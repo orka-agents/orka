@@ -338,3 +338,16 @@ func TestParseKeepsTheExperimentGate(t *testing.T) {
 		t.Fatalf("case sets = %+v", set.CaseSets)
 	}
 }
+
+// A GitHub repository is exactly owner/name: an owner alone protects no
+// workspace, so it is refused rather than silently matching nothing.
+func TestCanonicalRepositoryIDNeedsAGitHubOwnerAndName(t *testing.T) {
+	for _, value := range []string{"github.com/orka-agents", "github.com/orka-agents/orka/extra"} {
+		if _, err := CanonicalRepositoryID(value); err == nil {
+			t.Errorf("CanonicalRepositoryID(%q) accepted an incomplete GitHub repository", value)
+		}
+	}
+	if id, err := CanonicalRepositoryID("https://github.com/Orka-Agents/Orka.git"); err != nil || id != "github.com/orka-agents/orka" {
+		t.Fatalf("CanonicalRepositoryID() = %q, %v", id, err)
+	}
+}

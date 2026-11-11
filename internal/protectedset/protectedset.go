@@ -309,6 +309,11 @@ func CanonicalRepositoryID(value string) (string, error) {
 	host = strings.ToLower(host)
 	if host == "github.com" {
 		repositoryPath = strings.ToLower(repositoryPath)
+		// A GitHub repository is exactly owner/name; an owner alone would
+		// match no workspace and protect nothing.
+		if owner, name, ok := strings.Cut(repositoryPath, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+			return "", errors.New("a github.com repository must be github.com/owner/name")
+		}
 	}
 	return host + "/" + repositoryPath, nil
 }

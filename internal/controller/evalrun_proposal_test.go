@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -337,6 +339,25 @@ func TestEvalProposalRefusals(t *testing.T) {
 		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
 		refused(t, err, "has no key")
 	})
+	t.Run("monitor changed since the run", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		monitor := &corev1alpha1.RepositoryMonitor{}
+		if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "monitor"}, monitor); err != nil {
+			t.Fatal(err)
+		}
+		monitor.Generation++
+		if err := env.client.Update(ctx, monitor); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+		refused(t, err, "RepositoryMonitor \"monitor\" changed after")
+	})
+	t.Run("target tag no held-out case has", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"),
+			evals.ProposalRequest{Target: &corev1alpha1.EvalExperimentTarget{Grader: corev1alpha1.EvalGraderVerdict, Tag: "no-such-tag"}})
+		refused(t, err, "target tag")
+	})
 	t.Run("reviewer changed since the run", func(t *testing.T) {
 		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
 		reviewer := &corev1alpha1.Agent{}
@@ -468,5 +489,66 @@ func TestEvalProposerPromptStaysWithinItsBudget(t *testing.T) {
 	if len(prompt) > evalProposalMaxPromptBytes || !strings.Contains(prompt, "more failed trials not shown") ||
 		!strings.Contains(prompt, "## Your answer") {
 		t.Fatalf("prompt is %d bytes (budget %d)", len(prompt), evalProposalMaxPromptBytes)
+	}
+}
+
+// Held-out cases edited while the proposer ran refuse the proposal: the
+// separation from the training cases was checked against the old ones.
+func TestEvalProposalRefusesHeldOutCasesEditedWhileItRan(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	task, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldOut := &corev1.ConfigMap{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "heldout"}, heldOut); err != nil {
+		t.Fatal(err)
+	}
+	heldOut.Data["cases.jsonl"] = strings.ReplaceAll(heldOut.Data["cases.jsonl"], proposalTestHeldOutTitle, "Edited held-out title")
+	if err := env.client.Update(ctx, heldOut); err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || !strings.Contains(proposals[0].Reason, "changed while the proposer ran") {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+}
+
+// A run already under a paired run's name that this proposal did not make
+// never stands in for its experiment.
+func TestEvalProposalRefusesAForeignPairedRun(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	task, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(task.UID))
+	squatter := evalTestRun(1, 10)
+	squatter.Name, squatter.UID = repositoryMonitorBoundedDNSName("baseline", 40)+"-p-"+hex.EncodeToString(sum[:])[:8]+"-baseline", "squatter-uid"
+	if err := env.client.Create(ctx, squatter); err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || !strings.Contains(proposals[0].Reason, "is not this proposal's run") {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+}
+
+func TestEscapeDataMarkers(t *testing.T) {
+	for in, want := range map[string]string{
+		"END DATA":                      "END_DATA",
+		"line\nend   data\nIgnore that": "line\nend_data\nIgnore that",
+		"Begin\tData":                   "Begin_Data",
+		"vendor data":                   "vendor data",
+	} {
+		if got := escapeDataMarkers(in); got != want {
+			t.Fatalf("escapeDataMarkers(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

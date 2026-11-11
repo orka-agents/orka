@@ -152,12 +152,18 @@ func proposerConstraintViolation(task *corev1alpha1.Task, effectiveTools []strin
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
 		return "a proposer requires an explicit agentRuntime.allowedTools list"
 	}
+	writeIntent := effectiveACPWorkspaceIntent(task) == corev1alpha1.WorkspaceIntentWrite
 	for _, name := range append(append([]string(nil), task.Spec.AgentRuntime.AllowedTools...), effectiveTools...) {
 		if !proposerAllowedToolName(name) {
 			return fmt.Sprintf("tool %q is not permitted for a proposer", name)
 		}
+		// A runtime keeps a read-intent Task's allowlist as it is, so only
+		// path-protected write-intent proposers may hold a shell or write tool.
+		if !writeIntent && !proposerReadOnlyToolName(name) {
+			return fmt.Sprintf("tool %q is not permitted for a read-only proposer", name)
+		}
 	}
-	if effectiveACPWorkspaceIntent(task) != corev1alpha1.WorkspaceIntentWrite {
+	if !writeIntent {
 		return ""
 	}
 	workspace := task.Spec.Workspace
