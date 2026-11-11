@@ -325,6 +325,7 @@ var methodCatalog = map[string]MethodInfo{
 	"MarkGatewayDeliveryDelivered":          stateWrite(""),
 	"MarkGatewayDeliveryTerminal":           stateWrite(""),
 	"MarkGatewayEventTaskCreated":           stateWrite(""),
+	"MarkWorkActionRetryPending":            stateWrite(""),
 	"PrepareSessionCleanup":                 stateWrite(""),
 	"PreviewScanTaskIngestion":              stateRead(),
 	"ProjectGatewayTerminal":                stateWrite("$1.Delivery.Namespace, $1.EventID"),
