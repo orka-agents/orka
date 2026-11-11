@@ -16,32 +16,55 @@ import (
 // fakeReplicated is a synchronous-replicated watermark provider whose
 // failover keeps every committed write. HoldWrites makes new watermark writes
 // wait until the failover, which ends them with ErrOutcomeUnknown without
-// committing, as stopping the primary would.
+// committing, as stopping the primary would. Its faults change how a held
+// write ends, which some combinations do correctly, or break the contract or
+// the harness.
 type fakeReplicated struct {
 	// The failover cases never bind the dataset.
 	storagev1.DatasetBindingStore
-
-	// holdless makes HoldWrites hold nothing, as a harness whose lock does
-	// not reach the database would. refuse makes the failover refuse the
-	// held writes with ErrNotReady instead. emptyResolution makes
-	// ResolveOperation settle a missing receipt with an empty outcome and no
-	// error.
-	holdless, refuse, emptyResolution bool
+	fakeReplicatedFaults
 
 	mu          sync.Mutex
 	incarnation int
 	epoch       *storagev1.ControllerEpochMirrorState
 	watermark   int64
 	receipts    map[string]storagev1.OperationOutcome
-	release     chan struct{}
-	waiting     int
+	// values holds the watermark each committed operation returned, for
+	// its replays.
+	values  map[string]int64
+	release chan struct{}
+	waiting int
 }
 
-func newFakeReplicated(holdless, refuse, emptyResolution bool) func(*testing.T) *fakeReplicated {
+// fakeReplicatedFaults change how a fakeReplicated ends a held write, which
+// the error and commit settings together do correctly or not, or break the
+// contract or the harness. The zero value breaks nothing.
+type fakeReplicatedFaults struct {
+	// holdless makes HoldWrites hold nothing, as a harness whose lock does
+	// not reach the database would.
+	holdless bool
+	// heldErr is what a held write returns once the failover ends it, in
+	// place of ErrOutcomeUnknown; heldSucceeds makes it return its
+	// watermark with no error instead.
+	heldErr      error
+	heldSucceeds bool
+	// commitHeld commits a held write, with its receipt, before it returns;
+	// advanceHeld advances the watermark for it but keeps no receipt.
+	commitHeld, advanceHeld bool
+	// emptyResolution makes ResolveOperation settle a missing receipt with
+	// an empty outcome and no error.
+	emptyResolution bool
+	// keepIncarnation makes a failover keep the incarnation.
+	keepIncarnation bool
+	// commitAborted commits a write whose operation settled as aborted.
+	commitAborted bool
+}
+
+func newFakeReplicated(faults fakeReplicatedFaults) func(*testing.T) *fakeReplicated {
 	return func(*testing.T) *fakeReplicated {
 		return &fakeReplicated{
-			holdless: holdless, refuse: refuse, emptyResolution: emptyResolution,
-			incarnation: 1, receipts: map[string]storagev1.OperationOutcome{},
+			fakeReplicatedFaults: faults, incarnation: 1,
+			receipts: map[string]storagev1.OperationOutcome{}, values: map[string]int64{},
 		}
 	}
 }
@@ -104,27 +127,48 @@ func (p *fakeReplicated) AdvanceWriteWatermark(ctx context.Context) (storagev1.W
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if outcome, ok := p.receipts[envelope.OperationID]; ok {
-		if outcome.State != storagev1.OperationCommitted {
+		switch {
+		case outcome.State == storagev1.OperationCommitted:
+			return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.values[envelope.OperationID]}, nil
+		case !p.commitAborted:
 			return storagev1.WriteWatermark{}, storagev1.ErrOperationAborted
 		}
-		return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
+	}
+	if p.epoch == nil || envelope.Fence.Epoch != p.epoch.Epoch.Epoch || envelope.Fence.HolderID != p.epoch.Epoch.HolderID {
+		return storagev1.WriteWatermark{}, storagev1.FencedErrorf("the write's fence is not the dataset's controller epoch")
 	}
 	if release := p.release; release != nil {
 		p.waiting++
 		p.mu.Unlock()
 		<-release
 		p.mu.Lock()
-		if p.refuse {
-			return storagev1.WriteWatermark{}, fmt.Errorf("%w: the standby is being promoted", storagev1.ErrNotReady)
+		switch {
+		case p.commitHeld:
+			p.commit(envelope)
+		case p.advanceHeld:
+			p.watermark++
+		}
+		switch {
+		case p.heldSucceeds:
+			return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
+		case p.heldErr != nil:
+			return storagev1.WriteWatermark{}, p.heldErr
 		}
 		return storagev1.WriteWatermark{}, fmt.Errorf("%w: the primary stopped", storagev1.ErrOutcomeUnknown)
 	}
+	p.commit(envelope)
+	return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
+}
+
+// commit advances the watermark for envelope's operation and keeps its
+// receipt.
+func (p *fakeReplicated) commit(envelope storagev1.WriteEnvelope) {
 	p.watermark++
+	p.values[envelope.OperationID] = p.watermark
 	p.receipts[envelope.OperationID] = storagev1.OperationOutcome{
 		OperationID: envelope.OperationID, Method: "AdvanceWriteWatermark", RequestDigest: envelope.RequestDigest,
 		State: storagev1.OperationCommitted, Fence: envelope.Fence, IssuedAt: envelope.IssuedAt,
 	}
-	return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
 }
 
 func (p *fakeReplicated) GetWriteWatermark(context.Context) (storagev1.WriteWatermark, error) {
@@ -156,7 +200,9 @@ func (p *fakeReplicated) holdWrites(t *testing.T) func(int) {
 func (p *fakeReplicated) failover() *fakeReplicated {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.incarnation++
+	if !p.keepIncarnation {
+		p.incarnation++
+	}
 	if p.release != nil {
 		close(p.release)
 		p.release = nil
@@ -168,13 +214,43 @@ func reopenFakeReplicated(_ *testing.T, p *fakeReplicated) *fakeReplicated { ret
 
 func holdFakeReplicatedWrites(t *testing.T, p *fakeReplicated) func(int) { return p.holdWrites(t) }
 
+// fakeReplicatedHarness restarts a fakeReplicated by keeping it, and fails
+// it over by promoting its standby.
+var fakeReplicatedHarness = DurabilityHarness{
+	Restart: func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber { return p },
+	Failovers: map[string]func(*testing.T, storagev1.ProviderDescriber) storagev1.ProviderDescriber{
+		"promote": func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+			return p.(*fakeReplicated).failover()
+		},
+	},
+	HoldWrites: func(t *testing.T, p storagev1.ProviderDescriber) func(int) { return p.(*fakeReplicated).holdWrites(t) },
+}
+
+// fakeReplicatedWrites is the write catalog of a fakeReplicated.
+var fakeReplicatedWrites = []writeCase[*fakeReplicated]{{
+	method: "AdvanceWriteWatermark", args: fixed(), observe: observeWatermark[*fakeReplicated],
+}}
+
+// A synchronous-replicated provider whose failover keeps every committed
+// write passes the durability cases, its failover included.
+func TestDurabilityPassesAProviderThatKeepsItsWrites(t *testing.T) {
+	runDurability(t, newFakeReplicated(fakeReplicatedFaults{}), fakeReplicatedWrites, fakeReplicatedHarness)
+}
+
 // A synchronous-replicated provider passes the writes-during-a-failover case
-// when the switch ends its held writes with an unknown outcome and when it
-// refuses them as not ready: neither committed, and both settle as aborted.
+// when the switch commits its held writes and reports them committed or
+// unknown, ends them with an unknown outcome without committing them, or
+// refuses them as unavailable or not ready without committing them.
 func TestWritesDuringFailoverPassAProviderThatSettlesThem(t *testing.T) {
-	for name, refuse := range map[string]bool{"unknown outcome": false, "refused as not ready": true} {
+	for name, faults := range map[string]fakeReplicatedFaults{
+		"committed":                 {commitHeld: true, heldSucceeds: true},
+		"unknown outcome":           {},
+		"unknown outcome committed": {commitHeld: true},
+		"refused as not ready":      {heldErr: fmt.Errorf("%w: the standby is being promoted", storagev1.ErrNotReady)},
+		"refused as unavailable":    {heldErr: fmt.Errorf("%w: the connection was refused", storagev1.ErrUnavailable)},
+	} {
 		t.Run(name, func(t *testing.T) {
-			runWritesDuringFailover(t, newFakeReplicated(false, refuse, false)(t), reopenFakeReplicated, holdFakeReplicatedWrites)
+			runWritesDuringFailover(t, newFakeReplicated(faults)(t), reopenFakeReplicated, holdFakeReplicatedWrites)
 		})
 	}
 }
@@ -185,31 +261,32 @@ const failingFailoverEnv = "STORAGETEST_FAILING_FAILOVER"
 // failover begins, a provider that settles a write with an outcome that is
 // neither committed nor aborted, a harness that declares failovers without
 // HoldWrites, and an async-replicated provider that declares a failover.
+// They also fail a provider that breaks what a failover must keep: one whose
+// failover keeps the incarnation, loses a write that returned nil, advances
+// the watermark for a write it kept no receipt for, or commits a write it
+// refused as unavailable or not ready, or one that settled as aborted.
 func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
-	failover := func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber {
-		return p.(*fakeReplicated).failover()
+	duringFailover := func(faults fakeReplicatedFaults) func(t *testing.T) {
+		return func(t *testing.T) {
+			runWritesDuringFailover(t, newFakeReplicated(faults)(t), reopenFakeReplicated, holdFakeReplicatedWrites)
+		}
 	}
-	restart := func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber { return p }
 	variants := map[string]struct {
 		run  func(t *testing.T)
 		want string
 	}{
 		"writes not in flight": {
-			run: func(t *testing.T) {
-				runWritesDuringFailover(t, newFakeReplicated(true, false, false)(t), reopenFakeReplicated, holdFakeReplicatedWrites)
-			},
+			run:  duringFailover(fakeReplicatedFaults{holdless: true}),
 			want: "was not in flight when the failover began",
 		},
 		"empty resolution": {
-			run: func(t *testing.T) {
-				runWritesDuringFailover(t, newFakeReplicated(false, false, true)(t), reopenFakeReplicated, holdFakeReplicatedWrites)
-			},
+			run:  duringFailover(fakeReplicatedFaults{emptyResolution: true}),
 			want: "settles as committed or aborted",
 		},
 		"failovers without HoldWrites": {
 			run: func(t *testing.T) {
-				runDurability(t, newFakeReplicated(false, false, false), nil, DurabilityHarness{
-					Restart: restart, Failovers: map[string]func(*testing.T, storagev1.ProviderDescriber) storagev1.ProviderDescriber{"promote": failover},
+				runDurability(t, newFakeReplicated(fakeReplicatedFaults{}), nil, DurabilityHarness{
+					Restart: fakeReplicatedHarness.Restart, Failovers: fakeReplicatedHarness.Failovers,
 				})
 			},
 			want: "needs HoldWrites",
@@ -217,9 +294,9 @@ func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 		"async-replicated failover": {
 			run: func(t *testing.T) {
 				runDurability(t, func(t *testing.T) *fakeAsync {
-					return &fakeAsync{fakeReplicated: newFakeReplicated(false, false, false)(t)}
+					return &fakeAsync{fakeReplicated: newFakeReplicated(fakeReplicatedFaults{})(t)}
 				}, nil, DurabilityHarness{
-					Restart: restart,
+					Restart: fakeReplicatedHarness.Restart,
 					Failovers: map[string]func(*testing.T, storagev1.ProviderDescriber) storagev1.ProviderDescriber{
 						"promote": func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber {
 							p.(*fakeAsync).failover()
@@ -232,6 +309,36 @@ func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 				})
 			},
 			want: "an async-replicated switch may lose acknowledged writes",
+		},
+		"failover keeps the incarnation": {
+			run: func(t *testing.T) {
+				runDurability(t, newFakeReplicated(fakeReplicatedFaults{keepIncarnation: true}), fakeReplicatedWrites, fakeReplicatedHarness)
+			},
+			want: "a failover changes the incarnation",
+		},
+		"write that returned nil lost": {
+			run:  duringFailover(fakeReplicatedFaults{heldSucceeds: true}),
+			want: "a write that returned nil survives the failover",
+		},
+		"watermark advanced without a receipt": {
+			run:  duringFailover(fakeReplicatedFaults{advanceHeld: true}),
+			want: "exactly the committed writes advanced the watermark",
+		},
+		"aborted write committed late": {
+			run:  duringFailover(fakeReplicatedFaults{commitAborted: true}),
+			want: "an aborted write arriving late is refused",
+		},
+		"refused as not ready but committed": {
+			run: duringFailover(fakeReplicatedFaults{
+				commitHeld: true, heldErr: fmt.Errorf("%w: the standby is being promoted", storagev1.ErrNotReady),
+			}),
+			want: "was refused as unavailable or not ready",
+		},
+		"refused as unavailable but committed": {
+			run: duringFailover(fakeReplicatedFaults{
+				commitHeld: true, heldErr: fmt.Errorf("%w: the connection was refused", storagev1.ErrUnavailable),
+			}),
+			want: "was refused as unavailable or not ready",
 		},
 	}
 	if variant := os.Getenv(failingFailoverEnv); variant != "" {
