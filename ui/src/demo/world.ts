@@ -25,9 +25,6 @@ export const PROVIDERS = {
   azure: { name: 'azure-openai', type: 'openai', models: ['gpt-4.1'] },
 } as const
 
-/** Built-in ACP agent runtimes. */
-export const RUNTIMES = ['claude', 'codex', 'copilot', 'opencode'] as const
-
 /**
  * Agent CRs. `kind: 'ai'` agents run Orka's own tool loop against a provider;
  * `kind: 'agent'` agents run a coding-agent runtime over ACP in a workspace.
@@ -44,9 +41,6 @@ export const AGENTS = {
 } as const
 
 export type AgentKey = keyof typeof AGENTS
-
-/** Built-in and custom tools registered in the namespace. */
-export const TOOLS = ['web_search', 'web_fetch', 'code_exec', 'file_read', 'file_write', 'request_approval', 'github_search', 'pagerduty_incident', 'datadog_query', 'slack_post'] as const
 
 export type DemoTaskPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Scheduled'
 
@@ -107,6 +101,3 @@ export const SESSIONS = {
   reviewThread: { name: 'github-pr-1479-a3e8d2', agent: 'reviewer' as AgentKey, source: 'gateway', title: 'checkout-service#1479 review thread' },
   releaseChat: { name: 'chat-release-v2-14-4d77aa', agent: 'coordinator' as AgentKey, source: 'chat', title: 'Release v2.14.0 planning' },
 } as const
-
-/** Find a task seed by name. */
-export const taskSeed = (name: string) => TASKS.find((task) => task.name === name)
