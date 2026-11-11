@@ -96,9 +96,18 @@ func withTemplateImage(object *unstructured.Unstructured, image string) *unstruc
 }
 
 func withReplicaSetOwner(object *unstructured.Unstructured) *unstructured.Unstructured {
+	return withNamedReplicaSetOwner(object, "orka-controller-abc")
+}
+
+func withNamedReplicaSetOwner(object *unstructured.Unstructured, replicaSet string) *unstructured.Unstructured {
 	object.Object["metadata"].(map[string]any)["ownerReferences"] = []any{map[string]any{
-		"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "orka-controller-abc", "uid": "rs-uid", "controller": true,
+		"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": replicaSet, "uid": "rs-uid", "controller": true,
 	}}
+	return object
+}
+
+func withLabel(object *unstructured.Unstructured, key, value string) *unstructured.Unstructured {
+	object.Object["metadata"].(map[string]any)["labels"] = map[string]any{key: value}
 	return object
 }
 
@@ -117,7 +126,11 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 	}{
 		// Pods: only the ReplicaSet controller, whatever owner reference a
 		// creator writes.
-		{name: "controller Pod from the ReplicaSet controller", username: replicaSetControllerUsername, object: asController("Pod", "p"), allowed: true},
+		{name: "controller Pod from the ReplicaSet controller", username: replicaSetControllerUsername, object: withReplicaSetOwner(asController("Pod", "orka-controller-abc-x1y2z")), allowed: true},
+		{name: "Pod of another ReplicaSet running as the controller", username: replicaSetControllerUsername, object: withNamedReplicaSetOwner(asController("Pod", "legacy-abc-x1y2z"), "legacy-abc")},
+		{name: "Pod named like the controller's for another ReplicaSet", username: replicaSetControllerUsername, object: withNamedReplicaSetOwner(asController("Pod", "orka-controller-abc-x1y2z"), "legacy-abc")},
+		{name: "controller ReplicaSet's Pod under another name", username: replicaSetControllerUsername, object: withReplicaSetOwner(asController("Pod", "other-x1y2z"))},
+		{name: "ownerless Pod from the ReplicaSet controller", username: replicaSetControllerUsername, object: asController("Pod", "orka-controller-abc-x1y2z")},
 		{name: "Pod with a forged ReplicaSet owner", username: aiWorkerUsername, object: withReplicaSetOwner(asController("Pod", "p"))},
 		{name: "bare Pod as the controller", username: aiWorkerUsername, object: asController("Pod", "p")},
 		{name: "Job controller Pod as the controller", username: "system:serviceaccount:kube-system:job-controller", object: asController("Pod", "p")},
@@ -126,6 +139,15 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		// ReplicaSets: only the Deployment controller creates them.
 		{name: "controller ReplicaSet from the Deployment controller", username: deploymentControllerUsername, object: asController("ReplicaSet", "orka-controller-abc"), allowed: true},
 		{name: "ReplicaSet created by someone else", username: aiWorkerUsername, object: asController("ReplicaSet", "rs")},
+		{name: "another Deployment's ReplicaSet as the controller", username: deploymentControllerUsername, object: asController("ReplicaSet", "legacy-abc")},
+		{
+			name: "earlier ReplicaSet as the controller scaled up", username: "namespace-editor",
+			object: withReplicas(asController("ReplicaSet", "legacy-abc"), 1), oldObject: withReplicas(asController("ReplicaSet", "legacy-abc"), 0),
+		},
+		{
+			name: "earlier ReplicaSet as the controller garbage-collected", username: "system:serviceaccount:kube-system:generic-garbage-collector",
+			object: withLabel(asController("ReplicaSet", "legacy-abc"), "orphaned", "true"), oldObject: asController("ReplicaSet", "legacy-abc"), allowed: true,
+		},
 		{
 			name: "update of a ReplicaSet already running as the controller", username: "system:serviceaccount:kube-system:generic-garbage-collector",
 			object: asController("ReplicaSet", "orka-controller-abc"), oldObject: asController("ReplicaSet", "orka-controller-abc"), allowed: true,

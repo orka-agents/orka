@@ -299,17 +299,17 @@ tolerating the controller nodes' taint or binding to them by name. Only then do
 the chart's `nodeSelector` and `tolerations`, which apply to the controller
 Deployment, give it nodes of its own.
 
-The controller ServiceAccount's own policy governs only new objects. It still
-lets the ReplicaSet controller create Pods from an existing ReplicaSet whose
-template runs as that ServiceAccount, and lets anyone scale such a ReplicaSet,
-even one scaled to zero. Before you turn identities on, first delete every
-Deployment and ReplicaSet other than the controller Deployment and its own
-ReplicaSets whose Pod template runs as that ServiceAccount, or change their
-templates to another ServiceAccount:
-`kubectl get deployments,replicasets -n <namespace> -o jsonpath='{range .items[?(@.spec.template.spec.serviceAccountName=="<controller ServiceAccount>")]}{.kind}/{.metadata.name}{"\n"}{end}'`
-lists them. Then delete any Pod still running as that ServiceAccount that the
+The controller ServiceAccount's own policy admits Pods running as that
+ServiceAccount only for the controller Deployment's own ReplicaSets, which are
+named after it, and lets no other ReplicaSet running as it be created, scaled,
+or given a new template. It evicts nothing, though, so before you turn
+identities on, delete any Pod already running as that ServiceAccount that the
 controller Deployment did not create, since it keeps the identity:
 `kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
+lists them. Also delete, or move to another ServiceAccount, any other
+Deployment or ReplicaSet whose Pod template runs as it, which the policy now
+leaves unable to run:
+`kubectl get deployments,replicasets -n <namespace> -o jsonpath='{range .items[?(@.spec.template.spec.serviceAccountName=="<controller ServiceAccount>")]}{.kind}/{.metadata.name}{"\n"}{end}'`
 lists them.
 
 ## Secret management

@@ -311,7 +311,7 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	// again: an edit that fails validation, or an issuer that cannot answer,
 	// must not turn it back into a merely declared identity whose cached
 	// tokens Tools could still receive.
-	refusal, refused := r.lastIdentityRefusal(key, agent.UID, issuer, id)
+	refusal, refused := r.lastIdentityRefusal(key, agent, issuer, id)
 	if validationErr != nil || r.IdentityVerifier == nil {
 		if refused {
 			return refusal
@@ -368,7 +368,7 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 			r.issuerBackoff.Unlock()
 			return unavailable(agentIdentityIssuerBackoff)
 		}
-		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
+		state.err = fmt.Errorf("%s: %w", identityRefusalPrefix(issuer, id), err)
 		return remember(state)
 	}
 	state.verified = true
@@ -376,18 +376,34 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 }
 
 // lastIdentityRefusal returns the issuer's last refusal of this Agent's
-// identity, whatever generation it was given for and however old it is.
-func (r *AgentReconciler) lastIdentityRefusal(key types.NamespacedName, uid types.UID, issuer, id string) (agentIdentityState, bool) {
+// identity, whatever generation it was given for and however old it is. This
+// controller's own last answer for the identity decides; without one, as
+// after a restart or a leader change, the refusal the Agent's status records
+// for this identity stands, so only a fresh verification clears it.
+func (r *AgentReconciler) lastIdentityRefusal(key types.NamespacedName, agent *corev1alpha1.Agent, issuer, id string) (agentIdentityState, bool) {
 	r.verifications.Lock()
 	cached, found := r.verifications.byAgent[key]
 	r.verifications.Unlock()
-	if !found || cached.uid != uid || cached.issuer != issuer || cached.id != id ||
-		cached.state.err == nil || cached.state.unavailable || cached.state.verified {
+	if found && cached.uid == agent.UID && cached.issuer == issuer && cached.id == id {
+		if cached.state.err == nil || cached.state.unavailable || cached.state.verified {
+			return agentIdentityState{}, false
+		}
+		refusal := cached.state
+		refusal.retryAfter = 0
+		return refusal, true
+	}
+	condition := meta.FindStatusCondition(agent.Status.Conditions, conditionTypeIdentityVerified)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != reasonIdentityVerificationFailed ||
+		!strings.HasPrefix(condition.Message, identityRefusalPrefix(issuer, id)) {
 		return agentIdentityState{}, false
 	}
-	refusal := cached.state
-	refusal.retryAfter = 0
-	return refusal, true
+	return agentIdentityState{declared: true, err: errors.New(condition.Message)}, true
+}
+
+// identityRefusalPrefix starts every refusal message, naming the identity
+// it refused.
+func identityRefusalPrefix(issuer, id string) string {
+	return fmt.Sprintf("identity %s/%s failed verification", issuer, id)
 }
 
 // forgetAgentIdentityVerification drops a deleted Agent's last answer.
