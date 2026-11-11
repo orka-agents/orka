@@ -81,10 +81,11 @@ delegated Tools can only read.
     keeps every other Pod from tolerating their taint or naming them in
     `spec.nodeName`. A taint alone keeps no one off
     ([Security](../concepts/security.md#agent-identities)).
-- No Deployment, ReplicaSet, or Pod whose Pod template runs as the controller
-  ServiceAccount except the controller Deployment's own. Delete the others, or
-  move them to another ServiceAccount, before you configure Orka: an existing
-  ReplicaSet can still recreate its Pods, even one scaled to zero
+- No Pod running as the controller ServiceAccount except the controller
+  Deployment's own; delete any other before you configure Orka, since it keeps
+  the identity. Also delete, or move to another ServiceAccount, any other
+  Deployment or ReplicaSet that runs as it, which the controller
+  ServiceAccount's admission policy then leaves unable to run
   ([Security](../concepts/security.md#agent-identities)).
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
