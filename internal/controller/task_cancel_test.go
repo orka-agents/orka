@@ -1188,21 +1188,30 @@ func TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor(t *testing.T) {
 		task *corev1alpha1.Task
 		want bool
 	}{
-		"under a finished parent of a cancelled root":   {lateChild("late", "mid", "mid-uid", "default"), true},
-		"under a gone parent":                           {lateChild("orphan", "gone", "gone-uid", "default"), false},
-		"under a replaced parent":                       {lateChild("replaced", "mid", "earlier-mid-uid", "default"), false},
-		"under a finished parent whose own was deleted": {lateChild("retained", "kept", "kept-uid", "default"), false},
-		"named after a namesake in its own namespace":   {lateChild("namesake", "neighbor", "elsewhere-uid", ""), false},
-		"under a live chain":                            {lateChild("healthy", "live", "live-uid", "default"), false},
-		"without a UID pin":                             {lateChild("unpinned", "mid", "", "default"), false},
-		"without the parent's namespace":                {lateChild("unplaced", "mid", "mid-uid", ""), false},
-		"a scheduled template":                          {template, false},
+		"under a finished parent of a cancelled root":         {lateChild("late", "mid", "mid-uid", "default"), true},
+		"under a gone parent":                                 {lateChild("orphan", "gone", "gone-uid", "default"), false},
+		"under a replaced parent":                             {lateChild("replaced", "mid", "earlier-mid-uid", "default"), false},
+		"under a finished parent whose own was deleted":       {lateChild("retained", "kept", "kept-uid", "default"), false},
+		"named after a namesake in its own namespace":         {lateChild("namesake", "neighbor", "elsewhere-uid", ""), false},
+		"under a live chain":                                  {lateChild("healthy", "live", "live-uid", "default"), false},
+		"without a UID pin":                                   {lateChild("unpinned", "mid", "", "default"), false},
+		"without the parent's namespace":                      {lateChild("unplaced", "mid", "mid-uid", ""), false},
+		"a scheduled template":                                {template, false},
+		"a cron run of a schedule a cancelled Task delegated": {lateChild("run", "nightly", "nightly-uid", "default"), false},
+		"a cron run of a cancelled schedule":                  {lateChild("cancelled-run", "cancelled-nightly", "cancelled-nightly-uid", "default"), true},
 	}
 	// kept finished under a run that retention has since deleted; neighbor
-	// is an unrelated Task in the child's namespace.
+	// is an unrelated Task in the child's namespace. nightly is a schedule
+	// the cancelled root delegated, whose runs answer only to it.
 	neighbor := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "neighbor", Namespace: "other", UID: "neighbor-uid"}}
-	objects := make([]client.Object, 0, 5+len(children))
-	objects = append(objects, root, live, finishedUnder("mid", "root", "root-uid"), finishedUnder("kept", "deleted-run", "deleted-run-uid"), neighbor)
+	nightly := finishedUnder("nightly", "root", "root-uid")
+	nightly.Spec.Schedule = "0 2 * * *"
+	nightly.Status.Phase = corev1alpha1.TaskPhaseScheduled
+	cancelledNightly := finishedUnder("cancelled-nightly", "live", "live-uid")
+	cancelledNightly.Spec.Schedule = "0 2 * * *"
+	cancelledNightly.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"}
+	objects := make([]client.Object, 0, 7+len(children))
+	objects = append(objects, root, live, finishedUnder("mid", "root", "root-uid"), finishedUnder("kept", "deleted-run", "deleted-run-uid"), neighbor, nightly, cancelledNightly)
 	for _, child := range children {
 		objects = append(objects, child.task)
 	}
