@@ -68,6 +68,9 @@ delegated Tools can only read.
     ([admin consent roles](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent#prerequisites)).
 - Orka installed with Helm in the namespace `team-a`, with built-in RuntimePools.
   A release reconciles only its own namespace, so everything below lives there.
+- A model gateway Orka can reach, and a model it serves for the Agent in step 5:
+  built-in RuntimePools reach models only through it
+  ([Connect a model gateway](../getting-started.md#1-connect-a-model-gateway)).
 - No privileged or `hostPath` Pod able to run on the controller's node, since
   one could read the controller's blueprint credential from it:
   - enforce the `baseline` Pod Security profile on that namespace
@@ -97,7 +100,9 @@ The steps call Microsoft Graph with `curl`. Keep these values in your shell:
 ```bash
 TENANT=<tenant ID>
 ISSUER=<cluster OIDC issuer URL>
-ORKA_SA=system:serviceaccount:team-a:orka   # the controller ServiceAccount
+# The controller ServiceAccount, whose name the chart derives from the release
+ORKA_SA=system:serviceaccount:team-a:$(kubectl -n team-a get deploy \
+  -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
 SPONSOR=$(az ad signed-in-user show --query id -o tsv)   # the person responsible for the identities
 TOKEN=$(az account get-access-token --tenant "$TENANT" \
   --scope https://graph.microsoft.com/.default --query accessToken -o tsv)
@@ -105,6 +110,13 @@ graph() { curl -s -X "$1" -H "Authorization: Bearer $TOKEN" \
   -H "OData-Version: 4.0" -H "Content-Type: application/json" \
   "https://graph.microsoft.com/$2" ${3:+-d "$3"}; }
 ```
+
+An `az` token worked for these Agent ID calls when the steps were tested.
+Microsoft documents that Agent ID APIs can refuse tokens that carry
+`Directory.AccessAsUser.All`, which `az` tokens do; if step 1 answers 403 for
+a signed-in user who holds the roles above, take `TOKEN` from an app granted
+the Agent ID Graph permissions instead
+([Agent ID setup](https://learn.microsoft.com/entra/agent-id/)).
 
 ## 1. Create the blueprint
 
@@ -195,33 +207,45 @@ all Agents, not only identity-bound ones. Grant it before you turn it on.
 
 ## 4. Let a namespace claim the identity and use the Agent
 
+Claiming the identity (`bind`) and running work as the Agent (`use`) are
+separate grants, in separate Roles, so whoever only starts Tasks cannot also
+claim the identity for an Agent they can edit:
+
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   namespace: team-a
-  name: inventory-agent
+  name: inventory-agent-bind
 rules:
 - apiGroups: [core.orka.ai]
   resources: [agentidentities/entra]
   verbs: [bind]
   resourceNames: ["<agent identity appId>"]   # who may claim this identity
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: team-a
+  name: inventory-agent-use
+rules:
 - apiGroups: [core.orka.ai]
   resources: [agents]
   verbs: [use]
   resourceNames: [inventory-agent]            # who may run work as the Agent
 ```
 
-Bind it to whoever edits the Agent (`bind`) and whoever starts its Tasks
-(`use`). A cluster administrator already holds both. Everyone else needs a
-binding, including the ServiceAccount whose token `orka` uses:
+Bind `inventory-agent-bind` only to whoever edits the Agent, and
+`inventory-agent-use` to whoever starts its Tasks. A cluster administrator
+already holds both. Everyone else needs a binding, including the
+ServiceAccount whose token `orka` uses:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   namespace: team-a
-  name: inventory-agent
+  name: inventory-agent-use
 subjects:
 - kind: ServiceAccount            # a ServiceAccount that starts Tasks
   namespace: team-a
@@ -232,7 +256,7 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: inventory-agent
+  name: inventory-agent-use
 ```
 
 A person signed in through Entra is checked as the `User` `<issuer>#<sub>`
@@ -594,7 +618,7 @@ For each call, the controller:
 | Action | Effect |
 |---|---|
 | Delete the Agent, or remove `spec.identity` | New calls from its Tasks are refused at once. The claim stays until bound Tasks end, so no other Agent can take the identity meanwhile |
-| Disable or delete the agent identity in Entra | New tokens are refused. Cached tokens last at most five minutes; Graph already rejects a disabled identity's tokens |
+| Disable or delete the agent identity in Entra | New tokens are refused. Cached tokens last at most five minutes, and the resource may still accept them until then; remove `spec.identity` from the Agent to stop new calls at once |
 | Cancel the Task (`orka task cancel`, or the dashboard) or delete it | Its delegated calls are refused at once |
 | Stop a Session's turn (`orka session cancel`) | The turn's Task is cancelled, so its delegated calls are refused. The Session takes the next message |
 | A Task above it in the delegation chain is cancelled or deleted | Delegated calls from every Task below it are refused. A parent that finished normally does not stop its children |
