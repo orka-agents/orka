@@ -558,6 +558,12 @@ func requireTaskSourceCoveredByClaim(
 	case repositoryMonitorResourceKind:
 		source = &corev1alpha1.RepositoryMonitor{}
 	default:
+		// Another Orka controller owner, such as one an editor attached
+		// after an orphaning delete, does not vouch for an automation Task.
+		if kind := taskAutomationMarker(task); kind != "" {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a %s's Task cannot use identity-bound Agent %q once its %s no longer controls it", kind, agent.Name, kind))
+		}
 		return nil
 	}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, source); err != nil {
@@ -639,6 +645,11 @@ func requireParentOwnsIdentityAgent(
 			return permanentACPAgentConfiguration(fmt.Errorf(
 				"scheduled Task %q was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; re-create the scheduled Task",
 				parent.Name, agent.Name, ref.Issuer, ref.ID))
+		}
+		// A scheduled Task an automation or GatewayBinding created, perhaps
+		// given its schedule afterwards, is judged by that source as well.
+		if err := requireTaskSourceCoveredByClaim(ctx, reader, parent, agent, ref, claim); err != nil {
+			return err
 		}
 		// A scheduled Task a worker delegated was created under the worker's
 		// broad Agent use, so its creation was never checked for this

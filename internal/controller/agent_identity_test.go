@@ -265,7 +265,15 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	nativeSchedule := scheduled.DeepCopy()
 	nativeSchedule.Name = "nightly-native"
 	nativeSchedule.Spec.Type = corev1alpha1.TaskTypeAI
-	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentEarlierGrant, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule, staleSchedule, nativeSchedule}
+	// Unbound Tasks a GatewayBinding or a monitor created, later given a
+	// schedule: their runs are judged by that source too.
+	gatewaySchedule := scheduled.DeepCopy()
+	gatewaySchedule.Name = "nightly-gateway"
+	gatewaySchedule.Labels = map[string]string{gateway.TaskGatewayBindingLabel: "support"}
+	monitorSchedule := scheduled.DeepCopy()
+	monitorSchedule.Name = "nightly-monitor"
+	monitorSchedule.Labels = map[string]string{labels.LabelRepositoryMonitor: "old-monitor"}
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentEarlierGrant, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule, staleSchedule, nativeSchedule, gatewaySchedule, monitorSchedule}
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
 	for _, parent := range parents {
 		parent.UID = types.UID(parent.Name + "-uid")
@@ -327,6 +335,8 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		{"scheduled run naming another Agent", otherAgentRun, "scheduled Task names it"},
 		{"run of a schedule an unbound parent delegated", task("nightly-borrowed"), "parent's own bound Agent"},
 		{"child of a native Task given a schedule", task("nightly-native"), "parent's own bound Agent"},
+		{"run of a GatewayBinding Task given a schedule", task("nightly-gateway"), "GatewayBinding"},
+		{"run of a monitor Task given a schedule", task("nightly-monitor"), "no longer controls it"},
 		{"orphan", orphan, "still controls it"},
 		{"replaced parent", replaced, "still controls it"},
 		{"recorded parent", misrecorded, "still controls it"},
@@ -385,6 +395,10 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 		Name: "from-gateway", Namespace: testNS, CreationTimestamp: metav1.Now(),
 		Labels: map[string]string{gateway.TaskGatewayBindingLabel: "support"},
 	}}
+	// An orphaned monitor Task whose editor attached another Orka owner keeps
+	// its monitor markers.
+	reowned := producedBy("Agent", agent.Name, string(agent.UID))
+	reowned.Labels = map[string]string{labels.LabelRepositoryMonitor: "old-monitor"}
 	for _, tc := range []struct {
 		name string
 		task *corev1alpha1.Task
@@ -395,6 +409,7 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 		{"replaced scan", producedBy("RepositoryScan", "new-scan", "deleted-scan-uid"), "was replaced"},
 		{"deleted monitor", producedBy("RepositoryMonitor", "gone", "gone-uid"), "is gone"},
 		{"GatewayBinding Task", gatewayTask, "GatewayBinding"},
+		{"monitor Task given another Orka owner", reowned, "no longer controls it"},
 	} {
 		_, err := r.agentExecutionIdentity(ctx, tc.task, agent)
 		requirePermanentIdentityRefusal(t, tc.name, err, tc.want)
