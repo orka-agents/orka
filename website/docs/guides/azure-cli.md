@@ -227,10 +227,12 @@ Add `writes` to let `az` change resources:
   `orka task approve <task> <id>` or `orka task decline <task> <id>` answers
   it. The **Approvals** tab needs the dashboard, which is off by default: set
   `controller.dashboard.enabled: true` and open it with `orka dashboard`.
-- A request lasts only while the agent keeps waiting for `az`. If the agent
-  stops the command or ends its turn first, the request is cancelled and
-  nothing is sent to Azure, even though it showed time left. Ask for the
-  write again, and tell the agent in the prompt to wait for approval.
+- A request ends with the agent's turn. If the turn ends first, the request is
+  cancelled and nothing is sent to Azure, even though it showed time left; ask
+  for the write again, and tell the agent in the prompt to wait for approval.
+  Stopping `az` alone does not withdraw it: while the turn goes on, the request
+  stays pending, and approving it still sends the write. To make sure a write is
+  never sent, decline it, or cancel the Task with `orka task cancel <task>`.
 - `az` resends a request that has had no answer for 5 minutes. The resent
   request joins the pending approval, so a write is never sent twice. Orka
   keeps no write's answer, which can carry a secret, so a resent request
