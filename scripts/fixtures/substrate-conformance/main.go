@@ -19,7 +19,7 @@ const (
 	credentialBundle    = "/run/substrate-client/credential-bundle.pem"
 	proofContents       = "native-data"
 	// The proof's only outbound destination, reached over plain HTTP.
-	providerProxyHost = "orka-provider-auth-proxy.orka-system.svc"
+	providerProxyHost = "orka-provider-auth-proxy.orka-system.svc.cluster.local"
 	providerProxyPort = 8080
 )
 
