@@ -137,7 +137,7 @@ func TestExternalNativeWorkspaceExplicitSandboxTokenFallback(t *testing.T) {
 
 func TestExternalNativeWorkspaceRefusesInexpressibleInjection(t *testing.T) {
 	f := newNativeSubstrateV1Fixture(t)
-	f.r.ProviderProxy.BaseURL = "https://provider-auth-proxy.orka-system.svc:8443"
+	f.r.ProviderProxy.BaseURL = "https://provider-auth-proxy.orka-system.svc.cluster.local:8443"
 	for range 6 {
 		runtimePoolReconcile(t, f.r, f.pool)
 	}
@@ -151,14 +151,14 @@ func TestExternalNativeWorkspaceRefusesInexpressibleInjection(t *testing.T) {
 
 func TestExternalRuntimeEgressProviderTokenInjectionShape(t *testing.T) {
 	injection := &externalProviderTokenInjection{namespace: "orka-runtimes", name: "pool-provider-e1-gabc"}
-	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc:8080"}}
-	r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc"}
+	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"}}
+	r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc.cluster.local"}
 	policy, err := r.externalRuntimeEgress(cfg, injection)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, rule := range policy.Rules {
-		if injected := len(rule.ReplaceHeaders) != 0; injected != (rule.Host == "provider-auth-proxy.orka-system.svc") {
+		if injected := len(rule.ReplaceHeaders) != 0; injected != (rule.Host == "provider-auth-proxy.orka-system.svc.cluster.local") {
 			t.Fatalf("credential replacement on the wrong origin: %#v", rule)
 		}
 	}
@@ -174,8 +174,8 @@ func TestExternalRuntimeEgressProviderTokenInjectionShape(t *testing.T) {
 		r := &RuntimePoolReconciler{ControllerAPIURL: controllerURL}
 		cfg := cfg
 		if controllerURL == "" {
-			r.ControllerAPIURL = "https://orka-api.orka-system.svc"
-			cfg.providerProxy.baseURL = "https://provider-auth-proxy.orka-system.svc"
+			r.ControllerAPIURL = "https://orka-api.orka-system.svc.cluster.local"
+			cfg.providerProxy.baseURL = "https://provider-auth-proxy.orka-system.svc.cluster.local"
 		}
 		if _, err := r.externalRuntimeEgress(cfg, injection); err == nil {
 			t.Errorf("%s: injection was admitted", name)

@@ -149,7 +149,7 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
-                  "--controller-url=http://orka-api.orka-system.svc:8080",
+                  "--controller-url=http://orka-api.orka-system.svc.cluster.local:8080",
                   "--controller-mode=harness-v2",
                   "--watch-namespace=orka-system",
                   "--enforce-namespace-isolation=true",
@@ -171,7 +171,7 @@ deploy_orka() {
                   # RuntimePool reconciliation and prompt execution use the
                   # authenticated provider-proxy boundary deployed above; the
                   # token Secret is created above and mounted by the base manifest.
-                  "--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080",
+                  "--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080",
                   "--acp-provider-proxy-namespace=orka-system",
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"

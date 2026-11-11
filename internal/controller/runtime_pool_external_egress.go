@@ -78,10 +78,16 @@ func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, inj
 		port int32
 	}
 	proxyHost, proxyPort, proxyProtocol, err := externalEgressOrigin(cfg.providerProxy.baseURL)
+	if err == nil {
+		err = externalEgressHostResolvable("--acp-provider-proxy-base-url", proxyHost)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("provider proxy origin cannot be admitted to the runtime egress allowlist: %w", err)
 	}
 	controllerHost, controllerPort, controllerProtocol, err := externalEgressOrigin(r.ControllerAPIURL)
+	if err == nil {
+		err = externalEgressHostResolvable("--controller-url", controllerHost)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("controller API origin cannot be admitted to the runtime egress allowlist: %w", err)
 	}
@@ -187,4 +193,20 @@ func externalEgressOrigin(raw string) (string, int32, workspacev1alpha1.RuntimeE
 		return "", 0, "", err
 	}
 	return host, port, protocol, nil
+}
+
+// externalEgressHostResolvable refuses a short in-cluster Service name. A
+// gateway-enforced runtime resolves allowlisted names through the backend: a
+// Substrate Actor's resolver tries search suffixes its DNS relay refuses, and
+// cluster DNS answers only the fully qualified "<service>.<namespace>.svc.<cluster
+// domain>" form, so a "<service>.<namespace>.svc" origin is admitted but never
+// connects. Core does not know the cluster domain, so it names the form to use
+// rather than rewriting the host. Pod-backed runtimes, which resolve through
+// their Pod's search path, never reach this check.
+func externalEgressHostResolvable(flag, host string) error {
+	if !strings.HasSuffix(host, ".svc") {
+		return nil
+	}
+	return fmt.Errorf("host %q is a short Kubernetes Service name, which native workspace runtimes cannot resolve; set %s to "+
+		"the fully qualified name %q (use your cluster domain if it is not cluster.local)", host, flag, host+".cluster.local")
 }

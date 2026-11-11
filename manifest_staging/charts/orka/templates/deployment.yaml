@@ -86,7 +86,8 @@ spec:
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
-            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+            {{- /* Fully qualified: native workspace runtimes cannot resolve "<service>.<namespace>.svc". */}}
+            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:{{ .Values.service.port }}
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
@@ -129,7 +130,7 @@ spec:
             - --acp-upgrade-drain-marker-namespace={{ .Release.Namespace }}
             {{- end }}
             {{- if .Values.providerProxy.enabled }}
-            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc:8080
+            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:8080
             - --acp-provider-proxy-namespace={{ .Release.Namespace }}
             - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
             - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
