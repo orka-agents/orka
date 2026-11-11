@@ -248,7 +248,7 @@ func identityTaskOfOtherAgent(ctx context.Context, reader client.Reader, agent *
 // when that binding froze the identity.
 func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *corev1alpha1.AgentExecutionAgentRef {
 	binding := task.Status.AgentExecutionBinding
-	if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
+	if task.Status.Phase.IsTerminal() || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
 		binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
 		return nil
 	}
@@ -1043,7 +1043,7 @@ func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.Ag
 		return errors.New("the Task was replaced")
 	case !task.DeletionTimestamp.IsZero():
 		return errors.New("the Task is being deleted")
-	case isTerminalTaskPhase(task.Status.Phase):
+	case task.Status.Phase.IsTerminal():
 		return fmt.Errorf("the Task is %s", task.Status.Phase)
 	}
 	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {

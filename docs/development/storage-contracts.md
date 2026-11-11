@@ -15,7 +15,7 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 3` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 4` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -24,11 +24,16 @@ Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
-and the upgrade records an adopted identity. A store at an earlier schema
+the 170-to-171 transition makes a `retry_pending` work action own its dedupe
+key, and the upgrade records an adopted identity. A store at an earlier schema
 version upgrades through numbered version steps under the same lock, backup and
-transaction: a version-1 store (the 159-object layout) gains the 168-to-169 and
-169-to-170 objects, a version-2 store gains the 169-to-170 columns, and both
-keep their identity row, records and bootstrap state unchanged. An installation
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
+169-to-170 and 170-to-171 objects, a version-2 store gains the 169-to-170
+columns and the 170-to-171 index, a version-3 store gains the 170-to-171 index,
+and all keep their identity row, records and bootstrap state unchanged. Before
+the 170-to-171 index is rebuilt, a `retry_pending` work action that shares its
+dedupe key with a queued, leased or running action, or with a newer
+`retry_pending` one, is cancelled with reason `dedupe_superseded`. An installation
 a version-2 store's epoch advance recorded stays its owner, at switch
 generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
@@ -283,9 +288,13 @@ the observable parts.
   provider contracts. Revision 3 added dataset binding (see "Installation
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
-  writes without one during the transition. Revision 5 requires
-  `GetSessionCreatedAt` on `state.v1`. The revision Orka requires for
-  each part belongs to Orka, not to the contract.
+  writes without one during the transition. Revision 5 adds
+  `MarkWorkActionRetryPending`, which parks an active work action for retry
+  and leaves a finished one unchanged in one step, and defines the work-action
+  statuses and which of them are active (`WorkActionStatus*`,
+  `IsWorkActionActive`). Revision 6 requires `GetSessionCreatedAt` on
+  `state.v1`. The revision Orka requires for each part belongs to Orka, not to
+  the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -723,7 +732,7 @@ later.
   caller rotates keys. Binding a
   dataset records its installation as the advance does, so the advance then
   accepts only that installation and `SyncControllerEpochMirror` is refused.
-- **SQLite.** The binding lives in the `store_dataset` row (schema version 3).
+- **SQLite.** The binding lives in the `store_dataset` row (schema version 3 and later).
   Every binding method runs in one transaction that reserves the writer, and a
   successful call checkpoints the WAL before it returns, as dataset identity
   does. A checkpoint that fails after the commit returns `ErrOutcomeUnknown`,

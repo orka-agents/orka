@@ -19,14 +19,18 @@ import (
 
 const (
 	// Base worker env vars used by all worker types.
-	TaskName          = "ORKA_TASK_NAME"
-	TaskNamespace     = "ORKA_TASK_NAMESPACE"
-	ResultEndpoint    = "ORKA_RESULT_ENDPOINT"
-	ResultStdout      = "ORKA_RESULT_STDOUT"
-	ResultStdoutToken = "ORKA_RESULT_STDOUT_TOKEN"
-	ControllerURL     = "ORKA_CONTROLLER_URL"
-	Command           = "ORKA_COMMAND"
-	AgentName         = "ORKA_AGENT_NAME"
+	TaskName      = "ORKA_TASK_NAME"
+	TaskNamespace = "ORKA_TASK_NAMESPACE"
+	// ServiceAccountName is the worker Pod's own ServiceAccount, from the
+	// Downward API. Outbound access lets the AI worker exchange a token for
+	// itself even though its account is a platform account.
+	ServiceAccountName = "ORKA_SERVICE_ACCOUNT_NAME"
+	ResultEndpoint     = "ORKA_RESULT_ENDPOINT"
+	ResultStdout       = "ORKA_RESULT_STDOUT"
+	ResultStdoutToken  = "ORKA_RESULT_STDOUT_TOKEN"
+	ControllerURL      = "ORKA_CONTROLLER_URL"
+	Command            = "ORKA_COMMAND"
+	AgentName          = "ORKA_AGENT_NAME"
 
 	// Task relationship env vars.
 	PriorTask           = "ORKA_PRIOR_TASK"
