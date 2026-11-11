@@ -243,12 +243,14 @@ func (s *mcpProxySession) promptRunning(prompt harnessv2.PromptID) bool {
 		s.state == harnessv2.RuntimeSessionStatePromptRunning
 }
 
-// approvalRequired reports whether the running prompt's policy requires
-// approval for a tool.
+// approvalRequired reports whether the session's approval policy requires
+// approval for a tool. It reads the session's frozen configuration, which
+// every prompt's policy must match and which, unlike a prompt's
+// authorization, stays set between prompts.
 func (s *mcpProxySession) approvalRequired(toolName string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.authorization != nil && s.authorization.ApprovalPolicy.Requires(toolName)
+	return s.configuration.ApprovalPolicy.Requires(toolName)
 }
 
 func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {

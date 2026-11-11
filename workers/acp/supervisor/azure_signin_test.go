@@ -228,6 +228,18 @@ func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.
 	if !fixture.session.approvalRequired(testForwardTool) {
 		t.Fatal("the prompt does not require approval for the forwarding Tool")
 	}
+	// The answer holds between prompts too, when no prompt's authorization
+	// is held: a sign-in that starts late reads the session's own policy.
+	fixture.session.mu.Lock()
+	held := fixture.session.authorization
+	fixture.session.authorization = nil
+	fixture.session.mu.Unlock()
+	if !fixture.session.approvalRequired(testForwardTool) {
+		t.Fatal("between prompts the forwarding Tool's reads must still need approval")
+	}
+	fixture.session.mu.Lock()
+	fixture.session.authorization = held
+	fixture.session.mu.Unlock()
 	// Give a wrongly started background sign-in time to reach the broker.
 	time.Sleep(200 * time.Millisecond)
 	fixture.gateway.signInMu.Lock()
