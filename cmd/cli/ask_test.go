@@ -4,10 +4,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +30,8 @@ type askServer struct {
 	createStatus int // non-zero fails the Task create with this status
 	answer       string
 	stallResult  chan struct{} // when set, result reads hang until the client gives up or this closes
+	stalled      chan struct{} // when set, closed once a result read starts hanging
+	stalledOnce  sync.Once
 	created      map[string]any
 	resultReads  int
 }
@@ -36,9 +41,12 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 	s := &askServer{agentStatus: agentStatus, phases: phases, answer: "**Answer:** Yes.\n"}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		stall := s.stallResult
+		stall, stalled := s.stallResult, s.stalled
 		s.mu.Unlock()
 		if stall != nil && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result") {
+			if stalled != nil {
+				s.stalledOnce.Do(func() { close(stalled) })
+			}
 			select {
 			case <-r.Context().Done():
 			case <-stall:
@@ -94,6 +102,11 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 
 func runAsk(t *testing.T, srv *askServer, stdin string, args ...string) (string, string, error) {
 	t.Helper()
+	return runAskContext(context.Background(), t, srv, stdin, args...)
+}
+
+func runAskContext(ctx context.Context, t *testing.T, srv *askServer, stdin string, args ...string) (string, string, error) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	previousInterval, previousGrace := askPollInterval, askNotFoundGrace
 	askPollInterval, askNotFoundGrace = 10*time.Millisecond, time.Second
@@ -105,7 +118,7 @@ func runAsk(t *testing.T, srv *askServer, stdin string, args ...string) (string,
 	root.SetErr(&stderr)
 	root.SetIn(strings.NewReader(stdin))
 	root.SetArgs(append(append([]string{"ask"}, args...), "--server", srv.URL, "-n", "orka-system"))
-	err := root.Execute()
+	err := root.ExecuteContext(ctx)
 	return stdout.String(), stderr.String(), err
 }
 
@@ -277,7 +290,7 @@ func TestAskBoundsTheAnswerReadByTimeout(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := runAsk(t, srv, "", "q", "--timeout", "300ms")
+		_, _, err := runAsk(t, srv, "", "q", "--timeout", "2s")
 		done <- err
 	}()
 	select {
@@ -291,6 +304,38 @@ func TestAskBoundsTheAnswerReadByTimeout(t *testing.T) {
 	}
 }
 
+func TestAskReportsAnInterruptedAnswerRead(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	release, stalled := make(chan struct{}), make(chan struct{})
+	srv.mu.Lock()
+	srv.stallResult, srv.stalled = release, stalled
+	srv.mu.Unlock()
+	t.Cleanup(func() { close(release) })
+
+	ctx, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := runAskContext(ctx, t, srv, "", "q", "--timeout", "1m")
+		done <- err
+	}()
+	select {
+	case <-stalled:
+		interrupt()
+	case <-time.After(10 * time.Second):
+		t.Fatal("orka ask never read the answer")
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "reading its answer was interrupted") ||
+			!strings.Contains(err.Error(), "orka task result ask-") {
+			t.Fatalf("err = %v, want the interrupt error with the command that reads the answer", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("orka ask kept reading the answer after the interrupt")
+	}
+}
+
 func TestAskRejectsQuestionAndTokenBothOnStdin(t *testing.T) {
 	srv := newAskServer(t, http.StatusOK, "Succeeded")
 	_, _, err := runAsk(t, srv, "txn-token-value", "-", "--txn-token-file", "-")
@@ -299,5 +344,44 @@ func TestAskRejectsQuestionAndTokenBothOnStdin(t *testing.T) {
 	}
 	if srv.created != nil {
 		t.Fatalf("no Task may be created when stdin holds the token: %#v", srv.created)
+	}
+}
+
+func TestAskRejectsTokenFileThatIsStdin(t *testing.T) {
+	// Standard input is a file, and --txn-token-file names it by another path,
+	// as /dev/stdin does.
+	path := filepath.Join(t.TempDir(), "stdin")
+	if err := os.WriteFile(path, []byte("txn-token-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close() //nolint:errcheck
+	previous := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() { os.Stdin = previous })
+
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	_, _, err = runAsk(t, srv, "txn-token-value", "-", "--txn-token-file", path)
+	if err == nil || !strings.Contains(err.Error(), "can't both come from stdin") {
+		t.Fatalf("err = %v, want the shared-stdin error", err)
+	}
+	if srv.created != nil {
+		t.Fatalf("no Task may be created when stdin holds the token: %#v", srv.created)
+	}
+}
+
+func TestAskReadsQuestionFromStdinWhenTokenIsGiven(t *testing.T) {
+	// --txn-token wins over --txn-token-file, so stdin holds only the question.
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	_, stderr, err := runAsk(t, srv, "is the guide read-only?", "-",
+		"--txn-token", "txn-token-value", "--txn-token-file", "-")
+	if err != nil {
+		t.Fatalf("ask: %v (stderr %q)", err, stderr)
+	}
+	if srv.created["prompt"] != "is the guide read-only?" {
+		t.Fatalf("prompt = %#v, want the question from stdin", srv.created["prompt"])
 	}
 }

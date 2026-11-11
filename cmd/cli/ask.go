@@ -115,8 +115,12 @@ namespace, so asking needs permission to create Tasks there.`,
 			}
 			result, err := c.GetTaskResult(waitCtx, name, client.GetOptions{Namespace: c.Namespace})
 			if err != nil {
-				if waitCtx.Err() != nil {
+				switch {
+				case errors.Is(waitCtx.Err(), context.DeadlineExceeded):
 					return fmt.Errorf("task %s finished, but reading its answer outlasted --timeout. "+
+						"Get the answer with: orka task result %s -n %s", name, name, c.Namespace)
+				case waitCtx.Err() != nil:
+					return fmt.Errorf("task %s finished, but reading its answer was interrupted. "+
 						"Get the answer with: orka task result %s -n %s", name, name, c.Namespace)
 				}
 				return fmt.Errorf("read the answer from task %s: %w", name, err)
@@ -154,9 +158,9 @@ func askQuestion(cmd *cobra.Command, args []string) (string, error) {
 	if readStdin {
 		// A token read from stdin would otherwise become the question and
 		// reach the model.
-		if tokenFile, _ := cmd.Flags().GetString("txn-token-file"); tokenFile == "-" {
-			return "", fmt.Errorf("the question and --txn-token-file - can't both come from stdin: " +
-				"pass the question as an argument or the token in a file")
+		if tokenReadsStdin(cmd) {
+			return "", fmt.Errorf("the question and the --txn-token-file token can't both come from stdin: " +
+				"pass the question as an argument or the token in another file")
 		}
 		data, err := io.ReadAll(cmd.InOrStdin())
 		if err != nil {
@@ -169,6 +173,28 @@ func askQuestion(cmd *cobra.Command, args []string) (string, error) {
 		return "", fmt.Errorf("a question is required: orka ask \"<question>\"")
 	}
 	return question, nil
+}
+
+// tokenReadsStdin reports whether the client reads the transaction token from
+// standard input: --txn-token is unset and --txn-token-file is "-" or names
+// the file standard input is, such as /dev/stdin.
+func tokenReadsStdin(cmd *cobra.Command) bool {
+	if token, _ := cmd.Flags().GetString("txn-token"); token != "" {
+		return false
+	}
+	path, _ := cmd.Flags().GetString("txn-token-file")
+	if path == "-" {
+		return true
+	}
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	tokenFile, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	stdin, err := os.Stdin.Stat()
+	return err == nil && os.SameFile(tokenFile, stdin)
 }
 
 func createAskTask(ctx context.Context, c *client.Client, agent, question string) (string, error) {
