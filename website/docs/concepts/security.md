@@ -302,9 +302,16 @@ tolerating the controller nodes' taint or binding to them by name. Only then do
 the chart's `nodeSelector` and `tolerations`, which apply to the controller
 Deployment, give it nodes of its own.
 
-The controller ServiceAccount's own policy governs only new Pods. Before you
-turn identities on, also delete any Pod already running as that ServiceAccount
-that the controller Deployment did not create, since it keeps the identity:
+The controller ServiceAccount's own policy governs only new objects. It still
+lets the ReplicaSet controller create Pods from an existing ReplicaSet whose
+template runs as that ServiceAccount, and lets anyone scale such a ReplicaSet,
+even one scaled to zero. Before you turn identities on, first delete every
+Deployment and ReplicaSet other than the controller Deployment and its own
+ReplicaSets whose Pod template runs as that ServiceAccount, or change their
+templates to another ServiceAccount:
+`kubectl get deployments,replicasets -n <namespace> -o jsonpath='{range .items[?(@.spec.template.spec.serviceAccountName=="<controller ServiceAccount>")]}{.kind}/{.metadata.name}{"\n"}{end}'`
+lists them. Then delete any Pod still running as that ServiceAccount that the
+controller Deployment did not create, since it keeps the identity:
 `kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
 lists them.
 
