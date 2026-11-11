@@ -180,7 +180,11 @@ func newAgentPromotionsCmd() *cobra.Command {
 				return err
 			}
 			if format != outputTable {
-				return printStructuredTo(cmd.OutOrStdout(), format, page)
+				var response any
+				if err := json.Unmarshal(raw, &response); err != nil {
+					return fmt.Errorf("decode promotions: %w", err)
+				}
+				return printStructuredTo(cmd.OutOrStdout(), format, response)
 			}
 			if page.Rollout != nil && page.Rollout.Candidate != nil {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Canary: %d%% of new Sessions and Tasks run on %s (decision %s)\n",
