@@ -1,6 +1,6 @@
 # PR review eval cases
 
-Twelve `orka.eval.case.v1` cases for the `repositoryMonitorReview` EvalRun
+Twenty-four `orka.eval.case.v1` cases for the `repositoryMonitorReview` EvalRun
 subject. Each case is one branch of the public fixture repository
 [`orka-agents/orka-eval-fixtures`](https://github.com/orka-agents/orka-eval-fixtures),
 also open there as a `do-not-merge` pull request: a single commit that changes
@@ -20,6 +20,18 @@ a small Go utility package.
 | `safepath-sibling-tests` | passed | Adds tests only |
 | `config-error-sentinel` | passed | Wraps errors in a sentinel |
 | `truncate-ascii-fast-path` | passed | Cuts ASCII prefixes by byte, which is safe, and falls back to the rune walk otherwise |
+| `safepath-dotdot-root` | not passed | Drops the `..` equality check, so `Join(root, "..")` returns the root's parent |
+| `cache-set-keeps-expiry` | not passed | Updating a key keeps its old expiry, so a refreshed entry still expires early |
+| `retry-delay-exceeds-max` | not passed | Doubles the delay while it is below the cap, so a wait can reach twice `MaxDelay` |
+| `config-fraction-truncates` | not passed | Accepts `"1.5"` but converts it to a whole second before scaling |
+| `store-sync-after-rename` | not passed | Renames before syncing, so a crash can leave a partial file in place |
+| `store-temp-outside-dir` | not passed | Creates the temp file in the system temp directory, so the rename can cross filesystems and is no longer atomic |
+| `cache-len` | passed | Adds `Len` under the lock |
+| `cache-purge-expired` | passed | Adds `Purge`, which removes expired entries while walking the list safely |
+| `textutil-truncate-runes` | passed | Adds `TruncateRunes`, which counts characters rather than bytes |
+| `config-error-bounds` | passed | Says which timeout forms parse in the error message |
+| `store-sync-dir` | passed | Syncs the directory after the rename |
+| `retry-docs-example` | passed | Documents the backoff schedule and adds a runnable example |
 
 Half the cases are clean, so a reviewer that holds back everything or passes
 everything scores 50% on `verdict`. For a defect made of deleted code, such as

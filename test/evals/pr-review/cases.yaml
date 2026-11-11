@@ -150,3 +150,148 @@ cases:
       tests with a multi-byte character at the cut and with extreme limits.
     reference:
       verdict: passed
+
+
+  - id: safepath-dotdot-root
+    branch: case/safepath-dotdot-root
+    tags: [defect, security]
+    title: "refactor(safepath): use one prefix check for parent paths"
+    body: |
+      The ".." equality check and the "../" prefix check say the same thing
+      twice. Keep the prefix check.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: safepath/safepath.go, startLine: 25, endLine: 25}
+
+
+  - id: cache-set-keeps-expiry
+    branch: case/cache-set-keeps-expiry
+    tags: [defect, correctness]
+    title: "perf(cache): skip the clock read when Set updates a key"
+    body: |
+      Updating an existing key only needs the new value and a move to the
+      front; read the clock only when inserting.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: cache/cache.go, startLine: 66, endLine: 66}
+
+
+  - id: retry-delay-exceeds-max
+    branch: case/retry-delay-exceeds-max
+    tags: [defect, correctness]
+    title: "refactor(retry): stop doubling once the delay reaches the cap"
+    body: |
+      Once the delay has reached MaxDelay there is nothing left to do, so only
+      double while it is still below the cap.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: retry/retry.go, startLine: 40, endLine: 42}
+
+
+  - id: config-fraction-truncates
+    branch: case/config-fraction-truncates
+    tags: [defect, correctness]
+    title: "feat(config): accept fractional seconds"
+    body: |
+      Operators write timeouts like "1.5" and get an error today. Accept a
+      decimal number of seconds as well as a whole one.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: config/timeout.go, startLine: 27, endLine: 28}
+
+
+  - id: store-sync-after-rename
+    branch: case/store-sync-after-rename
+    tags: [defect, correctness]
+    title: "perf(store): rename before syncing so writers return sooner"
+    body: |
+      Readers only need the rename to see the new file. Rename first and sync
+      the file afterwards, which takes the fsync off the critical path.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: store/atomic.go, startLine: 31, endLine: 38}
+
+
+  - id: store-temp-outside-dir
+    branch: case/store-temp-outside-dir
+    tags: [defect, correctness]
+    title: "chore(store): keep temporary files out of data directories"
+    body: |
+      Half-written temp files show up in directory listings and backups of the
+      data directory. Create them in the system temp directory instead.
+    reference:
+      verdict: notPassed
+      locations:
+        - {file: store/atomic.go, startLine: 13, endLine: 13}
+
+
+  - id: cache-len
+    branch: case/cache-len
+    tags: [clean]
+    title: "feat(cache): add Len"
+    body: |
+      Callers want to report cache size in metrics. Add Len, read under the
+      lock like every other method.
+    reference:
+      verdict: passed
+
+
+  - id: cache-purge-expired
+    branch: case/cache-purge-expired
+    tags: [clean]
+    title: "feat(cache): add Purge to drop expired entries"
+    body: |
+      Expired entries are only removed when someone reads them, so a cache
+      with one-off keys keeps them until eviction. Add Purge for a periodic
+      cleanup.
+    reference:
+      verdict: passed
+
+
+  - id: textutil-truncate-runes
+    branch: case/textutil-truncate-runes
+    tags: [clean]
+    title: "feat(textutil): add TruncateRunes"
+    body: |
+      Terminal columns count characters, not bytes. Add TruncateRunes, which
+      cuts by character count and keeps the same ellipsis.
+    reference:
+      verdict: passed
+
+
+  - id: config-error-bounds
+    branch: case/config-error-bounds
+    tags: [clean]
+    title: "fix(config): name the limit in timeout errors"
+    body: |
+      "invalid timeout" doesn't tell operators what is accepted. Say which
+      forms parse and include the minimum.
+    reference:
+      verdict: passed
+
+
+  - id: store-sync-dir
+    branch: case/store-sync-dir
+    tags: [clean]
+    title: "fix(store): sync the directory after the rename"
+    body: |
+      On ext4 and xfs a rename is durable only once its directory is synced.
+      Sync the directory so a crash right after WriteFileAtomic returns cannot
+      bring back the old file.
+    reference:
+      verdict: passed
+
+
+  - id: retry-docs-example
+    branch: case/retry-docs-example
+    tags: [clean]
+    title: "docs(retry): document the backoff schedule and add an example"
+    body: |
+      Spell out the wait sequence in Do's comment and add a runnable example.
+    reference:
+      verdict: passed
