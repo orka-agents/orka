@@ -79,7 +79,9 @@ func (c *Client) GetMessages(ctx context.Context, namespace, taskName, parentTas
 }
 
 // SendMessage stamps the message's creation time before storing it. The
-// provider writes the assigned ID back into msg.
+// stamp goes on a copy, and the stored ID and creation time reach msg only
+// once the write succeeds, so a write whose outcome stays unknown leaves msg
+// as the caller passed it.
 func (c *Client) SendMessage(ctx context.Context, msg *store.Message) error {
 	if msg == nil {
 		return store.ValidationErrorf("message is required")
@@ -91,10 +93,15 @@ func (c *Client) SendMessage(ctx context.Context, msg *store.Message) error {
 		return c.StateProvider.SendMessage(ctx, msg)
 	}
 	ctx, now := c.ops.withIssueTime(ctx)
-	if msg.CreatedAt.IsZero() {
-		msg.CreatedAt = now
+	stamped := *msg
+	if stamped.CreatedAt.IsZero() {
+		stamped.CreatedAt = now
 	}
-	return c.StateProvider.SendMessage(ctx, msg)
+	if err := c.StateProvider.SendMessage(ctx, &stamped); err != nil {
+		return err
+	}
+	*msg = stamped
+	return nil
 }
 
 // AppendMessages gives every transcript message without an ID or timestamp

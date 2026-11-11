@@ -115,8 +115,8 @@ func TestLostResponseRetriesWriteBackWithTheOriginalRequest(t *testing.T) {
 		if !errors.Is(err, storagev1.ErrOutcomeUnknown) {
 			t.Fatalf("SendMessage = %v, want ErrOutcomeUnknown", err)
 		}
-		if sent.ID != 0 {
-			t.Fatalf("sent.ID = %d after an unknown outcome, want the caller's record unchanged", sent.ID)
+		if *sent != *message("hello") {
+			t.Fatalf("sent = %#v after an unknown outcome, want the caller's record unchanged", sent)
 		}
 	})
 }
