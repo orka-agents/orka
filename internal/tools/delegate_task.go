@@ -653,6 +653,9 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 			return nil, fmt.Errorf("brokered delegation requires an immutable parent Task UID")
 		}
 		childTask.Annotations[labels.AnnotationParentTaskUID] = string(dc.parentTask.UID)
+		if dc.parentTask.Namespace != "" {
+			childTask.Annotations[labels.AnnotationParentTaskNamespace] = dc.parentTask.Namespace
+		}
 		if toolCtx.ExternalEffects != nil || strings.TrimSpace(toolCtx.SessionID) != "" || strings.TrimSpace(toolCtx.OperationID) != "" {
 			effectID, err := brokeredDelegationEffectID(toolCtx)
 			if err != nil {
