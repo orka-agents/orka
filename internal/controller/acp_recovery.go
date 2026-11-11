@@ -55,9 +55,7 @@ func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
-	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-	default:
+	if !task.Status.Phase.IsTerminal() {
 		return false
 	}
 	binding := executionBinding(task)
