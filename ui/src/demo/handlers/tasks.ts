@@ -1128,6 +1128,9 @@ export const taskHandlers: RequestHandler[] = [
     const name = nameParam(params)
     const rec = tasks.get(name)
     if (!rec) return notFound(`tasks.orka.ai "${name}"`)
+    // As in the API, a stale confirmation is refused before any phase check.
+    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
+    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
     const now = Date.now()
     advance(rec, now)
     const phase = phaseOf(rec, now)
@@ -1137,8 +1140,6 @@ export const taskHandlers: RequestHandler[] = [
     if (TERMINAL.has(phase) || rec.schedule) {
       return apiError(409, `task cannot be cancelled: the task is ${phase}`)
     }
-    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
-    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
     const reason = body.reason?.trim()
     const message = reason ? `cancelled by demo-user: ${reason}` : 'cancelled by demo-user'
     cancelDemoTask(name, message)
