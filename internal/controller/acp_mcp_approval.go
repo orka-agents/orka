@@ -817,7 +817,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	callCtx, stopPrompt := b.watchPromptAuthority(callCtx, call.Request, false)
 	defer stopPrompt()
 	result, executeErr := prepared(withACPMCPAuthenticatedTask(callCtx, credentials.Task))
-	if failure, ok := b.failCallWithoutEffect(ctx, call, credentials, effect, result, executeErr); ok {
+	if failure, ok := b.failCallWithoutEffect(ctx, call, credentials, effect, executeErr); ok {
 		return failure, false, nil
 	}
 	if executeErr == nil {
@@ -866,28 +866,24 @@ func (b *ACPMCPBroker) failApprovedCall(ctx context.Context, call *acpMCPApprova
 // failCallWithoutEffect settles an approved call that provably reached no
 // remote system as failed, and reports whether it did. Nothing was sent, so
 // the failure is final whatever happened to the prompt's authority
-// meanwhile. That is a no-effect error, or the refusal of a requester's link
-// found missing or unusable, which keeps its code and the fix it names for
-// the agent. A receipt that cannot be recorded leaves the outcome to the
-// caller, which treats it as unknown, as the record shows.
+// meanwhile. That is a no-effect error, or Orka's own refusal before sending,
+// such as for a requester link found missing or unusable, which keeps its
+// code and the fix it names for the agent. A tool's response is never taken
+// as such proof. When the receipt cannot be recorded, it reports false and
+// the caller, whose error stays set, settles the outcome as unknown.
 func (b *ACPMCPBroker) failCallWithoutEffect(
-	ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect,
-	result json.RawMessage, executeErr error,
+	ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, executeErr error,
 ) (json.RawMessage, bool) {
 	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
 		failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect)
 		return failure, err == nil
 	}
-	if executeErr != nil {
-		return nil, false
+	if refusal, ok := errors.AsType[*acpMCPRefusedWithoutEffect](executeErr); ok {
+		failure, err := b.failApprovedCallWithCode(ctx, call, credentials, effect, refusal.Code,
+			&tools.NoEffectError{Summary: refusal.Reason, Err: refusal})
+		return failure, err == nil
 	}
-	reason, ok := acpMCPConnectionRequiredResult(result)
-	if !ok {
-		return nil, false
-	}
-	failure, err := b.failApprovedCallWithCode(ctx, call, credentials, effect, harnessv2.MCPToolErrorCodeConnectionRequired,
-		&tools.NoEffectError{Summary: reason, Err: errors.New(reason)})
-	return failure, err == nil
+	return nil, false
 }
 
 // failApprovedCallWithCode settles an approved call that had no effect as
@@ -953,21 +949,6 @@ func acpApprovalError(id, code string) json.RawMessage {
 		acpApprovalCodeUnknown:   "The tool may have run. Do not repeat it automatically.",
 	}
 	return acpApprovalResult(id, code, messages[code])
-}
-
-// acpMCPConnectionRequiredResult reports whether a tool result is the
-// refusal of a missing or unusable linked account, and its reason.
-func acpMCPConnectionRequiredResult(result json.RawMessage) (string, bool) {
-	var refusal struct {
-		IsError bool   `json:"isError"`
-		Code    string `json:"code"`
-		Error   string `json:"error"`
-	}
-	if json.Unmarshal(result, &refusal) != nil || !refusal.IsError ||
-		refusal.Code != harnessv2.MCPToolErrorCodeConnectionRequired || strings.TrimSpace(refusal.Error) == "" {
-		return "", false
-	}
-	return refusal.Error, true
 }
 
 func acpApprovalResult(id, code, message string) json.RawMessage {
