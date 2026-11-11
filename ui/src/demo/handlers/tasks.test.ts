@@ -167,6 +167,23 @@ describe('demo task API', () => {
     expect(events.at(-1)).toMatchObject({ type: 'TaskCancelled', summary: 'Cancelled: repository monitor stopped by command' })
   })
 
+  it('cancels running children with their parent', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+    const parent = createDemoTask({ agent: 'coordinator', prompt: 'Prepare the release' })
+    const child = createDemoTask({ agent: 'docs', prompt: 'Draft the release notes', parent })
+    const finished = createDemoTask({ agent: 'triage', prompt: 'List release blockers', parent })
+    cancelDemoTask(finished, 'Cancelled: stopped earlier')
+    advanceClock(10_000)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status?.phase).toBe('Running')
+
+    expect((await call(`/tasks/${parent}/cancel`, post({ reason: 'wrong branch' }))).ok).toBe(true)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status).toMatchObject({
+      phase: 'Cancelled',
+      message: 'cancelled by demo-user: wrong branch',
+    })
+    expect(taskSchema.parse(await json(`/tasks/${finished}`)).status?.message).toBe('Cancelled: stopped earlier')
+  })
+
   it('forks a finished container task with its own container and keeps its outcome', async () => {
     const source = 'db-migrate-orders-v42-e2l9o'
     const fork = forkTaskResponseSchema.parse(await json(`/tasks/${source}/fork`, post({})))

@@ -193,8 +193,13 @@ orka task create -f task.yaml
 orka task wait my-task --timeout 5m
 orka task result my-task
 orka task logs my-task
-orka task cancel my-task --reason "wrong repository"
 orka task delete my-task
+```
+
+Stop a Task that is still pending or running:
+
+```bash
+orka task cancel my-task --reason "wrong repository"
 ```
 
 Create a simple container task from flags:

@@ -531,6 +531,8 @@ export interface DemoTaskInput {
   repo?: RepoKey
   /** session the task belongs to (e.g. the chat session that created it) */
   session?: string
+  /** delegating parent Task */
+  parent?: string
   createdBy?: 'chat' | 'gateway' | 'monitor'
 }
 
@@ -550,6 +552,7 @@ export function createDemoTask(input: DemoTaskInput): string {
     repo: input.repo,
     prompt: input.prompt,
     session: input.session,
+    parent: input.parent,
     createdBy: input.createdBy ?? 'chat',
   })
   return name
@@ -577,6 +580,8 @@ export function cancelDemoTask(name: string, reason: string) {
   rec.end = now
   rec.outcome = { phase: 'Cancelled', message: reason }
   finishTask(rec)
+  // The controller cancels a Task's unfinished delegated children with it.
+  for (const child of children(name)) cancelDemoTask(child.name, reason)
 }
 
 // ---- views ------------------------------------------------------------------------
