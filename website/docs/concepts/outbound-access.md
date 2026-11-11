@@ -105,9 +105,9 @@ resources, such as Azure Storage, are not yet validated against a live tenant.
   policy, only the requester can approve any call; anyone else allowed to decide
   approvals may still decline.
 - **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
-  `--agent-identity-max-delegation-age`) after the root requester's last action in the
-  Task chain, that is, creating the root Task or sending the Session message that started
-  it. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
+  `--agent-identity-max-delegation-age`) after the chain's root Task was created, whether
+  the requester created it directly or with a Session message. Time spent in the chat
+  before that does not count. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
   its parent no immutable UID proves, such as one Kubernetes orphaned, fails closed. A
   fork of an identity-bound Task does not carry the identity; create a new Task instead.
   Calls also stop at once when the Task is cancelled, deleted, or finished, or when its
