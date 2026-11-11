@@ -190,6 +190,37 @@ func TestTransientLockExpiryIsJudgedAtTheRequestTime(t *testing.T) {
 	require.Equal(t, "owner-b", session.ActiveTask)
 }
 
+// ReleaseLockWithTokenUsage counts the owner's tokens only while its
+// transient lock is live at the request time, and releases the lock either
+// way.
+func TestReleaseLockWithTokenUsageJudgesTheLockAtTheRequestTime(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	expiry := leaseClockBase.Add(time.Minute)
+	for _, tc := range []struct {
+		session       string
+		now           time.Time
+		input, output int
+	}{
+		{session: "in-time", now: expiry.Add(-time.Nanosecond), input: 3, output: 4},
+		{session: "late", now: expiry},
+	} {
+		require.NoError(t, s.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "tenant", Name: tc.session, SessionType: "task",
+			CreatedAt: leaseClockBase, UpdatedAt: leaseClockBase,
+		}))
+		require.NoError(t, s.AcquireLockUntil(ctx, "tenant", tc.session, "owner-a", "uid-a", leaseClockBase, expiry))
+		owner := store.SessionOwnerWrite{Namespace: "tenant", Name: tc.session, OwnerName: "owner-a", OwnerUID: "uid-a", Now: tc.now}
+		require.NoError(t, s.ReleaseLockWithTokenUsage(ctx, owner, 3, 4))
+
+		session, err := s.GetSession(ctx, "tenant", tc.session)
+		require.NoError(t, err)
+		require.Equal(t, tc.input, session.InputTokens, tc.session)
+		require.Equal(t, tc.output, session.OutputTokens, tc.session)
+		require.Empty(t, session.ActiveTask, "%s: the lock is released", tc.session)
+	}
+}
+
 // Session cleanup judges a chat turn reservation at the plan's preparation
 // time.
 func TestSessionCleanupJudgesLocksAtThePreparationTime(t *testing.T) {
