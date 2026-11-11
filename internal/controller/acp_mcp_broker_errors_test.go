@@ -333,8 +333,11 @@ func TestACPMCPToolExecutionResultReportsAConnectionTheRequesterMustLink(t *test
 	reason := refusal.Error()
 	err := &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: fmt.Errorf("resolve outbound access policy: %w", refusal)}
 	result, resultErr := acpMCPToolExecutionResult(context.Background(), descriptor, "", err)
-	if resultErr != nil {
-		t.Fatalf("acpMCPToolExecutionResult() error = %v, want a tool result", resultErr)
+	// The refusal is typed, so approval settlement can trust that nothing
+	// was sent; a direct call gets its result.
+	typed, ok := errors.AsType[*acpMCPRefusedWithoutEffect](resultErr)
+	if !ok || string(typed.Result) != string(result) || typed.Code != harnessv2.MCPToolErrorCodeConnectionRequired || typed.Reason != reason {
+		t.Fatalf("acpMCPToolExecutionResult() error = %v, want the typed refusal", resultErr)
 	}
 	var got struct {
 		IsError bool   `json:"isError"`

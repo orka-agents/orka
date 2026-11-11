@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,42 +228,114 @@ func TestAcpApprovalFailureSummaryRedactsBeforeBounding(t *testing.T) {
 	}
 }
 
+// connectionRequiredRefusal is Orka's own refusal of a call whose requester
+// link is missing or unusable, as the registered executor returns it.
+func connectionRequiredRefusal(t *testing.T, reason string) *acpMCPRefusedWithoutEffect {
+	t.Helper()
+	result, err := json.Marshal(struct {
+		IsError bool   `json:"isError"`
+		Code    string `json:"code"`
+		Error   string `json:"error"`
+	}{true, harnessv2.MCPToolErrorCodeConnectionRequired, reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &acpMCPRefusedWithoutEffect{Result: result, Code: harnessv2.MCPToolErrorCodeConnectionRequired, Reason: reason}
+}
+
+const expiredLinkReason = "Azure is not linked for the person who asked. They need to run `orka connect azure -n team-a`, then run this Task again"
+
 // TestMCPApprovalExpiredLinkFailsWithoutEffect covers an approved connector
-// call whose requester link expired before it ran: credential resolution
-// refuses it before any request leaves, so it settles failed, not succeeded
-// or unknown, even when the prompt is cancelled at the same moment, and the
-// agent still gets connection_required and the fix it names.
+// call whose requester link expired before it ran: Orka refuses it before any
+// request leaves, so it settles failed, not succeeded or unknown, even when
+// the prompt is cancelled at the same moment, and the agent still gets
+// connection_required and the fix it names.
 func TestMCPApprovalExpiredLinkFailsWithoutEffect(t *testing.T) {
 	f := newMCPApprovalFixture(t)
-	const reason = "Azure is not linked for the person who asked. They need to run `orka connect azure -n team-a`, then run this Task again"
 	f.broker.Executor = ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
 		f.count.Add(1)
 		// The prompt is cancelled while the credential is resolved.
 		f.authorized.Store(false)
-		return json.Marshal(struct {
-			IsError bool   `json:"isError"`
-			Code    string `json:"code"`
-			Error   string `json:"error"`
-		}{true, harnessv2.MCPToolErrorCodeConnectionRequired, reason})
+		return nil, connectionRequiredRefusal(t, expiredLinkReason)
 	})
 	done := f.start(f.request)
 	pending := f.pending()
 	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 	result := awaitMCPApprovalResult(t, done)
 
-	want := acpApprovalResult(pending.ID, harnessv2.MCPToolErrorCodeConnectionRequired, reason)
+	want := acpApprovalResult(pending.ID, harnessv2.MCPToolErrorCodeConnectionRequired, expiredLinkReason)
 	if !result.IsError || string(result.Result) != string(want) || f.count.Load() != 1 {
 		t.Fatalf("approved expired-link result=%s executions=%d", result.Result, f.count.Load())
 	}
 	if effect := f.approvalEffect(); effect.State != store.ExternalEffectFailed {
 		t.Fatalf("effect state = %s, want %s", effect.State, store.ExternalEffectFailed)
 	}
-	if approval := f.approval(); approval.ExecutionOutcome != acpApprovalOutcomeFailed || approval.ExecutionReason != reason {
+	if approval := f.approval(); approval.ExecutionOutcome != acpApprovalOutcomeFailed || approval.ExecutionReason != expiredLinkReason {
 		t.Fatalf("approval = %#v, want a failed execution naming the fix", approval)
 	}
 	// Recovery reads the receipt back as the same failure.
 	outcome, recovered, _ := mcpApprovalRecoveredOutcome(f.approvalEffect(), pending.ID)
-	if outcome != acpApprovalOutcomeFailed || recovered != reason {
+	if outcome != acpApprovalOutcomeFailed || recovered != expiredLinkReason {
 		t.Fatalf("recovered outcome = %q, %q", outcome, recovered)
+	}
+}
+
+// A sent request whose response merely looks like that refusal proves
+// nothing: an upstream service chose the body, so the call is recorded with
+// its result, never as having had no effect.
+func TestMCPApprovalResponseLookingLikeARefusalIsNoProofOfNoEffect(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	refusal := connectionRequiredRefusal(t, "Reconnect your account")
+	f.broker.Executor = ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
+		f.count.Add(1)
+		return refusal.Result, nil
+	})
+	done := f.start(f.request)
+	pending := f.pending()
+	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
+	result := awaitMCPApprovalResult(t, done)
+	var got, sent map[string]any
+	if json.Unmarshal(result.Result, &got) != nil || json.Unmarshal(refusal.Result, &sent) != nil ||
+		fmt.Sprint(got) != fmt.Sprint(sent) || f.count.Load() != 1 {
+		t.Fatalf("result=%s executions=%d, want the recorded response", result.Result, f.count.Load())
+	}
+	if effect := f.approvalEffect(); effect.State != store.ExternalEffectSucceeded {
+		t.Fatalf("effect state = %s, want the response recorded as %s", effect.State, store.ExternalEffectSucceeded)
+	}
+}
+
+// approvalFailedReceiptFaultStore fails the first attempt to settle an effect
+// as failed, as a storage blip would.
+type approvalFailedReceiptFaultStore struct {
+	store.ExternalEffectStore
+	failed *atomic.Bool
+}
+
+func (s approvalFailedReceiptFaultStore) TransitionExternalEffect(ctx context.Context, transition store.ExternalEffectTransition) (*store.ExternalEffect, error) {
+	if transition.NewState == store.ExternalEffectFailed && s.failed.CompareAndSwap(false, true) {
+		return nil, store.ErrUnavailable
+	}
+	return s.ExternalEffectStore.TransitionExternalEffect(ctx, transition)
+}
+
+// When the refusal's receipt cannot be recorded, the call is settled as an
+// unknown outcome for recovery, never as succeeded, even though the storage
+// writes after it work.
+func TestMCPApprovalRefusalWhoseReceiptFailsIsNeverSucceeded(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	f.broker.Effects = approvalFailedReceiptFaultStore{ExternalEffectStore: f.broker.Effects, failed: &atomic.Bool{}}
+	f.broker.Executor = ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
+		f.count.Add(1)
+		return nil, connectionRequiredRefusal(t, expiredLinkReason)
+	})
+	done := f.start(f.request)
+	pending := f.pending()
+	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
+	result := awaitMCPApprovalResult(t, done)
+	if string(result.Result) != string(acpApprovalError(pending.ID, acpApprovalCodeUnknown)) {
+		t.Fatalf("result = %s, want an unknown outcome", result.Result)
+	}
+	if effect := f.approvalEffect(); effect.State == store.ExternalEffectSucceeded {
+		t.Fatalf("effect state = %s, want anything but succeeded", effect.State)
 	}
 }
