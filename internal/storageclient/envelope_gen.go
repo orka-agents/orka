@@ -603,6 +603,16 @@ func (p envelopedState) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	})
 }
 
+func (p envelopedState) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
+	var r0 bool
+	err := p.ops.run(ctx, writeCall{method: "MarkWorkActionRetryPending", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.MarkWorkActionRetryPending(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) PrepareSessionCleanup(ctx context.Context, a1 storagev1.SessionCleanupIntent) (*storagev1.SessionCleanupIntent, error) {
 	var r0 *storagev1.SessionCleanupIntent
 	err := p.ops.run(ctx, writeCall{method: "PrepareSessionCleanup", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {

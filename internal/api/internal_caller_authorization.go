@@ -583,12 +583,3 @@ func firstUserExtra(userInfo *UserInfo, key string) string {
 	}
 	return values[0]
 }
-
-func isTerminalInternalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
-}
