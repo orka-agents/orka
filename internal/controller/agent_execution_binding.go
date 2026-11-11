@@ -1524,7 +1524,7 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		if result, err, handled := r.requireBoundIdentityClaim(ctx, task, existing); handled {
 			return result, err, true
 		}
-		return ctrl.Result{}, nil, false
+		return r.requireBoundAgentCeiling(ctx, task, reader, existing)
 	}
 
 	if wait := agentCacheBehind(ctx, reader, agent); wait > 0 {
@@ -1596,6 +1596,42 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	}
 	if result, err, handled := r.requireBoundIdentityClaim(ctx, task, binding); handled {
 		return result, err, true
+	}
+	return r.requireBoundAgentCeiling(ctx, task, reader, binding)
+}
+
+// requireBoundAgentCeiling re-judges a bound Task against its Agent's live
+// ceiling until the Task starts executing. The binding froze the generation
+// the cache held when the live check passed; a ceiling tightened between
+// that check and the binding write is caught here, and a Task the newer
+// ceiling refuses fails before it runs. A change after this read follows
+// the binding, as it does for a Task already running. Registered external
+// runtimes are judged against their AgentRuntime policy during planning.
+func (r *TaskReconciler) requireBoundAgentCeiling(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reader client.Reader,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (ctrl.Result, error, bool) {
+	if task.Status.Execution != nil || binding == nil || binding.Agent == nil {
+		return ctrl.Result{}, nil, false
+	}
+	live := &corev1alpha1.Agent{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: binding.Agent.Namespace, Name: binding.Agent.Name}, live)
+	switch {
+	case apierrors.IsNotFound(err):
+		return ctrl.Result{}, nil, false
+	case err != nil:
+		logf.FromContext(ctx).Error(err, "uncached Agent read after execution binding")
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+	case live.UID != binding.Agent.UID || live.Generation == binding.Agent.Generation:
+		return ctrl.Result{}, nil, false
+	case live.Spec.Runtime != nil && live.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(live.Spec.Runtime.RuntimeRef.Name) != "":
+		return ctrl.Result{}, nil, false
+	}
+	if err := validateAgentRuntimeCeiling(task, live); err != nil {
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("the Agent's ceiling changed while the Task was bound: %v", err))
+		return result, failErr, true
 	}
 	return ctrl.Result{}, nil, false
 }
