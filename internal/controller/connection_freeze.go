@@ -517,18 +517,6 @@ func acpChildTaskSealOnce(reader client.Reader, parentNamespace, parentName, par
 	}
 }
 
-// FrozenConnectorToolDigests returns, for every named Tool backed by a
-// connection-mode policy, the digest of its spec as read now. The Job builder
-// freezes the result into the worker's environment so the controller executes
-// only the definition the worker was dispatched with.
-func FrozenConnectorToolDigests(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]string, error) {
-	infos, err := connectorToolsFor(ctx, reader, tools.DefaultRegistry, namespace, toolNames)
-	if err != nil {
-		return nil, err
-	}
-	return nativeConnectorToolDigests(infos), nil
-}
-
 // nativeConnectorToolDigests is the native dispatch identity of each
 // classified connector tool.
 func nativeConnectorToolDigests(infos map[string]connectorToolInfo) map[string]string {

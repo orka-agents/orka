@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -330,13 +329,7 @@ func TestSubmitResult_RejectsBlank(t *testing.T) {
 	}
 }
 
-func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
-	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
-	originalMarkerPath := resultStdoutMarkerPath
-	resultStdoutMarkerPath = markerPath
-	t.Cleanup(func() {
-		resultStdoutMarkerPath = originalMarkerPath
-	})
+func TestSubmitResult_ResultStdoutPrintsMarker(t *testing.T) {
 	t.Setenv(workerenv.ResultStdout, "true")
 
 	result := []byte(`{"kind":"typed-review","payload":"large-review"}`)
@@ -352,22 +345,10 @@ func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
 	if !strings.Contains(stdout, wantMarker+"\n") {
 		t.Fatalf("stdout = %q, want marker %q", stdout, wantMarker)
 	}
-	data, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatalf("read marker file: %v", err)
-	}
-	if string(data) != wantMarker+"\n" {
-		t.Fatalf("marker file = %q, want %q", string(data), wantMarker+"\n")
-	}
 }
 
 func TestSubmitResultContext_PreservesPublishedStdoutMarkerAfterCancellation(t *testing.T) {
-	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
-	originalMarkerPath := resultStdoutMarkerPath
-	resultStdoutMarkerPath = markerPath
-	t.Cleanup(func() { resultStdoutMarkerPath = originalMarkerPath })
 	t.Setenv(workerenv.ResultStdout, "true")
-	t.Setenv(workerenv.ResultStdoutToken, "")
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -403,10 +384,6 @@ func TestSubmitResultContext_PreservesPublishedStdoutMarkerAfterCancellation(t *
 	wantMarker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result) + "\n"
 	if string(first)+string(rest) != wantMarker {
 		t.Fatal("stdout marker was not fully published")
-	}
-	data, err := os.ReadFile(markerPath)
-	if err != nil || string(data) != wantMarker {
-		t.Fatalf("marker file was not fully published: %v", err)
 	}
 }
 

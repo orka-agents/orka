@@ -13,99 +13,37 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// AgentConfig holds worker configuration from environment variables.
-type AgentConfig struct {
-	TaskName           string
-	TaskNamespace      string
-	TransactionID      string
-	TransactionProfile string
-	Prompt             string
-	Model              string
-	SystemPrompt       string
-	MaxTurns           int
-	AllowedTools       []string
-	AllowedToolsSet    bool
-	DisallowedTools    []string
-	GitRepo            string
-	GitBranch          string
-	GitRef             string
-	ShallowGitRef      bool
-	PRBaseBranch       string
-	PRBaseRepo         string
-	PRBaseSHA          string
-	SubPath            string
-	TimeoutSeconds     int
-
-	securityReviewContextArtifact string
-	securityReviewContextManifest []byte
+// WorkspaceConfig holds the repository checkout configuration a worker reads
+// from its environment.
+type WorkspaceConfig struct {
+	GitRepo       string
+	GitBranch     string
+	GitRef        string
+	ShallowGitRef bool
+	PRBaseBranch  string
+	PRBaseRepo    string
+	PRBaseSHA     string
+	SubPath       string
 }
 
-// LoadConfig reads and validates agent configuration from environment variables.
-func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
-	return loadConfig(defaultMaxTurns, true)
-}
-
-// LoadWorkspaceConfig reads and validates workspace configuration without
-// requiring an agent prompt. Container workers use this for deterministic tasks.
-func LoadWorkspaceConfig() (*AgentConfig, error) {
-	return loadConfig(0, false)
-}
-
-func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
-	cfg := &AgentConfig{
-		TaskName:           os.Getenv(workerenv.TaskName),
-		TaskNamespace:      os.Getenv(workerenv.TaskNamespace),
-		TransactionID:      os.Getenv(workerenv.TransactionID),
-		TransactionProfile: os.Getenv(workerenv.TransactionProfile),
-		Prompt:             os.Getenv(workerenv.Prompt),
-		Model:              os.Getenv(workerenv.Model),
-		SystemPrompt:       os.Getenv(workerenv.SystemPrompt),
-		GitRepo:            os.Getenv(workerenv.GitRepo),
-		GitBranch:          os.Getenv(workerenv.GitBranch),
-		GitRef:             os.Getenv(workerenv.GitRef),
-		ShallowGitRef:      workerenv.IsTrue(os.Getenv(workerenv.GitRefShallow)),
-		PRBaseBranch:       os.Getenv(workerenv.PRBaseBranch),
-		PRBaseRepo:         os.Getenv(workerenv.PRBaseRepo),
-		PRBaseSHA:          os.Getenv(workerenv.PRBaseSHA),
-		SubPath:            os.Getenv(workerenv.WorkspaceSubpath),
-		MaxTurns:           defaultMaxTurns,
-	}
-
-	if requirePrompt && cfg.Prompt == "" {
-		return nil, fmt.Errorf("%s is required", workerenv.Prompt)
-	}
-
-	if v := os.Getenv(workerenv.MaxTurns); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", workerenv.MaxTurns, err)
-		}
-		cfg.MaxTurns = n
-	}
-
-	if v, ok := os.LookupEnv(workerenv.AllowedTools); ok {
-		cfg.AllowedToolsSet = true
-		if v != "" {
-			cfg.AllowedTools = strings.Split(v, ",")
-		}
-	}
-	if v := os.Getenv(workerenv.DisallowedTools); v != "" {
-		cfg.DisallowedTools = strings.Split(v, ",")
-	}
-
-	if v := os.Getenv(workerenv.TimeoutSeconds); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", workerenv.TimeoutSeconds, err)
-		}
-		cfg.TimeoutSeconds = n
+// LoadWorkspaceConfig reads and validates the repository checkout
+// configuration from environment variables.
+func LoadWorkspaceConfig() (*WorkspaceConfig, error) {
+	cfg := &WorkspaceConfig{
+		GitRepo:       os.Getenv(workerenv.GitRepo),
+		GitBranch:     os.Getenv(workerenv.GitBranch),
+		GitRef:        os.Getenv(workerenv.GitRef),
+		ShallowGitRef: workerenv.IsTrue(os.Getenv(workerenv.GitRefShallow)),
+		PRBaseBranch:  os.Getenv(workerenv.PRBaseBranch),
+		PRBaseRepo:    os.Getenv(workerenv.PRBaseRepo),
+		PRBaseSHA:     os.Getenv(workerenv.PRBaseSHA),
+		SubPath:       os.Getenv(workerenv.WorkspaceSubpath),
 	}
 
 	// Sanitize SubPath to prevent directory traversal
@@ -160,7 +98,7 @@ func SetupGitCredentials() {
 // way any agent-initiated `git push origin HEAD` lands on the intended remote
 // branch instead of the upstream default (often "main"). The post-run worker
 // finalize step still owns the canonical commit + push.
-func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error {
+func CloneRepo(ctx context.Context, cfg *WorkspaceConfig, workspaceDir string) error {
 	// Detect a reused workspace: if <workspaceDir>/.git exists we already
 	// have a clone (sandbox session reuse). Re-running `git clone` would
 	// fail with "destination path already exists". Refresh in place instead.
