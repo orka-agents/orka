@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -247,5 +248,95 @@ func TestChildCreateOutcomeUnknown(t *testing.T) {
 		if got := childCreateOutcomeUnknown(tc.err); got != tc.want {
 			t.Errorf("%s: unknown = %t, want %t", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestUnknownCreateSearchOutlastsALiveParent covers a parent still live at the
+// search's first look, then cancelled before the child commits: the search
+// keeps watching for its whole window and cancels the child.
+func TestUnknownCreateSearchOutlastsALiveParent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	saved := unknownCreateBackoff
+	unknownCreateBackoff.Duration = time.Millisecond
+	t.Cleanup(func() { unknownCreateBackoff = saved })
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"}}
+	committed := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "parent-child-late1", Namespace: "other", UID: "late-uid",
+		Labels: map[string]string{labels.LabelParentTask: "parent"},
+		Annotations: map[string]string{
+			labels.AnnotationParentTaskUID:      "parent-uid",
+			labels.AnnotationDelegationEffectID: "effect-1",
+		},
+	}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent.DeepCopy()).Build()
+	parentReads := 0
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, w client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := w.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if key.Name == parent.Name {
+				parentReads++
+				if parentReads == 1 {
+					// After the first look: the parent is cancelled, and the
+					// child the cut-short Create sent commits.
+					live := &corev1alpha1.Task{}
+					if err := w.Get(ctx, key, live); err != nil {
+						return err
+					}
+					live.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"}
+					if err := w.Update(ctx, live); err != nil {
+						return err
+					}
+					if err := w.Create(ctx, committed.DeepCopy()); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	})
+	attempted := committed.DeepCopy()
+	attempted.Name, attempted.UID = "", ""
+	if err := cancelChildrenAfterUnknownCreate(context.Background(), c, c, parent, attempted); err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(committed), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+		t.Fatal("a child committed after the parent's cancel was not cancelled")
+	}
+}
+
+// TestChildTokenCleanupSurvivesTheCallersCancellation covers a delegation the
+// broker cancelled right after its child token was prepared: the Secret is
+// still deleted, since the parent that owns it is kept.
+func TestChildTokenCleanupSurvivesTheCallersCancellation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "child-token", Namespace: "default"}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return w.Delete(ctx, obj, opts...)
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default",
+		Annotations: map[string]string{labels.AnnotationTransactionTokenSecret: "child-token"}}}
+	cleanupChildTransactionTokenSecret(ctx, c, child)
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the prepared token Secret survived its cancelled delegation: %v", err)
 	}
 }
