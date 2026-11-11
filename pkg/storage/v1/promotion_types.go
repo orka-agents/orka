@@ -31,15 +31,31 @@ const (
 )
 
 // MaxAgentPromotionRecordBytes bounds one encoded promotion record; it
-// carries two resolved system prompts.
-const MaxAgentPromotionRecordBytes = 256 * 1024
+// carries two resolved system prompts. A new record must leave
+// AgentPromotionTransitionReserveBytes of it free, so the state, applied
+// generation and digest, and reason that transitions add always fit.
+const (
+	MaxAgentPromotionRecordBytes         = 256 * 1024
+	AgentPromotionTransitionReserveBytes = 8 * 1024
+)
 
 // AgentPromotionValues are an Agent's promotable fields. The system prompt
 // is resolved text, so a rollback does not depend on a ConfigMap that may
 // have changed or gone.
 type AgentPromotionValues struct {
 	SystemPrompt string `json:"systemPrompt"`
-	Model        string `json:"model,omitempty"`
+	// SystemPromptConfigMap is the ConfigMap the prompt came from, if any.
+	// Writing the values back keeps the reference rather than copying the
+	// ConfigMap's text into the Agent, where every Agent reader could see
+	// it; the write checks the ConfigMap still holds SystemPrompt.
+	SystemPromptConfigMap *AgentPromotionConfigMapRef `json:"systemPromptConfigMap,omitempty"`
+	Model                 string                      `json:"model,omitempty"`
+}
+
+// AgentPromotionConfigMapRef names a ConfigMap key holding a system prompt.
+type AgentPromotionConfigMapRef struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 // AgentPromotionRecord is one rollout action on a stable Agent.

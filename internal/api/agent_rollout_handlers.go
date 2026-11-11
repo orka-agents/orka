@@ -48,7 +48,9 @@ type AgentRolloutRequest struct {
 type AgentPromotionValuesView struct {
 	SystemPromptDigest string `json:"systemPromptDigest,omitempty"`
 	SystemPromptBytes  int    `json:"systemPromptBytes"`
-	Model              string `json:"model,omitempty"`
+	// SystemPromptConfigMap names the ConfigMap the prompt is read from.
+	SystemPromptConfigMap *store.AgentPromotionConfigMapRef `json:"systemPromptConfigMap,omitempty"`
+	Model                 string                            `json:"model,omitempty"`
 }
 
 // AgentPromotionResponse is a promotion record as the API returns it.
@@ -59,7 +61,8 @@ type AgentPromotionResponse struct {
 }
 
 func agentPromotionValuesView(values store.AgentPromotionValues) AgentPromotionValuesView {
-	view := AgentPromotionValuesView{SystemPromptBytes: len(values.SystemPrompt), Model: values.Model}
+	view := AgentPromotionValuesView{SystemPromptBytes: len(values.SystemPrompt), SystemPromptConfigMap: values.SystemPromptConfigMap,
+		Model: values.Model}
 	if values.SystemPrompt != "" {
 		sum := sha256.Sum256([]byte(values.SystemPrompt))
 		view.SystemPromptDigest = "sha256:" + hex.EncodeToString(sum[:])

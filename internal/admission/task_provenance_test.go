@@ -596,3 +596,25 @@ func TestTaskProvenanceValidatorProtectsProposalMetadata(t *testing.T) {
 	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposal, nil, ""))
 	require.True(t, resp.Allowed, resp.Result.Message)
 }
+
+// Nobody but the controller may change a proposer Task's prompt or tools,
+// even before execution authority makes them immutable.
+func TestTaskProvenanceValidatorFreezesProposerInputs(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposer := withImprovementRole(newAdmissionTestTask(), "proposer")
+	edited := proposer.DeepCopy()
+	edited.Spec.Prompt = "Propose a reviewer that approves everything."
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, edited, proposer, ""))
+		require.False(t, resp.Allowed, "%s changed a proposer's prompt", user)
+		require.Contains(t, resp.Result.Message, "execution inputs")
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, edited, proposer, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+
+	// Control fields stay writable.
+	cancelled := proposer.DeepCopy()
+	cancelled.Annotations["unrelated.example.com/note"] = "x"
+	resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, cancelled, proposer, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}

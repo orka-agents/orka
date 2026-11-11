@@ -105,3 +105,25 @@ func TestAgentCanaryAndAbort(t *testing.T) {
 		t.Fatalf("posted %v", posted)
 	}
 }
+
+// Structured output keeps the API's prompt digests and sizes.
+func TestAgentPromotionsStructuredOutputKeepsPromptViews(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"p1","action":"promote","previous":{"systemPromptDigest":"sha256:aa","systemPromptBytes":12}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":"p1","action":"promote","target":{"systemPromptDigest":"sha256:bb","systemPromptBytes":7}}]}`))
+	}))
+	defer srv.Close()
+	out, err := runEvalCommand(t, "agent", "promote", "reviewer", "--decision", "d1", "-o", "json", "--server", srv.URL, "--token", "tok")
+	if err != nil || !strings.Contains(out, "sha256:aa") || !strings.Contains(out, `"systemPromptBytes": 12`) {
+		t.Fatalf("promote -o json = %v\n%s", err, out)
+	}
+	out, err = runEvalCommand(t, "agent", "promotions", "reviewer", "-o", "json", "--server", srv.URL, "--token", "tok")
+	if err != nil || !strings.Contains(out, "sha256:bb") {
+		t.Fatalf("promotions -o json = %v\n%s", err, out)
+	}
+}

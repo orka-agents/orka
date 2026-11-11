@@ -224,6 +224,13 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task update cannot modify Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
+		// The controller built a self-improvement Task's prompt and tools
+		// from evidence it checked; nobody else may change them, even before
+		// the Task's execution inputs become immutable.
+		if oldTask.Annotations[labels.AnnotationImprovementRole] != "" &&
+			!reflect.DeepEqual(oldTask.Spec.ExecutionInputs(), task.Spec.ExecutionInputs()) {
+			return ctrladmission.Denied("a self-improvement Task's execution inputs are set by the controller and cannot be changed")
+		}
 	}
 
 	return ctrladmission.Allowed("Task provenance fields unchanged")
