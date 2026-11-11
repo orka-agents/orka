@@ -118,6 +118,10 @@ namespace, so asking needs permission to create Tasks there.`,
 				return fmt.Errorf("read the answer from task %s: %w", name, err)
 			}
 			answer.Answer = result.Result
+			if strings.TrimSpace(answer.Answer) == "" {
+				return fmt.Errorf("task %s succeeded without an answer. See orka task logs %s -n %s",
+					name, name, c.Namespace)
+			}
 			if format != outputTable {
 				return printStructuredTo(cmd.OutOrStdout(), format, answer)
 			}
@@ -175,7 +179,8 @@ func createAskTask(ctx context.Context, c *client.Client, agent, question string
 	}
 	created, err := c.CreateTaskRaw(ctx, body)
 	if err != nil {
-		return "", fmt.Errorf("create the question task: %w", err)
+		// Name the Task: when the request's outcome is unknown, it may exist.
+		return "", fmt.Errorf("create the question task %s: %w", request.Name, err)
 	}
 	if name := client.StringField(*created, "metadata", "name"); name != "" {
 		return name, nil

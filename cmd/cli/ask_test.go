@@ -18,19 +18,21 @@ import (
 // Task create, its status and its result.
 type askServer struct {
 	*httptest.Server
-	mu          sync.Mutex
-	agentStatus int
-	phases      []string
-	execution   map[string]any
-	message     string
-	missing     int // Task reads that answer 404 before the Task is visible
-	created     map[string]any
-	resultReads int
+	mu           sync.Mutex
+	agentStatus  int
+	phases       []string
+	execution    map[string]any
+	message      string
+	missing      int // Task reads that answer 404 before the Task is visible
+	createStatus int // non-zero fails the Task create with this status
+	answer       string
+	created      map[string]any
+	resultReads  int
 }
 
 func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 	t.Helper()
-	s := &askServer{agentStatus: agentStatus, phases: phases}
+	s := &askServer{agentStatus: agentStatus, phases: phases, answer: "**Answer:** Yes.\n"}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -43,11 +45,16 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 			if err := json.Unmarshal(body, &s.created); err != nil {
 				t.Errorf("task request is not JSON: %v", err)
 			}
+			if s.createStatus != 0 {
+				w.WriteHeader(s.createStatus)
+				_, _ = w.Write([]byte(`{"error":"upstream timed out"}`))
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": s.created["name"]}})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result"):
 			s.resultReads++
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "**Answer:** Yes.\n"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"result": s.answer})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/") && s.missing > 0:
 			s.missing--
 			w.WriteHeader(http.StatusNotFound)
@@ -213,6 +220,29 @@ func TestAskTimeoutLeavesTaskRunning(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "still running as task ask-") ||
 		!strings.Contains(err.Error(), "orka task result ask-") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAskRejectsSucceededTaskWithoutAnswer(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	srv.answer = " \n"
+	stdout, _, err := runAsk(t, srv, "", "q", "-o", "json")
+	if err == nil || !strings.Contains(err.Error(), "succeeded without an answer") ||
+		!strings.Contains(err.Error(), "orka task logs ask-") {
+		t.Fatalf("err = %v, want an error for the missing answer", err)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want nothing printed without an answer", stdout)
+	}
+}
+
+func TestAskCreateFailureNamesTheTask(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	srv.createStatus = http.StatusGatewayTimeout
+	_, _, err := runAsk(t, srv, "", "q")
+	name, _ := srv.created["name"].(string)
+	if err == nil || !strings.HasPrefix(name, "ask-") || !strings.Contains(err.Error(), "create the question task "+name+":") {
+		t.Fatalf("err = %v, want it to name the requested task %q", err, name)
 	}
 }
 
