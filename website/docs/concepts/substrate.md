@@ -352,6 +352,19 @@ The `--substrate-actor-dns-suffix` and `--substrate-session-identity-*` settings
 were removed and fail startup if set; core now issues each Actor's workspace
 credential itself through the sealed bootstrap.
 
+Native Substrate workspaces reach the controller API and the provider proxy
+through the egress gateway, by the host names in `--controller-url` and
+`--acp-provider-proxy-base-url`. An Actor cannot resolve a short
+`<service>.<namespace>.svc` name, so Core refuses one when it admits a native
+workspace: the RuntimePool reports `Degraded` with a message naming the flag
+and the fully qualified name to use. Charts and kustomize manifests from this
+release set `<service>.<namespace>.svc.<cluster domain>` (chart value
+`clusterDomain`, default `cluster.local`). If you set either flag yourself to a
+short name, change it to the fully qualified one before using Substrate-native
+workspaces. Pod-backed workspaces and other workers keep resolving short names.
+The same rule applies to the hosts in a Substrate MCP Tool's
+`spec.mcp.substrateActor.egress`.
+
 Installations that run AI workers with `workers.ai.rbacProfile: restricted` and
 use Substrate MCP Tools with `http.authSecretRef` must
 [grant the worker that Secret](#mcp-tool-credential-grant) before upgrading.
