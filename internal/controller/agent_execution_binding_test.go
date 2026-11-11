@@ -332,6 +332,35 @@ func TestResolveAgentExecutionCandidateDigestIsStable(t *testing.T) {
 	}
 }
 
+// A Task validated against a stale cached Agent is not bound while the live
+// Agent is a newer generation, such as one whose ceiling was just tightened.
+func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := bindingTestTask()
+	cached := bindingTestAgent()
+	live := cached.DeepCopy()
+	live.Generation = cached.Generation + 1
+	live.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{}}
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), live)
+
+	result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), cached)
+	if err != nil || !handled || result.RequeueAfter == 0 {
+		t.Fatalf("ensure binding = result=%+v handled=%v err=%v, want a requeue", result, handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		t.Fatalf("a stale Agent generation was bound: %+v", current.Status.AgentExecutionBinding)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), live); err != nil || handled {
+		t.Fatalf("binding against the live generation = handled=%v err=%v", handled, err)
+	}
+}
+
 func TestPersistAgentExecutionBindingNeverOverwrites(t *testing.T) {
 	ctx := context.Background()
 	task := bindingTestTask()
