@@ -59,22 +59,25 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConf
 		host string
 		port int32
 	}
-	type origin struct{ name, raw string }
+	type origin struct{ name, flag, raw string }
 	origins := []origin{
-		{name: "provider proxy", raw: cfg.providerProxy.baseURL},
-		{name: "controller API", raw: r.ControllerAPIURL},
+		{name: "provider proxy", flag: "--acp-provider-proxy-base-url", raw: cfg.providerProxy.baseURL},
+		{name: "controller API", flag: "--controller-url", raw: r.ControllerAPIURL},
 	}
 	if r.EnableTelemetry && r.TelemetryCollectorEgress {
 		for _, endpoint := range runtimePoolTelemetryCollectorEndpoints(true, getenv) {
 			if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
 				return nil, fmt.Errorf("telemetry collector origin cannot be admitted to the runtime egress allowlist: %w", err)
 			}
-			origins = append(origins, origin{name: "telemetry collector", raw: endpoint})
+			origins = append(origins, origin{name: "telemetry collector", flag: "the OTLP collector endpoint", raw: endpoint})
 		}
 	}
 	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{}
 	for _, origin := range origins {
 		host, port, protocol, err := externalEgressOrigin(origin.raw)
+		if err == nil {
+			err = externalEgressHostResolvable(origin.flag, host)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%s origin cannot be admitted to the runtime egress allowlist: %w", origin.name, err)
 		}
@@ -139,4 +142,20 @@ func externalEgressOrigin(raw string) (string, int32, workspacev1alpha1.RuntimeE
 		return "", 0, "", err
 	}
 	return host, port, protocol, nil
+}
+
+// externalEgressHostResolvable refuses a short in-cluster Service name. A
+// gateway-enforced runtime resolves allowlisted names through the backend: a
+// Substrate Actor's resolver tries search suffixes its DNS relay refuses, and
+// cluster DNS answers only the fully qualified "<service>.<namespace>.svc.<cluster
+// domain>" form, so a "<service>.<namespace>.svc" origin is admitted but never
+// connects. Core does not know the cluster domain, so it names the form to use
+// rather than rewriting the host. Pod-backed runtimes, which resolve through
+// their Pod's search path, never reach this check.
+func externalEgressHostResolvable(flag, host string) error {
+	if !strings.HasSuffix(host, ".svc") {
+		return nil
+	}
+	return fmt.Errorf("host %q is a short Kubernetes Service name, which native workspace runtimes cannot resolve; set %s to "+
+		"the fully qualified name %q (use your cluster domain if it is not cluster.local)", host, flag, host+".cluster.local")
 }

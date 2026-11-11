@@ -205,6 +205,21 @@ func (c RuntimePoolProviderProxyConfig) Validate() error {
 	return err
 }
 
+// runtimePoolServiceHostInNamespace reports whether host names a Service in
+// namespace: "<service>.<namespace>.svc", optionally followed by the cluster
+// domain, which Core does not know and so accepts as any DNS name.
+func runtimePoolServiceHostInNamespace(host, namespace string) bool {
+	service, clusterDomain, found := strings.Cut(host, "."+namespace+".svc")
+	if !found || service == "" {
+		return false
+	}
+	if clusterDomain == "" {
+		return true
+	}
+	domain, dotted := strings.CutPrefix(clusterDomain, ".")
+	return dotted && len(validation.IsDNS1123Subdomain(domain)) == 0
+}
+
 func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyConfig, error) {
 	baseURL := strings.TrimSpace(c.BaseURL)
 	if baseURL == "" {
@@ -219,9 +234,7 @@ func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyCo
 	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy namespace is required and must be a DNS label")
 	}
-	hostname := strings.ToLower(parsed.Hostname())
-	serviceSuffix := "." + strings.ToLower(namespace) + ".svc"
-	if !strings.HasSuffix(hostname, serviceSuffix) && !strings.HasSuffix(hostname, serviceSuffix+".cluster.local") {
+	if !runtimePoolServiceHostInNamespace(strings.ToLower(parsed.Hostname()), strings.ToLower(namespace)) {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy base URL must address a Service in its configured namespace")
 	}
 	port := int32(80)

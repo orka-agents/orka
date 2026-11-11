@@ -40,6 +40,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
+| `clusterDomain` | `cluster.local` | Cluster DNS domain for the fully qualified controller API and provider proxy URLs the chart passes to the controller. Native workspace runtimes cannot resolve `<service>.<namespace>.svc`. |
 | `controller.apiPort` | `8080` | Controller container listener and Service target port. |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
@@ -431,7 +432,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |
 | `--acp-toolbox-node-selector` | `ORKA_ACP_TOOLBOX_NODE_SELECTOR` env or `""` | Comma-separated `key=value` node selector merged into runtime Pods that bind toolboxes |
 | `--acp-toolbox-mount-method` | `ORKA_ACP_TOOLBOX_MOUNT_METHOD` env or `copy` | `copy` or `imageVolume`. With `imageVolume` on an API server older than 1.36, toolbox Agents are rejected with `ToolboxUnavailable`; there is no silent fallback |
-| `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
+| `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc.cluster.local:8080`). Required for worker result callbacks and session transcript fetching. Native Substrate workspaces need the fully qualified Service name; Core refuses `<service>.<namespace>.svc` for them |
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
 | `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
@@ -490,7 +491,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-runtime-pool-max-resident-sessions` | `10` | Resident RuntimeSessions in each new built-in runtime RuntimePool (1-1000). |
 | `--acp-dispatch-max-concurrent-tasks` | `4` | Agent Tasks the controller runs through ACP runtimes at once, across all RuntimePools (1-1000). Each running prompt holds one place, so pool capacity above this value is not used. A coordinator Task waiting on ACP child Tasks keeps its place, so keep this above the number of coordinators that can wait at once. |
 | `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `""` | Approved provider-proxy namespace selector. The Helm chart uses its release namespace when the proxy is enabled. |
-| `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |
+| `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. Native Substrate workspaces need the fully qualified Service name (`<service>.<namespace>.svc.<cluster domain>`); Core refuses `<service>.<namespace>.svc` for them. |
 | `--acp-provider-proxy-pod-labels` / `ORKA_ACP_PROVIDER_PROXY_POD_LABELS` | `orka.ai/network-role=provider-auth-proxy` | Exact Pod labels selected by RuntimePool egress policy. |
 | `--acp-provider-proxy-token-file` / `ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE` | unset | Controller-mounted bearer file copied into generation-scoped immutable RuntimePool Secrets. |
 | `--acp-codex-runtime-image` / `ORKA_ACP_CODEX_RUNTIME_IMAGE` | unset | Codex runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |

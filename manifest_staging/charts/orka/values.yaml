@@ -1,5 +1,10 @@
 # Orka Helm Chart Values
 
+# Cluster DNS domain. The controller API and provider proxy URLs handed to
+# runtimes use fully qualified Service names under it, because native workspace
+# runtimes (Agent Substrate Actors) cannot resolve "<service>.<namespace>.svc".
+clusterDomain: cluster.local
+
 # Controller configuration
 controller:
   # Fixed execution protocol identity. Only harness-v2 is supported.
