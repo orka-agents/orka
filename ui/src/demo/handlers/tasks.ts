@@ -380,14 +380,6 @@ function finishTask(rec: TaskRecord) {
   if (phase === 'Succeeded') emit(rec, { type: 'TaskSucceeded', summary: `Task succeeded in ${took}` }, rec.end)
   else if (phase === 'Failed') emit(rec, { type: 'TaskFailed', severity: 'error', summary: message ?? 'Task failed' }, rec.end)
   else emit(rec, { type: 'TaskCancelled', severity: 'warning', summary: message ?? 'Task cancelled' }, rec.end)
-  if (rec.outcome.pr) {
-    const pr = rec.outcome.pr
-    Object.assign(rec.annotations, {
-      'orka.ai/pr-url': `${REPOS[rec.repo ?? 'checkout'].url}/pull/${pr.number}`,
-      'orka.ai/pr-number': String(pr.number),
-      'orka.ai/pr-status': pr.status,
-    })
-  }
 }
 
 function advance(rec: TaskRecord, now: number) {
@@ -823,7 +815,8 @@ function deliveryStatus(rec: TaskRecord, phase: TaskPhase): NonNullable<Task['st
       id: `PR_kwDO${digest(`pr:${rec.name}`, 14)}`,
       number: pr.number,
       url: `${repo?.url}/pull/${pr.number}`,
-      state: pr.status === 'merged' ? 'merged' : pr.status,
+      // The controller records the forge state as Open, Closed or Merged.
+      state: pr.status[0].toUpperCase() + pr.status.slice(1),
       baseBranch: 'main',
       headBranch: pr.branch,
       headSHA: head,

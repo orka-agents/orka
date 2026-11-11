@@ -190,11 +190,7 @@ export const taskDeliveryStatusSchema = z.object({
 })
 
 export const resultRefSchema = z.object({
-  // Backend ResultReference serializes as { available: bool }; older callers
-  // referenced ConfigMap fields, so keep them optional for tolerance.
   available: z.boolean().optional(),
-  configMapName: z.string().optional(),
-  key: z.string().optional(),
 })
 
 export const childTaskStatusSchema = z.object({
