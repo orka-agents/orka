@@ -26,6 +26,7 @@ type askServer struct {
 	missing      int // Task reads that answer 404 before the Task is visible
 	createStatus int // non-zero fails the Task create with this status
 	answer       string
+	stallResult  chan struct{} // when set, result reads hang until the client gives up or this closes
 	created      map[string]any
 	resultReads  int
 }
@@ -34,6 +35,16 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 	t.Helper()
 	s := &askServer{agentStatus: agentStatus, phases: phases, answer: "**Answer:** Yes.\n"}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		stall := s.stallResult
+		s.mu.Unlock()
+		if stall != nil && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result") {
+			select {
+			case <-r.Context().Done():
+			case <-stall:
+			}
+			return
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch {
@@ -253,5 +264,40 @@ func TestAskRequiresQuestion(t *testing.T) {
 	}
 	if srv.created != nil {
 		t.Fatal("no Task may be created without a question")
+	}
+}
+
+func TestAskBoundsTheAnswerReadByTimeout(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	release := make(chan struct{})
+	srv.mu.Lock()
+	srv.stallResult = release
+	srv.mu.Unlock()
+	t.Cleanup(func() { close(release) }) // runs before the server closes
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := runAsk(t, srv, "", "q", "--timeout", "300ms")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "finished, but reading its answer outlasted --timeout") ||
+			!strings.Contains(err.Error(), "orka task result ask-") {
+			t.Fatalf("err = %v, want the timeout error with the command that reads the answer", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("orka ask kept waiting for the answer after --timeout")
+	}
+}
+
+func TestAskRejectsQuestionAndTokenBothOnStdin(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	_, _, err := runAsk(t, srv, "txn-token-value", "-", "--txn-token-file", "-")
+	if err == nil || !strings.Contains(err.Error(), "can't both come from stdin") {
+		t.Fatalf("err = %v, want the shared-stdin error", err)
+	}
+	if srv.created != nil {
+		t.Fatalf("no Task may be created when stdin holds the token: %#v", srv.created)
 	}
 }

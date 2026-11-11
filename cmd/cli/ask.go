@@ -113,8 +113,12 @@ namespace, so asking needs permission to create Tasks there.`,
 			if !strings.EqualFold(answer.Phase, "Succeeded") {
 				return askTaskFailure(name, c.Namespace, detail)
 			}
-			result, err := c.GetTaskResult(ctx, name, client.GetOptions{Namespace: c.Namespace})
+			result, err := c.GetTaskResult(waitCtx, name, client.GetOptions{Namespace: c.Namespace})
 			if err != nil {
+				if waitCtx.Err() != nil {
+					return fmt.Errorf("task %s finished, but reading its answer outlasted --timeout. "+
+						"Get the answer with: orka task result %s -n %s", name, name, c.Namespace)
+				}
 				return fmt.Errorf("read the answer from task %s: %w", name, err)
 			}
 			answer.Answer = result.Result
@@ -148,6 +152,12 @@ func askQuestion(cmd *cobra.Command, args []string) (string, error) {
 	}
 	question := strings.Join(args, " ")
 	if readStdin {
+		// A token read from stdin would otherwise become the question and
+		// reach the model.
+		if tokenFile, _ := cmd.Flags().GetString("txn-token-file"); tokenFile == "-" {
+			return "", fmt.Errorf("the question and --txn-token-file - can't both come from stdin: " +
+				"pass the question as an argument or the token in a file")
+		}
 		data, err := io.ReadAll(cmd.InOrStdin())
 		if err != nil {
 			return "", fmt.Errorf("read the question from stdin: %w", err)
