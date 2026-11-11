@@ -131,6 +131,13 @@ func TestAgentRefsUseChecksOnlyNewlyNamedAgents(t *testing.T) {
 		PatchAgentRef:    &corev1alpha1.AgentReference{Name: "patcher"},
 	})
 	requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan", scanRefs, nil))
+
+	// A stored reference the controller cannot resolve is not the Agent its
+	// corrected name runs, so the correction is checked.
+	for _, stale := range []corev1alpha1.AgentReference{{Name: "patcher "}, {Name: "patcher", Namespace: " team-a"}} {
+		requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan",
+			[]corev1alpha1.AgentReference{{Name: "patcher"}}, []corev1alpha1.AgentReference{stale}))
+	}
 }
 
 func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {

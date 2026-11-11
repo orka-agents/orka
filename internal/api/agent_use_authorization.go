@@ -146,8 +146,15 @@ func authorizeAgentRefsUse(
 	refs []corev1alpha1.AgentReference,
 	previous []corev1alpha1.AgentReference,
 ) error {
+	// Compare the stored names exactly, as admission does: a reference the
+	// controller cannot resolve, such as one with stray whitespace, is not the
+	// Agent its corrected name runs, so correcting it needs a new check.
 	key := func(ref corev1alpha1.AgentReference) string {
-		return agentRefNamespace(ref, namespace) + "/" + strings.TrimSpace(ref.Name)
+		refNamespace := ref.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		return refNamespace + "/" + ref.Name
 	}
 	existing := make(map[string]bool, len(previous))
 	for _, ref := range previous {
