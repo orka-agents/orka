@@ -125,6 +125,18 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			task:  ceilingTestTask(nil, no),
 		},
 		{
+			// Codex read sessions still run read commands through the shell.
+			name:    "codex read-only session still has a shell",
+			agent:   ceilingTestAgent(corev1alpha1.AgentRuntimeCodex, &corev1alpha1.AgentRuntimeCeiling{AllowBash: no}),
+			task:    ceilingTestTask(tools("Glob", "Grep", "Read"), no),
+			wantErr: "codex runtime runs shell commands",
+		},
+		{
+			name:  "codex read-only session fits a tool-only ceiling",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeCodex, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Glob", "Grep", "Read")}),
+			task:  ceilingTestTask(tools("Glob", "Grep", "Read"), no),
+		},
+		{
 			name:  "bare ceiling entry covers a scoped request",
 			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Read")}),
 			task:  ceilingTestTask(tools("Read(/workspace/**)"), nil),
