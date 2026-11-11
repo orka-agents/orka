@@ -7,7 +7,7 @@ import { StatusDot } from '@/components/ui/status-dot'
 import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
 import { elapsedSeconds, formatElapsed, UNASSIGNED_AGENT } from '@/lib/runtime-activity'
-import { isTerminal } from '@/lib/runtime-validation'
+import { isTaskTerminal } from '@/lib/task-phase'
 import { isWaitingForApproval, podWaitingMessage } from '@/components/tasks/task-state'
 import { TaskStateBadges } from '@/components/tasks/task-state-badges'
 import type { Task } from '@/schemas/task'
@@ -69,7 +69,7 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   // For terminal tasks freeze the clock at completionTime (the run's duration);
   // a running task ticks against now. Pending/Scheduled tasks are waiting, not
   // active, even when opened in the task detail Runtime tab.
-  const terminal = isTerminal(phase)
+  const terminal = isTaskTerminal(phase)
   const endMs = terminal && task.status?.completionTime ? new Date(task.status.completionTime).getTime() : now
   const elapsed = formatElapsed(running || terminal ? elapsedSeconds(task, endMs) : null)
   const heading = terminal ? 'Last run' : running ? 'Active now' : 'Waiting'

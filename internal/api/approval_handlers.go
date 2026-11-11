@@ -163,7 +163,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 			return err
 		}
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if task.Status.Phase.IsTerminal() {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
