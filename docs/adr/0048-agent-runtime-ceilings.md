@@ -32,7 +32,7 @@ Task when that policy exceeds the ceiling. Effective-policy computation, the
 execution snapshot, and dispatch are unchanged. A Task that passes
 the gate therefore runs with a policy inside the ceiling, and no consumer of
 the frozen snapshot can disagree with the check. A Task is judged against the
-Agent generation it binds to, which the binding already freezes.
+Agent generation it binds to, which the binding already freezes. Binding waits until the controller's cached Agent is the live generation, and a bound Task is judged again against the live ceiling until it starts, so a ceiling tightened while the Task was being bound still applies to it.
 
 The alternative was to make an omitted Task policy fall back to the ceiling
 instead of the defaults. That would change effective-policy computation in
