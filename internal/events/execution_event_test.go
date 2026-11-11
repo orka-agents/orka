@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -274,4 +275,36 @@ func fakeJWT() string {
 		"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
 		"signaturevalue1234567890",
 	}, ".")
+}
+
+// A credential sent as a JSON key is redacted the way a value is, while
+// ordinary keys, including ones naming secrets, are kept; colliding
+// redacted keys are told apart.
+func TestSanitizeExecutionEventJSONRedactsSecretKeys(t *testing.T) {
+	github := "ghp_" + strings.Repeat("a", 36)
+	jwt := "eyJ" + strings.Repeat("b", 12) + "." + strings.Repeat("c", 12) + "." + strings.Repeat("d", 12)
+	content := fmt.Sprintf(`{"properties":{%q:"x",%q:"y","adminPassword":"z","location":"eastus"}}`, github, jwt)
+	sanitized, _, err := SanitizeExecutionEventJSON(json.RawMessage(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(sanitized)
+	if strings.Contains(out, github) || strings.Contains(out, jwt) {
+		t.Fatalf("a credential key survived sanitization: %s", out)
+	}
+	var decoded struct {
+		Properties map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Properties) != 4 {
+		t.Fatalf("properties = %v, want both redacted keys kept apart beside adminPassword and location", decoded.Properties)
+	}
+	if decoded.Properties["location"] != "eastus" {
+		t.Fatalf("an ordinary key or value changed: %s", out)
+	}
+	if _, ok := decoded.Properties["adminPassword"]; !ok {
+		t.Fatalf("a key naming a secret, which is not one, was dropped: %s", out)
+	}
 }
