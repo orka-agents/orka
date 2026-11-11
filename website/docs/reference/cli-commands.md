@@ -79,6 +79,9 @@ Available Commands:
   delete      Delete an agent
   get         Get agent details
   list        List agents
+  promote     Write an approved candidate's system prompt and model onto the Agent it was tested against
+  promotions  List the Agent's promotions and rollbacks, oldest first
+  rollback    Write back the system prompt and model the Agent's latest promotion replaced
   update      Update an agent resource from a manifest
 
 Flags:
@@ -168,6 +171,71 @@ Usage:
 Flags:
   -h, --help            help for list
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent promote`
+
+```text
+Promote the candidate an approval names onto the stable Agent. The approval must be the latest decision for its experiment, and the experiment's candidate, baseline, cases, graders and gate must still match the live configuration; the Agent must not have changed since its baseline run. The Agent then carries the candidate's system prompt and model: an inline prompt is copied inline, and a prompt read from a ConfigMap stays a reference to that ConfigMap, so keep the ConfigMap as it is. Find the decision ID with orka eval decisions. Only a person in a promoter group with the promote permission on agents may promote. Undo it with orka agent rollback.
+
+Usage:
+  orka agent promote <agent> --decision <id> [flags]
+
+Flags:
+      --decision string   ID of the approval to carry out (required)
+  -h, --help              help for promote
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent promotions`
+
+```text
+List the Agent's promotions and rollbacks, oldest first
+
+Usage:
+  orka agent promotions <agent> [flags]
+
+Flags:
+  -h, --help            help for promotions
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent rollback`
+
+```text
+Roll back the Agent's latest promotion. The Agent must still hold exactly what that promotion wrote: an edit made since is never overwritten, and the rollback is refused instead. Only a person in a promoter group with the promote permission on agents may roll back.
+
+Usage:
+  orka agent rollback <agent> [--reason <text>] [flags]
+
+Flags:
+  -h, --help            help for rollback
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Why, in a sentence or two
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

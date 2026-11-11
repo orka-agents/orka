@@ -143,7 +143,7 @@ func newEvalRunTestEnv(t *testing.T, objects ...client.Object) *evalRunTestEnv {
 	env := &evalRunTestEnv{t: t, store: sqliteStore, now: evalTestNow}
 	kube := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.EvalRun{}, &corev1alpha1.Task{}).
+		WithStatusSubresource(&corev1alpha1.EvalRun{}, &corev1alpha1.Task{}, &corev1alpha1.Agent{}).
 		WithObjects(objects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			// The API server sets creationTimestamp; trial deadlines count from it.

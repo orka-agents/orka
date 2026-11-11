@@ -153,6 +153,8 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/agents":                     coreAPIPolicy("list", "agents", ""),
 	"GET /api/v1/agents/:name":               coreAPIPolicy("get", "agents", "name"),
 	"GET /api/v1/agents/:name/system-prompt": coreAPIPolicy("get", "agents", "name"),
+	"GET /api/v1/agents/:name/promotions":    coreAPIPolicy("get", "agents", "name"),
+	"POST /api/v1/agents/:name/rollout":      coreAPIPolicy("promote", "agents", "name"),
 	"PUT /api/v1/agents/:name":               coreAPIPolicy("patch", "agents", "name"),
 	"DELETE /api/v1/agents/:name":            coreAPIPolicy("delete", "agents", "name"),
 	"POST /api/v1/skills":                    coreAPIPolicy("create", "skills", "").inNamespace(apiCreateNamespace),

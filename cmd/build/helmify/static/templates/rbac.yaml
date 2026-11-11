@@ -830,7 +830,8 @@ rules:
     resources: ["evalruns/status"]
     verbs: ["get"]
 ---
-# Approving and rejecting EvalRun experiments. Not aggregated into edit or
+# Approving and rejecting EvalRun experiments, asking for proposals, and
+# promoting or rolling back approved candidates. Not aggregated into edit or
 # admin: bind it only to people. The API also refuses ServiceAccounts,
 # transaction-token callers and anyone outside --eval-promoter-groups.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -843,4 +844,7 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns"]
     verbs: ["decide", "propose", "get", "list", "watch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents"]
+    verbs: ["promote", "get", "list", "watch"]
 {{- end }}

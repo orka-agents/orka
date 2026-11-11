@@ -29,8 +29,9 @@ is better than what runs today, and how to record a person's decision about it.
 - **A decision:** a person approves or rejects the experiment. Decisions are
   append-only, and an approval goes stale as soon as anything it was based on changes.
 
-Approving records the decision; it doesn't change the reviewer. Roll the approved
-Agent out yourself.
+Approving records the decision; it doesn't change the reviewer. Promoting the
+approved candidate writes its prompt and model onto the reviewer, and a rollback
+writes back what the promotion replaced.
 
 ## 1. Turn on evals
 
@@ -311,9 +312,40 @@ as stale and names what changed. Run a new experiment for the changed configurat
 
 ## 8. Roll it out
 
-Point the monitor's reviewer at the approved Agent, or copy its settings into the
-current reviewer. `orka eval decisions` names the rollback target: the reviewer and
-generation the baseline ran.
+Promote the approval. The same promoter role grants the `promote` verb on `agents`:
+
+```bash
+orka eval decisions review-careful         # the approval's decision ID
+orka agent promote reviewer --decision <decision-id>
+orka agent promotions reviewer             # what was promoted, by whom, and when
+```
+
+Promotion writes the candidate's system prompt and model onto the reviewer the
+experiment's baseline ran, and nothing else. A prompt kept in a ConfigMap stays a
+ConfigMap reference. It's refused if:
+
+- the approval isn't the latest decision for its experiment;
+- the approval has gone stale;
+- the candidate EvalRun is gone;
+- the reviewer changed after its baseline run;
+- the candidate differs from the reviewer in more than its prompt and model;
+- the candidate isn't labelled `orka.ai/candidate-of: <reviewer>` and owned by the
+  reviewer. Proposals create candidates that way. For one you wrote yourself, add the
+  label and owner reference before the experiment runs.
+
+The reviewer's generation moves, so the same approval can't be promoted twice.
+Running reviews finish on the configuration they started with.
+
+To undo it:
+
+```bash
+orka agent rollback reviewer --reason "More false positives in production."
+```
+
+Rollback writes back the prompt and model the promotion replaced, including a
+ConfigMap reference. If anyone edited
+the reviewer after the promotion, rollback is refused rather than overwriting that
+edit.
 
 Experiments, outcomes and decisions stay in Orka's store after their EvalRuns are
 deleted, so the record of what was tried, what passed and who approved it remains.

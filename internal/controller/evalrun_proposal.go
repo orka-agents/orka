@@ -756,7 +756,7 @@ func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable
 			},
 			Annotations: map[string]string{annotationCandidateHypothesis: candidate.Hypothesis},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Agent", Name: stable.Name, UID: stable.UID,
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: agentKind, Name: stable.Name, UID: stable.UID,
 			}},
 		},
 		Spec: *spec,
@@ -772,10 +772,7 @@ func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable
 		// The name is a digest of the intended spec, but an existing Agent
 		// of that name may have been edited or made by hand. Reuse it only
 		// when it is exactly the candidate this proposal would create.
-		owned := slices.ContainsFunc(existing.OwnerReferences, func(ref metav1.OwnerReference) bool {
-			return ref.Kind == "Agent" && ref.UID == stable.UID
-		})
-		if !owned || existing.Labels[labels.LabelCandidateOf] != agent.Labels[labels.LabelCandidateOf] ||
+		if !ownedByAgent(existing, stable) || existing.Labels[labels.LabelCandidateOf] != agent.Labels[labels.LabelCandidateOf] ||
 			!equality.Semantic.DeepEqual(existing.Spec, agent.Spec) {
 			return nil, fmt.Sprintf("candidate Agent %q already exists and differs from the proposed change; delete it and propose again",
 				agent.Name), nil
@@ -838,6 +835,16 @@ func (r *EvalRunReconciler) ensureEvalProposalRuns(ctx context.Context, run *cor
 		}
 	}
 	return baseline.Name, candidate.Name, nil
+}
+
+// agentKind is the Kind of an Agent owner reference.
+const agentKind = "Agent"
+
+// ownedByAgent reports whether agent carries an owner reference to owner.
+func ownedByAgent(agent, owner *corev1alpha1.Agent) bool {
+	return slices.ContainsFunc(agent.OwnerReferences, func(ref metav1.OwnerReference) bool {
+		return ref.Kind == agentKind && ref.UID == owner.UID
+	})
 }
 
 // checkTrainingCasesDisjoint refuses training cases that review the same

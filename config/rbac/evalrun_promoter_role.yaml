@@ -1,8 +1,10 @@
 # Grants approving and rejecting EvalRun experiments through
-# POST /api/v1/evals/runs/:name/decisions, and asking for proposals through
-# POST /api/v1/evals/runs/:name/proposals. It is not aggregated into "edit" or
-# "admin": bind it only to people. The API also refuses ServiceAccounts,
-# transaction-token callers and anyone outside --eval-promoter-groups.
+# POST /api/v1/evals/runs/:name/decisions, asking for proposals through
+# POST /api/v1/evals/runs/:name/proposals, and promoting an approved candidate
+# or rolling it back through POST /api/v1/agents/:name/rollout. It is not
+# aggregated into "edit" or "admin": bind it only to people. The API also
+# refuses ServiceAccounts, transaction-token callers and anyone outside
+# --eval-promoter-groups.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -18,6 +20,15 @@ rules:
   verbs:
   - decide
   - propose
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - promote
   - get
   - list
   - watch

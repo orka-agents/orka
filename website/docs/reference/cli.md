@@ -548,8 +548,18 @@ person in a group named by the controller's `--eval-promoter-groups`, with the
 `decide` verb on `evalruns` (the `orka-eval-promoter` ClusterRole), may decide,
 and an approval needs a `Passed` experiment that still matches the live Agents,
 monitor, cases, graders and gate. `decisions` reports an approval as stale once
-any of them changes. A decision changes no Agent; roll the approved change out
-yourself. See [Evaluate a reviewer change](../guides/evals-getting-started.md).
+any of them changes. A decision changes no Agent; promote it to roll it out:
+
+```bash
+orka agent promote reviewer --decision <decision-id>   # write the approved candidate's prompt and model onto the reviewer
+orka agent rollback reviewer --reason "regressed"      # write back what the latest promotion replaced
+orka agent promotions reviewer                         # every promotion and rollback, oldest first
+```
+
+Both need the `promote` verb on `agents`, which the same ClusterRole grants.
+`promote` rechecks the approval and refuses a stale one, and `rollback` refuses
+when the reviewer was edited after the promotion. See
+[Evaluate a reviewer change](../guides/evals-getting-started.md).
 
 ## Usage and PR outcomes
 

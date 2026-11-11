@@ -93,6 +93,7 @@ type ServerConfig struct {
 	EvalExperimentStore       store.EvalExperimentStore
 	EvalDecisionVerifier      EvalDecisionVerifier
 	EvalProposer              EvalProposer
+	AgentPromoter             AgentPromoter
 	EvalPromoterGroups        []string
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
@@ -188,6 +189,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		EvalExperimentStore:       config.EvalExperimentStore,
 		EvalDecisionVerifier:      config.EvalDecisionVerifier,
 		EvalProposer:              config.EvalProposer,
+		AgentPromoter:             config.AgentPromoter,
 		EvalPromoterGroups:        config.EvalPromoterGroups,
 		ExecutionEventStore:       config.ExecutionEventStore,
 		GatewayEventStore:         config.GatewayEventStore,
@@ -449,6 +451,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
 	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
+	api.Get("/agents/:name/promotions", s.handlers.GetAgentPromotions)
+	api.Post("/agents/:name/rollout", s.handlers.RolloutAgent)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 

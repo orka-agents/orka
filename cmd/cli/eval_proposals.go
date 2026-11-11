@@ -62,25 +62,7 @@ func newEvalProposalsCmd() *cobra.Command {
 		Short: "List a training run's proposals: hypothesis, candidate Agent and paired experiment",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			raw, _, err := newClientFromCmd(cmd).GetRaw(cmd.Context(), evalRunsAPIPath+"/"+url.PathEscape(args[0])+"/proposals", nil)
-			if err != nil {
-				return err
-			}
-			var page struct {
-				Items []evals.Proposal `json:"items"`
-			}
-			if err := json.Unmarshal(raw, &page); err != nil {
-				return fmt.Errorf("decode proposals: %w", err)
-			}
-			format, err := outputFormat(cmd)
-			if err != nil {
-				return err
-			}
-			if format != outputTable {
-				return printStructuredTo(cmd.OutOrStdout(), format, page)
-			}
-			printEvalProposals(cmd.OutOrStdout(), page.Items)
-			return nil
+			return printItemsPage(cmd, evalRunsAPIPath+"/"+url.PathEscape(args[0])+"/proposals", "proposals", printEvalProposals)
 		},
 	}
 	addOutputFlag(cmd, outputTable)

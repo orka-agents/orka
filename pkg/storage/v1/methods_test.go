@@ -133,6 +133,7 @@ var classified = map[string]storagev1.CallClass{
 
 	"DeleteGatewayTaskCleanupReceipt":     storagev1.CallBackground,
 	"ListGatewaySessionCleanupCandidates": storagev1.CallBackground,
+	"ListOpenAgentPromotions":             storagev1.CallBackground,
 	"ListGatewayTaskCleanupReceipts":      storagev1.CallBackground,
 	"ListSessionCleanupIntents":           storagev1.CallBackground,
 	"MaintainGatewayRecords":              storagev1.CallBackground,

@@ -2169,6 +2169,7 @@ func main() {
 	}
 	var evalDecisionVerifier api.EvalDecisionVerifier
 	var evalProposer api.EvalProposer
+	var agentPromoter api.AgentPromoter
 	if evalsEnabled {
 		gateConfigMap, err := parseEvalGateConfigMap(evalGateConfigMap, currentPodNamespace())
 		if err != nil {
@@ -2196,6 +2197,7 @@ func main() {
 		}
 		evalDecisionVerifier = evalRunReconciler
 		evalProposer = evalRunReconciler
+		agentPromoter = evalRunReconciler
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -2260,6 +2262,7 @@ func main() {
 		EvalExperimentStore:       appStorage,
 		EvalDecisionVerifier:      evalDecisionVerifier,
 		EvalProposer:              evalProposer,
+		AgentPromoter:             agentPromoter,
 		EvalPromoterGroups:        splitCommaList(evalPromoterGroups),
 		ExecutionEventStore:       appStorage,
 		GatewayEventStore:         appStorage,
