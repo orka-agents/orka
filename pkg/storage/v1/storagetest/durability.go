@@ -49,7 +49,9 @@ type DurabilityHarness struct {
 // a second change, and the dataset keeps its identity, controller epoch,
 // installation and write watermark. Each failover also changes the reported
 // incarnation, and the writes HoldWrites keeps in flight while it happens
-// either survive or settle as aborted through ResolveOperation.
+// settle through ResolveOperation as their errors said: one that returned nil
+// survives, one refused as unavailable or not ready committed nothing, and
+// only one whose outcome is unknown may settle either way.
 func WithDurability(harness DurabilityHarness) Option {
 	return func(options *suiteOptions) { options.durability = &harness }
 }
@@ -175,9 +177,13 @@ func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], 
 
 // runWritesDuringFailover holds watermark writes in the database and fails
 // the provider over while they are in flight. Every write that returned nil
-// survives with its receipt; every write that was refused or whose outcome
-// is unknown settles through ResolveOperation as committed and present, or
-// as aborted, absent and refused if it arrives late.
+// survives with its receipt. Every write refused as unavailable or not ready
+// settles through ResolveOperation as aborted, because those errors promise
+// that nothing committed and a caller may repeat the action as a new
+// operation; a write the provider cannot rule out returns ErrOutcomeUnknown
+// instead. A write whose outcome is unknown settles as committed and
+// present, or as aborted. An aborted write is absent and refused if it
+// arrives late.
 func runWritesDuringFailover[P suiteProvider](
 	t *testing.T, provider P, reopen func(*testing.T, P) P, holdWrites func(*testing.T, P) func(int),
 ) {
@@ -214,10 +220,11 @@ func runWritesDuringFailover[P suiteProvider](
 		require.Falsef(t, late[i] || early[i],
 			"write %d was not in flight when the failover began (began after it: %t, returned before it: %t, error: %v); "+
 				"HoldWrites must keep it waiting in the database", i, late[i], early[i], err)
+		refused := false
 		switch {
-		case err == nil:
-		case errors.Is(err, storagev1.ErrOutcomeUnknown), errors.Is(err, storagev1.ErrUnavailable),
-			errors.Is(err, storagev1.ErrNotReady):
+		case err == nil, errors.Is(err, storagev1.ErrOutcomeUnknown):
+		case errors.Is(err, storagev1.ErrUnavailable), errors.Is(err, storagev1.ErrNotReady):
+			refused = true
 		default:
 			require.NoErrorf(t, err, "a write during a failover commits, has an unknown outcome, or is refused as unavailable or not ready")
 		}
@@ -230,6 +237,11 @@ func runWritesDuringFailover[P suiteProvider](
 			"a write during a failover settles as committed or aborted, not %q", outcome.State)
 		if errs[i] == nil {
 			require.Equal(t, storagev1.OperationCommitted, outcome.State, "a write that returned nil survives the failover")
+		}
+		if refused {
+			require.Equalf(t, storagev1.OperationAborted, outcome.State,
+				"write %d was refused as unavailable or not ready (%v), but it committed: "+
+					"a write that may have committed returns ErrOutcomeUnknown", i, errs[i])
 		}
 		if outcome.State == storagev1.OperationCommitted {
 			committed++

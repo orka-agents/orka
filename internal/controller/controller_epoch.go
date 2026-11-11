@@ -288,6 +288,9 @@ type datasetAdvance struct {
 // datasetAdvanceResult is what a dataset held before and after this
 // takeover's advance.
 type datasetAdvanceResult struct {
+	// incarnation is the incarnation the dataset was described at before
+	// the advance read it.
+	incarnation string
 	// storedBefore is the controller epoch the dataset held before the
 	// advance, or zero when it held none.
 	storedBefore int64

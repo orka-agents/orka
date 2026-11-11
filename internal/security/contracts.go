@@ -420,21 +420,6 @@ func ParseReviewContextManifest(data []byte) (*ReviewContextManifest, error) {
 	return &manifest, nil
 }
 
-// ParseFindingsV2Artifact parses and validates only the top-level contract.
-func ParseFindingsV2Artifact(data []byte) (*FindingsV2Artifact, error) {
-	var artifact FindingsV2Artifact
-	if err := json.Unmarshal(data, &artifact); err != nil {
-		return nil, err
-	}
-	if artifact.SchemaVersion != SchemaVersionFindingsV2 {
-		return nil, fmt.Errorf("unsupported findings schemaVersion %d", artifact.SchemaVersion)
-	}
-	if artifact.Findings == nil {
-		return nil, fmt.Errorf("findings must be an array")
-	}
-	return &artifact, nil
-}
-
 func validateReviewSliceContract(slice store.ReviewSlice) error {
 	if slice.SchemaVersion != 0 && slice.SchemaVersion != SchemaVersionReviewSlices {
 		return fmt.Errorf("unsupported schemaVersion %d", slice.SchemaVersion)

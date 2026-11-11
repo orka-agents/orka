@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"maps"
 	"sort"
@@ -45,14 +46,39 @@ func stampedApplicationRows(t *testing.T, before map[string][]string) map[string
 // signed integer. A sequence it cannot store is refused rather than wrapped
 // into a stamp that orders before every other write.
 func TestOrderStampRefusesASequenceSQLiteCannotStore(t *testing.T) {
-	s := setupTestStore(t)
-	dataset := advanceTestEpoch(t, s, testWriteFence)
-	ctx, envelope := testEnvelope(t, t.Context(), dataset, "SaveResult", time.Now().UTC(), "ns", "task", []byte("result"))
-	envelope.Sequence = 1 << 63
-	err := s.SaveResult(storagev1.WithWriteEnvelope(ctx, envelope), "ns", "task", []byte("result"))
-	require.ErrorIs(t, err, store.ErrValidation)
-	_, err = s.GetResult(t.Context(), "ns", "task")
-	require.ErrorIs(t, err, store.ErrNotFound)
+	owner := store.ArtifactOwner{Namespace: "ns", TaskName: "task"}
+	artifact := store.SaveArtifactRequest{Owner: owner, Filename: "out.txt", ContentType: "text/plain", Data: []byte("output")}
+	for _, write := range []struct {
+		method  string
+		request []any
+		save    func(context.Context, *Store) error
+		get     func(context.Context, *Store) error
+	}{{
+		method:  "SaveResult",
+		request: []any{"ns", "task", []byte("result")},
+		save:    func(ctx context.Context, s *Store) error { return s.SaveResult(ctx, "ns", "task", []byte("result")) },
+		get: func(ctx context.Context, s *Store) error {
+			_, err := s.GetResult(ctx, "ns", "task")
+			return err
+		},
+	}, {
+		method:  "SaveArtifact",
+		request: []any{artifact},
+		save:    func(ctx context.Context, s *Store) error { return s.SaveArtifact(ctx, artifact) },
+		get: func(ctx context.Context, s *Store) error {
+			_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: owner, Filename: artifact.Filename})
+			return err
+		},
+	}} {
+		t.Run(write.method, func(t *testing.T) {
+			s := setupTestStore(t)
+			dataset := advanceTestEpoch(t, s, testWriteFence)
+			ctx, envelope := testEnvelope(t, t.Context(), dataset, write.method, time.Now().UTC(), write.request...)
+			envelope.Sequence = 1 << 63
+			require.ErrorIs(t, write.save(storagev1.WithWriteEnvelope(ctx, envelope), s), store.ErrValidation)
+			require.ErrorIs(t, write.get(t.Context(), s), store.ErrNotFound)
+		})
+	}
 }
 
 // Results and artifacts stored before the write stamp have the stamp (0, 0)

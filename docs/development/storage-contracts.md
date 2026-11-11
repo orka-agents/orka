@@ -912,9 +912,11 @@ into the installation record once that exists.
 record before it advances the dataset or opens the contract's fence (see
 "Controller ownership" above). From then on, about once a minute, it
 describes each dataset that has passed, without waiting for datasets that
-are still unreachable. When the
+are still unreachable, and compares its incarnation with the last one
+checked, starting with the one described before the takeover advanced it. When the
 dataset's incarnation changed, the manager closes the fences of the
-contracts it serves until it has been checked again; once it is ready, the
+contracts it serves until it has been checked again, and a passed check
+reopens only those whose acknowledgement is recorded; once it is ready, the
 manager checks that the dataset still holds this controller's epoch and at
 least its acknowledged watermark, and holds the installation for an `async-replicated`
 dataset whatever it holds. It then advances the watermark with a fenced
@@ -1033,10 +1035,14 @@ dataset's identity, controller epoch, installation and watermark survive, and
 a replay changes nothing. Each failover must change the incarnation. Before
 each failover, `HoldWrites` keeps watermark writes waiting inside the
 database, and the suite checks that they were in flight when the switch
-began; each then returns nil and survives, or is refused or ends with an
-unknown outcome (`ErrUnavailable`, `ErrNotReady` or `ErrOutcomeUnknown`)
-and settles through `ResolveOperation` as committed or aborted, never in any
-other state. A `local-fsync` or `local-buffered` provider declares no
+began. Each must then settle through `ResolveOperation` as its error said.
+A write that returned nil survives. One refused with `ErrUnavailable` or
+`ErrNotReady` settles as aborted, because those errors tell the caller
+nothing committed and it may repeat the action as a new operation. A
+provider that cannot rule out the commit returns `ErrOutcomeUnknown`, and
+only such a write may settle as committed or aborted. The watermark counts
+exactly the committed writes, and an aborted write that arrives late is
+refused. A `local-fsync` or `local-buffered` provider declares no
 failover, and a `synchronous-replicated` one declares at least one. An
 `async-replicated` provider declares none either: its switch may lose
 acknowledged writes, which these cases do not allow, and Orka holds the

@@ -802,9 +802,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
-	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
-	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
-	// after the immutable execution binding has selected v1 or v2.
+	// Non-agent workers use the Session lock lifecycle. Agent Tasks claim
+	// protocol lineage and a fenced SessionTurn in their ACP dispatcher only
+	// after the immutable execution binding is recorded.
 	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
@@ -2892,11 +2892,14 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 
 	// Collect available output before cleanup, but stop failed or cancelled work even
 	// when storage finalization must wait for recovery. Keep the Task
-	// nonterminal in Kubernetes so those writes are retried.
+	// nonterminal in Kubernetes so those writes are retried. The staged intent
+	// and the workload outcome keep the decision this completion was given;
+	// collection may change only the Task's phase and message.
+	decidedPhase, decidedMessage := phase, message
 	retryFinalization := func(err error) (ctrl.Result, error) {
-		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
+		if decidedPhase == corev1alpha1.TaskPhaseCancelled || decidedPhase == corev1alpha1.TaskPhaseFailed {
 			cleanupErr := r.stopJobForDeferredFinalization(ctx, task, deferredTaskFinalization{
-				Phase: phase, OutcomePhase: outcomePhase, Message: message, RecordOutcome: recordOutcome,
+				Phase: decidedPhase, OutcomePhase: outcomePhase, Message: decidedMessage, RecordOutcome: recordOutcome,
 			})
 			err = errors.Join(err, cleanupErr)
 		}
@@ -2917,12 +2920,19 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		// A result the store has not accepted yet, or may have saved, is
-		// collected again on the next attempt rather than dropped.
-		if deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
+		switch {
+		case errors.Is(err, store.ErrTooLarge):
+			// No retry can store a result above the limit. Finish without
+			// it and record why, rather than retry for good or report a
+			// success whose result was not stored.
+			phase, message = taskResultTooLargeOutcome(phase, message)
+			task.Status.Phase, task.Status.Message = phase, message
+		case deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err):
+			// A result the store has not accepted yet, or may have saved, is
+			// collected again on the next attempt rather than dropped.
 			return retryFinalization(err)
 		}
-		// Continue anyway, result collection is best-effort
+		// Otherwise continue: result collection is best-effort.
 	}
 
 	// Update session if configured
@@ -2989,7 +2999,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 				Attempt:    attempt,
 				ResultRef:  resultRef,
 				RecordedAt: now,
-				Message:    message,
+				Message:    decidedMessage,
 			}
 		}
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
@@ -3267,11 +3277,39 @@ func extractStdoutTaskResult(logs string) ([]byte, bool, error) {
 	if payload == "" {
 		return nil, false, nil
 	}
+	// Refuse a payload too long to decode to the limit before decoding it, so
+	// no more than the limit is decoded, staged or stored. Padding makes
+	// DecodedLen exceed a valid payload's decoded size by at most two bytes.
+	if base64.StdEncoding.DecodedLen(len(payload)) > store.MaxResultBytes+2 {
+		return nil, true, errTaskResultTooLarge
+	}
 	result, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return nil, true, fmt.Errorf("decoding stdout task result: %w", err)
 	}
+	if len(result) > store.MaxResultBytes {
+		return nil, true, errTaskResultTooLarge
+	}
 	return result, true, nil
+}
+
+// errTaskResultTooLarge reports a Task result above store.MaxResultBytes. No
+// retry can store it, so it is permanent.
+var errTaskResultTooLarge = fmt.Errorf("%w: task result exceeds the %d byte limit", store.ErrTooLarge, store.MaxResultBytes)
+
+// taskResultTooLargeOutcome returns the terminal phase and message of a Task
+// whose result exceeds store.MaxResultBytes and is not stored: a Task that
+// would have succeeded fails, a cancelled or failed Task keeps its phase, and
+// the reason follows the message the Task was completed with.
+func taskResultTooLargeOutcome(phase corev1alpha1.TaskPhase, message string) (corev1alpha1.TaskPhase, string) {
+	if phase == corev1alpha1.TaskPhaseSucceeded {
+		phase = corev1alpha1.TaskPhaseFailed
+	}
+	reason := fmt.Sprintf("task result exceeds the %d byte limit and was not stored", store.MaxResultBytes)
+	if strings.TrimSpace(message) == "" {
+		return phase, reason
+	}
+	return phase, message + "; " + reason
 }
 
 // readPodLogs reads logs from the first pod of a task's job.
@@ -4114,11 +4152,6 @@ func trustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName 
 	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
 }
 
-func legacyTrustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName string) string {
-	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName))
-	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
-}
-
 func trustedServiceReadBindingLabels(taskNamespace string) map[string]string {
 	return map[string]string{
 		orkaManagedByLabelKey:                     managedByLabelValue,
@@ -4300,41 +4333,6 @@ func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
 			return fmt.Errorf("deleting trusted Service Role %s/%s for inactive namespace %q: %w", role.Namespace, role.Name, taskNamespace, err)
 		}
 	}
-	return r.deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(ctx, taskNamespace)
-}
-
-func (r *TaskReconciler) deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(
-	ctx context.Context,
-	taskNamespace string,
-) error {
-	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
-	seen := map[types.NamespacedName]struct{}{}
-	for _, ref := range refs {
-		if ref.Namespace == "" || ref.Namespace == taskNamespace {
-			continue
-		}
-		key := types.NamespacedName{
-			Namespace: ref.Namespace,
-			Name:      legacyTrustedServiceReadBindingName(taskNamespace, ref.Namespace, ref.Name),
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		binding := &rbacv1.RoleBinding{}
-		if err := r.trustedServiceReadReader().Get(ctx, key, binding); apierrors.IsNotFound(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("getting legacy trusted Service RoleBinding %s/%s: %w", key.Namespace, key.Name, err)
-		}
-		ownerNamespace, ok := legacyTrustedServiceReadRoleBindingTaskNamespace(binding)
-		if !ok || ownerNamespace != taskNamespace {
-			continue
-		}
-		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -4429,10 +4427,7 @@ func trustedServiceReadRoleOwned(role *rbacv1.Role, taskNamespace string, servic
 		strings.HasPrefix(role.Name, "orka-outbound-service-") {
 		return true
 	}
-	if len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0]) {
-		return true
-	}
-	return legacyTrustedServiceReadRole(role, taskNamespace)
+	return len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0])
 }
 
 func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAccountName string) bool {
@@ -4440,13 +4435,6 @@ func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAcco
 		return false
 	}
 	return role.Name == trustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0], serviceAccountName)
-}
-
-func legacyTrustedServiceReadRole(role *rbacv1.Role, taskNamespace string) bool {
-	if !trustedServiceReadRoleRuleValid(role) {
-		return false
-	}
-	return role.Name == legacyTrustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0])
 }
 
 func trustedServiceReadRoleRuleValid(role *rbacv1.Role) bool {

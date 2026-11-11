@@ -82,7 +82,7 @@ coding agent.
   dashboard or over the API.
 - **[Agents in Teams, Telegram, and A2A.](https://orka-agents.github.io/orka/docs/gateways)**
   Gateways bring the same Agents into the conversations people already have.
-- **[Agents on a schedule.](https://orka-agents.github.io/orka/docs/scheduled-tasks)**
+- **[Agents on a schedule.](https://orka-agents.github.io/orka/docs/guides/scheduled-tasks)**
   Nightly dependency audits, security scans, or reports, with retries and notifications
   handled for you.
 - **[Your existing tools, safer.](https://orka-agents.github.io/orka/docs/openai-compat)**
