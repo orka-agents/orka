@@ -361,6 +361,56 @@ func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T)
 	}
 }
 
+// A ceiling tightened between the live check and the binding write is caught
+// before the bound Task starts: the next binding pass re-judges it against
+// the live Agent and fails it, while a newer generation it still fits leaves
+// it alone.
+func TestBoundTaskIsRejudgedAgainstATightenedCeilingBeforeItStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ceiling *corev1alpha1.AgentRuntimeCeiling
+		fails   bool
+	}{
+		{name: "tightened past the Task", ceiling: &corev1alpha1.AgentRuntimeCeiling{AllowBash: new(bool)}, fails: true},
+		{name: "still within the ceiling", ceiling: &corev1alpha1.AgentRuntimeCeiling{MaxTurns: new(int32(500))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			task := bindingTestTask()
+			agent := bindingTestAgent()
+			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), agent.DeepCopy())
+			if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+				t.Fatalf("first binding = handled=%v err=%v", handled, err)
+			}
+
+			live := &corev1alpha1.Agent{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(agent), live); err != nil {
+				t.Fatal(err)
+			}
+			live.Spec.Runtime.Ceiling = tc.ceiling
+			live.Generation = agent.Generation + 1
+			if err := reconciler.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			bound := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			_, err, handled := reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
+			if err != nil || handled != tc.fails {
+				t.Fatalf("re-judging = handled=%v err=%v, want handled=%v", handled, err, tc.fails)
+			}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			if failed := bound.Status.Phase == corev1alpha1.TaskPhaseFailed; failed != tc.fails {
+				t.Fatalf("phase = %q message = %q, want failed=%v", bound.Status.Phase, bound.Status.Message, tc.fails)
+			}
+		})
+	}
+}
+
 func TestPersistAgentExecutionBindingNeverOverwrites(t *testing.T) {
 	ctx := context.Background()
 	task := bindingTestTask()
