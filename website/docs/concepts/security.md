@@ -304,8 +304,8 @@ Deployment, give it nodes of its own.
 
 The controller ServiceAccount's own policy admits Pods running as that
 ServiceAccount only for the controller Deployment's own ReplicaSets, which are
-named after it, and lets no other ReplicaSet running as it be created, scaled,
-or given a new template. It evicts nothing, though, so before you turn
+named after it, so no other ReplicaSet running as it can create Pods, even
+when scaled up, and none can be created or given a new template. It evicts nothing, though, so before you turn
 identities on, delete any Pod already running as that ServiceAccount that the
 controller Deployment did not create, since it keeps the identity:
 `kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
