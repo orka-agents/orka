@@ -308,3 +308,18 @@ func TestSanitizeExecutionEventJSONRedactsSecretKeys(t *testing.T) {
 		t.Fatalf("a key naming a secret, which is not one, was dropped: %s", out)
 	}
 }
+
+// A literal key equal to another key's redacted form keeps its own field.
+func TestSanitizeExecutionEventJSONKeepsKeysThatCollideWithARedactedKey(t *testing.T) {
+	sanitized, _, err := SanitizeExecutionEventJSON(json.RawMessage(`{"password=1234":"a","password=[REDACTED]":"b"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 2 || strings.Contains(string(sanitized), "1234") {
+		t.Fatalf("sanitized = %s, want both fields kept and the secret redacted", sanitized)
+	}
+}

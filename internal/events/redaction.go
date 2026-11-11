@@ -280,13 +280,11 @@ func sanitizeExecutionEventJSONValue(value any) any {
 
 // sanitizeExecutionEventJSONKey redacts a key the way string values are
 // redacted: keys are as caller-controlled as values, so a credential sent as
-// a key must not survive in the event either. A redacted key that collides
-// with one already kept is numbered.
+// a key must not survive in the event either. A key that collides with one
+// already kept, as a literal key can with an earlier key's redacted form, is
+// numbered, so no field is dropped.
 func sanitizeExecutionEventJSONKey(key string, kept map[string]any) string {
 	redacted := RedactExecutionEventText(key)
-	if redacted == key {
-		return key
-	}
 	candidate := redacted
 	for n := 2; ; n++ {
 		if _, taken := kept[candidate]; !taken {
