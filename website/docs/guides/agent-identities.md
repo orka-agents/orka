@@ -77,8 +77,12 @@ delegated Tools can only read.
     them before you label the namespace;
   - and enforce it on every other namespace whose Pods can be scheduled onto
     that node, or run the controller on dedicated nodes with the chart's
-    `nodeSelector` and `tolerations`
+    `nodeSelector` and `tolerations`, together with admission control that
+    keeps every other Pod from tolerating their taint or naming them in
+    `spec.nodeName`. A taint alone keeps no one off
     ([Security](../concepts/security.md#agent-identities)).
+- No Pod already running as the controller ServiceAccount except the
+  controller's own; delete any other before you configure Orka.
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
   - Entra sign-in configured for Orka (step 8);
