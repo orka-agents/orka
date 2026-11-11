@@ -114,9 +114,9 @@ resources, such as Azure Storage, are not yet validated against a live tenant.
   from them, and delegated mode, which runs only on built-in runtimes, is read-only
   today.
 - **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
-  `--agent-identity-max-delegation-age`) after the root requester's last action in the
-  Task chain, that is, creating the root Task or sending the Session message that started
-  it. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
+  `--agent-identity-max-delegation-age`) after the chain's root Task was created, whether
+  the requester created it directly or with a Session message. Time spent in the chat
+  before that does not count. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
   its parent no immutable UID proves, such as one Kubernetes orphaned, fails closed. A
   fork of an identity-bound Task does not carry the identity; create a new Task instead.
   Calls also stop at once when the Task, or any Task above it in the delegation chain, is
