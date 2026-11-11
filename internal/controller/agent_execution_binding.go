@@ -1431,6 +1431,32 @@ func (r *TaskReconciler) handleAgentExecutionBindingVerificationFailure(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
+// agentCacheBehind returns how long to wait before binding when the cached
+// Agent a Task was validated against, ceiling included, is not the live one.
+// The binding freezes that generation, so a tightened ceiling is never bound
+// past by a stale copy. An Agent already deleted is left to the paths that
+// handle deletion; one recreated under its name differs by UID.
+func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent) time.Duration {
+	if agent == nil {
+		return 0
+	}
+	log := logf.FromContext(ctx)
+	live := &corev1alpha1.Agent{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live)
+	switch {
+	case apierrors.IsNotFound(err):
+		return 0
+	case err != nil:
+		log.Error(err, "uncached Agent read before execution binding")
+		return 2 * time.Second
+	case live.UID != agent.UID || live.Generation != agent.Generation:
+		log.Info("execution binding waits for the Agent cache", "agent", agent.Name,
+			"cachedGeneration", agent.Generation, "liveGeneration", live.Generation)
+		return time.Second
+	}
+	return 0
+}
+
 // ensureAgentExecutionBinding runs the binding stage for the ACP execution
 // path. It returns handled=true when the caller must return the result
 // immediately (failure or requeue) and handled=false when dispatch may
@@ -1469,23 +1495,8 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return ctrl.Result{}, nil, false
 	}
 
-	// The Task was validated against the cached Agent, ceiling included, and
-	// the binding freezes that generation. Bind only once the cache has
-	// caught up with the live Agent, so a tightened ceiling is never bound
-	// past by a stale copy. An Agent already deleted is left to the paths
-	// that handle deletion; one recreated under its name differs by UID.
-	if agent != nil {
-		live := &corev1alpha1.Agent{}
-		err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live)
-		if err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "uncached Agent read before execution binding")
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
-		}
-		if err == nil && (live.UID != agent.UID || live.Generation != agent.Generation) {
-			log.Info("execution binding waits for the Agent cache", "agent", agent.Name,
-				"cachedGeneration", agent.Generation, "liveGeneration", live.Generation)
-			return ctrl.Result{RequeueAfter: time.Second}, nil, true
-		}
+	if wait := agentCacheBehind(ctx, reader, agent); wait > 0 {
+		return ctrl.Result{RequeueAfter: wait}, nil, true
 	}
 
 	candidate, err := r.resolveAgentExecutionCandidate(ctx, task, agent)
