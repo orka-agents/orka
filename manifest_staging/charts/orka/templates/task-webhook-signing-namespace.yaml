@@ -1,0 +1,20 @@
+{{- include "orka.validateTaskWebhooks" . }}
+{{- /*
+Holds only the Task webhook signing Secret, which the controller creates and
+mints. Nothing runs here: Task and Agent secretRefs mount Secrets from the
+Task namespace and worker roles are bound there, so neither reaches the key.
+*/ -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "orka.taskWebhookSigningNamespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "orka.name" . }}
+    app.kubernetes.io/component: task-webhook-signing
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+  annotations:
+    # The signing key outlives an uninstall, so receivers keep trusting it.
+    helm.sh/resource-policy: keep

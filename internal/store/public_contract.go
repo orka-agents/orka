@@ -73,6 +73,7 @@ type (
 	MonitorItemFilter                         = storagev1.MonitorItemFilter
 	WorkAction                                = storagev1.WorkAction
 	WorkActionFilter                          = storagev1.WorkActionFilter
+	MarkWorkActionRetryPendingRequest         = storagev1.MarkWorkActionRetryPendingRequest
 	ImplementationJob                         = storagev1.ImplementationJob
 	ImplementationJobFilter                   = storagev1.ImplementationJobFilter
 	GitHubMutationRecord                      = storagev1.GitHubMutationRecord

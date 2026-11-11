@@ -336,7 +336,7 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) ||
-			!isTerminalTaskPhase(task.Status.Phase) {
+			!task.Status.Phase.IsTerminal() {
 			continue
 		}
 		owner, gatewayOwned := TaskOwner(task)
@@ -1328,7 +1328,7 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 			}
 			continue
 		}
-		if isTerminalTaskPhase(task.Status.Phase) {
+		if task.Status.Phase.IsTerminal() {
 			projected, err := s.projectTerminal(ctx, event, task)
 			if errors.Is(err, errGatewayResultNotReady) {
 				s.deferProjection(ctx, event, now)
@@ -2355,10 +2355,6 @@ func terminalErrorText(phase corev1alpha1.TaskPhase, statusMessage string) strin
 		return "The conversation is too long for the configured model. Please shorten the request and try again."
 	}
 	return "The task could not be completed."
-}
-
-func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	return phase == corev1alpha1.TaskPhaseSucceeded || phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func eventBackoff(attempt int) time.Duration {

@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stages 1–4 are implemented; stage 1 is opt-in. Identity use records are not. Builds on ADR 0034 (Agent runtime ceilings) and
+Proposed. Stages 1–4 are implemented; stage 1 is opt-in. Identity use records are not. Builds on ADR 0048 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -12,7 +12,7 @@ Agents stay out of scope.
 
 ## Context
 
-ADR 0034 lets an Agent cap what a Task may make it do inside its runtime:
+ADR 0048 lets an Agent cap what a Task may make it do inside its runtime:
 tools, Bash, and turns. It says nothing about what the Agent reaches outside
 the cluster. Today an outbound Tool call authenticates as whatever its
 `OutboundAccessPolicy` resolves: a Secret, a ServiceAccount token exchange,
@@ -167,7 +167,7 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   turned it away for capacity, since the RuntimeSession start and the wait
   can outlast the claim.
 - A delegated child Task may name an identity-bound Agent only when it is the
-  parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
+  parent's own Agent. Delegation targets have no ceiling yet (ADR 0048), so a
   child must not borrow an identity its root requester was never checked
   against. This blocks the common pattern where a coordinator hands work to a
   different, identity-bound worker Agent. Lifting it needs a delegation
@@ -205,12 +205,12 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   controller configuration never moves a bound Task to another identity; a
   frozen issuer instance that no longer matches the controller's fails the
   call closed.
-- An Agent with an identity must set `ceiling.allowedTools` (ADR 0034). Every
+- An Agent with an identity must set `ceiling.allowedTools` (ADR 0048). Every
   tool a Task could use to carry identity-backed data out of Orka, such as a
   brokered fetch, an HTTP Tool, or a gateway reply, is then one the Agent
   owner listed explicitly. The ceiling does not cover the coordination tools
   Orka injects into delegated children (`send_message` and `check_messages`,
-  ADR 0034), so an identity-bound child can pass data to its siblings,
+  ADR 0048), so an identity-bound child can pass data to its siblings,
   including Tasks whose Agent has no identity. A sibling is another child of
   the same parent, and an identity-bound child's parent runs the same Agent
   (stage 1), so those messages reach only Agents that Agent's
@@ -579,7 +579,7 @@ Entra; each needs its own decision and integration proof before it ships.
 - **SPIFFE.** Not an issuer for downstream APIs. A SPIRE server can supply the
   controller's own federated credential for installation-wide issuers.
 
-### Relationship to ADR 0034
+### Relationship to ADR 0048
 
 The ceiling and the identity bound different things and stay separate checks.
 The ceiling bounds what a Task may make the Agent do inside its runtime; issuer

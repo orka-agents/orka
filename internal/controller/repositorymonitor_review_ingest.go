@@ -11,6 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -158,7 +159,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 			}
 			return ingested, needsRequeue, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, &item, &task)
@@ -182,19 +183,10 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	return ingested, needsRequeue, nil
 }
 
-func repositoryMonitorReviewTaskTerminal(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
 //nolint:gocyclo // Result validation, verdict downgrades, and durable review recording remain ordered.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (bool, error) {
 	recordID := repositoryMonitorReviewRecordID(task)
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	if err := validateRepositoryMonitorReviewTaskItemBinding(task, monitor, repositoryMonitorPullRequestKind, item.Number); err != nil {
@@ -300,6 +292,24 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 			return false, err
 		}
 	}
+	var rounds repositoryMonitorReviewRounds
+	if verdict == repositoryMonitorReviewVerdictPassed || (verdict == repositoryMonitorReviewVerdictNeedsChanges && monitor.Spec.Review.MaxRounds != nil) {
+		if rounds, err = r.repositoryMonitorReviewRoundsFor(ctx, monitor, item.Number, reviewedHead); err != nil {
+			return false, err
+		}
+	}
+	if verdict == repositoryMonitorReviewVerdictNeedsChanges && repositoryMonitorMaxRoundsReached(monitor.Spec, rounds) {
+		// The findings stay open and published; needs_human stops automatic
+		// repair of them so a person can rethink the change.
+		verdict = repositoryMonitorReviewVerdictNeedsHuman
+		summary = strings.TrimSpace(repositoryMonitorMaxRoundsNote(monitor.Spec, rounds) + " " + summary)
+		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, reviewedHead, repositoryMonitorReviewEscalatedEvent, fmt.Sprintf("Pull request #%d review verdict raised to needs_human after %d reviewed heads without a passed review", item.Number, rounds.SincePass), map[string]any{
+			eventTaskNameField: task.Name,
+			eventReasonField:   repositoryMonitorReviewMaxRoundsReason,
+		}); err != nil {
+			return false, err
+		}
+	}
 	record := &store.ReviewRecord{
 		ID:                      recordID,
 		MonitorNamespace:        monitor.Namespace,
@@ -325,6 +335,8 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
+	recordRepositoryMonitorReviewMetrics(plan, ledger, record)
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, record, rounds)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
@@ -458,7 +470,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Evidence = "The immutable validation command Secret does not match its stored binding."
 		return result, false, nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+	if !validationTask.Status.Phase.IsTerminal() {
 		return result, true, nil
 	}
 
@@ -522,7 +534,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		}
 		return true, nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+	if !validationTask.Status.Phase.IsTerminal() {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			current := &corev1alpha1.Task{}
 			if err := r.Get(ctx, key, current); err != nil {
@@ -531,7 +543,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 				}
 				return err
 			}
-			if !current.DeletionTimestamp.IsZero() || repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+			if !current.DeletionTimestamp.IsZero() || current.Status.Phase.IsTerminal() {
 				return nil
 			}
 			if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, current); err != nil {
@@ -936,7 +948,7 @@ func repositoryMonitorReviewFindingsJSON(findings []repositoryMonitorReviewFindi
 }
 
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, recordID, verdict, reason, summary string) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	summary = strings.TrimSpace(summary)
@@ -961,6 +973,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
+	metrics.RecordRepositoryMonitorReview(repositoryMonitorReviewMetricMode(task.Annotations[repositoryMonitorAnnotationReviewMode]), record.Verdict)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
@@ -989,7 +1002,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 }
 
 func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, task *corev1alpha1.Task) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	if item.LastReviewID != task.Name || item.LastVerdict != repositoryMonitorRunPhaseQueued {
