@@ -459,7 +459,9 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		// committed grant, so its ownership is proven and it is revoked
 		// rather than left live outside the disconnect's revocation set.
 		s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
-		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
+		// The Tool request was never sent, so callers are told to reconnect,
+		// as for any other disconnected Connection.
+		return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 	case err != nil:
 		// The provider already issued this pair and may have invalidated the
 		// previous refresh token, so it is kept in sealed retirement custody,
