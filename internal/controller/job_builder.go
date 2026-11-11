@@ -853,6 +853,12 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
 	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	envVars = append(removeControllerEnv(envVars, workerenv.ServiceAccountName), corev1.EnvVar{
+		Name: workerenv.ServiceAccountName,
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.serviceAccountName"},
+		},
+	})
 	if agent != nil {
 		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
 	}

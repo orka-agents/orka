@@ -414,7 +414,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if !isTerminalTaskPhase(task.Status.Phase) {
+	if !task.Status.Phase.IsTerminal() {
 		intent, err := r.loadDeferredTaskFinalization(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -4504,7 +4504,8 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				Name:      name,
 				Namespace: namespace,
 				Labels: map[string]string{
-					orkaManagedByLabelKey: managedByLabelValue,
+					orkaManagedByLabelKey:        managedByLabelValue,
+					labels.LabelPlatformIdentity: labels.PlatformIdentityValue,
 				},
 			},
 		}
@@ -4526,8 +4527,9 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 	if sa.Labels == nil {
 		sa.Labels = map[string]string{}
 	}
-	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue || sa.Labels[labels.LabelPlatformIdentity] != labels.PlatformIdentityValue {
 		sa.Labels[orkaManagedByLabelKey] = managedByLabelValue
+		sa.Labels[labels.LabelPlatformIdentity] = labels.PlatformIdentityValue
 		if err := r.Update(ctx, sa); err != nil {
 			return fmt.Errorf("updating worker ServiceAccount %s/%s labels: %w", namespace, name, err)
 		}
