@@ -287,6 +287,13 @@ that breaks the profile before you turn identities on. A server-side dry run of
 the label lists them:
 `kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline`.
 
+The release namespace's profile covers only Pods admitted there. A privileged
+or `hostPath` Pod from any other namespace that lands on the controller's node
+can read the credential too. So either every namespace whose Pods can run on
+that node enforces at least `baseline` as well, or the controller runs on nodes
+only trusted workloads use: taint them and set the chart's `nodeSelector` and
+`tolerations`, which apply to the controller Deployment.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,
