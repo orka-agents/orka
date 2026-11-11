@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -30,7 +31,10 @@ func TestAgentContractValidatorAdmitsGuideAgent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	namespace := admissionNamespace(string(executionmode.HarnessV2))
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "orka-system",
+		Labels: map[string]string{executionmode.NamespaceLabel: string(executionmode.HarnessV2)},
+	}}
 	validator := &AgentContractValidator{
 		decoder: ctrladmission.NewDecoder(scheme),
 		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),

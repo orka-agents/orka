@@ -6,18 +6,20 @@ import (
 )
 
 func guideChartArgs(extra ...string) []string {
-	args := []string{
+	args := make([]string, 0, 14+len(extra))
+	args = append(args,
 		"--set", "controller.acpRuntime.toolboxes.enabled=true",
 		"--set", "controller.acpRuntime.toolboxes.allowedRegistries[0]=registry.example.com",
 		"--set", "controller.acpRuntime.toolboxes.allowedRegistries[1]=ghcr.io/orka-agents",
 		"--set", "guide.enabled=true",
 		"--set-string", "guide.model=claude-test",
-		"--set-string", "guide.docs.image.digest=sha256:" + strings.Repeat("a", 64),
-	}
+		"--set-string", "guide.docs.image.digest=sha256:"+strings.Repeat("a", 64),
+	)
 	return append(append(args, extra...), "--show-only", "templates/deployment.yaml")
 }
 
 func TestStaticChartRendersGuideFlags(t *testing.T) {
+
 	t.Run("off by default", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml")
 		if err != nil {
@@ -73,28 +75,39 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		}
 	})
 
+	set := func(key, value string) []string { return []string{"--set", key + "=" + value} }
+	str := func(key, value string) []string { return []string{"--set-string", key + "=" + value} }
+	const (
+		repository   = "guide.docs.image.repository"
+		digest       = "guide.docs.image.digest"
+		toolboxes    = "controller.acpRuntime.toolboxes.enabled"
+		notCovered   = "is not covered by controller.acpRuntime.toolboxes.allowedRegistries"
+		notCanonical = "must be <registry host>/<lowercase path>"
+		notSHA256    = "guide.docs.image.digest must be a sha256 digest"
+		badTurns     = "guide.maxTurns must be"
+	)
 	for _, tt := range []struct {
 		name  string
 		extra []string
 		want  string
 	}{
-		{"opencode", []string{"--set", "guide.runtime=opencode"}, `guide.runtime "opencode" is not supported`},
-		{"runtime image unset", []string{"--set-string", "controller.acpRuntime.claudeImage="}, "needs controller.acpRuntime.claudeImage"},
-		{"no model", []string{"--set-string", "guide.model= "}, "guide.model is required"},
-		{"zero turns", []string{"--set", "guide.maxTurns=0"}, "guide.maxTurns must be"},
-		{"too many turns", []string{"--set", "guide.maxTurns=1001"}, "guide.maxTurns must be"},
-		{"fractional turns", []string{"--set", "guide.maxTurns=2.5"}, "guide.maxTurns must be"},
-		{"provider proxy off", []string{"--set", "providerProxy.enabled=false"}, "needs providerProxy.enabled=true"},
-		{"no digest", []string{"--set-string", "guide.docs.image.digest="}, "guide.docs.image.digest must be a sha256 digest"},
-		{"tag as digest", []string{"--set-string", "guide.docs.image.digest=v1.2.3"}, "guide.docs.image.digest must be a sha256 digest"},
-		{"no repository", []string{"--set-string", "guide.docs.image.repository="}, "guide.docs.image.repository is required"},
-		{"toolboxes off", []string{"--set", "controller.acpRuntime.toolboxes.enabled=false"}, "needs controller.acpRuntime.toolboxes.enabled=true"},
-		{"registry not allowed", []string{"--set-string", "guide.docs.image.repository=ghcr.io/someone/guide-docs"}, "is not covered by controller.acpRuntime.toolboxes.allowedRegistries"},
-		{"partial segment", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents-mirror/guide-docs"}, "is not covered by"},
-		{"no registry host", []string{"--set-string", "guide.docs.image.repository=myregistry/guide-docs"}, "must be <registry host>/<lowercase path>"},
-		{"host only", []string{"--set-string", "guide.docs.image.repository=ghcr.io"}, "must be <registry host>/<lowercase path>"},
-		{"uppercase path", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents/Guide-Docs"}, "must be <registry host>/<lowercase path>"},
-		{"tag in repository", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents/guide-docs:v1"}, "must be <registry host>/<lowercase path>"},
+		{"opencode", set("guide.runtime", "opencode"), `guide.runtime "opencode" is not supported`},
+		{"runtime image unset", str("controller.acpRuntime.claudeImage", ""), "needs controller.acpRuntime.claudeImage"},
+		{"no model", str("guide.model", " "), "guide.model is required"},
+		{"zero turns", set("guide.maxTurns", "0"), badTurns},
+		{"too many turns", set("guide.maxTurns", "1001"), badTurns},
+		{"fractional turns", set("guide.maxTurns", "2.5"), badTurns},
+		{"provider proxy off", set("providerProxy.enabled", "false"), "needs providerProxy.enabled=true"},
+		{"no digest", str(digest, ""), notSHA256},
+		{"tag as digest", str(digest, "v1.2.3"), notSHA256},
+		{"no repository", str(repository, ""), "guide.docs.image.repository is required"},
+		{"toolboxes off", set(toolboxes, "false"), "needs " + toolboxes + "=true"},
+		{"registry not allowed", str(repository, "ghcr.io/someone/guide-docs"), notCovered},
+		{"partial segment", str(repository, "ghcr.io/orka-agents-mirror/guide-docs"), notCovered},
+		{"no registry host", str(repository, "myregistry/guide-docs"), notCanonical},
+		{"host only", str(repository, "ghcr.io"), notCanonical},
+		{"uppercase path", str(repository, "ghcr.io/orka-agents/Guide-Docs"), notCanonical},
+		{"tag in repository", str(repository, "ghcr.io/orka-agents/guide-docs:v1"), notCanonical},
 	} {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, guideChartArgs(tt.extra...)...)
