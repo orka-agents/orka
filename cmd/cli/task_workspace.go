@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"unicode/utf8"
@@ -507,6 +508,11 @@ func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
+	// A Task awaiting approval stays Running, so the action it waits on is
+	// reported in every output, not only the default summary.
+	if waitingOn := taskWaitingOn(task); waitingOn != "" {
+		out["waitingOn"] = waitingOn
+	}
 	if execution := nestedMap(status, "execution"); len(execution) > 0 {
 		out["execution"] = copyKeys(execution,
 			"state", "outcome", "reason", "attempt", "promptID", "runtimePoolName", "runtimePoolUID",
@@ -543,6 +549,9 @@ func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) erro
 		{"Delivery message", anyString(delivery["message"])},
 		{labelPublicationBranch, anyString(delivery["branch"])},
 		{"Verified remote", compactCLIValue(anyString(delivery["verifiedRemoteSHA"]))},
+	}
+	if waitingOn := anyString(status["waitingOn"]); waitingOn != "" {
+		rows = slices.Insert(rows, 3, [2]string{labelWaitingOn, waitingOn})
 	}
 	for _, row := range rows {
 		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
