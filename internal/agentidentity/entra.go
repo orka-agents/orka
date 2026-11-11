@@ -117,23 +117,54 @@ func (i *EntraIssuer) ExchangeToken(ctx context.Context, identityID string) (str
 		return "", errors.New("Entra agent identity IDs must be GUIDs") //nolint:staticcheck // Product name begins the message.
 	}
 	return i.cached(ctx, "exchange\x00"+identityID, func(ctx context.Context) (string, time.Duration, error) {
-		credential, err := i.credential()
-		if err != nil {
-			return "", 0, err
-		}
-		return i.requestToken(ctx, "entra_exchange", url.Values{
-			formGrantType:           {"client_credentials"},
-			formClientID:            {strings.ToLower(i.Config.BlueprintClientID)},
-			formScope:               {entraExchangeScope},
-			"fmi_path":              {identityID},
-			formClientAssertionType: {jwtBearerAssertionType},
-			formClientAssertion:     {credential},
-		})
+		return i.requestExchangeToken(ctx, identityID)
 	})
 }
 
+func (i *EntraIssuer) requestExchangeToken(ctx context.Context, identityID string) (string, time.Duration, error) {
+	credential, err := i.credential()
+	if err != nil {
+		return "", 0, err
+	}
+	return i.requestToken(ctx, "entra_exchange", url.Values{
+		formGrantType:           {"client_credentials"},
+		formClientID:            {strings.ToLower(i.Config.BlueprintClientID)},
+		formScope:               {entraExchangeScope},
+		"fmi_path":              {identityID},
+		formClientAssertionType: {jwtBearerAssertionType},
+		formClientAssertion:     {credential},
+	})
+}
+
+func (i *EntraIssuer) requestAppToken(ctx context.Context, identityID, resource, exchange string) (string, time.Duration, error) {
+	return i.requestToken(ctx, "entra_app", url.Values{
+		formGrantType:           {"client_credentials"},
+		formClientID:            {identityID},
+		formScope:               {entraScope(resource)},
+		formClientAssertionType: {jwtBearerAssertionType},
+		formClientAssertion:     {exchange},
+	})
+}
+
+// VerifyIdentity asks Entra, past the token cache, for the identity's own
+// token for resource. A cached token is up to five minutes old, so treating
+// it as proof would let an Agent edit renew trust in an identity Entra has
+// since disabled. The tokens it obtains are not cached or returned.
+func (i *EntraIssuer) VerifyIdentity(ctx context.Context, identityID, resource string) error {
+	identityID = strings.ToLower(strings.TrimSpace(identityID))
+	if !guidPattern.MatchString(identityID) {
+		return errors.New("Entra agent identity IDs must be GUIDs") //nolint:staticcheck // Product name begins the message.
+	}
+	exchange, _, err := i.requestExchangeToken(ctx, identityID)
+	if err != nil {
+		return err
+	}
+	_, _, err = i.requestAppToken(ctx, identityID, resource, exchange)
+	return err
+}
+
 // AppToken returns an app-only token for the agent identity and resource,
-// cached apart from any policy's tokens. It is how an identity is verified.
+// cached apart from any policy's tokens.
 func (i *EntraIssuer) AppToken(ctx context.Context, identityID, resource string) (string, error) {
 	return i.appToken(ctx, identityID, resource, outboundaccess.PolicyIdentity{})
 }
@@ -152,13 +183,7 @@ func (i *EntraIssuer) appToken(ctx context.Context, identityID, resource string,
 		if err != nil {
 			return "", 0, err
 		}
-		return i.requestToken(ctx, "entra_app", url.Values{
-			formGrantType:           {"client_credentials"},
-			formClientID:            {identityID},
-			formScope:               {entraScope(resource)},
-			formClientAssertionType: {jwtBearerAssertionType},
-			formClientAssertion:     {exchange},
-		})
+		return i.requestAppToken(ctx, identityID, resource, exchange)
 	})
 }
 
@@ -494,8 +519,8 @@ func (s *Source) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
 		// is usable: Entra still issues it for a disabled agent identity.
 		// The identity's own token does, and Entra issues it for this
 		// cloud-neutral resource whatever the identity has been granted.
-		_, err := s.Entra.AppToken(ctx, id, entraVerificationResource)
-		return err
+		// It is asked for fresh, never taken from the cache.
+		return s.Entra.VerifyIdentity(ctx, id, entraVerificationResource)
 	default:
 		return fmt.Errorf("identity issuer %q is not supported", issuer)
 	}

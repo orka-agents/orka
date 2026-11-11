@@ -265,6 +265,34 @@ func TestSourceVerifyRequestsTheIdentitysOwnToken(t *testing.T) {
 	}
 }
 
+// A verification is fresh proof: a token the cache still holds, from an
+// earlier verification or a Tool call, never stands in for Entra's answer, so
+// an Agent edit right after cannot renew trust in an identity Entra has since
+// disabled.
+func TestSourceVerifyNeverAnswersFromTheTokenCache(t *testing.T) {
+	fake := &fakeEntra{}
+	now := time.Now()
+	source := &Source{Config: configuredConfig(), Entra: newTestIssuer(t, fake, &now)}
+	agent := identityAgent(now)
+	agent.ObjectMeta = metav1.ObjectMeta{Name: "a", Namespace: "team-a"}
+	if _, err := source.Entra.AppToken(context.Background(), testIdentity, entraVerificationResource); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Verify(context.Background(), &agent); err != nil {
+		t.Fatal(err)
+	}
+	if fake.count() != 4 {
+		t.Fatalf("requests = %d, want the cached token ignored and both tokens requested again", fake.count())
+	}
+	fake.mu.Lock()
+	fake.disabled = strings.ToLower(testIdentity)
+	fake.mu.Unlock()
+	now = now.Add(time.Minute)
+	if err := source.Verify(context.Background(), &agent); err == nil {
+		t.Fatal("an identity disabled a minute after its last verification must fail the next one")
+	}
+}
+
 func TestSourceVerifyFailsForADisabledIdentity(t *testing.T) {
 	fake := &fakeEntra{disabled: strings.ToLower(testIdentity)}
 	now := time.Now()
