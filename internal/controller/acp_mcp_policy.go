@@ -611,7 +611,9 @@ func adjustInputsForForwardingWrites(
 	allowed := effectiveACPAllowedTools(task, agent)
 	var disallowed []string
 	if task.Spec.AgentRuntime != nil {
-		disallowed = task.Spec.AgentRuntime.DisallowedTools
+		// Normalized as policy construction does, so a padded deny of the
+		// write tool here removes its approval as well as its descriptor.
+		disallowed = sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
 	}
 	var writes, approvals []string
 	modes := map[string]string{}

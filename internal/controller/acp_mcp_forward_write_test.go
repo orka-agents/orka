@@ -247,32 +247,35 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	}
 	// A Task that denies only the write tool plans on codex, which enforces
 	// its built-in tools all or nothing: the deny names no built-in tool. It
-	// keeps the Tool's reads and gets no write tool.
-	readOnly := forwardingWriteTask()
-	readOnly.UID = "read-only-uid"
-	readOnly.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"azure-arm:write"}}
-	readOnlyAgent := forwardingWriteAgent()
-	readOnlyAgent.UID, readOnlyAgent.Generation = "agent-uid", 1
-	readOnlyAgent.Spec.Model = &corev1alpha1.ModelConfig{Name: "model"}
-	readOnlyAgent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV2)
-	readOnlyAgent.Spec.Runtime.DefaultAllowedTools = append(acp.BuiltInRuntimeNativeToolNames("codex"), "azure-arm")
-	readOnly, readOnlyAgent, err = adjustInputsForForwardingWrites(context.Background(), reader, readOnly, readOnlyAgent, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readPlan, err := PlanACPRuntime(readOnly, readOnlyAgent, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
-	if err != nil {
-		t.Fatalf("a Task that denies only the write tool must plan on codex: %v", err)
-	}
-	readConfiguration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, readOnly, readOnlyAgent, readPlan.Profile, tools.NewRegistry())
-	if err != nil {
-		t.Fatalf("policy for a Task that denies the write tool: %v", err)
-	}
-	if _, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm:write"); offered {
-		t.Fatal("a denied write tool must not be offered")
-	}
-	if read, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm"); !offered || read.Forward == nil {
-		t.Fatalf("the Tool's reads must stay: %#v", read)
+	// keeps the Tool's reads and gets no write tool, however the deny is
+	// spelled.
+	for _, deny := range []string{"azure-arm:write", " azure-arm:write "} {
+		readOnly := forwardingWriteTask()
+		readOnly.UID = "read-only-uid"
+		readOnly.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{deny}}
+		readOnlyAgent := forwardingWriteAgent()
+		readOnlyAgent.UID, readOnlyAgent.Generation = "agent-uid", 1
+		readOnlyAgent.Spec.Model = &corev1alpha1.ModelConfig{Name: "model"}
+		readOnlyAgent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV2)
+		readOnlyAgent.Spec.Runtime.DefaultAllowedTools = append(acp.BuiltInRuntimeNativeToolNames("codex"), "azure-arm")
+		readOnly, readOnlyAgent, err = adjustInputsForForwardingWrites(context.Background(), reader, readOnly, readOnlyAgent, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readPlan, err := PlanACPRuntime(readOnly, readOnlyAgent, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
+		if err != nil {
+			t.Fatalf("deny %q: a Task that denies only the write tool must plan on codex: %v", deny, err)
+		}
+		readConfiguration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, readOnly, readOnlyAgent, readPlan.Profile, tools.NewRegistry())
+		if err != nil {
+			t.Fatalf("deny %q: policy for a Task that denies the write tool: %v", deny, err)
+		}
+		if _, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm:write"); offered || readConfiguration.ApprovalPolicy.Requires("azure-arm:write") {
+			t.Fatalf("deny %q: a denied write tool must not be offered or need approval", deny)
+		}
+		if read, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm"); !offered || read.Forward == nil {
+			t.Fatalf("deny %q: the Tool's reads must stay: %#v", deny, read)
+		}
 	}
 	// A policy that drops the write tool's approval, as a registered
 	// external runtime's could, is refused while the Tool requires it.
