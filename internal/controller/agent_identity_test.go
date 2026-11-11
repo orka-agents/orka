@@ -1645,6 +1645,52 @@ func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
 	}
 }
 
+// TestIssuerRefusalSurvivesAControllerRestart covers a controller that
+// restarts, or loses leadership, after the issuer refused an Agent's
+// identity: the refusal its status records stands while the issuer cannot
+// answer or the Agent fails validation, and only a fresh verification clears
+// it. A refusal recorded for another identity does not carry over.
+func TestIssuerRefusalSurvivesAControllerRestart(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	agent.UID, agent.Generation = "reviewer-uid", 1
+	first := setupAgentReconciler()
+	first.Identity = testIdentityConfig()
+	first.IdentityVerifier = &countingIdentityVerifier{err: errors.New("AADSTS700016")}
+	ctx := context.Background()
+	refused := first.verifyAgentIdentity(ctx, agent, nil)
+	setAgentIdentityCondition(agent, metav1.Now(), refused)
+
+	// A new controller starts with no answers of its own.
+	restarted := setupAgentReconciler()
+	restarted.Identity = testIdentityConfig()
+	verifier := &countingIdentityVerifier{err: fmt.Errorf("token endpoint down: %w", agentidentity.ErrIssuerUnavailable)}
+	restarted.IdentityVerifier = verifier
+	if state := restarted.verifyAgentIdentity(ctx, agent, nil); state.err == nil || state.unavailable || state.verified {
+		t.Fatalf("an unavailable issuer after a restart = %+v, want the recorded refusal kept", state)
+	}
+	if state := restarted.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err == nil || state.unavailable || state.verified {
+		t.Fatalf("an invalid Agent after a restart = %+v, want the recorded refusal kept", state)
+	}
+
+	other := agent.DeepCopy()
+	other.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+	if state := restarted.verifyAgentIdentity(ctx, other, errors.New("spec.runtime is invalid")); state.err != nil {
+		t.Fatalf("another identity after a restart = %+v, want no refusal carried over", state)
+	}
+
+	restarted.issuerBackoff.Lock()
+	restarted.issuerBackoff.until = time.Time{}
+	restarted.issuerBackoff.Unlock()
+	verifier.err = nil
+	verified := restarted.verifyAgentIdentity(ctx, agent, nil)
+	if !verified.verified || verified.err != nil {
+		t.Fatalf("a fresh verification after a restart = %+v, want it to clear the refusal", verified)
+	}
+	if state := restarted.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err != nil {
+		t.Fatalf("an invalid edit after the fresh verification = %+v, want no refusal", state)
+	}
+}
+
 // TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm covers a claim
 // the dispatcher cannot read, and an enforcement period not yet recorded:
 // both are errors the prompt is retried on, never a reason to fail the
