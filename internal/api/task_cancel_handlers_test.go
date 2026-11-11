@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -724,6 +725,39 @@ func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("allow=%v: access reviews = %+v, want update tasks/cancel in the Task's namespace", allow, *seen)
+		}
+	}
+}
+
+// A context token whose Task type covers only some of a Session's Tasks
+// cancels none of them, whatever order they are listed in.
+func TestCancelSessionChecksEveryTaskAgainstAContextTokenFirst(t *testing.T) {
+	agentTask := chatTask("default", "agent-turn", "default")
+	aiTask := chatTask("default", "ai-turn", "default")
+	aiTask.Spec.Type = corev1alpha1.TaskTypeAI
+	h, app := setupTestHandlersWithObjects(agentTask, aiTask)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.contextTokenAuthorization = authz
+	token := &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test",
+		Scopes:             append(slices.Clone(authz.SessionWriteScopes), authz.TaskUpdateScopes...),
+		TransactionContext: map[string]any{"taskType": string(corev1alpha1.TaskTypeAgent)}}
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", Subject: "alice", Issuer: token.Issuer, AuthType: AuthTypeContextToken, ContextToken: token})
+		return c.Next()
+	})
+	app.Post("/sessions/:id/cancel", h.CancelSession)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %v, want 403", resp.StatusCode, body)
+	}
+	for _, name := range []string{"agent-turn", "ai-turn"} {
+		if _, ok := cancelAnnotationIn(t, h, "default", name); ok {
+			t.Fatalf("%s was cancelled although the token does not cover every Task", name)
 		}
 	}
 }
