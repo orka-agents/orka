@@ -342,6 +342,10 @@ How the check reads a policy:
   already fixes Bash and the turn budget. The check uses the tools the
   registered AgentRuntime policy exposes, so a tool the registration lists but
   also denies does not count against the ceiling.
+- **Codex.** Every Codex session can run shell commands. Even a read-only
+  session with only `Glob`, `Grep`, and `Read` runs read commands through the
+  shell. A Codex Task therefore always fails a `ceiling.allowBash: false`, so
+  use another runtime when the ceiling must exclude the shell.
 
 A Task is checked against the Agent generation it binds to. Changing a
 ceiling does not affect Tasks that are already bound. When an Agent's own
