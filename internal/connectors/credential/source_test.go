@@ -792,9 +792,7 @@ func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -878,9 +876,7 @@ func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -1385,5 +1381,17 @@ func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testi
 	}}
 	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
 		t.Fatal("a link disconnected during the grant read must refuse the exchanged credential")
+	}
+}
+
+// requireDisconnectedDuringRefresh resolves a credential whose refresh a
+// disconnect wins, and requires the typed connection-required refusal the
+// broker reports as OrkaConnectionRequired, not a plain error.
+func requireDisconnectedDuringRefresh(t *testing.T, h *harness) {
+	t.Helper()
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	var required *outboundaccess.ConnectionRequiredError
+	if !errors.As(err, &required) || required.Kind != outboundaccess.ConnectionNoCredential {
+		t.Fatalf("refresh after disconnect err = %v, want a ConnectionRequiredError for a missing credential", err)
 	}
 }
