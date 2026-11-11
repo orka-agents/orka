@@ -64,7 +64,7 @@ be pointed at a local endpoint and signed in without a real credential.
   runs nothing before its profile names an account, and listing the
   identity's subscriptions is a Resource Manager read, which needs a running
   prompt. So session setup writes a placeholder profile (a tenant-level
-  account under the zero tenant), and when a prompt first runs, the supervisor
+  account under the zero tenant, named so an agent that reads it retries), and when a prompt first runs, the supervisor
   lists the subscriptions through the forwarding Tool and writes them as
   `az`'s profile, in the shape `az login --identity` writes. The profile holds
   no credential. The read runs once per session, under a call ID marked as

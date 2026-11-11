@@ -108,7 +108,7 @@ func TestAzureGatewayStartsWithThePlaceholderAccount(t *testing.T) {
 	waitForAttempt(t, fixture)
 	profile := readAzureProfile(t, fixture)
 	if len(profile.Subscriptions) != 1 || profile.Subscriptions[0].ID != azureZeroTenant ||
-		profile.Subscriptions[0].Name != azureTenantLevelAccountName || !profile.Subscriptions[0].IsDefault {
+		profile.Subscriptions[0].Name != azureSignInPendingName || !profile.Subscriptions[0].IsDefault {
 		t.Fatalf("placeholder profile = %+v", profile.Subscriptions)
 	}
 	// A command az sends under the placeholder tries again, and says why it
@@ -156,6 +156,11 @@ func TestAzureGatewaySignsInAgainForACommandUnderThePlaceholder(t *testing.T) {
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups", http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
+	}
+	// Signed in, the account has az's own tenant-level name, not the
+	// still-signing-in one.
+	if profile := readAzureProfile(t, fixture); len(profile.Subscriptions) != 1 || profile.Subscriptions[0].Name != azureTenantLevelAccountName {
+		t.Fatalf("profile = %+v", profile.Subscriptions)
 	}
 	// Now it has one: the command signs az in again and asks to be rerun.
 	var listed atomic.Int32

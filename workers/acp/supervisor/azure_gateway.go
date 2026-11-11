@@ -424,7 +424,7 @@ func (g *azureGateway) prepareHome(home string, caPEM []byte) (map[string]string
 		return nil, err
 	}
 	g.profileDir = root
-	if err := g.writeProfile(placeholderAzureProfile(), false); err != nil {
+	if err := g.writeProfile(placeholderAzureProfile(azureSignInPendingName), false); err != nil {
 		return nil, err
 	}
 	return map[string]string{

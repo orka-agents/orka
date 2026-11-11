@@ -46,6 +46,10 @@ const (
 	// azureTenantLevelAccountName is az's name for an account with no
 	// subscription.
 	azureTenantLevelAccountName = "N/A(tenant level account)"
+	// azureSignInPendingName names the placeholder until a sign-in has
+	// run, so an agent that reads it, with az account show for example,
+	// learns to retry rather than that the identity has no subscription.
+	azureSignInPendingName = "Orka is still signing az in; run the command again"
 	// azureSubscriptionsAPIVersion is the Subscriptions - List version az
 	// itself uses.
 	azureSubscriptionsAPIVersion = "2022-12-01"
@@ -93,10 +97,11 @@ type azureProfile struct {
 var azureManagedIdentityUser = azureProfileUser{Name: "systemAssignedIdentity", Type: "servicePrincipal", AssignedIdentity: "MSI"}
 
 // placeholderAzureProfile is the profile of an identity with no
-// subscription: what `az login --identity --allow-no-subscriptions` writes.
-func placeholderAzureProfile() azureProfile {
+// subscription: what `az login --identity --allow-no-subscriptions` writes,
+// under name.
+func placeholderAzureProfile(name string) azureProfile {
 	return azureProfile{Subscriptions: []azureProfileAccount{{
-		ID: azureZeroTenant, Name: azureTenantLevelAccountName, State: "Enabled", User: azureManagedIdentityUser,
+		ID: azureZeroTenant, Name: name, State: "Enabled", User: azureManagedIdentityUser,
 		IsDefault: true, TenantID: azureZeroTenant, EnvironmentName: azureCloudName,
 	}}}
 }
@@ -220,7 +225,7 @@ func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error)
 	if len(accounts) > maxAzureSubscriptions {
 		accounts = accounts[:maxAzureSubscriptions]
 	}
-	profile := placeholderAzureProfile()
+	profile := placeholderAzureProfile(azureTenantLevelAccountName)
 	if len(accounts) > 0 {
 		chosen := 0
 		for index := range accounts {

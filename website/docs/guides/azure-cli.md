@@ -46,8 +46,9 @@ identity you choose decides what they can see.
   `az`'s profile, with the first enabled one as the default. That read is
   Orka's, not the agent's: it runs once per session, it is recorded like any
   other call to the Tool, and it is skipped when reads of the Tool need
-  approval. A command that runs before the sign-in finishes is answered with
-  `OrkaSignedIn`; run it again. After `az account clear`, `az login --identity`
+  approval. Until it finishes, `az account show` names the account
+  "Orka is still signing az in; run the command again", and a command that
+  runs is answered with `OrkaSignedIn`; run it again. After `az account clear`, `az login --identity`
   signs `az` in again.
 - `az account show` reports a tenant ID of all zeros. Subscription IDs and
   everything Resource Manager returns are real. An identity with no role on a

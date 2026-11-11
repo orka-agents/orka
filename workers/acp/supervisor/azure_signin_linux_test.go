@@ -48,7 +48,7 @@ func TestAzureProfileWriteActsAsTheSessionChild(t *testing.T) {
 	}
 	// Without DAC_OVERRIDE the test's cleanup must reclaim the directory.
 	t.Cleanup(func() { _ = os.Chown(dir, 0, 0) })
-	if err := gateway.writeProfile(placeholderAzureProfile(), true); err != nil {
+	if err := gateway.writeProfile(placeholderAzureProfile(azureSignInPendingName), true); err != nil {
 		t.Fatalf("write as the child: %v", err)
 	}
 	if raw, err := os.ReadFile(victim); err != nil || string(raw) != "keep" {

@@ -88,6 +88,11 @@ func TestAzureGatewayPlaceholderAccountWorksInTheRealAzureCLI(t *testing.T) {
 	})
 	waitForAttempt(t, fixture)
 	run := azRunner(az, fixture)
+	// An agent that looks before the sign-in finishes reads that it should
+	// retry, not that the identity has no subscription.
+	if output, err := run("account", "show", "--query", "name", "-o", "tsv"); err != nil || strings.TrimSpace(output) != azureSignInPendingName {
+		t.Fatalf("az account show under the placeholder: %v\n%s", err, output)
+	}
 	output, err := run("group", "list")
 	if err == nil || !strings.Contains(output, "OrkaConnectionRequired") || !strings.Contains(output, "orka connect azure -n team-a") ||
 		strings.Contains(output, "Please run 'az login'") {
