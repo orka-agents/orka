@@ -48,6 +48,16 @@ func (f *externalRuntimePoolFixture) advertiseSubstrateV1Backend(t *testing.T) {
 	if err := f.r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
+	// A native runtime on this backend resolves only fully qualified names.
+	f.r.ControllerAPIURL = "http://orka-api.default.svc.cluster.local:8080"
+	f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"
+}
+
+// useShortServiceOrigins configures Core's origins with the short
+// "<service>.<namespace>.svc" names that Pods resolve through their search path.
+func (f *externalRuntimePoolFixture) useShortServiceOrigins() {
+	f.r.ControllerAPIURL = "http://orka-api.default.svc:8080"
+	f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.orka-system.svc:8080"
 }
 
 type routedRuntimeFixture struct {
@@ -86,35 +96,71 @@ func newRoutedRuntimeFixture(t *testing.T, substrateV1 bool, mutate func(*worksp
 }
 
 func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *testing.T) {
-	r := &RuntimePoolReconciler{ControllerAPIURL: "https://Orka-API.orka-system.svc"}
-	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc:8080"}}
+	r := &RuntimePoolReconciler{ControllerAPIURL: "https://Orka-API.orka-system.svc.cluster.local"}
+	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"}}
 	policy, err := r.externalRuntimeEgress(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []workspacev1alpha1.RuntimeEgressRule{
-		{Protocol: workspacev1alpha1.RuntimeEgressTLSPassthrough, Host: "orka-api.orka-system.svc", Ports: []int32{443}},
-		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc", Ports: []int32{8080}},
+		{Protocol: workspacev1alpha1.RuntimeEgressTLSPassthrough, Host: "orka-api.orka-system.svc.cluster.local", Ports: []int32{443}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc.cluster.local", Ports: []int32{8080}},
 	}
 	if !reflect.DeepEqual(policy.Rules, want) {
 		t.Fatalf("egress rules = %#v, want %#v", policy.Rules, want)
 	}
+	// A cluster domain other than cluster.local is the operator's to choose.
+	r.ControllerAPIURL = "https://orka-api.orka-system.svc.corp.example"
+	if _, err := r.externalRuntimeEgress(cfg); err != nil {
+		t.Fatalf("custom cluster domain refused: %v", err)
+	}
 
 	// One origin serving both roles yields one grant.
-	r.ControllerAPIURL = "http://provider-auth-proxy.orka-system.svc:8080/api"
+	r.ControllerAPIURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080/api"
 	if policy, err = r.externalRuntimeEgress(cfg); err != nil || len(policy.Rules) != 1 {
 		t.Fatalf("shared origin = %#v, %v", policy, err)
 	}
 	for name, controllerURL := range map[string]string{
-		"conflicting protocol": "https://provider-auth-proxy.orka-system.svc:8080",
+		"conflicting protocol": "https://provider-auth-proxy.orka-system.svc.cluster.local:8080",
 		"IP address":           "http://10.0.0.10:8080",
 		"single-label host":    "http://orka-api:8080",
-		"unsupported scheme":   "ftp://orka-api.orka-system.svc",
+		"unsupported scheme":   "ftp://orka-api.orka-system.svc.cluster.local",
 	} {
 		r.ControllerAPIURL = controllerURL
 		if _, err := r.externalRuntimeEgress(cfg); err == nil {
 			t.Errorf("%s: inexpressible controller origin was admitted", name)
 		}
+	}
+}
+
+// A native runtime behind the Substrate egress gateway cannot resolve a short
+// "<service>.<namespace>.svc" name: its resolver's search suffixes are refused
+// and cluster DNS answers only the fully qualified form. Admission refuses such
+// an origin and names the flag and the form to use.
+func TestExternalRuntimeEgressRefusesShortServiceNames(t *testing.T) {
+	const (
+		controllerFQDN = "http://orka-api.orka-system.svc.cluster.local:8080"
+		proxyFQDN      = "http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080"
+	)
+	for _, tc := range []struct {
+		name, controllerURL, proxyURL, flag, host string
+	}{
+		{"controller URL", "http://orka-api.orka-system.svc:8080", proxyFQDN, "--controller-url", "orka-api.orka-system.svc"},
+		{"controller URL in another case", "https://Orka-API.orka-system.SVC", proxyFQDN, "--controller-url", "orka-api.orka-system.svc"},
+		{"provider proxy URL", controllerFQDN, "http://orka-provider-auth-proxy.orka-system.svc:8080", "--acp-provider-proxy-base-url", "orka-provider-auth-proxy.orka-system.svc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &RuntimePoolReconciler{ControllerAPIURL: tc.controllerURL}
+			_, err := r.externalRuntimeEgress(runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: tc.proxyURL}})
+			if err == nil {
+				t.Fatal("a short Service name was admitted to a native egress allowlist")
+			}
+			for _, want := range []string{tc.flag, `"` + tc.host + `"`, `"` + tc.host + `.cluster.local"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not name %s", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -171,17 +217,38 @@ func TestExternalRuntimePoolPublishesEgressAllowlistForSubstrateV1Native(t *test
 		t.Fatalf("Substrate v1 native request network = %#v / %#v, port %d", runtime.NetworkPolicy, runtime.Egress, runtime.BootstrapPort)
 	}
 	want := []workspacev1alpha1.RuntimeEgressRule{
-		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "orka-api.default.svc", Ports: []int32{8080}},
-		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc", Ports: []int32{8080}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "orka-api.default.svc.cluster.local", Ports: []int32{8080}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc.cluster.local", Ports: []int32{8080}},
 	}
 	if !reflect.DeepEqual(runtime.Egress.Rules, want) {
 		t.Fatalf("admitted egress = %#v, want provider proxy and controller API origins", runtime.Egress.Rules)
 	}
 }
 
+// Admission fails closed: the pool reports the misconfiguration and publishes
+// no request, rather than starting a runtime that can reach nothing.
+func TestExternalRuntimePoolRefusesShortServiceNamesForSubstrateV1Native(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
+	f.advertiseSubstrateV1Backend(t)
+	f.useShortServiceOrigins()
+	for range 6 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if f.currentWorkspace(t).Spec.Workload != nil {
+		t.Fatal("a workload request was published with a short Service name in its egress allowlist")
+	}
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "set --acp-provider-proxy-base-url to the fully qualified name") {
+		t.Fatalf("pool status = %s %q, want Degraded naming the flag to fix", pool.Status.Lifecycle, pool.Status.Message)
+	}
+}
+
 func TestExternalRuntimePoolKeepsNetworkPolicyForPodBackedSubstrateV1Provider(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.advertiseSubstrateV1Backend(t)
+	// Pods resolve short Service names through their search path.
+	f.useShortServiceOrigins()
 	runtime := f.publish(t).Spec.Workload.Runtime
 	if runtime.Egress != nil || runtime.NetworkPolicy == nil || len(runtime.NetworkPolicy.Ingress) == 0 {
 		t.Fatal("Pod-backed request lost its admitted NetworkPolicy")
@@ -478,5 +545,27 @@ func TestExternalGatewayBackedPolicyCleanupNeedsNoLiveProxyConfiguration(t *test
 	}
 	if remaining := listOwned(); len(remaining) != 0 {
 		t.Fatalf("gateway-backed cleanup left %d Core-owned policies", len(remaining))
+	}
+}
+
+func TestRuntimePoolProviderProxyServiceHostAcceptsAnyClusterDomain(t *testing.T) {
+	for host, want := range map[string]bool{
+		"proxy.orka-system.svc":                    true,
+		"proxy.orka-system.svc.cluster.local":      true,
+		"proxy.orka-system.svc.corp.example":       true,
+		"a.proxy.orka-system.svc":                  true,
+		"orka-system.svc":                          false, // no Service name
+		".orka-system.svc":                         false,
+		"proxy.other.svc.cluster.local":            false, // another namespace
+		"proxy.orka-system.svcx":                   false,
+		"proxy.orka-system.svc.":                   false,
+		"proxy.orka-system.svc..cluster.local":     false,
+		"proxy.orka-system.svc.cluster_local":      false,
+		"proxy.orka-system.example.com":            false,
+		"proxy.orka-system.svc.cluster.local:8080": false,
+	} {
+		if got := runtimePoolServiceHostInNamespace(host, "orka-system"); got != want {
+			t.Errorf("runtimePoolServiceHostInNamespace(%q) = %t, want %t", host, got, want)
+		}
 	}
 }

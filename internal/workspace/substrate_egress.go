@@ -344,6 +344,14 @@ func validateSubstrateEgressHost(raw string) (string, error) {
 	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
 		return "", fmt.Errorf("host %q must not end in a numeric label", raw)
 	}
+	// An Actor's resolver tries search suffixes its DNS relay refuses, and
+	// cluster DNS answers only the fully qualified Service name, so a short
+	// one would be allowed but never resolve. The cluster domain is not known
+	// here, so name the form to use rather than rewrite the host.
+	if labels[len(labels)-1] == "svc" {
+		return "", fmt.Errorf("host %q is a short Kubernetes Service name, which Substrate Actors cannot resolve; use the fully qualified name %q "+
+			"(with your cluster domain if it is not cluster.local)", raw, host+".cluster.local")
+	}
 	return host, nil
 }
 
