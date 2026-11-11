@@ -65,6 +65,19 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("Docker Hub namespace", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t, guideChartArgs(
+			"--set", "controller.acpRuntime.toolboxes.allowedRegistries[2]=docker.io/acme",
+			"--set-string", "guide.docs.image.repository=docker.io/acme/guide-docs",
+		)...)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, output)
+		}
+		if !strings.Contains(output, `"--guide-docs-image=docker.io/acme/guide-docs@sha256:`) {
+			t.Fatalf("render is missing the Docker Hub image:\n%s", output)
+		}
+	})
+
 	t.Run("reuse-values from a release without guide values", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, "--set", "guide=null", "--show-only", "templates/deployment.yaml")
 		if err != nil {
@@ -78,13 +91,14 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 	set := func(key, value string) []string { return []string{"--set", key + "=" + value} }
 	str := func(key, value string) []string { return []string{"--set-string", key + "=" + value} }
 	const (
-		repository   = "guide.docs.image.repository"
-		digest       = "guide.docs.image.digest"
-		toolboxes    = "controller.acpRuntime.toolboxes.enabled"
-		notCovered   = "is not covered by controller.acpRuntime.toolboxes.allowedRegistries"
-		notCanonical = "must be <registry host>/<lowercase path>"
-		notSHA256    = "guide.docs.image.digest must be a sha256 digest"
-		badTurns     = "guide.maxTurns must be"
+		repository      = "guide.docs.image.repository"
+		digest          = "guide.docs.image.digest"
+		toolboxes       = "controller.acpRuntime.toolboxes.enabled"
+		notCovered      = "is not covered by controller.acpRuntime.toolboxes.allowedRegistries"
+		notCanonical    = "must be <registry host>/<lowercase path>"
+		notHubCanonical = "is not canonical: use docker.io/<namespace>/<name>"
+		notSHA256       = "guide.docs.image.digest must be a sha256 digest"
+		badTurns        = "guide.maxTurns must be"
 	)
 	for _, tt := range []struct {
 		name  string
@@ -108,6 +122,8 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		{"host only", str(repository, "ghcr.io"), notCanonical},
 		{"uppercase path", str(repository, "ghcr.io/orka-agents/Guide-Docs"), notCanonical},
 		{"tag in repository", str(repository, "ghcr.io/orka-agents/guide-docs:v1"), notCanonical},
+		{"legacy Docker Hub host", str(repository, "index.docker.io/acme/guide-docs"), notHubCanonical},
+		{"Docker Hub name without namespace", str(repository, "docker.io/guide-docs"), notHubCanonical},
 	} {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, guideChartArgs(tt.extra...)...)

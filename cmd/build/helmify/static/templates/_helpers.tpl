@@ -954,6 +954,10 @@ every check; these fail the render first with the value to change.
 {{- if or (not $qualifiedHost) (not (regexMatch `^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*$` $repositoryPath)) -}}
 {{- fail (printf "guide.docs.image.repository %q must be <registry host>/<lowercase path> with no tag, where the host is localhost or contains a dot or port, such as ghcr.io or registry:5000" $repository) -}}
 {{- end -}}
+{{- /* Docker Hub references are canonical only as docker.io/<namespace>/<name>; index.docker.io and docker.io/<name> are rewritten. */ -}}
+{{- if or (eq $repositoryHost "index.docker.io") (and (eq $repositoryHost "docker.io") (lt (len (splitList "/" $repositoryPath)) 2)) -}}
+{{- fail (printf "guide.docs.image.repository %q is not canonical: use docker.io/<namespace>/<name> for Docker Hub" $repository) -}}
+{{- end -}}
 {{- if not (regexMatch `^sha256:[0-9a-f]{64}$` $digest) -}}
 {{- fail "guide.docs.image.digest must be a sha256 digest: the guide mounts its docs snapshot by digest" -}}
 {{- end -}}
