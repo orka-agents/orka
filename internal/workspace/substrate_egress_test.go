@@ -51,6 +51,29 @@ func TestValidateSubstrateEgressRulesRejectsUnsafeHosts(t *testing.T) {
 	}
 }
 
+// An Actor cannot resolve a short "<service>.<namespace>.svc" name, so it is
+// refused with the fully qualified form to use, which is admitted.
+func TestValidateSubstrateEgressRulesRefusesShortServiceNames(t *testing.T) {
+	for host, fqdn := range map[string]string{
+		"mcp-backend.tools.svc": "mcp-backend.tools.svc.cluster.local",
+		"*.tools.svc":           "*.tools.svc.cluster.local",
+	} {
+		err := ValidateSubstrateEgressRules([]SubstrateEgressRule{{Scheme: "http", Host: host, Ports: []int32{8080}}})
+		if err == nil || !strings.Contains(err.Error(), "short Kubernetes Service name") || !strings.Contains(err.Error(), `"`+fqdn+`"`) {
+			t.Fatalf("%s: error = %v, want a refusal naming %q", host, err, fqdn)
+		}
+		if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{{Scheme: "http", Host: fqdn, Ports: []int32{8080}}}); err != nil {
+			t.Fatalf("%s: fully qualified name refused: %v", fqdn, err)
+		}
+	}
+	// Only a final "svc" label marks a short Service name.
+	for _, host := range []string{"svc.example.com", "api.svc-proxy.example.com"} {
+		if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{{Scheme: "https", Host: host}}); err != nil {
+			t.Fatalf("%s refused: %v", host, err)
+		}
+	}
+}
+
 func TestValidateSubstrateEgressRulesRejectsOverlappingOrigins(t *testing.T) {
 	err := ValidateSubstrateEgressRules([]SubstrateEgressRule{
 		{Scheme: "https", Host: "api.example.com"},
