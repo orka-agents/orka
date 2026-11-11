@@ -3022,6 +3022,11 @@ func (r *TaskReconciler) stoppedAncestor(ctx context.Context, task *corev1alpha1
 			parent.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 			return parent.Name, nil
 		}
+		// A scheduled template outlives whoever created it: the cascade
+		// leaves it to its own owner, so its runs answer only to it.
+		if strings.TrimSpace(parent.Spec.Schedule) != "" {
+			return "", nil
+		}
 		current = parent
 	}
 	return "", nil
