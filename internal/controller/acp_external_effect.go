@@ -500,8 +500,9 @@ func SettlePendingExternalEffect(
 	return nil
 }
 
-// ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
-// reserves an effect, so a caller can recognize its own committed record.
+// ExternalEffectRequestDigest is the digest under which
+// RunExternalEffectWithReplayCallTimeout reserves an effect, so a caller can
+// recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
 	return acpDomainDigest("external-effect-request", map[string]any{
 		identityKey: identity, requestKey: request,
