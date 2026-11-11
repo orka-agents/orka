@@ -71,7 +71,9 @@ delegated Tools can only read.
 - The `baseline` Pod Security profile enforced on that namespace
   (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`), so no
   privileged or `hostPath` Pod can read the controller's blueprint credential
-  from its node.
+  from its node. Admission checks only new Pods, so first run the label with
+  `--dry-run=server`; it lists running Pods that break the profile. Delete
+  them before you label the namespace.
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
   - Entra sign-in configured for Orka (step 8);
