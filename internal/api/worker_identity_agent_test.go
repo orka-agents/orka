@@ -31,11 +31,11 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 			Issuer: corev1alpha1.AgentIdentityIssuerEntra, ID: "33333333-3333-3333-3333-33333333aaaa",
 		}},
 	}
-	post := func(username, agent string) (int, string) {
+	postAs := func(user *UserInfo, agent string) (int, string) {
 		handlers, _ := setupTestHandlersWithObjects(identityAgent, plainAgent, removedAgent)
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
-			c.Locals(UserInfoContextKey, &UserInfo{Username: username, AuthType: AuthTypeTokenReview})
+			c.Locals(UserInfoContextKey, user)
 			return c.Next()
 		})
 		app.Post("/tasks", handlers.CreateTask)
@@ -44,6 +44,9 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 		})
 		body, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(body)
+	}
+	post := func(username, agent string) (int, string) {
+		return postAs(&UserInfo{Username: username, AuthType: AuthTypeTokenReview}, agent)
 	}
 	worker := "system:serviceaccount:" + testDefaultNamespace + ":orka-ai-worker"
 
@@ -60,4 +63,9 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 
 	status, body = post("system:serviceaccount:"+testDefaultNamespace+":editor", "reviewer")
 	require.False(t, strings.Contains(body, "identity-bound Agent"), "a non-worker is judged by the Agent use check: %d %s", status, body)
+
+	// An OIDC caller whose display name looks like a worker's is judged by
+	// issuer and subject, not as a worker.
+	status, body = postAs(&UserInfo{Username: worker, AuthType: AuthTypeOIDC, Issuer: "https://issuer.example.test", Subject: "alice"}, "reviewer")
+	require.False(t, strings.Contains(body, "identity-bound Agent"), "an OIDC caller is not a worker: %d %s", status, body)
 }
