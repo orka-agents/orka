@@ -582,3 +582,36 @@ func TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination(t *testing.T) 
 		}
 	}
 }
+
+// TestTaskBindersCarryOnlyAVerifiedRequester covers a Task whose requestedBy
+// the controller key never sealed, such as one a worker or a planted object
+// claims for someone else: neither binder hands that person to the executor,
+// so it reaches no credential lookup and no identity-use record.
+func TestTaskBindersCarryOnlyAVerifiedRequester(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	unstamped := f.task.DeepCopy()
+	delete(unstamped.Annotations, labels.AnnotationRequestedByStamp)
+	forged := f.task.DeepCopy()
+	forged.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: f.requester.Issuer, Subject: "bob"}
+	for name, task := range map[string]*corev1alpha1.Task{"unstamped": unstamped, "stamped for someone else": forged} {
+		native := workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
+		if err := BindNativeTaskConnectorAuthority(ctx, f.reader(), task, nil, false, native); err != nil {
+			t.Fatal(err)
+		}
+		brokered := workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
+		if err := bindFrozenConnections(ctx, f.reader(), nil, task, brokered); err != nil {
+			t.Fatal(err)
+		}
+		if native.Requester() != nil || brokered.Requester() != nil {
+			t.Fatalf("%s: requester = %+v / %+v, want none", name, native.Requester(), brokered.Requester())
+		}
+	}
+	verified := workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
+	if err := bindFrozenConnections(ctx, f.reader(), nil, f.task, verified); err != nil {
+		t.Fatal(err)
+	}
+	if verified.Requester() == nil || verified.Requester().Subject != "alice" {
+		t.Fatalf("verified requester = %+v", verified.Requester())
+	}
+}
