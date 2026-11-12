@@ -643,6 +643,18 @@ func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task
 	return connectors.RequesterStampValid(requesterStampKey, task), nil
 }
 
+// verifiedTaskRequester returns the Task's requester when the controller key
+// sealed it for this Task, or nil. Executors carry only that requester, so a
+// requestedBy a worker or a planted Task claims never reaches a credential
+// lookup or another person's identity-use records. A stamp still pending
+// counts as none.
+func verifiedTaskRequester(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) *corev1alpha1.RequestedBy {
+	if verified, err := requesterProvenanceVerified(ctx, reader, task); err != nil || !verified {
+		return nil
+	}
+	return task.Spec.RequestedBy.DeepCopy()
+}
+
 // requesterConnection returns the requester's linked Connection for provider,
 // or nil when none is usable or the requester is not provably the person.
 func requesterConnection(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, provider string) (*corev1alpha1.Connection, error) {
@@ -1189,7 +1201,8 @@ func BindNativeTaskConnectorAuthority(
 	if task == nil || executor == nil {
 		return errors.New("native connector authority binding requires a Task and executor")
 	}
-	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetRequester(verifiedTaskRequester(ctx, reader, task))
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(FrozenConnectionsFromTaskStatus(task))
 	return bindVerifiedTaskTransactionAuthority(ctx, reader, task, readScopes, enforceCredentialAuth, executor)
 }
@@ -1237,7 +1250,8 @@ func bindFrozenConnections(
 	if task == nil || executor == nil {
 		return errors.New("frozen connection binding requires a Task and executor")
 	}
-	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetRequester(verifiedTaskRequester(ctx, reader, task))
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(nil)
 	identity, err := agentIdentityBindingFromTask(ctx, reader, task)
 	if err != nil {

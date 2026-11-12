@@ -175,6 +175,9 @@ func TestBindFrozenConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	requester, frozen := executor.Requester(), executor.FrozenConnections()
+	if executor.TaskUID() != "task-uid" {
+		t.Fatalf("task UID = %q, want the authenticated Task's", executor.TaskUID())
+	}
 	if requester == nil || requester.Subject != "alice" {
 		t.Fatalf("requester = %+v", requester)
 	}

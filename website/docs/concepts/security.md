@@ -400,6 +400,13 @@ Security-relevant events are logged at the API layer:
 - Authentication failures (missing/invalid tokens)
 - Namespace access denials (isolation violations, watch-namespace mismatches)
 - Cross-namespace worker access attempts
+- Every call made with an Agent identity, issued or refused, on the
+  `agent-identity-audit` logger: the Agent, identity, issuer instance, mode,
+  Task, policy, Tool, a digest of the arguments, the outcome, and for a refusal
+  a reason category. Records hold no tokens, request bodies, or error text, and
+  a Delegated call's requester appears only as a keyed pseudonym. The
+  controller's log level does not filter this logger. Route and retain it in
+  your log pipeline.
 
 ## Generic gateway trust boundary
 
