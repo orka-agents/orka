@@ -757,8 +757,10 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 	return nil
 }
 
-// validateForwardingTool keeps a forwarding tool to reads on one origin: its
-// arguments are the runtime's fixed request shape, so it declares none.
+// validateForwardingTool keeps a forwarding tool to one origin: its
+// arguments are the runtime's fixed request shape, so it declares none. It is
+// class read; writes, which a linked account makes only through a
+// readWrite link, need its forward.writes as well as the Tool's.
 func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
 	forward := tool.HTTP.Forward
 	if forward == nil {
@@ -1034,10 +1036,13 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	for _, tool := range tools {
 		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method, "parameters", canonicalSchema(tool.Parameters))
 		// A forwarding tool may reach any read path on its origin, not one
-		// endpoint, so turning a tool into one needs renewed consent. Tools
-		// without it keep their existing digest.
+		// endpoint, so turning a tool into one needs renewed consent, and so
+		// does letting it write. Tools without either keep their digest.
 		if tool.HTTP.Forward != nil {
 			parts = append(parts, "forward", string(tool.HTTP.Forward.Protocol))
+			if tool.HTTP.Forward.Writes != nil {
+				parts = append(parts, "forward-writes")
+			}
 		}
 		headerNames := make([]string, 0, len(tool.HTTP.Headers))
 		for name := range tool.HTTP.Headers {

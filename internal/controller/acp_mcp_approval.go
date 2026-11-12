@@ -283,7 +283,14 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	action := "Execute " + call.Request.Call.ToolName
-	if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// The approver sees the forwarded request itself, not only the tool.
+		var request harnessv2.MCPForwardRequest
+		if json.Unmarshal(call.Request.Call.Arguments, &request) == nil && request.Method != "" && request.Path != "" {
+			path, _, _ := events.RedactAndTruncateExecutionEventText(request.Path, 300)
+			action = "Send " + request.Method + " " + path + " via " + call.Request.Call.ToolName
+		}
+	} else if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
 		var args struct {
 			Name      json.RawMessage `json:"name"`
 			ToolName  json.RawMessage `json:"toolName"`
@@ -307,6 +314,16 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	target.ApprovalID = call.ID
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// A request body can carry a secret under any field name, such as a
+		// function key's value, so reviewers see its fields, not its values.
+		masked, maskErr := approvals.NewApprovalTarget(call.Task.Namespace, call.Task.Name, call.Task.UID,
+			call.Request.Call.ToolName, maskForwardedWriteArguments(call.Request.Call.Arguments), action, "", "warning", specDigest)
+		if maskErr != nil {
+			return maskErr
+		}
+		target.TargetArgsPreview = masked.TargetArgsPreview
+	}
 	// Runtime call IDs can contain private text that generic redaction misses.
 	binding := approvalCallBinding(call)
 	_, err = b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
@@ -829,12 +846,15 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	if executeErr == nil {
 		result, executeErr = canonicalMCPApprovalResult(result)
 	}
+	// The caller gets the answer; the record and its event keep what they may.
+	kept := result
 	if executeErr == nil {
+		kept = forwardedWriteKeptResult(call.Descriptor, result)
 		_, executeErr = b.Effects.TransitionExternalEffect(callCtx, store.ExternalEffectTransition{
 			ID: claimed.ID, Fence: credentials.ControllerFence, ExpectedVersion: claimed.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectSucceeded,
 			RequestDigest: call.RequestDigest, ExpectedLeaseOwner: leaseOwner,
-			Response: result, ResponseDigest: store.CanonicalBytesDigest(result), UpdatedAt: time.Now().UTC(),
+			Response: kept, ResponseDigest: store.CanonicalBytesDigest(kept), UpdatedAt: time.Now().UTC(),
 		})
 	}
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
@@ -853,7 +873,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	}
 	// The result commit was acknowledged. A failed event projection must not
 	// replace that receipt with a transport error; recovery repairs the event.
-	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", result)
+	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", kept)
 	return result, false, nil
 }
 

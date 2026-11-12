@@ -26,9 +26,11 @@ identity you choose decides what they can see.
 - **Read requests to Azure Resource Manager**: `az group list`, `az vm show`,
   `az aks list`, `az resource list`, `az account list`, and any other command
   that only reads ARM. Paging works.
-- **Not writes or actions.** `az group create`, `az vm start`, and
-  `az storage account keys list` send `PUT`, `POST`, or `DELETE` and are
-  refused with `OrkaReadOnly`.
+- **Writes and actions, when the Tool allows them.** `az group create`,
+  `az vm start`, `az aks create`, and `az aks get-credentials` send `PUT`,
+  `PATCH`, `DELETE`, or `POST`. A Tool without `forward.writes` refuses them
+  with `OrkaReadOnly`; one with it waits for a person to approve each write
+  unless the Tool waives approval ([Writes](#writes)).
 - **Not other Azure services.** Commands that call Microsoft Graph (`az ad`),
   Key Vault data, Storage data, or `az ssh` fail with
   `OrkaResourceNotForwarded` or a connection error.
@@ -181,6 +183,64 @@ before each Task:
 - When the policy draws on a ConnectorProvider, the provider declares a tool
   of the same name with the same `url` and `forward`.
 
+### Writes
+
+Add `writes` to let `az` change resources:
+
+```yaml
+  http:
+    url: https://management.azure.com
+    forward:
+      protocol: AzureResourceManager
+      writes:
+        approval: Required          # the default; None sends writes without approval
+```
+
+- Each write is a separate tool, `azurearm:write`, that Orka derives from the
+  Tool. Allowing `azurearm` (and an Agent ceiling that names it) allows both;
+  an allowlist that names `azurearm:write` is refused. A Task keeps the reads
+  and refuses writes with `disallowedTools: [azurearm:write]`. Reads stay
+  unapproved.
+- With `approval: Required`, a write waits in the Task's **Approvals** tab (or
+  for `orka task approve`) showing its method, path, and body. When it
+  creates or updates a resource group, AKS cluster or agent pool, or virtual
+  machine, sizing values such as `location`, `sku`, `kubernetesVersion`, and
+  each agent pool's `count` and `vmSize` are shown when they look like
+  sizing values (up to 64 letters, digits, spaces, `.`, `_`, or `-`); every
+  other value is masked because any of them can be a secret. Meanwhile `az`
+  waits for the answer. A decision is final: `az` gets Azure's response, or
+  `OrkaApprovalNotGranted` if it was declined or expired after 10 minutes.
+  When the Agent acts for the requester (`agentIdentity.mode: Delegated`), only
+  the requester can approve.
+- While a write waits, the Task stays `Running`. `orka task get <task>` shows
+  `Waiting on: approval`, `orka task approvals <task>` shows the request, and
+  `orka task approve <task> <id>` or `orka task decline <task> <id>` answers
+  it. The **Approvals** tab needs the dashboard, which is off by default: set
+  `controller.dashboard.enabled: true` and open it with `orka dashboard`.
+- A request ends with the agent's turn. If the turn ends first, the request is
+  cancelled and nothing is sent to Azure, even though it showed time left; ask
+  for the write again, and tell the agent in the prompt to wait for approval.
+  Stopping `az` alone does not withdraw it: while the turn goes on, the request
+  stays pending, and approving it still sends the write. To make sure a write is
+  never sent, decline it, or cancel the Task with `orka task cancel <task>`.
+- `az` resends a request that has had no answer for 5 minutes. The resent
+  request joins the pending approval, so a write is never sent twice. Orka
+  keeps no write's answer, which can carry a secret, so a resent request
+  whose write already ran gets `OrkaResultNotKept`: check the resource, or
+  run the command again.
+- Write bodies must be a JSON object or array. Every write runs once: if Orka cannot tell
+  whether it reached Azure, `az` gets `OrkaOutcomeUnknown` and the write is
+  not repeated.
+- `POST` actions can return secrets: `az aks get-credentials` returns a
+  kubeconfig and `az storage account keys list` returns keys, and the agent
+  can read them. Keep `approval: Required` on a Tool whose identity can reach
+  such actions, or grant that identity a role that cannot.
+- For a linked account, the provider's tool needs `writes` too (its
+  `approval` is not used), and each person links with
+  `orka connect azure -n team-a --mode readWrite`. Adding `writes` to a
+  provider asks everyone to consent again. With a `readOnly` link, or none,
+  the agent gets reads only.
+
 ## 4. Give the Agent the toolbox and the Tool
 
 ```yaml
@@ -230,10 +290,15 @@ orka task get az-groups -n team-a
 
 | What az prints | Why |
 | --- | --- |
-| `(OrkaReadOnly)` | The command writes or acts on a resource. Only reads are forwarded. |
+| `(OrkaReadOnly)` | The command writes or acts on a resource, and this Task has no write tool: the Tool has no `forward.writes`, the Task disallows it, or the requester's link was not `readWrite` when the Task started. |
+| `(OrkaApprovalNotGranted)` | A reviewer declined the write, or nobody approved it within 10 minutes. Nothing was sent to Azure. |
+| `(OrkaResultNotKept)` | `az` resent a write that already ran, for example after a slow approval. Orka keeps no write's answer, which can carry secrets; check the resource, or run the command again. |
+| `(OrkaResendRefused)` | `az` resent a write during a later turn than the one that first sent it, for example a command left running in the background. Orka did not send it again; check the resource, or run the command again. A session that has sent 16384 writes also refuses new ones; start a new session. |
+| `(OrkaThrottled)` | Azure throttled the write and did not process it, and this session has already had 256 throttled writes, so Orka cannot resend it safely. Run the command again later. |
+| `(OrkaOutcomeUnknown)` | The write may have reached Azure. Check the resource before running the command again. |
 | `(OrkaResourceNotForwarded)` | The command needs a service other than Resource Manager. |
 | `(OrkaNotAuthorized)` | No prompt is running, or the Task does not allow the forwarding Tool. |
 | `(OrkaConnectionRequired)` | The person who asked has no usable linked account: none, expired, revoked, or changed since the Task started. The message names the `orka connect` command; run it, then run the Task again. |
-| `(OrkaToolRefused)` or `(OrkaBrokerError)` | The controller refused or could not complete the call: for example, the identity is disabled or the policy changed. For an agent identity, the `agent-identity-audit` log says why. |
+| `(OrkaToolRefused)` or `(OrkaBrokerError)` | The controller refused or could not complete the call: for example, the identity is disabled, the policy changed, or a write used a `readOnly` link. For an agent identity, the `agent-identity-audit` log says why. |
 | `(AuthorizationFailed)` | Azure refused the identity. Give it a role on the scope you are reading. |
 | `Please run 'az login'` | The Agent's toolbox is not this wrapper, or the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |

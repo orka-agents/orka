@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -17,6 +18,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -137,8 +139,11 @@ func randomSerial() *big.Int {
 
 // azureGateway serves az for one RuntimeSession.
 type azureGateway struct {
-	session        *mcpProxySession
-	toolName       string
+	session  *mcpProxySession
+	toolName string
+	// writeToolName carries the Tool's writes, or is empty when the Tool
+	// forwards reads only.
+	writeToolName  string
 	origin         string
 	listener       net.Listener
 	server         *http.Server
@@ -146,29 +151,144 @@ type azureGateway struct {
 	identityHeader string
 	tokenSecret    string
 	closeOnce      sync.Once
+	// throttled counts, per write call ID, the throttled answers Azure gave
+	// it. Azure did not process a throttled request, so the client's retry
+	// is a new attempt under a new call ID rather than a replay.
+	throttledMu sync.Mutex
+	throttled   map[string]int
+	// writePrompts records, per write call ID, the prompt that first sent
+	// it. Its retries share that ID, but the broker scopes a call to its
+	// prompt, so a resend during a later prompt would be a second write.
+	writePromptsMu sync.Mutex
+	writePrompts   map[string]harnessv2.PromptID
 }
 
-// azureForwardingTool returns the session's Azure forwarding Tool, if any. A
-// session with two would leave the Tool, and so the identity, az acts as to
-// chance, so it is refused.
-func azureForwardingTool(configuration harnessv2.MCPPolicyConfiguration) (harnessv2.MCPToolDescriptor, bool, error) {
-	var found []harnessv2.MCPToolDescriptor
-	for _, descriptor := range configuration.ToolPolicy.Tools {
-		if descriptor.Forward != nil && descriptor.Forward.Protocol == harnessv2.MCPForwardProtocolAzureResourceManager {
-			found = append(found, descriptor)
+// maxAzureWritePrompts bounds the writes one session remembers. A session
+// forgets none, since a forgotten write could be sent again by a resend in
+// a later prompt; past the bound it refuses new writes instead.
+const maxAzureWritePrompts = 16384
+
+// errAzureWriteFromEarlierPrompt refuses a write first sent during an
+// earlier prompt; errAzureTooManyWrites refuses a write the session cannot
+// remember.
+var (
+	errAzureWriteFromEarlierPrompt = errors.New("the write was first sent during an earlier prompt")
+	errAzureTooManyWrites          = errors.New("the session sent too many writes to remember another")
+)
+
+// admitWrite records the prompt a joinable write is sent under, and refuses
+// it when an earlier prompt already sent it: a later prompt is a different
+// call to the broker, which would send the write again. The session
+// remembers every write for its whole life, which is as long as any az
+// process that could resend one runs.
+func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID) error {
+	g.writePromptsMu.Lock()
+	defer g.writePromptsMu.Unlock()
+	if first, ok := g.writePrompts[callID]; ok {
+		if first != prompt {
+			return errAzureWriteFromEarlierPrompt
 		}
+		return nil
+	}
+	if len(g.writePrompts) >= maxAzureWritePrompts {
+		return errAzureTooManyWrites
+	}
+	if g.writePrompts == nil {
+		g.writePrompts = map[string]harnessv2.PromptID{}
+	}
+	g.writePrompts[callID] = prompt
+	return nil
+}
+
+// maxAzureThrottledWrites bounds the throttled-write memory of one session.
+const maxAzureThrottledWrites = 256
+
+// azureJoinableWritePrefix starts the call ID of a write that retries join.
+const azureJoinableWritePrefix = "az-w-"
+
+// attemptCallID returns the call ID and number of the current attempt of a
+// joinable write: a write Azure throttled is retried as a new attempt.
+func (g *azureGateway) attemptCallID(write bool, callID string) (string, int) {
+	if !write || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
+		return callID, 0
+	}
+	g.throttledMu.Lock()
+	defer g.throttledMu.Unlock()
+	if attempt := g.throttled[callID]; attempt > 0 {
+		return callID + "-a" + strconv.Itoa(attempt), attempt
+	}
+	return callID, 0
+}
+
+// noteAnswer records a throttled answer to a joinable write: Azure did not
+// process that attempt, so the client's retry is sent again as the next one.
+// Only the current attempt's 429 advances it; a late 429 of an earlier
+// attempt, which another request may have joined, never does, so a write
+// that later succeeded is never sent again.
+//
+// It reports false when it cannot record the throttle because the session
+// already tracks its most writes. Tracked writes keep their place, since
+// forgetting one could resend a write that already succeeded, so the
+// caller must answer with an error az does not retry: a retry would only
+// rejoin, and replay, the throttled attempt.
+func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int) bool {
+	if !write || status != http.StatusTooManyRequests || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
+		return true
+	}
+	g.throttledMu.Lock()
+	defer g.throttledMu.Unlock()
+	current, tracked := g.throttled[callID]
+	if current != attempt {
+		return true
+	}
+	if !tracked && len(g.throttled) >= maxAzureThrottledWrites {
+		return false
+	}
+	if g.throttled == nil {
+		g.throttled = map[string]int{}
+	}
+	g.throttled[callID] = current + 1
+	return true
+}
+
+// azureForwardingTool returns the session's Azure forwarding Tool, if any,
+// and the name of its write tool when it allows writes. A session with two
+// Tools would leave the Tool, and so the identity, az acts as to chance, so
+// it is refused, as is a write tool without its Tool.
+func azureForwardingTool(configuration harnessv2.MCPPolicyConfiguration) (harnessv2.MCPToolDescriptor, string, bool, error) {
+	var found []harnessv2.MCPToolDescriptor
+	writes := map[string]bool{}
+	for _, descriptor := range configuration.ToolPolicy.Tools {
+		if descriptor.Forward == nil || descriptor.Forward.Protocol != harnessv2.MCPForwardProtocolAzureResourceManager {
+			continue
+		}
+		if descriptor.Forward.Write {
+			writes[descriptor.Name] = true
+			continue
+		}
+		found = append(found, descriptor)
 	}
 	switch len(found) {
 	case 0:
-		return harnessv2.MCPToolDescriptor{}, false, nil
+		if len(writes) > 0 {
+			return harnessv2.MCPToolDescriptor{}, "", false, errors.New("the session allows an Azure write tool without its forwarding Tool")
+		}
+		return harnessv2.MCPToolDescriptor{}, "", false, nil
 	case 1:
-		return found[0], true, nil
+		writeName := harnessv2.MCPForwardWriteToolName(found[0].Name)
+		if len(writes) > 1 || (len(writes) == 1 && !writes[writeName]) {
+			return harnessv2.MCPToolDescriptor{}, "", false, errors.New("the session allows an Azure write tool that is not its forwarding Tool's")
+		}
+		if !writes[writeName] {
+			writeName = ""
+		}
+		return found[0], writeName, true, nil
 	default:
-		return harnessv2.MCPToolDescriptor{}, false, fmt.Errorf("the session allows %d Azure forwarding tools; allow at most one", len(found))
+		return harnessv2.MCPToolDescriptor{}, "", false, fmt.Errorf("the session allows %d Azure forwarding tools; allow at most one", len(found))
 	}
 }
 
-func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession, descriptor harnessv2.MCPToolDescriptor) (*azureGateway, error) {
+func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession, descriptor harnessv2.MCPToolDescriptor, writeToolName string) (*azureGateway, error) {
 	if descriptor.Forward == nil {
 		return nil, errors.New("not a forwarding tool")
 	}
@@ -193,7 +313,7 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 		return nil, fmt.Errorf("start the Azure gateway listener: %w", err)
 	}
 	gateway := &azureGateway{
-		session: session, toolName: descriptor.Name, origin: origin, listener: listener,
+		session: session, toolName: descriptor.Name, writeToolName: writeToolName, origin: origin, listener: listener,
 		base: "https://" + listener.Addr().String(), identityHeader: identityHeader, tokenSecret: tokenSecret,
 	}
 	gateway.server = &http.Server{
@@ -208,11 +328,11 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 // allows an Azure forwarding Tool, and returns the environment az needs. The
 // gateway closes with the session.
 func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harnessv2.MCPPolicyConfiguration, home string) (map[string]string, error) {
-	descriptor, ok, err := azureForwardingTool(configuration)
+	descriptor, writeToolName, ok, err := azureForwardingTool(configuration)
 	if err != nil || !ok {
 		return nil, err
 	}
-	gateway, err := newAzureGateway(&s.azureAuthority, session, descriptor)
+	gateway, err := newAzureGateway(&s.azureAuthority, session, descriptor, writeToolName)
 	if err != nil {
 		return nil, err
 	}
@@ -359,19 +479,36 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusUnauthorized, "OrkaGatewayUnauthorized", "Run `az login --identity` in this session first.")
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	write := harnessv2.ForwardWriteMethod(r.Method)
+	toolName := g.toolName
+	switch {
+	case write && g.writeToolName == "":
 		writeAzureError(w, http.StatusMethodNotAllowed, "OrkaReadOnly",
-			"Orka forwards only read requests (GET) to Azure Resource Manager; this az command changes or acts on a resource.")
+			"Orka forwards only read requests (GET) to Azure Resource Manager through tool "+strconv.Quote(g.toolName)+
+				"; this az command changes or acts on a resource, which this Task cannot do. Writes need http.forward.writes on that Tool and, for a linked account, a readWrite link.")
 		return
-	}
-	// A chunked request reports an unknown length (-1); it may still carry a
-	// body that forwarding would drop, so only a request known to be empty
-	// passes.
-	if r.ContentLength != 0 {
-		writeAzureError(w, http.StatusBadRequest, "OrkaReadOnly", "Read requests carry no body.")
+	case write:
+		toolName = g.writeToolName
+	case r.Method != http.MethodGet && r.Method != http.MethodHead:
+		writeAzureError(w, http.StatusMethodNotAllowed, "OrkaMethodNotForwarded", "Orka does not forward "+r.Method+" requests.")
 		return
 	}
 	request := harnessv2.MCPForwardRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
+	if write {
+		// az --if-match and --if-none-match guard a write; dropping them
+		// would run it unguarded. Reads keep ignoring them. A header sent
+		// more than once is one list (RFC 9110), so every value is kept: an
+		// If-None-Match cut to its first value would allow an overwrite the
+		// client ruled out.
+		request.IfMatch = strings.Join(r.Header.Values("If-Match"), ", ")
+		request.IfNoneMatch = strings.Join(r.Header.Values("If-None-Match"), ", ")
+	}
+	body, status, code, message := readAzureRequestBody(r, write)
+	if status != 0 {
+		writeAzureError(w, status, code, message)
+		return
+	}
+	request.Body = json.RawMessage(body)
 	if err := request.Validate(); err != nil {
 		writeAzureError(w, http.StatusBadRequest, "OrkaRequestRefused", "Orka refused the request: "+err.Error()+".")
 		return
@@ -381,11 +518,18 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be encoded.")
 		return
 	}
-	callID, err := newAzureCallID()
+	if len(arguments) > harnessv2.MaxMCPArgumentsBytes {
+		writeAzureError(w, http.StatusRequestEntityTooLarge, "OrkaRequestTooLarge",
+			fmt.Sprintf("Orka forwards request bodies up to about %d KiB.", harnessv2.MaxMCPArgumentsBytes>>10))
+		return
+	}
+	baseCallID, err := azureCallID(write, r.Header.Get(azureClientRequestIDHeader), request)
 	if err != nil {
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be identified.")
 		return
 	}
+	callID, attempt := g.attemptCallID(write, baseCallID)
+	joinable := write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix)
 	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
 	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
@@ -396,34 +540,27 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		}
 		defer releaseMCPSlot(g.session.proxy.slots)
 	}
-	response, err := g.session.callBrokeredTool(r.Context(), callID, g.toolName, arguments, true)
+	var admit func(harnessv2.PromptID) error
+	if joinable {
+		admit = func(prompt harnessv2.PromptID) error { return g.admitWrite(baseCallID, prompt) }
+	}
+	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true, admit)
 	if err != nil {
-		switch {
-		case errors.Is(err, errMCPSessionAtCapacity):
-			w.Header().Set("Retry-After", "1")
-			writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")
-		case errors.Is(err, errMCPCallNotAuthorized):
-			writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
-				"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(g.toolName)+".")
-		default:
-			writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
-		}
+		writeAzureCallError(w, err, write, toolName)
 		return
 	}
 	if response.IsError {
-		if brokerErrorCode(response.Result) == harnessv2.MCPToolErrorCodeConnectionRequired {
-			// The broker's message already says who must do what; the agent
-			// should not retry or try to sign az in itself.
-			writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired",
-				brokerErrorMessage(response.Result)+". Retrying or running az login will not help.")
-			return
-		}
-		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
+		writeAzureToolError(w, write, response.Result)
 		return
 	}
 	forwarded, err := harnessv2.DecodeMCPForwardResponse(response.Result)
 	if err != nil {
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
+		return
+	}
+	if !g.noteAnswer(write, baseCallID, attempt, forwarded.Status) {
+		writeAzureError(w, http.StatusConflict, "OrkaThrottled",
+			"Azure throttled the request and did not process it, and this session already tracks its most throttled writes. Run the command again later.")
 		return
 	}
 	for name, value := range forwarded.Headers {
@@ -444,10 +581,59 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(forwarded.Status)
 		return
 	}
-	body := g.rewriteBody(forwarded.Body)
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	answer := g.rewriteBody(forwarded.Body)
+	w.Header().Set("Content-Length", strconv.Itoa(len(answer)))
 	w.WriteHeader(forwarded.Status)
-	_, _ = io.WriteString(w, body)
+	_, _ = io.WriteString(w, answer)
+}
+
+// writeAzureCallError answers a request whose broker call failed before it
+// returned an answer.
+func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName string) {
+	switch {
+	case errors.Is(err, errAzureWriteFromEarlierPrompt):
+		writeAzureError(w, http.StatusConflict, "OrkaResendRefused",
+			"Orka received this request during an earlier turn and did not send it again. Check the resource before running the command again.")
+	case errors.Is(err, errAzureTooManyWrites):
+		writeAzureError(w, http.StatusConflict, "OrkaResendRefused",
+			"This session sent too many writes for Orka to tell a retry from a new request; it did not send this one. Start a new session to write again.")
+	case errors.Is(err, errMCPSessionAtCapacity):
+		w.Header().Set("Retry-After", "1")
+		writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")
+	case errors.Is(err, errMCPCallNotAuthorized):
+		writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
+			"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
+	case write:
+		// The broker records a failed write as an unknown outcome, so a
+		// retry could only replay that; a 5xx would make az retry it.
+		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+			"The request may have reached Azure. Check the resource before repeating it.")
+	default:
+		writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
+	}
+}
+
+// writeAzureToolError answers a request the broker answered with a tool
+// error. A decided or possibly delivered write gets a status az does not
+// retry, since a retry could only replay the recorded outcome.
+func writeAzureToolError(w http.ResponseWriter, write bool, result json.RawMessage) {
+	code, message := brokerErrorCode(result), brokerErrorMessage(result)
+	switch {
+	case code == harnessv2.MCPToolErrorCodeConnectionRequired:
+		// The broker's message already says who must do what; the agent
+		// should not retry or try to sign az in itself.
+		writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired", message+". Retrying or running az login will not help.")
+	case code == "approval_declined" || code == "approval_expired" || code == "approval_cancelled" || code == "approval_stale":
+		writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted", "Orka did not send the request: "+message)
+	case code == "tool_failed_without_effect":
+		writeAzureError(w, http.StatusForbidden, "OrkaToolRefused", "Orka refused the request without sending it: "+message)
+	case code == "tool_outcome_unknown" || (write && code == "tool_execution_failed"):
+		// A failed execution was delivered, so a write may have reached Azure.
+		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+			"The request may have reached Azure. Check the resource before repeating it.")
+	default:
+		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+message+".")
+	}
 }
 
 // azureNextLinkFields are the paging fields Resource Manager responses use.
@@ -523,12 +709,63 @@ func brokerErrorCode(result json.RawMessage) string {
 	return failure.Code
 }
 
-func newAzureCallID() (string, error) {
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
+// azureClientRequestIDHeader names the request ID the Azure SDK sets once per
+// operation and keeps across its retries.
+const azureClientRequestIDHeader = "X-Ms-Client-Request-Id"
+
+// maxAzureRequestBodyBytes bounds a write's body so its arguments fit the
+// broker's argument limit.
+const maxAzureRequestBodyBytes = harnessv2.MaxMCPArgumentsBytes - 8<<10
+
+// readAzureRequestBody reads a write's JSON body. A read carries none: a
+// chunked request reports an unknown length (-1) and may still carry one
+// that forwarding would drop, so only a read known to be empty passes. It
+// returns a nonzero status, with an error code and message, to refuse.
+func readAzureRequestBody(r *http.Request, write bool) (string, int, string, string) {
+	if !write {
+		if r.ContentLength != 0 {
+			return "", http.StatusBadRequest, "OrkaReadOnly", "Read requests carry no body."
+		}
+		return "", 0, "", ""
 	}
-	return "az-" + hex.EncodeToString(raw), nil
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAzureRequestBodyBytes+1))
+	if err != nil {
+		return "", http.StatusBadRequest, "OrkaRequestRefused", "The request body could not be read."
+	}
+	if len(raw) > maxAzureRequestBodyBytes {
+		return "", http.StatusRequestEntityTooLarge, "OrkaRequestTooLarge",
+			fmt.Sprintf("Orka forwards request bodies up to %d KiB.", maxAzureRequestBodyBytes>>10)
+	}
+	if len(raw) == 0 {
+		return "", 0, "", ""
+	}
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		return "", http.StatusUnsupportedMediaType, "OrkaRequestRefused", "Orka forwards only JSON request bodies."
+	}
+	return string(raw), 0, "", ""
+}
+
+// azureCallID names one forwarded request. A read gets a fresh ID. A write
+// with the SDK's request ID gets an ID derived from it and the request, so a
+// retry of the same write joins its pending approval or recorded result
+// instead of writing twice; a write without one is never joined.
+func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwardRequest) (string, error) {
+	clientRequestID = strings.TrimSpace(clientRequestID)
+	if !write || clientRequestID == "" {
+		raw := make([]byte, 16)
+		if _, err := rand.Read(raw); err != nil {
+			return "", err
+		}
+		return "az-" + hex.EncodeToString(raw), nil
+	}
+	// The digest below makes the call ID joinable: retries of the same
+	// write share it.
+	body := sha256.Sum256([]byte(request.Body))
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"orka.azure-gateway.write.v1", clientRequestID, request.Method, request.Path, request.Query, hex.EncodeToString(body[:]),
+		request.IfMatch, request.IfNoneMatch,
+	}, "\x00")))
+	return azureJoinableWritePrefix + hex.EncodeToString(digest[:16]), nil
 }
 
 func constantTimeEqual(got, want string) bool {

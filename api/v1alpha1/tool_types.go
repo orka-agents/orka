@@ -106,8 +106,9 @@ type HTTPExecution struct {
 	// runtime uses, instead of a function the model calls. The runtime serves
 	// the client's protocol on loopback and sends each request through the
 	// broker to this Tool's origin, where the outbound access policy supplies
-	// the credential. The client never holds it. Only read requests (GET and
-	// HEAD) are forwarded, and the Tool is not listed to the model.
+	// the credential. The client never holds it. Read requests (GET and HEAD)
+	// are forwarded; writes only when Writes is set. The Tool is not listed to
+	// the model.
 	// +optional
 	Forward *HTTPForward `json:"forward,omitempty"`
 }
@@ -128,6 +129,42 @@ const (
 type HTTPForward struct {
 	// Protocol is the client protocol the runtime serves.
 	Protocol HTTPForwardProtocol `json:"protocol"`
+
+	// Writes lets the client send write requests (PUT, PATCH, DELETE, and
+	// POST) through this Tool, each recorded as an external effect. Without
+	// it only reads are forwarded. On a ConnectorProvider tool it grants
+	// writes to the matching Tool through readWrite links; the Tool's own
+	// approval setting governs them.
+	// +optional
+	Writes *HTTPForwardWrites `json:"writes,omitempty"`
+}
+
+// HTTPForwardWriteApproval decides whether a forwarded write waits for a
+// person's approval.
+// +kubebuilder:validation:Enum=Required;None
+type HTTPForwardWriteApproval string
+
+const (
+	// HTTPForwardWriteApprovalRequired holds each write until a person
+	// approves it.
+	HTTPForwardWriteApprovalRequired HTTPForwardWriteApproval = "Required"
+	// HTTPForwardWriteApprovalNone sends writes without approval; the
+	// credential's own permissions are the only limit.
+	HTTPForwardWriteApprovalNone HTTPForwardWriteApproval = "None"
+)
+
+// HTTPForwardWrites configures forwarded writes.
+type HTTPForwardWrites struct {
+	// Approval decides whether each write waits for a person's approval.
+	// +kubebuilder:default=Required
+	// +optional
+	Approval HTTPForwardWriteApproval `json:"approval,omitempty"`
+}
+
+// WriteApprovalRequired reports whether forwarded writes wait for approval.
+// An unset approval is Required.
+func (w *HTTPForwardWrites) WriteApprovalRequired() bool {
+	return w == nil || w.Approval != HTTPForwardWriteApprovalNone
 }
 
 // LocalObjectReference selects an object in the same namespace.
@@ -305,6 +342,9 @@ type ToolActorStatus struct {
 // resolve that name to its own tool and never create the forwarding gateway.
 // TestForwardingToolNamesCoverTheBrokeredBuiltIns keeps the list complete.
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name in ['bash','edit','glob','grep','read','webfetch','websearch','write','check_messages','check_pull_request_ci','comment_on_issue','create_pull_request','delegate_task','get_issue','list_connections','list_issues','list_pull_requests','post_review_comment','propose_memory','recall_memory','remember','reply_in_conversation','review_pull_request','run_validation','search_transcript','send_message','wait_for_tasks','web_fetch','web_search'])",message="a forwarding tool must not share a name with a built-in tool"
+// A write tool is named after its Tool with the ":write" suffix, and tool
+// names are limited to 253 bytes.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !has(self.spec.http.forward.writes) || size(self.metadata.name) <= 247",message="a forwarding tool that allows writes must have a name of at most 247 characters"
 type Tool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,9 +41,10 @@ func toolForwardProtocol(tool *corev1alpha1.Tool) corev1alpha1.HTTPForwardProtoc
 	return tool.Spec.HTTP.Forward.Protocol
 }
 
-// prepareForwardRequest builds the request a forwarding Tool call names: a
-// read on the Tool's own origin, with no body and no headers from the call.
-// The outbound access policy then adds the credential as for any Tool.
+// prepareForwardRequest builds the request a forwarding Tool call names on the
+// Tool's own origin: a read, or, through the Tool's write tool, a write with
+// its JSON body. No headers come from the call. The outbound access policy
+// then adds the credential as for any Tool.
 func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
 	if !e.forwarding {
 		return preparedToolRequest{}, fmt.Errorf("tool %q forwards a command-line client's requests and runs only through an ACP runtime", tool.Name)
@@ -59,15 +61,36 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
+	// A write runs only as the write tool of a Tool that allows writes: the
+	// broker hands the write tool its Tool with the write class.
+	write := harnessv2.ForwardWriteMethod(request.Method)
+	if write != (tool.Spec.BrokeredToolClass == corev1alpha1.AgentRuntimeBrokeredToolClassWrite) ||
+		(write && tool.Spec.HTTP.Forward.Writes == nil) {
+		return preparedToolRequest{}, fmt.Errorf("tool %q does not forward %s requests", tool.Name, request.Method)
+	}
 	target, err := request.Target(httpConfig.URL)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, request.Method, target.String(), nil)
+	var body io.Reader
+	if len(request.Body) > 0 {
+		body = bytes.NewReader(request.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, request.Method, target.String(), body)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to create forwarded request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if len(request.Body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	// A guarded write keeps its precondition, or it would run unguarded.
+	if request.IfMatch != "" {
+		req.Header.Set("If-Match", request.IfMatch)
+	}
+	if request.IfNoneMatch != "" {
+		req.Header.Set("If-None-Match", request.IfNoneMatch)
+	}
 	prepared := preparedToolRequest{httpConfig: httpConfig, request: req, forward: true}
 	if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 		return preparedToolRequest{}, err
