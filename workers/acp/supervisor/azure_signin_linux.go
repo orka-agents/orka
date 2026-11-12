@@ -4,6 +4,7 @@ package supervisor
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 
 	"golang.org/x/sys/unix"
@@ -26,11 +27,15 @@ func asSessionChild(uid, gid int, fn func() error) error {
 		// Drop the supervisor's supplementary groups on this thread, as
 		// session children are started without any. The raw call changes
 		// only this thread; syscall.Setgroups would change every thread.
+		// Only an unprivileged process acting as itself, which changes no
+		// identity at all, may keep its own groups; any other refusal
+		// fails closed.
 		if _, _, errno := unix.RawSyscall(unix.SYS_SETGROUPS, 0, 0, 0); errno != 0 {
-			result <- fmt.Errorf("drop the supervisor's groups: %w", errno)
-			return
-		}
-		if groups, err := unix.Getgroups(); err != nil || len(groups) != 0 {
+			if errno != unix.EPERM || os.Geteuid() == 0 || uid != os.Geteuid() || gid != os.Getegid() {
+				result <- fmt.Errorf("drop the supervisor's groups: %w", errno)
+				return
+			}
+		} else if groups, err := unix.Getgroups(); err != nil || len(groups) != 0 {
 			result <- fmt.Errorf("the thread kept supplementary groups %v: %v", groups, err)
 			return
 		}

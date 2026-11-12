@@ -101,3 +101,20 @@ func mustGetgroups(t *testing.T) []int {
 	}
 	return groups
 }
+
+// An unprivileged process may act as itself, as the gateway fixtures do,
+// but cannot take any other identity: the switch fails closed rather than
+// running fn as the caller.
+func TestAsSessionChildWithoutPrivilegeActsOnlyAsItself(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs an unprivileged user")
+	}
+	ran := false
+	if err := asSessionChild(os.Geteuid(), os.Getegid(), func() error { ran = true; return nil }); err != nil || !ran {
+		t.Fatalf("acting as itself = %v, ran %v", err, ran)
+	}
+	ran = false
+	if err := asSessionChild(os.Geteuid()+1, os.Getegid()+1, func() error { ran = true; return nil }); err == nil || ran {
+		t.Fatalf("taking another identity = %v, ran %v", err, ran)
+	}
+}
