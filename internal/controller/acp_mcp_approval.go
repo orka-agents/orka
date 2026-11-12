@@ -283,7 +283,14 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	action := "Execute " + call.Request.Call.ToolName
-	if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// The approver sees the forwarded request itself, not only the tool.
+		var request harnessv2.MCPForwardRequest
+		if json.Unmarshal(call.Request.Call.Arguments, &request) == nil && request.Method != "" && request.Path != "" {
+			path, _, _ := events.RedactAndTruncateExecutionEventText(request.Path, 300)
+			action = "Send " + request.Method + " " + path + " via " + call.Request.Call.ToolName
+		}
+	} else if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
 		var args struct {
 			Name      json.RawMessage `json:"name"`
 			ToolName  json.RawMessage `json:"toolName"`
@@ -307,6 +314,16 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	target.ApprovalID = call.ID
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// A request body can carry a secret under any field name, such as a
+		// function key's value, so reviewers see its fields, not its values.
+		masked, maskErr := approvals.NewApprovalTarget(call.Task.Namespace, call.Task.Name, call.Task.UID,
+			call.Request.Call.ToolName, maskForwardedWriteArguments(call.Request.Call.Arguments), action, "", "warning", specDigest)
+		if maskErr != nil {
+			return maskErr
+		}
+		target.TargetArgsPreview = masked.TargetArgsPreview
+	}
 	// Runtime call IDs can contain private text that generic redaction misses.
 	binding := approvalCallBinding(call)
 	_, err = b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
@@ -817,13 +834,8 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	callCtx, stopPrompt := b.watchPromptAuthority(callCtx, call.Request, false)
 	defer stopPrompt()
 	result, executeErr := prepared(withACPMCPAuthenticatedTask(callCtx, credentials.Task))
-	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
-		// Nothing reached the remote system, so the failure is final whatever
-		// happened to the prompt's authority meanwhile. A receipt that cannot
-		// be recorded leaves the outcome unknown below, as the record shows.
-		if failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect); err == nil {
-			return failure, false, nil
-		}
+	if failure, ok := b.failCallWithoutEffect(ctx, call, credentials, effect, executeErr); ok {
+		return failure, false, nil
 	}
 	if executeErr == nil {
 		executeErr = callCtx.Err()
@@ -834,12 +846,15 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	if executeErr == nil {
 		result, executeErr = canonicalMCPApprovalResult(result)
 	}
+	// The caller gets the answer; the record and its event keep what they may.
+	kept := result
 	if executeErr == nil {
+		kept = forwardedWriteKeptResult(call.Descriptor, result)
 		_, executeErr = b.Effects.TransitionExternalEffect(callCtx, store.ExternalEffectTransition{
 			ID: claimed.ID, Fence: credentials.ControllerFence, ExpectedVersion: claimed.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectSucceeded,
 			RequestDigest: call.RequestDigest, ExpectedLeaseOwner: leaseOwner,
-			Response: result, ResponseDigest: store.CanonicalBytesDigest(result), UpdatedAt: time.Now().UTC(),
+			Response: kept, ResponseDigest: store.CanonicalBytesDigest(kept), UpdatedAt: time.Now().UTC(),
 		})
 	}
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
@@ -858,17 +873,47 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	}
 	// The result commit was acknowledged. A failed event projection must not
 	// replace that receipt with a transport error; recovery repairs the event.
-	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", result)
+	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", kept)
 	return result, false, nil
 }
 
 // failApprovedCall settles an approved call that failed without effect as a
 // definite failure whose safe summary both the reviewer and the model see.
 func (b *ACPMCPBroker) failApprovedCall(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, cause *tools.NoEffectError) (json.RawMessage, error) {
+	return b.failApprovedCallWithCode(ctx, call, credentials, effect, acpApprovalCodeNoEffect, cause)
+}
+
+// failCallWithoutEffect settles an approved call that provably reached no
+// remote system as failed, and reports whether it did. Nothing was sent, so
+// the failure is final whatever happened to the prompt's authority
+// meanwhile. That is a no-effect error, or Orka's own refusal before sending,
+// such as for a requester link found missing or unusable, which keeps its
+// code and the fix it names for the agent. A tool's response is never taken
+// as such proof. When the receipt cannot be recorded, it reports false and
+// the caller, whose error stays set, settles the outcome as unknown.
+func (b *ACPMCPBroker) failCallWithoutEffect(
+	ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, executeErr error,
+) (json.RawMessage, bool) {
+	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
+		failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect)
+		return failure, err == nil
+	}
+	if refusal, ok := errors.AsType[*acpMCPRefusedWithoutEffect](executeErr); ok {
+		failure, err := b.failApprovedCallWithCode(ctx, call, credentials, effect, refusal.Code,
+			&tools.NoEffectError{Summary: refusal.Reason, Err: refusal})
+		return failure, err == nil
+	}
+	return nil, false
+}
+
+// failApprovedCallWithCode settles an approved call that had no effect as
+// failed, under code: the generic no-effect code, or a refusal's own, such
+// as connection_required, whose guidance the agent relays.
+func (b *ACPMCPBroker) failApprovedCallWithCode(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, code string, cause *tools.NoEffectError) (json.RawMessage, error) {
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer stop()
 	summary := acpApprovalFailureSummary(cause.Summary)
-	failure := acpApprovalResult(call.ID, acpApprovalCodeNoEffect, summary)
+	failure := acpApprovalResult(call.ID, code, summary)
 	if err := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, effect.Identity, store.ExternalEffectFailed, failure); err != nil {
 		return nil, err
 	}

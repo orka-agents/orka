@@ -180,6 +180,11 @@ type ToolBinding struct {
 	URL    string
 	Method string
 	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
+	// Forward is the forwarding protocol of a forwarding Tool, or empty. A
+	// forwarding Tool matches only a forwarding declaration of the same
+	// protocol; its request method comes from the call, so the declared
+	// method is not compared.
+	Forward corev1alpha1.HTTPForwardProtocol
 	// Builtin marks an Orka built-in tool the controller executes itself.
 	// It matches only a Builtin declaration of the same name and class; a
 	// built-in carries no destination, headers, schema, or timeout to compare.
@@ -471,10 +476,26 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if toolMethod == "" {
 			toolMethod = http.MethodPost
 		}
-		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || toolMethod != method {
+		declaredForward := corev1alpha1.HTTPForwardProtocol("")
+		if candidate.HTTP.Forward != nil {
+			declaredForward = candidate.HTTP.Forward.Protocol
+		}
+		if declaredForward != tool.Forward {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the forwarding declared by provider %q", name, provider.Name)
+		}
+		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || (tool.Forward == "" && toolMethod != method) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
 		}
-		if string(candidate.Class) != string(tool.Class) {
+		// A forwarding Tool's writes run as class write, but the provider
+		// declares the forwarding tool as a read that also allows writes, so
+		// a write matches only a declaration that grants them, and is judged
+		// as a write from here on (a readWrite link, readWrite scopes).
+		if tool.Forward != "" && tool.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite {
+			if candidate.Class != corev1alpha1.ConnectorToolClassRead || candidate.HTTP.Forward.Writes == nil {
+				return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q writes, which provider %q does not declare for it", name, provider.Name)
+			}
+			candidate.Class = corev1alpha1.ConnectorToolClassWrite
+		} else if string(candidate.Class) != string(tool.Class) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q class does not match the class declared by provider %q", name, provider.Name)
 		}
 		if !sameStaticHeaders(candidate.HTTP.Headers, tool.Headers) {
@@ -635,8 +656,9 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	}
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
-		if reason := r.unfrozenConnectionReason(ctx, policy.Namespace, providerName, requester); reason != "" {
-			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(reason)
+		if refusal := r.unfrozenConnectionRefusal(ctx, policy.Namespace, providerName, requester); refusal != nil {
+			r.describeConnectionRefusal(ctx, refusal, policy.Namespace, providerName, nil)
+			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, refusal
 		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
@@ -669,6 +691,13 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 		Tool:      req.Tool,
 	})
 	if err != nil {
+		if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
+			// A shared refresh hands every waiter the same error, so describe
+			// a copy this caller owns.
+			described := *refusal
+			r.describeConnectionRefusal(ctx, &described, policy.Namespace, providerName, provider)
+			err = &described
+		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("resolve connection credential: %w", err)
 	}
 	if strings.TrimSpace(credential.AccessToken) == "" {
@@ -680,21 +709,20 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	return credential, declared, nil
 }
 
-// unfrozenConnectionReason explains why the Task carries no Connection of
+// unfrozenConnectionRefusal explains why the Task carries no Connection of
 // the requester's for a provider, from the state of their links now: none,
 // several, or one that is expired, not Ready, or Ready but not bound (for
 // example consent or granted scopes that did not match the provider when the
-// Task was bound). It reads only, and returns "" when it cannot tell, so the
+// Task was bound). It reads only, and returns nil when it cannot tell, so the
 // caller keeps its generic refusal.
-func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) string {
+func (r *KubernetesResolver) unfrozenConnectionRefusal(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) *ConnectionRequiredError {
 	if r.Reader == nil {
-		return ""
+		return nil
 	}
 	connections := &corev1alpha1.ConnectionList{}
 	if err := r.Reader.List(ctx, connections, client.InNamespace(namespace)); err != nil {
-		return ""
+		return nil
 	}
-	relink := fmt.Sprintf("link it with `orka connect %s` and run the Task again", provider)
 	var links []*corev1alpha1.Connection
 	for i := range connections.Items {
 		connection := &connections.Items[i]
@@ -705,19 +733,35 @@ func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, names
 	}
 	switch {
 	case len(links) == 0:
-		return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
+		return &ConnectionRequiredError{Kind: ConnectionNotLinked}
 	case len(links) > 1:
-		return fmt.Sprintf("the requester has %d links to %q and none is bound while that is ambiguous; keep one and run the Task again",
-			len(links), provider)
+		return &ConnectionRequiredError{Kind: ConnectionAmbiguous, Links: len(links)}
 	}
 	switch state := links[0].Status.State; state {
 	case corev1alpha1.ConnectionStateExpired:
-		return fmt.Sprintf("the requester's link to %q is expired; %s", provider, relink)
+		return &ConnectionRequiredError{Kind: ConnectionExpired}
 	case corev1alpha1.ConnectionStateReady:
-		return fmt.Sprintf("the requester's link to %q is Ready but is not bound to this Task; "+
-			"check that its consent and granted scopes match the provider, then run the Task again", provider)
+		return &ConnectionRequiredError{Kind: ConnectionNotBound}
 	default:
-		return fmt.Sprintf("the requester's link to %q is not Ready (%s); %s", provider, state, relink)
+		return &ConnectionRequiredError{Kind: ConnectionNotReady, State: state}
+	}
+}
+
+// describeConnectionRefusal names the provider in a refusal so its message
+// gives the exact command. The display name is best effort: provider may be
+// nil, and a failed read leaves the resource name.
+func (r *KubernetesResolver) describeConnectionRefusal(
+	ctx context.Context, refusal *ConnectionRequiredError, namespace, providerName string, provider *corev1alpha1.ConnectorProvider,
+) {
+	refusal.Provider, refusal.Namespace = providerName, namespace
+	if provider == nil && r.Reader != nil {
+		candidate := &corev1alpha1.ConnectorProvider{}
+		if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: providerName}, candidate); err == nil {
+			provider = candidate
+		}
+	}
+	if provider != nil {
+		refusal.DisplayName = strings.TrimSpace(provider.Spec.DisplayName)
 	}
 }
 
@@ -947,11 +991,19 @@ func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context,
 	if !ok || !bound || req.Requester == nil {
 		return errors.New("the Task has no requester Connection frozen for the policy")
 	}
-	return checker.RequireLiveConnection(ctx, ConnectionCredentialRequest{
+	err := checker.RequireLiveConnection(ctx, ConnectionCredentialRequest{
 		Namespace: policy.Namespace, Provider: provider,
 		Issuer: req.Requester.Issuer, Subject: req.Requester.Subject,
 		Frozen: frozen, Tool: req.Tool,
 	})
+	if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
+		// Describe a copy, as the credential path does, so the agent is told
+		// how the person relinks.
+		described := *refusal
+		r.describeConnectionRefusal(ctx, &described, policy.Namespace, provider, nil)
+		return &described
+	}
+	return err
 }
 
 var errDelegationExpired = errors.New("the delegation has expired; the requester must act again for the Agent to act for them")

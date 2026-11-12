@@ -273,7 +273,10 @@ listed, marked `providerMissing` and never ready, until the person
 disconnects it. An agent that needs an account the person
 has not linked should say so and point them at **Settings › Connectors**,
 or at `orka connect <provider> --namespace <namespace>` when there is no dashboard, rather than try
-another credential. The tool is available to chat, to the
+another credential. In an ACP runtime, a linked-account tool called without a usable link (none,
+not Ready, expired, or changed since the Task started) sends nothing and
+returns an error result with code `connection_required` whose message names
+the provider and what to do; the controller logs the same reason. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
 broker; a Task without a verified requester gets an explicit "no identity"
 result. The tool exists only while `--connectors-enabled` is set: without

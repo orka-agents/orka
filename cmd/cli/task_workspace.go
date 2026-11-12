@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"unicode/utf8"
@@ -413,7 +414,7 @@ session generation, verified remote commit) for tracing a problem.`,
 				return printTaskRuntimeStatusTable(cmd, status)
 			}
 			writeIntent := strings.EqualFold(nestedString(*detail, "spec", "workspace", "intent"), string(corev1alpha1.WorkspaceIntentWrite))
-			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), writeIntent)
+			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), taskWaitingOn(*detail), writeIntent)
 		},
 	}
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show execution and runtime-pool details as well")
@@ -425,7 +426,7 @@ session generation, verified remote commit) for tracing a problem.`,
 // creating a Task: whether it finished, and where the change went. Delivery
 // rows appear only for write-intent workspaces (or once delivery status
 // exists), and a failed or unknown outcome shows its reason.
-func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason string, writeIntent bool) error {
+func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason, waitingOn string, writeIntent bool) error {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
@@ -433,6 +434,9 @@ func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, re
 	rows := [][2]string{
 		{labelTask, anyString(status[cliTaskCommand])},
 		{labelPhase, anyString(status["phase"])},
+	}
+	if waitingOn != "" {
+		rows = append(rows, [2]string{labelWaitingOn, waitingOn})
 	}
 	if writeIntent || len(delivery) > 0 {
 		rows = append(rows,
@@ -504,6 +508,11 @@ func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
+	// A Task awaiting approval stays Running, so the action it waits on is
+	// reported in every output, not only the default summary.
+	if waitingOn := taskWaitingOn(task); waitingOn != "" {
+		out["waitingOn"] = waitingOn
+	}
 	if execution := nestedMap(status, "execution"); len(execution) > 0 {
 		out["execution"] = copyKeys(execution,
 			"state", "outcome", "reason", "attempt", "promptID", "runtimePoolName", "runtimePoolUID",
@@ -540,6 +549,9 @@ func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) erro
 		{"Delivery message", anyString(delivery["message"])},
 		{labelPublicationBranch, anyString(delivery["branch"])},
 		{"Verified remote", compactCLIValue(anyString(delivery["verifiedRemoteSHA"]))},
+	}
+	if waitingOn := anyString(status["waitingOn"]); waitingOn != "" {
+		rows = slices.Insert(rows, 3, [2]string{labelWaitingOn, waitingOn})
 	}
 	for _, row := range rows {
 		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
