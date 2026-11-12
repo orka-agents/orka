@@ -166,19 +166,21 @@ func TestExternalRuntimeEgressProviderTokenInjectionShape(t *testing.T) {
 	if got, err := externalRuntimeProviderTokenInjection(request); err != nil || got == nil || *got != *injection {
 		t.Fatalf("admitted injection = %#v, %v", got, err)
 	}
-	for name, controllerURL := range map[string]string{
-		"shared host":      "http://provider-auth-proxy.orka-system.svc:9090",
-		"shared origin":    "http://provider-auth-proxy.orka-system.svc:8080/api",
-		"TLS proxy origin": "",
+	const sharedHostRefusal = "requires a provider proxy host that the controller API does not share"
+	for name, tc := range map[string]struct {
+		controllerURL, proxyURL, refusal string
+	}{
+		"shared host":      {controllerURL: "http://provider-auth-proxy.orka-system.svc.cluster.local:9090", refusal: sharedHostRefusal},
+		"shared origin":    {controllerURL: "http://provider-auth-proxy.orka-system.svc.cluster.local:8080/api", refusal: sharedHostRefusal},
+		"TLS proxy origin": {controllerURL: "https://orka-api.orka-system.svc.cluster.local", proxyURL: "https://provider-auth-proxy.orka-system.svc.cluster.local", refusal: "requires an http provider proxy origin"},
 	} {
-		r := &RuntimePoolReconciler{ControllerAPIURL: controllerURL}
+		r := &RuntimePoolReconciler{ControllerAPIURL: tc.controllerURL}
 		cfg := cfg
-		if controllerURL == "" {
-			r.ControllerAPIURL = "https://orka-api.orka-system.svc.cluster.local"
-			cfg.providerProxy.baseURL = "https://provider-auth-proxy.orka-system.svc.cluster.local"
+		if tc.proxyURL != "" {
+			cfg.providerProxy.baseURL = tc.proxyURL
 		}
-		if _, err := r.externalRuntimeEgress(cfg, injection); err == nil {
-			t.Errorf("%s: injection was admitted", name)
+		if _, err := r.externalRuntimeEgress(cfg, injection); err == nil || !strings.Contains(err.Error(), tc.refusal) {
+			t.Errorf("%s: want refusal %q, got %v", name, tc.refusal, err)
 		}
 	}
 	for name, mutate := range map[string]func(*workspacev1alpha1.RuntimeEgressCredentialHeader){
