@@ -12,8 +12,10 @@ is better than what runs today, and how to record a person's decision about it.
 **Input**
 
 - **A candidate Agent:** the changed reviewer, as an Agent next to the current one.
-- **Cases:** pull requests with known answers. Orka ships twelve in
-  `test/evals/pr-review/cases.jsonl`: six with a real defect and six clean changes.
+- **Cases:** pull requests with known answers. Orka ships twenty-four in
+  `test/evals/pr-review/cases.jsonl`: twelve with a real defect and twelve clean
+  changes. Split them between training and held-out sets so no pull request is in
+  both.
 - **Graders:** code that scores each review. `verdict` checks the review's decision,
   `localization` checks it points at the defect's lines, `contract` checks the output
   format, and `honesty` checks it doesn't claim tests it never ran.
