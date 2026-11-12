@@ -188,6 +188,13 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
 				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
 			}
+			// The sign-in itself is good, so say what is missing: an
+			// administrator needs this subject to allow the person.
+			if notAllowed, ok := errors.AsType[*oidcSubjectNotAllowedError](err); ok {
+				return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf(
+					"your sign-in is valid, but its subject %q is not allowed to use this Orka installation; ask an administrator to add it to the allowed OIDC subjects",
+					notAllowed.Subject))
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 

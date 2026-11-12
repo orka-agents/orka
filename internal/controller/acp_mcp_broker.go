@@ -42,6 +42,7 @@ type ACPMCPAuthenticatedTask struct {
 	UID          string
 	ParentTaskID string
 	AgentName    string
+	AgentUID     string // frozen by the Task's execution binding, if any
 	SessionName  string
 	Deadline     time.Time
 }
@@ -262,7 +263,7 @@ func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context,
 		return nil, nil, nil, errors.New("authenticated ACP MCP task identity changed")
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
-	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+	if err := bindFrozenConnections(ctx, e.Reader, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return nil, nil, nil, err
 	}
 	// Only a requester the controller key sealed for this Task is handed
@@ -513,9 +514,11 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if identity != nil {
 			executor.SetCheckedPolicy(policyName, *identity)
 		}
+		authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
 		execute = func(callCtx context.Context) (string, error) {
 			execCtx := workerexecutor.WithToolCallID(callCtx, request.Call.CallID)
 			execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
+			execCtx = workerexecutor.WithAgentUID(execCtx, authenticated.AgentUID)
 			result, err := executor.Execute(execCtx, tool, request.Call.Arguments)
 			return result, customToolNoEffectError(err)
 		}
@@ -627,7 +630,7 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
-	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+	if err := bindFrozenConnections(ctx, e.Reader, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return err
 	}
 	return bindVerifiedTaskTransactionAuthority(
@@ -1183,6 +1186,9 @@ func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials
 	if task.Spec.AgentRef != nil {
 		credentials.Task.AgentName = strings.TrimSpace(task.Spec.AgentRef.Name)
 	}
+	if binding := task.Status.AgentExecutionBinding; binding != nil && binding.Agent != nil {
+		credentials.Task.AgentUID = string(binding.Agent.UID)
+	}
 	return credentials, nil
 }
 
@@ -1446,7 +1452,10 @@ func findACPMCPTaskExecution(
 	if execution == nil {
 		return nil, nil, fmt.Errorf("active MCP task was not found")
 	}
-	if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+	// A recorded cancel request stops new calls at once; the Cancelled phase
+	// follows only when the Task is next reconciled.
+	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
+	if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 		return nil, nil, errACPMCPTaskCancelled
 	}
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {

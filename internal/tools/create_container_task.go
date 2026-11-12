@@ -117,7 +117,7 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return result, nil
 	}
 	tracing.StampTaskTraceContext(ctx, task)
-	if err := tc.Client.Create(ctx, task); err != nil {
+	if err := createChatTask(ctx, tc.Client, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
 	sealTaskCreate(ctx, tc, task)

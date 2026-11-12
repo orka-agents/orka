@@ -822,7 +822,13 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 			return nil
 		}
 		const reason = "RuntimeLost"
-		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		message := "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			// A recorded cancel request does not prove the prompt stopped
+			// before leadership changed, so the outcome stays unknown; the
+			// request is carried in the message so it is not lost.
+			message = requested + "; " + message
+		}
 		recoveredAt := time.Now().UTC()
 		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
 			return err
@@ -2126,7 +2132,7 @@ func recoveredTerminalExecutionReasonMessage(
 	case store.PromptExecutionCancelled:
 		state = corev1alpha1.TaskExecutionStateCancelled
 		outcome = corev1alpha1.TaskExecutionOutcomeCancelled
-		defaultReason = "Cancelled"
+		defaultReason = acpCancelledReason
 		defaultMessage = "prompt cancelled"
 	case store.PromptExecutionOutcomeUnknown:
 		state = corev1alpha1.TaskExecutionStateOutcomeUnknown

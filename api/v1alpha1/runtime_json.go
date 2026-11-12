@@ -61,6 +61,16 @@ func (in *AgentCLIRuntime) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (in *AgentRuntimeCeiling) UnmarshalJSON(data []byte) error {
+	type plain AgentRuntimeCeiling
+	var value plain
+	if err := decodeRuntimeJSON(data, &value, "spec.runtime.ceiling"); err != nil {
+		return err
+	}
+	*in = AgentRuntimeCeiling(value)
+	return nil
+}
+
 func (in *TaskStatus) UnmarshalJSON(data []byte) error {
 	type plain TaskStatus
 	var value plain
