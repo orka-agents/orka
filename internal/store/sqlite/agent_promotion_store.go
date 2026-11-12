@@ -43,16 +43,19 @@ func validateAgentPromotion(record *store.AgentPromotionRecord) error {
 		}
 	}
 	switch record.Action {
-	case store.AgentPromotionPromote:
+	case store.AgentPromotionPromote, store.AgentPromotionCanary:
 		if record.DecisionID == "" || record.CandidateRunUID == "" || record.CandidateAgent == nil {
-			return store.ValidationErrorf("agent promotion promote needs decisionID, candidateRunUID and candidateAgent")
+			return store.ValidationErrorf("agent promotion %s needs decisionID, candidateRunUID and candidateAgent", record.Action)
 		}
-	case store.AgentPromotionRollback:
+		if record.Action == store.AgentPromotionCanary && (record.Percent < 1 || record.Percent > 100) {
+			return store.ValidationErrorf("agent promotion canary percent must be 1 to 100")
+		}
+	case store.AgentPromotionRollback, store.AgentPromotionAbort:
 		if record.PromotionID == "" {
-			return store.ValidationErrorf("agent promotion rollback needs promotionID")
+			return store.ValidationErrorf("agent promotion %s needs promotionID", record.Action)
 		}
 	default:
-		return store.ValidationErrorf("agent promotion action must be promote or rollback")
+		return store.ValidationErrorf("agent promotion action must be promote, rollback, canary or abort")
 	}
 	if record.State != store.AgentPromotionPending {
 		return store.ValidationErrorf("agent promotion records start pending")

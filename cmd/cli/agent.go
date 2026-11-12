@@ -38,6 +38,8 @@ func newAgentCmd() *cobra.Command {
 	cmd.AddCommand(newAgentPromoteCmd())
 	cmd.AddCommand(newAgentRollbackCmd())
 	cmd.AddCommand(newAgentPromotionsCmd())
+	cmd.AddCommand(newAgentCanaryCmd())
+	cmd.AddCommand(newAgentAbortCmd())
 	return cmd
 }
 

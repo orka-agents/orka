@@ -312,13 +312,29 @@ as stale and names what changed. Run a new experiment for the changed configurat
 
 ## 8. Roll it out
 
-Promote the approval. The same promoter role grants the `promote` verb on `agents`:
+Start with a canary, then promote the approval. The same promoter role grants the
+`promote` verb on `agents`, which covers every rollout action:
 
 ```bash
-orka eval decisions review-careful         # the approval's decision ID
+orka eval decisions review-careful                         # the approval's decision ID
+orka agent canary reviewer --decision <decision-id> --percent 10
+orka agent promotions reviewer                             # the canary, and every action so far
+orka agent canary reviewer --decision <decision-id> --percent 50   # widen it
 orka agent promote reviewer --decision <decision-id>
-orka agent promotions reviewer             # what was promoted, by whom, and when
 ```
+
+During a canary, each new Session, or review without one, goes to the candidate when a
+hash of its name falls below the percent. A Session keeps the arm it started on, and a
+conversation that was already running stays on the reviewer. EvalRun trials are never
+routed. Before each review goes to the candidate, Orka checks again that the approval
+is current. If that check fails, reviews run on the reviewer and `orka agent promotions`
+shows `RolloutInvalid`. To stop a canary:
+
+```bash
+orka agent abort reviewer --reason "Noisier than the reviewer."
+```
+
+A Session that started on the candidate can't continue after an abort; start a new one.
 
 Promotion writes the candidate's system prompt and model onto the reviewer the
 experiment's baseline ran, and nothing else. A prompt kept in a ConfigMap stays a

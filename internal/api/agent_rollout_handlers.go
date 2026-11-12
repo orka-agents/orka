@@ -19,6 +19,8 @@ import (
 const (
 	AgentRolloutPromote  = "promote"
 	AgentRolloutRollback = "rollback"
+	AgentRolloutCanary   = "canary"
+	AgentRolloutAbort    = "abort"
 )
 
 // AgentPromoter promotes approved candidates onto stable Agents and rolls
@@ -26,13 +28,17 @@ const (
 type AgentPromoter interface {
 	PromoteAgent(ctx context.Context, namespace, agent, decisionID string, actor store.EvalDecisionActor) (*store.AgentPromotionRecord, error)
 	RollbackAgent(ctx context.Context, namespace, agent string, actor store.EvalDecisionActor, reason string) (*store.AgentPromotionRecord, error)
+	CanaryAgent(ctx context.Context, namespace, agent, decisionID string, percent int32, actor store.EvalDecisionActor) (*store.AgentPromotionRecord, error)
+	AbortAgentRollout(ctx context.Context, namespace, agent string, actor store.EvalDecisionActor, reason string) (*store.AgentPromotionRecord, error)
 	ListAgentPromotions(ctx context.Context, namespace, agent string) ([]store.AgentPromotionRecord, error)
+	AgentRollout(ctx context.Context, namespace, agent string) (*corev1alpha1.AgentRolloutStatus, string, error)
 }
 
 // AgentRolloutRequest is the body of POST /api/v1/agents/:name/rollout.
 type AgentRolloutRequest struct {
 	Action     string `json:"action"`
 	DecisionID string `json:"decisionID,omitempty"`
+	Percent    int32  `json:"percent,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 }
 
@@ -120,8 +126,18 @@ func (h *Handlers) RolloutAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, "a rollback takes no decisionID; it reverts the latest promotion")
 		}
 		record, err = h.agentPromoter.RollbackAgent(c.Context(), namespace, name, actor, reason)
+	case AgentRolloutCanary:
+		if strings.TrimSpace(req.DecisionID) == "" || req.Percent < 1 || req.Percent > 100 {
+			return fiber.NewError(fiber.StatusBadRequest, "a canary needs a decisionID and a percent from 1 to 100")
+		}
+		record, err = h.agentPromoter.CanaryAgent(c.Context(), namespace, name, strings.TrimSpace(req.DecisionID), req.Percent, actor)
+	case AgentRolloutAbort:
+		if req.DecisionID != "" {
+			return fiber.NewError(fiber.StatusBadRequest, "an abort takes no decisionID; it ends the running canary")
+		}
+		record, err = h.agentPromoter.AbortAgentRollout(c.Context(), namespace, name, actor, reason)
 	default:
-		return fiber.NewError(fiber.StatusBadRequest, "action must be promote or rollback")
+		return fiber.NewError(fiber.StatusBadRequest, "action must be promote, rollback, canary or abort")
 	}
 	if refusal, ok := errors.AsType[*evals.RolloutRefusal](err); ok {
 		return fiber.NewError(fiber.StatusConflict, refusal.Reason)
@@ -155,5 +171,16 @@ func (h *Handlers) GetAgentPromotions(c fiber.Ctx) error {
 	for _, record := range records {
 		items = append(items, agentPromotionResponse(record))
 	}
-	return c.JSON(fiber.Map{apiFieldItems: items})
+	rollout, invalid, err := h.agentPromoter.AgentRollout(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read the Agent's canary: %v", err))
+	}
+	response := fiber.Map{apiFieldItems: items}
+	if rollout != nil && rollout.Candidate != nil {
+		response["rollout"] = rollout
+	}
+	if invalid != "" {
+		response["rolloutInvalid"] = invalid
+	}
+	return c.JSON(response)
 }

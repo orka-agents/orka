@@ -21,7 +21,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -107,8 +111,9 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	committed := err == nil && agent.UID == types.UID(record.AgentUID) && agent.Annotations[labels.AnnotationPromotionRecord] == record.ID
-	if !committed && err == nil && agent.UID == types.UID(record.AgentUID) && agent.Generation == record.AgentGeneration+1 {
+	committed := err == nil && agent.UID == types.UID(record.AgentUID) && agentCarriesRolloutRecord(agent, record)
+	if !committed && err == nil && writesAgentSpec(record.Action) && agent.UID == types.UID(record.AgentUID) &&
+		agent.Generation == record.AgentGeneration+1 {
 		// The marker is an annotation an Agent editor could change. An Agent
 		// one generation on that holds exactly the target values took this
 		// update too.
@@ -151,22 +156,41 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 		}
 	}
 	// The update committed; record what it wrote rather than reading values
-	// a later edit may have changed.
-	digest, err := agentPromotionDigest(record.Target)
-	if err != nil {
-		return err
+	// a later edit may have changed. A canary or abort writes status only.
+	transition := store.AgentPromotionTransition{
+		Namespace: record.Namespace, ID: record.ID, From: store.AgentPromotionApplying, To: store.AgentPromotionComplete,
+		AppliedGeneration: record.AgentGeneration, UpdatedAt: r.now(),
+	}
+	if writesAgentSpec(record.Action) {
+		digest, err := agentPromotionDigest(record.Target)
+		if err != nil {
+			return err
+		}
+		transition.AppliedGeneration, transition.AppliedDigest = record.AgentGeneration+1, digest
 	}
 	log.Info("Completing an Agent promotion record whose update committed before a restart")
-	reason := ""
-	if agent.Annotations[labels.AnnotationPromotionRecord] != record.ID {
+	if writesAgentSpec(record.Action) && agent.Annotations[labels.AnnotationPromotionRecord] != record.ID {
 		// Said in the log so an audit can tell this from a marked commit.
-		reason = "completed from the Agent's values: one generation on, it holds exactly the target; its promotion marker was missing"
+		transition.Reason = "completed from the Agent's values: one generation on, it holds exactly the target; its promotion marker was missing"
 	}
-	_, err = r.ExperimentStore.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{
-		Namespace: record.Namespace, ID: record.ID, From: store.AgentPromotionApplying, To: store.AgentPromotionComplete,
-		AppliedGeneration: record.AgentGeneration + 1, AppliedDigest: digest, Reason: reason, UpdatedAt: r.now(),
-	})
+	_, err = r.ExperimentStore.TransitionAgentPromotion(ctx, transition)
 	return err
+}
+
+// writesAgentSpec reports whether an action changes the Agent's spec;
+// canary and abort change only its status.
+func writesAgentSpec(action string) bool {
+	return action == store.AgentPromotionPromote || action == store.AgentPromotionRollback
+}
+
+// agentCarriesRolloutRecord reports whether the Agent shows that record's
+// write committed: promote and rollback mark the spec update with an
+// annotation, canary and abort the status update with status.rollout.
+func agentCarriesRolloutRecord(agent *corev1alpha1.Agent, record *store.AgentPromotionRecord) bool {
+	if writesAgentSpec(record.Action) {
+		return agent.Annotations[labels.AnnotationPromotionRecord] == record.ID
+	}
+	return agent.Status.Rollout != nil && agent.Status.Rollout.RecordID == record.ID
 }
 
 func (r *EvalRunReconciler) awaitPromotionRecovery(_ context.Context) error {
@@ -194,6 +218,10 @@ func (r *EvalRunReconciler) beginAgentRolloutAction(ctx context.Context, namespa
 	if err := r.settleOpenAgentPromotions(ctx, namespace, string(agent.UID)); err != nil {
 		unlock()
 		return nil, fmt.Errorf("settle earlier rollout actions on Agent %q: %w", agentName, err)
+	}
+	if err := r.clearPromotedCanary(ctx, agent); err != nil {
+		unlock()
+		return nil, err
 	}
 	return unlock, nil
 }
@@ -313,6 +341,55 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 		return nil, err
 	}
 	defer unlock()
+	approved, err := r.approvedCandidate(ctx, namespace, agentName, decisionID)
+	if err != nil {
+		return nil, err
+	}
+	if rollout := approved.stable.Status.Rollout; rollout != nil && rollout.Candidate != nil && rollout.DecisionID != decisionID {
+		return nil, refuseRollout("Agent %q has a canary of decision %q; promote that decision or abort the canary first",
+			agentName, rollout.DecisionID)
+	}
+	record := approved.record(store.AgentPromotionPromote, actor, r.now())
+	complete, err := r.applyAgentRolloutAction(ctx, approved.stable, record, true, r.writePromotedSpec)
+	if err != nil {
+		return nil, err
+	}
+	// The promoted values are now the Agent's own, so a canary of them ends.
+	// Routing re-verifies every canary, so a failure here only leaves a
+	// rollout that no longer matches its approval and routes nothing.
+	if err := r.clearAgentRollout(ctx, approved.stable, ""); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to clear the canary after a promotion", "agent", agentName)
+	}
+	return complete, nil
+}
+
+// approvedRollout is an approval checked against the live cluster: the
+// stable Agent it changes, the candidate it carries out, and both sets of
+// promotable values.
+type approvedRollout struct {
+	decision          *store.EvalDecisionRecord
+	stable, candidate *corev1alpha1.Agent
+	previous, target  store.AgentPromotionValues
+}
+
+func (a *approvedRollout) record(action string, actor store.EvalDecisionActor, at time.Time) *store.AgentPromotionRecord {
+	return &store.AgentPromotionRecord{
+		SchemaVersion: store.AgentPromotionSchemaVersion, ID: uuid.NewString(), Namespace: a.stable.Namespace,
+		Agent: a.stable.Name, AgentUID: string(a.stable.UID), Action: action, State: store.AgentPromotionPending,
+		DecisionID: a.decision.ID, CandidateRun: a.decision.CandidateRun, CandidateRunUID: a.decision.CandidateRunUID,
+		CandidateAgent: &store.EvalAgentIdentity{Name: a.candidate.Name, UID: string(a.candidate.UID), Generation: a.candidate.Generation},
+		Previous:       a.previous, Target: a.target,
+		AgentResourceVersion: a.stable.ResourceVersion, AgentGeneration: a.stable.Generation,
+		Actor: actor, CreatedAt: at, UpdatedAt: at,
+	}
+}
+
+// approvedCandidate checks an approval can be carried out on the Agent now:
+// the decision is the latest for its experiment and approves, the bound
+// tuple still matches, the Agent is the unchanged baseline, and the
+// candidate is the experiment's own, belongs to the Agent, and differs from
+// it in its system prompt or model and in nothing else.
+func (r *EvalRunReconciler) approvedCandidate(ctx context.Context, namespace, agentName, decisionID string) (*approvedRollout, error) {
 	decision, err := r.ExperimentStore.GetEvalDecision(ctx, namespace, decisionID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, refuseRollout("no decision %q in %s", decisionID, namespace)
@@ -342,26 +419,161 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 		return nil, err
 	}
 	if sameBehavior(previous, target) {
-		return nil, refuseRollout("candidate Agent %q has the same system prompt and model as %q; there is nothing to promote",
+		return nil, refuseRollout("candidate Agent %q has the same system prompt and model as %q; there is nothing to roll out",
 			candidate.Name, stable.Name)
 	}
 	// reflect, not Semantic: an empty list and an omitted one differ, as a
 	// tool list does to the runtime.
 	if !reflect.DeepEqual(comparableAgentSpec(candidate.Spec), comparableAgentSpec(stable.Spec)) {
-		return nil, refuseRollout("candidate Agent %q differs from %q in more than its system prompt and model; only those are promoted",
+		return nil, refuseRollout("candidate Agent %q differs from %q in more than its system prompt and model; only those are rolled out",
 			candidate.Name, stable.Name)
+	}
+	return &approvedRollout{decision: decision, stable: stable, candidate: candidate, previous: previous, target: target}, nil
+}
+
+// CanaryAgent starts a canary, or changes its share: percent of new
+// Sessions and standalone Tasks that name the Agent run on the approved
+// candidate instead. It checks the approval as a promotion does; routing
+// checks it again before every Task it sends to the candidate.
+func (r *EvalRunReconciler) CanaryAgent(ctx context.Context, namespace, agentName, decisionID string, percent int32,
+	actor store.EvalDecisionActor) (*store.AgentPromotionRecord, error) {
+	if err := r.awaitPromotionRecovery(ctx); err != nil {
+		return nil, err
+	}
+	if r.ExperimentStore == nil {
+		return nil, refuseRollout("canaries need the eval experiment store")
+	}
+	if percent < 1 || percent > 100 {
+		return nil, refuseRollout("percent must be 1 to 100")
+	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	approved, err := r.approvedCandidate(ctx, namespace, agentName, decisionID)
+	if err != nil {
+		return nil, err
+	}
+	startedAt := metav1.NewTime(r.now())
+	if running := approved.stable.Status.Rollout; running != nil && running.Candidate != nil {
+		if running.DecisionID != decisionID {
+			return nil, refuseRollout("Agent %q has a canary of decision %q; abort it before starting another", agentName, running.DecisionID)
+		}
+		if running.StartedAt != nil {
+			startedAt = *running.StartedAt
+		}
+	}
+	record := approved.record(store.AgentPromotionCanary, actor, r.now())
+	record.Percent = percent
+	return r.applyAgentRolloutAction(ctx, approved.stable, record, true,
+		func(ctx context.Context, record *store.AgentPromotionRecord) (int64, string, error) {
+			return r.writeAgentRollout(ctx, approved.stable, &corev1alpha1.AgentRolloutStatus{
+				Candidate: &corev1alpha1.EvalObjectIdentity{
+					Name: approved.candidate.Name, UID: approved.candidate.UID, Generation: approved.candidate.Generation,
+				},
+				Percent: percent, DecisionID: record.DecisionID,
+				CandidateRun: &corev1alpha1.EvalObjectIdentity{Name: record.CandidateRun, UID: types.UID(record.CandidateRunUID)},
+				StartedAt:    &startedAt,
+				RecordID:     record.ID,
+			})
+		})
+}
+
+// AbortAgentRollout ends the Agent's canary: new Tasks run on the stable
+// Agent again. A Session that started on the candidate cannot continue and
+// needs a new Session.
+func (r *EvalRunReconciler) AbortAgentRollout(ctx context.Context, namespace, agentName string, actor store.EvalDecisionActor,
+	reason string) (*store.AgentPromotionRecord, error) {
+	if err := r.awaitPromotionRecovery(ctx); err != nil {
+		return nil, err
+	}
+	if r.ExperimentStore == nil {
+		return nil, refuseRollout("canaries need the eval experiment store")
+	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	stable := &corev1alpha1.Agent{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, stable); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, refuseRollout("Agent %q does not exist in %s", agentName, namespace)
+		}
+		return nil, err
+	}
+	rollout := stable.Status.Rollout
+	if rollout == nil || rollout.Candidate == nil {
+		return nil, refuseRollout("Agent %q has no canary to abort", agentName)
 	}
 	at := r.now()
 	record := &store.AgentPromotionRecord{
 		SchemaVersion: store.AgentPromotionSchemaVersion, ID: uuid.NewString(), Namespace: namespace,
-		Agent: stable.Name, AgentUID: string(stable.UID), Action: store.AgentPromotionPromote, State: store.AgentPromotionPending,
-		DecisionID: decision.ID, CandidateRun: decision.CandidateRun, CandidateRunUID: decision.CandidateRunUID,
-		CandidateAgent: &store.EvalAgentIdentity{Name: candidate.Name, UID: string(candidate.UID), Generation: candidate.Generation},
-		Previous:       previous, Target: target,
+		Agent: stable.Name, AgentUID: string(stable.UID), Action: store.AgentPromotionAbort, State: store.AgentPromotionPending,
+		DecisionID: rollout.DecisionID, PromotionID: rollout.RecordID,
 		AgentResourceVersion: stable.ResourceVersion, AgentGeneration: stable.Generation,
-		Actor: actor, CreatedAt: at, UpdatedAt: at,
+		Actor: actor, Reason: strings.TrimSpace(reason), CreatedAt: at, UpdatedAt: at,
 	}
-	return r.applyAgentPromotion(ctx, stable, record, true)
+	if record.PromotionID == "" {
+		record.PromotionID = "unrecorded"
+	}
+	return r.applyAgentRolloutAction(ctx, stable, record, false,
+		func(ctx context.Context, record *store.AgentPromotionRecord) (int64, string, error) {
+			return r.writeAgentRollout(ctx, stable, &corev1alpha1.AgentRolloutStatus{RecordID: record.ID})
+		})
+}
+
+// writeAgentRollout replaces the Agent's status.rollout and clears
+// RolloutInvalid, refusing when the Agent changed since the action read it.
+func (r *EvalRunReconciler) writeAgentRollout(ctx context.Context, stable *corev1alpha1.Agent,
+	rollout *corev1alpha1.AgentRolloutStatus) (int64, string, error) {
+	var changed error
+	// Other writers update the Agent's status too, so a conflict on the
+	// status alone is retried; a changed spec is not.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
+			return err
+		}
+		if current.UID != stable.UID || current.Generation != stable.Generation {
+			changed = apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("agents").GroupResource(), stable.Name,
+				errors.New("the Agent changed since the rollout action read it"))
+			return nil
+		}
+		current.Status.Rollout = rollout
+		meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
+		return r.Status().Update(ctx, current)
+	})
+	if err == nil {
+		err = changed
+	}
+	if err != nil {
+		return 0, "", err
+	}
+	return stable.Generation, "", nil
+}
+
+// clearAgentRollout drops the Agent's canary, keeping recordID.
+func (r *EvalRunReconciler) clearAgentRollout(ctx context.Context, stable *corev1alpha1.Agent, recordID string) error {
+	// A promotion's spec write makes the Agent controller update the status
+	// at the same time, so a conflict here is expected and retried.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
+			return err
+		}
+		if current.Status.Rollout == nil {
+			return nil
+		}
+		id := recordID
+		if id == "" {
+			id = current.Status.Rollout.RecordID
+		}
+		current.Status.Rollout = &corev1alpha1.AgentRolloutStatus{RecordID: id}
+		meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
+		return r.Status().Update(ctx, current)
+	})
 }
 
 // promotionExperimentRun reads the candidate EvalRun a decision names and
@@ -481,6 +693,9 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 	if err != nil {
 		return nil, err
 	}
+	if rollout := stable.Status.Rollout; rollout != nil && rollout.Candidate != nil {
+		return nil, refuseRollout("Agent %q has a canary running; abort it before rolling back", agentName)
+	}
 	// Promotions stack: each rollback reverts the newest promotion still in
 	// effect, and the Agent must hold exactly what the last spec write left.
 	var active []*store.AgentPromotionRecord
@@ -524,16 +739,19 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 		AgentResourceVersion: stable.ResourceVersion, AgentGeneration: stable.Generation,
 		Actor: actor, Reason: strings.TrimSpace(reason), CreatedAt: at, UpdatedAt: at,
 	}
-	return r.applyAgentPromotion(ctx, stable, record, false)
+	return r.applyAgentRolloutAction(ctx, stable, record, false, r.writePromotedSpec)
 }
 
-// applyAgentPromotion runs a record through its durable steps: insert it
-// pending, move it to applying (for a promotion, in the same transaction
-// that checks its decision is still the approval in force), update the
-// Agent with a resourceVersion precondition and the record's marker, then
-// complete it with what the update produced.
-func (r *EvalRunReconciler) applyAgentPromotion(ctx context.Context, stable *corev1alpha1.Agent, record *store.AgentPromotionRecord,
-	requireApproval bool) (*store.AgentPromotionRecord, error) {
+// rolloutWrite applies a record's change to the Agent, marked with the
+// record, and returns the generation and digest it produced.
+type rolloutWrite func(context.Context, *store.AgentPromotionRecord) (int64, string, error)
+
+// applyAgentRolloutAction runs a record through its durable steps: insert
+// it pending, move it to applying (for an approval, in the same transaction
+// that checks its decision is still the approval in force), write the Agent
+// with the record's marker, then complete it with what the write produced.
+func (r *EvalRunReconciler) applyAgentRolloutAction(ctx context.Context, stable *corev1alpha1.Agent, record *store.AgentPromotionRecord,
+	requireApproval bool, write rolloutWrite) (*store.AgentPromotionRecord, error) {
 	if err := r.ExperimentStore.CreateAgentPromotion(ctx, record); err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			return nil, refuseRollout("the rollout record was refused: %v", err)
@@ -563,10 +781,46 @@ func (r *EvalRunReconciler) applyAgentPromotion(ctx context.Context, stable *cor
 	}
 	record = applying
 
+	generation, digest, err := write(ctx, record)
+	if refusal, ok := errors.AsType[*evals.RolloutRefusal](err); ok {
+		fail(refusal.Reason)
+		return nil, refusal
+	}
+	if err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
+			fail("the Agent update was refused: " + err.Error())
+			return nil, refuseRollout("Agent %q changed while it was being updated; ask again", stable.Name)
+		}
+		// The write may have committed. Leave the record applying: the
+		// next controller start settles it from the marker.
+		return nil, fmt.Errorf("update Agent %q: %w", stable.Name, err)
+	}
+	complete, err := r.ExperimentStore.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{
+		Namespace: record.Namespace, ID: record.ID, From: store.AgentPromotionApplying, To: store.AgentPromotionComplete,
+		AppliedGeneration: generation, AppliedDigest: digest, UpdatedAt: r.now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	logf.FromContext(ctx).Info("Applied an Agent rollout action", "agent", stable.Name, "action", record.Action,
+		"record", record.ID, "generation", generation)
+	return complete, nil
+}
+
+// writePromotedSpec writes a promote or rollback's target values onto the
+// Agent with a resourceVersion precondition and the record's marker.
+func (r *EvalRunReconciler) writePromotedSpec(ctx context.Context, record *store.AgentPromotionRecord) (int64, string, error) {
+	stable := &corev1alpha1.Agent{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.Agent}, stable); err != nil {
+		return 0, "", err
+	}
+	if string(stable.UID) != record.AgentUID || stable.ResourceVersion != record.AgentResourceVersion {
+		return 0, "", apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("agents").GroupResource(), record.Agent,
+			errors.New("the Agent changed since the rollout action read it"))
+	}
 	if ref := record.Target.SystemPromptConfigMap; ref != nil {
 		if err := r.checkPromptConfigMap(ctx, record.Namespace, ref, record.Target.SystemPrompt); err != nil {
-			fail(err.Error())
-			return nil, err
+			return 0, "", err
 		}
 	}
 	updated := stable.DeepCopy()
@@ -576,28 +830,10 @@ func (r *EvalRunReconciler) applyAgentPromotion(ctx context.Context, stable *cor
 	}
 	updated.Annotations[labels.AnnotationPromotionRecord] = record.ID
 	if err := r.Update(ctx, updated); err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
-			fail("the Agent update was refused: " + err.Error())
-			return nil, refuseRollout("Agent %q changed while it was being updated; ask again", stable.Name)
-		}
-		// The update may have committed. Leave the record applying: the
-		// next controller start settles it from the marker.
-		return nil, fmt.Errorf("update Agent %q: %w", stable.Name, err)
+		return 0, "", err
 	}
 	digest, err := agentPromotionDigest(record.Target)
-	if err != nil {
-		return nil, err
-	}
-	complete, err := r.ExperimentStore.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{
-		Namespace: record.Namespace, ID: record.ID, From: store.AgentPromotionApplying, To: store.AgentPromotionComplete,
-		AppliedGeneration: updated.Generation, AppliedDigest: digest, UpdatedAt: r.now(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	logf.FromContext(ctx).Info("Applied an Agent rollout action", "agent", stable.Name, "action", record.Action,
-		"record", record.ID, "generation", updated.Generation)
-	return complete, nil
+	return updated.Generation, digest, err
 }
 
 // ListAgentPromotions returns an Agent's promotion log, oldest first.
@@ -613,6 +849,24 @@ func (r *EvalRunReconciler) ListAgentPromotions(ctx context.Context, namespace, 
 		return nil, err
 	}
 	return r.ExperimentStore.ListAgentPromotions(ctx, namespace, string(agent.UID))
+}
+
+// AgentRollout returns the Agent's canary, if any, and the message of its
+// RolloutInvalid condition.
+func (r *EvalRunReconciler) AgentRollout(ctx context.Context, namespace, agentName string) (*corev1alpha1.AgentRolloutStatus, string, error) {
+	agent := &corev1alpha1.Agent{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, "", refuseRollout("Agent %q does not exist in %s", agentName, namespace)
+		}
+		return nil, "", err
+	}
+	invalid := ""
+	if condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionRolloutInvalid); condition != nil &&
+		condition.Status == metav1.ConditionTrue {
+		invalid = condition.Message
+	}
+	return agent.Status.Rollout, invalid, nil
 }
 
 // checkPromptConfigMap refuses writing a ConfigMap reference whose
@@ -632,4 +886,28 @@ func (r *EvalRunReconciler) checkPromptConfigMap(ctx context.Context, namespace 
 		return refuseRollout("ConfigMap %q key %q no longer holds the system prompt this action checked; roll back by hand", name, key)
 	}
 	return nil
+}
+
+// clearPromotedCanary finishes a promotion whose canary cleanup did not run:
+// when the latest spec write is a promotion of the canary's own decision,
+// the canary ends now.
+func (r *EvalRunReconciler) clearPromotedCanary(ctx context.Context, agent *corev1alpha1.Agent) error {
+	rollout := agent.Status.Rollout
+	if rollout == nil || rollout.Candidate == nil {
+		return nil
+	}
+	records, err := r.ExperimentStore.ListAgentPromotions(ctx, agent.Namespace, string(agent.UID))
+	if err != nil {
+		return err
+	}
+	var lastWrite *store.AgentPromotionRecord
+	for i := range records {
+		if records[i].State == store.AgentPromotionComplete && writesAgentSpec(records[i].Action) {
+			lastWrite = &records[i]
+		}
+	}
+	if lastWrite == nil || lastWrite.Action != store.AgentPromotionPromote || lastWrite.DecisionID != rollout.DecisionID {
+		return nil
+	}
+	return r.clearAgentRollout(ctx, agent, "")
 }

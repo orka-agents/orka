@@ -114,11 +114,14 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                    client.Reader
-	Scheme                       *runtime.Scheme
-	JobBuilder                   *JobBuilder
-	GatewayService               *gatewayruntime.Service
-	SessionManager               *SessionManager
+	APIReader      client.Reader
+	Scheme         *runtime.Scheme
+	JobBuilder     *JobBuilder
+	GatewayService *gatewayruntime.Service
+	SessionManager *SessionManager
+	// RolloutVerifier checks an Agent's canary before a Task is routed to
+	// its candidate. Nil routes every Task to the stable Agent.
+	RolloutVerifier              AgentRolloutVerifier
 	WebhookNotifier              *WebhookNotifier
 	Recorder                     record.EventRecorder
 	KubeClient                   kubernetes.Interface
@@ -860,6 +863,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if err != nil {
 		log.Error(err, "failed to resolve agent")
 		return r.failTask(ctx, task, err.Error())
+	}
+	// While the Agent has a canary, a Task not yet bound may run on its
+	// candidate instead.
+	if agent, err = r.routeAgentRollout(ctx, task, agent); err != nil {
+		log.Error(err, "failed to route the Task through its Agent's canary")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Validate task-agent compatibility

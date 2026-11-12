@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -47,10 +48,13 @@ type evalRunTestEnv struct {
 	staleTaskCache bool
 	// staleTaskPhase makes cached Task listings report this phase.
 	staleTaskPhase corev1alpha1.TaskPhase
-	client         client.Client
-	store          *sqlite.Store
-	reconciler     *EvalRunReconciler
-	now            time.Time
+	// agentStatusConflicts fails this many Agent status updates with a
+	// conflict, as when the Agent controller writes the status first.
+	agentStatusConflicts int
+	client               client.Client
+	store                *sqlite.Store
+	reconciler           *EvalRunReconciler
+	now                  time.Time
 }
 
 func evalTestCaseLine(id, verdict string, tags ...string) string {
@@ -150,6 +154,15 @@ func newEvalRunTestEnv(t *testing.T, objects ...client.Object) *evalRunTestEnv {
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				obj.SetCreationTimestamp(metav1.NewTime(env.now))
 				return c.Create(ctx, obj, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object,
+				opts ...client.SubResourceUpdateOption) error {
+				if _, agent := obj.(*corev1alpha1.Agent); agent && env.agentStatusConflicts > 0 {
+					env.agentStatusConflicts--
+					return apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("agents").GroupResource(), obj.GetName(),
+						errors.New("the Agent controller updated the status first"))
+				}
+				return c.SubResource(subResource).Update(ctx, obj, opts...)
 			},
 			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if _, tasks := list.(*corev1alpha1.TaskList); tasks && env.staleTaskCache {

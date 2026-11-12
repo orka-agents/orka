@@ -72,6 +72,14 @@ const (
 	LabelAuthProfile   = "orka.ai/auth-profile"
 
 	// Annotations
+	// AnnotationRolloutArm records whether a Task routed during its Agent's
+	// canary took the stable or the candidate arm, and
+	// AnnotationRolloutCandidate the Agent it ran on. LabelRolloutSession
+	// names the Task's Session so later Tasks of the Session take the same
+	// arm. The controller sets all three; admission reserves them.
+	AnnotationRolloutArm       = "orka.ai/rollout-arm"
+	AnnotationRolloutCandidate = "orka.ai/rollout-candidate"
+	LabelRolloutSession        = "orka.ai/rollout-session"
 	// AnnotationPromotionRecord names the promotion log record whose promote
 	// or rollback last wrote the Agent's spec. The controller sets it in the
 	// same update, so a restart can tell whether an open record committed.

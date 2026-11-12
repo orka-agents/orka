@@ -2198,6 +2198,8 @@ func main() {
 		evalDecisionVerifier = evalRunReconciler
 		evalProposer = evalRunReconciler
 		agentPromoter = evalRunReconciler
+		// Tasks are routed through canaries only while evals can verify them.
+		taskReconciler.RolloutVerifier = evalRunReconciler
 	}
 	// +kubebuilder:scaffold:builder
 

@@ -10,16 +10,24 @@ import (
 )
 
 func TestAgentPromoteRollbackAndPromotions(t *testing.T) {
-	var posted []map[string]string
+	var posted []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/reviewer/rollout":
 			body, _ := io.ReadAll(r.Body)
-			var request map[string]string
+			var request map[string]any
 			_ = json.Unmarshal(body, &request)
 			posted = append(posted, request)
 			w.WriteHeader(http.StatusCreated)
+			switch request["action"] {
+			case "canary":
+				_, _ = w.Write([]byte(`{"id":"c1","agent":"reviewer","action":"canary","percent":10,"candidateAgent":{"name":"reviewer-c-1"}}`))
+				return
+			case "abort":
+				_, _ = w.Write([]byte(`{"id":"a1","agent":"reviewer","action":"abort"}`))
+				return
+			}
 			if request["action"] == "promote" {
 				_, _ = w.Write([]byte(`{"id":"p1","agent":"reviewer","action":"promote","state":"complete",` +
 					`"candidateAgent":{"name":"reviewer-c-1","uid":"u","generation":1},"appliedGeneration":4}`))
@@ -27,7 +35,7 @@ func TestAgentPromoteRollbackAndPromotions(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"id":"r1","agent":"reviewer","action":"rollback","state":"complete","promotionID":"p1","appliedGeneration":5}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/reviewer/promotions":
-			_, _ = w.Write([]byte(`{"items":[{"id":"p1","action":"promote","state":"complete","candidateAgent":{"name":"reviewer-c-1"},` +
+			_, _ = w.Write([]byte(`{"rollout":{"candidate":{"name":"reviewer-c-1"},"percent":10,"decisionID":"d1"},"items":[{"id":"p1","action":"promote","state":"complete","candidateAgent":{"name":"reviewer-c-1"},` +
 				`"actor":{"username":"alice"},"appliedGeneration":4,"createdAt":"2026-11-10T10:00:00Z"},` +
 				`{"id":"r1","action":"rollback","state":"complete","promotionID":"p1","actor":{"username":"bob"},` +
 				`"reason":"regressed","appliedGeneration":5,"createdAt":"2026-11-10T11:00:00Z"}]}`))
@@ -58,10 +66,43 @@ func TestAgentPromoteRollbackAndPromotions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"RECORD", "p1", "promote", "reviewer-c-1", "alice", "r1", "rollback", "bob", "r1: regressed"} {
+	for _, want := range []string{"Canary: 10% of new Sessions and Tasks run on reviewer-c-1 (decision d1)", "RECORD", "p1", "promote", "reviewer-c-1", "alice", "r1", "rollback", "bob", "r1: regressed"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("promotions lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestAgentCanaryAndAbort(t *testing.T) {
+	var posted []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := io.ReadAll(r.Body)
+		var request map[string]any
+		_ = json.Unmarshal(body, &request)
+		posted = append(posted, request)
+		w.WriteHeader(http.StatusCreated)
+		if request["action"] == "canary" {
+			_, _ = w.Write([]byte(`{"id":"c1","agent":"reviewer","action":"canary","percent":10,"candidateAgent":{"name":"reviewer-c-1"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"a1","agent":"reviewer","action":"abort"}`))
+	}))
+	defer srv.Close()
+	if _, err := runEvalCommand(t, "agent", "canary", "reviewer", "--decision", "d1", "--server", srv.URL, "--token", "tok"); err == nil ||
+		!strings.Contains(err.Error(), "--percent must be 1 to 100") {
+		t.Fatalf("canary without a percent = %v", err)
+	}
+	out, err := runEvalCommand(t, "agent", "canary", "reviewer", "--decision", "d1", "--percent", "10", "--server", srv.URL, "--token", "tok")
+	if err != nil || !strings.Contains(out, "Routing 10% of new Sessions and Tasks for agent/reviewer to reviewer-c-1") {
+		t.Fatalf("canary = %v\n%s", err, out)
+	}
+	out, err = runEvalCommand(t, "agent", "abort", "reviewer", "--reason", "noisy", "--server", srv.URL, "--token", "tok")
+	if err != nil || !strings.Contains(out, "Ended the canary on agent/reviewer") {
+		t.Fatalf("abort = %v\n%s", err, out)
+	}
+	if len(posted) != 2 || posted[0]["percent"] != float64(10) || posted[0]["decisionID"] != "d1" || posted[1]["reason"] != "noisy" {
+		t.Fatalf("posted %v", posted)
 	}
 }
 

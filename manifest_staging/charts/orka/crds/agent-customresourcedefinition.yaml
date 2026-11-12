@@ -1641,6 +1641,68 @@ spec:
                 description: Ready indicates whether the agent configuration is valid
                   and usable
                 type: boolean
+              rollout:
+                description: |-
+                  Rollout is the canary the controller routes new Tasks through, set
+                  only by the controller through POST /api/v1/agents/:name/rollout.
+                  After an abort only RecordID remains.
+                properties:
+                  candidate:
+                    description: Candidate is the candidate Agent the canary routes
+                      to.
+                    properties:
+                      generation:
+                        description: Generation is the object generation.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: Name is the object name.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID is the object UID.
+                        type: string
+                    type: object
+                  candidateRun:
+                    description: CandidateRun is the experiment's candidate EvalRun.
+                    properties:
+                      generation:
+                        description: Generation is the object generation.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: Name is the object name.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID is the object UID.
+                        type: string
+                    type: object
+                  decisionID:
+                    description: DecisionID is the approval the canary carries out.
+                    maxLength: 128
+                    type: string
+                  percent:
+                    description: Percent of new Sessions and standalone Tasks that
+                      run on the candidate.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  recordID:
+                    description: RecordID is the promotion log record of the last
+                      canary or abort.
+                    maxLength: 128
+                    type: string
+                  startedAt:
+                    description: |-
+                      StartedAt is when this canary first routed: a Session created before it
+                      stays on the stable Agent. Changing the share keeps it.
+                    format: date-time
+                    type: string
+                type: object
             required:
             - activeTasks
             type: object
