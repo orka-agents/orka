@@ -399,6 +399,21 @@ func TestKubernetesResolverDelegatedRechecksTheRequesterLink(t *testing.T) {
 		}
 	})
 
+	t.Run("names the provider when the requester disconnected during the exchange", func(t *testing.T) {
+		source := connection()
+		shared := &ConnectionRequiredError{Kind: ConnectionNotLinked}
+		identity := &fakeAgentIdentitySource{token: "obo-token", during: func() { source.liveErr = shared }}
+		_, err := resolver(delegatedPolicySpec(nil), source, identity).Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		refusal, ok := errors.AsType[*ConnectionRequiredError](err)
+		if !errors.Is(err, ErrRequesterLinkChanged) || !ok || refusal.Provider == "" || refusal.Namespace == "" ||
+			!strings.Contains(refusal.Error(), "orka connect "+refusal.Provider+" -n "+refusal.Namespace) {
+			t.Fatalf("Resolve() = %v, want a described link refusal", err)
+		}
+		if shared.Provider != "" || shared.Namespace != "" {
+			t.Fatalf("the source's error was annotated in place: %+v", shared)
+		}
+	})
+
 	t.Run("judges the delegation after the Connection re-check", func(t *testing.T) {
 		for name, during := range map[string]func(*KubernetesResolver){
 			"ancestor cancelled": func(r *KubernetesResolver) {
@@ -522,7 +537,7 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 			cap:     2 * time.Hour, want: "expired",
 		},
 		"no verified requester":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
-		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "link to"},
+		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "is not linked for the person who asked"},
 		"tool the provider lacks":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
 		"no liveness check":        {spec: delegatedPolicySpec(nil), noLive: true, want: "Task and Session check"},
 		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task is Cancelled"), want: "no longer live"},

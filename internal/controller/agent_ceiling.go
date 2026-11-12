@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -185,10 +187,21 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 // Tool names match without regard to case, but scopes must match exactly
 // because they carry command or path text. A bare ceiling entry also covers
 // scoped requests of the same tool; a scoped entry covers only its own scope.
+// An entry for a forwarding Tool covers its derived write tool, which a
+// registered external runtime lists by name; the Tool decides whether it has
+// writes at all.
 func ceilingAllowsTool(ceiling []string, tool string) bool {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
 		return true
+	}
+	if parent, ok := strings.CutSuffix(tool, harnessv2.MCPForwardWriteSuffix); ok {
+		// Only a Tool name has a write tool: one suffix, on a valid
+		// Kubernetes name, which carries no scope or second suffix.
+		if len(validation.IsDNS1123Subdomain(parent)) > 0 {
+			return false
+		}
+		tool = parent
 	}
 	base, scope, scoped := splitCeilingTool(tool)
 	return slices.ContainsFunc(ceiling, func(entry string) bool {
