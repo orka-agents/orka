@@ -11,6 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 const (
@@ -92,6 +93,11 @@ func acpTaskSpanAttributes(task *corev1alpha1.Task) []attribute.KeyValue {
 		agentName = task.Spec.AgentRef.Name
 	}
 	attrs := orkatracing.TaskAttributes(task.Name, task.Namespace, task.Namespace, agentName, "")
+	// The Agent UID, not its reusable name, joins spans with identity records
+	// and issuer logs.
+	if binding := task.Status.AgentExecutionBinding; binding != nil && binding.Agent != nil && binding.Agent.UID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrAgentID, string(binding.Agent.UID)))
+	}
 	if task.Status.Execution == nil {
 		return attrs
 	}

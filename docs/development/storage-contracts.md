@@ -82,11 +82,11 @@ Kubernetes authority remains separate from either boundary.
 | Production interfaces | Records and ownership | Main consumers and constraints |
 | --- | --- | --- |
 | `ResultStore`, `PromptResultReceiptStore` | Results and immutable attempt-bound result receipts; state. | Task reconciler, ACP dispatch/recovery, worker API and result API. A result receipt precedes prompt settling. |
-| `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` is also consumed through a narrow local reader. |
+| `SessionStore`, `SessionTurnCommitter`, `FencedSessionWriteStore` | Sessions, transcript messages, token counters and Task/chat ownership locks; state. | Session manager, chat, compatibility APIs and transcript tools. Turn commit groups messages with usage; fenced writes require the exact owner. `GetSessionType` and `GetSessionCreatedAt` are also consumed through narrow local readers; the creation time pins one Session incarnation for Delegated Agent identity calls. |
 | `AgentExecutionSnapshotStore`, `AgentExecutionSnapshotLifecycleStore` | Immutable snapshots keyed by Task UID/digest, sealed by the storage client, with metadata and retention operations; state. | Task admission/dispatch, internal APIs and reference-aware retention. Kubernetes Task bindings are separate. |
 | `SessionLineageStore` | Payload projection of Kubernetes-authoritative Session lineage; state. | Session continuity and dispatch. Projection failure may block dispatch but never changes Kubernetes lineage authority. |
 | `NativeSessionStore`, `NativeSessionImportStore` | Private native session records sealed by the storage client, import/capture receipts, finalization receipts and deleted-name tombstones; state. | ACP continuity/finalization and migration APIs. Native state is not a public Task artifact; reads validate canonical Session UID and transcript boundary. |
-| `ConnectorCredentialStore`, `ConnectorConsentStore` | Credentials, consents and parked completions sealed by the storage client, grants, retired custody, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. |
+| `ConnectorCredentialStore`, `ConnectorConsentStore` | Credentials, consents and parked completions sealed by the storage client, grants, retired custody, versions, sequences and disconnect tombstones; state. | Connector APIs, credential source and linked-account tool execution. Kubernetes Connection resources carry authority/metadata; secret custody stays in the database and is authenticated by the snapshot key. `GetConnectorCredentialGrant` opens the sealed credential to authenticate the held grant sequence and scopes, then drops the material; it never returns it. |
 | `SessionTurnPersistenceStore` | Turn records, transcript additions and deferred terminal outbox projections; state. | Kubernetes composite control store. `CommitSessionTurnFinalization` groups these records (and applicable sealed native state) atomically; projection activates after Kubernetes finalization. |
 | `OutboxPersistenceStore` | Projection payloads, claims and completion receipts; state. | Kubernetes composite control store and projection reconciler. Database persistence does not choose controller ownership. |
 | `SessionCleanupPersistenceStore`, `SessionTurnCleanupReceiptStore` | Cleanup identity, durable intents, completion tombstones and retained turn receipts; state. | Kubernetes composite and cleanup recovery. These close crash windows across Kubernetes deletion and transcript deletion. |
@@ -292,7 +292,8 @@ the observable parts.
   `MarkWorkActionRetryPending`, which parks an active work action for retry
   and leaves a finished one unchanged in one step, and defines the work-action
   statuses and which of them are active (`WorkActionStatus*`,
-  `IsWorkActionActive`). Revision 6 split the inbox read into
+  `IsWorkActionActive`). Revision 6 requires `GetSessionCreatedAt` on
+  `state.v1`. Revision 7 split the inbox read into
   `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage` write the
   assigned ID and creation time back, and made every Session lease
   decision, and the claim check in

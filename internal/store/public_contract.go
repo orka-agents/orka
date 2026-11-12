@@ -143,6 +143,7 @@ type (
 	PromptResultReceipt                       = storagev1.PromptResultReceipt
 	PromptResultReceiptStore                  = storagev1.PromptResultReceiptStore
 	SessionStore                              = storagev1.SessionStore
+	SessionCreationReader                     = storagev1.SessionCreationReader
 	SessionTurnCommitter                      = storagev1.SessionTurnCommitter
 	AcquireChatTurnRequest                    = storagev1.AcquireChatTurnRequest
 	CommitSessionTurnRequest                  = storagev1.CommitSessionTurnRequest

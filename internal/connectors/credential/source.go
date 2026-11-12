@@ -67,7 +67,10 @@ type Source struct {
 	flightEntered func()
 }
 
-var _ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+var (
+	_ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+	_ outboundaccess.ConnectionLivenessChecker  = (*Source)(nil)
+)
 
 func (s *Source) now() time.Time {
 	if s.Now != nil {
@@ -177,6 +180,82 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		Generation:    connection.Generation,
 		Mode:          connection.Spec.Mode,
 	}, nil
+}
+
+// RequireLiveConnection implements outboundaccess.ConnectionLivenessChecker:
+// the frozen-binding check ResolveConnectionCredential applies before it
+// releases a credential, and the grant custody holds. Custody, not the
+// Connection's status, is authoritative: a re-consent commits there first,
+// so a status that still shows the frozen grant does not prove the
+// material a credential was derived from is still the person's current
+// grant. It reads the grant only, never the material, and never refreshes.
+func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) error {
+	if s == nil || s.Client == nil || s.Credentials == nil {
+		return errors.New("connection credential source is not configured")
+	}
+	if strings.TrimSpace(req.Frozen.UID) == "" {
+		return errors.New("connection credential requires a frozen Connection binding")
+	}
+	connection, err := s.loadLiveConnection(ctx, req)
+	if err != nil {
+		return err
+	}
+	grants, ok := s.Credentials.(store.ConnectorGrantReader)
+	if !ok {
+		return errors.New("connector custody cannot report the grant it holds")
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return err
+	}
+	grant, err := grants.GetConnectorCredentialGrant(ctx, ref)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		return errors.New("connection holds no credential; the person must reconnect")
+	}
+	if err != nil {
+		return err
+	}
+	// The exchanged credential carried the frozen grant: resolution refuses
+	// any other before it releases material (frozenGrantHolds).
+	if grant.Sequence != req.Frozen.GrantSequence {
+		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+	}
+	// The provider can change during the exchange too, before the
+	// Connection's status shows it: it must still be accepted, match the
+	// consent, and declare the Tool, as when the credential was resolved.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return errors.New("connector provider is unavailable")
+	}
+	if !connectors.ProviderAccepted(provider) {
+		return errors.New("connector provider is not accepted")
+	}
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		return errors.New("connector provider changed since consent; the person must consent again")
+	}
+	// The consent fence leaves scopes out, so a provider that now requires
+	// more than the person granted is caught here, from the grant recorded at
+	// consent.
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	// A refresh keeps the grant but can narrow its scopes before the status
+	// shows it, so custody's scopes must cover the mode too.
+	required := connectors.ScopesForMode(provider, mode)
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, required) || !connectors.ScopesCover(grant.Scopes, required) {
+		return errors.New("the provider now requires scopes the person did not grant; the person must consent again")
+	}
+	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
+		return err
+	}
+	// The person can disconnect or change the link while custody answers,
+	// and custody may report the grant it held before: the Connection must
+	// still be the frozen, Ready one once custody has answered.
+	if _, err := s.loadLiveConnection(ctx, req); err != nil {
+		return err
+	}
+	return nil
 }
 
 // loadLiveConnection re-reads the requester's Connection and checks that it
