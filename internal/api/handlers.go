@@ -127,6 +127,8 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	// chatTurns stops a chat Session's in-flight request on session cancel.
+	chatTurns chatTurnStopper
 }
 
 // HandlersConfig holds configuration for creating Handlers.

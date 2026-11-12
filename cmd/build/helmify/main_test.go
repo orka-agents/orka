@@ -271,6 +271,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 	for resource, verbs := range map[string][]string{
 		"tasks":                           {"get", "list", "create", "delete", "patch"},
 		"tasks/approvals":                 {"update"},
+		"tasks/cancel":                    {"update"},
 		"sessions":                        {"get", "list", "create", "update", "delete"},
 		"chats":                           {"create"},
 		"chats/config":                    {"get"},

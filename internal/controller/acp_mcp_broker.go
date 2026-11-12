@@ -1452,7 +1452,10 @@ func findACPMCPTaskExecution(
 	if execution == nil {
 		return nil, nil, fmt.Errorf("active MCP task was not found")
 	}
-	if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+	// A recorded cancel request stops new calls at once; the Cancelled phase
+	// follows only when the Task is next reconciled.
+	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
+	if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 		return nil, nil, errACPMCPTaskCancelled
 	}
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {
