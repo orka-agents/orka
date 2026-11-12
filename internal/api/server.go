@@ -105,6 +105,10 @@ type ServerConfig struct {
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
+	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
+	// or RepositoryMonitor they create or edit names.
+	AgentUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -136,6 +140,7 @@ type Server struct {
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
+	agentUseAuthorization.Store(config.AgentUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -189,6 +194,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.handlers.chatTurns = server.chatHandler
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
@@ -357,6 +363,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.GetTask)
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
+	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
@@ -378,6 +385,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+	api.Post("/sessions/:id/cancel", s.handlers.CancelSession)
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)

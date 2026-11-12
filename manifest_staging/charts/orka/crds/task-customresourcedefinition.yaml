@@ -2052,6 +2052,37 @@ spec:
                         format: int64
                         minimum: 1
                         type: integer
+                      identity:
+                        description: |-
+                          Identity is the Agent's external identity frozen at binding. Editing the
+                          Agent or the controller's issuer configuration does not change it.
+                        properties:
+                          actsForRequester:
+                            description: |-
+                              ActsForRequester records that the binding froze an agentIdentity
+                              policy in Delegated mode, so the Task can act for its requester. Every
+                              approval on such a Task needs the requester.
+                            type: boolean
+                          id:
+                            description: ID is the identity's ID at the issuer.
+                            minLength: 1
+                            type: string
+                          instance:
+                            description: |-
+                              Instance identifies the issuer instance, for Entra the tenant and
+                              blueprint, as configured on the controller at binding.
+                            minLength: 1
+                            type: string
+                          issuer:
+                            description: Issuer is the identity's issuer type, such
+                              as entra.
+                            minLength: 1
+                            type: string
+                        required:
+                        - id
+                        - instance
+                        - issuer
+                        type: object
                       name:
                         minLength: 1
                         type: string

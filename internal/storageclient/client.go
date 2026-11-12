@@ -86,10 +86,11 @@ type Client struct {
 // The client implements Orka's side of each conditional protocol on top of
 // the provider contract, and still serves the whole contract itself.
 var (
-	_ store.MemoryProposalStore = (*Client)(nil)
-	_ store.TaskDataAccessStore = (*Client)(nil)
-	_ store.SecurityStore       = (*Client)(nil)
-	_ storagev1.StateProvider   = (*Client)(nil)
+	_ store.MemoryProposalStore  = (*Client)(nil)
+	_ store.TaskDataAccessStore  = (*Client)(nil)
+	_ store.SecurityStore        = (*Client)(nil)
+	_ store.ConnectorGrantReader = (*Client)(nil)
+	_ storagev1.StateProvider    = (*Client)(nil)
 )
 
 // ErrSplitEmbeddedStore rejects a client whose state, artifact and embedded

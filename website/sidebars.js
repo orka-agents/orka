@@ -71,6 +71,7 @@ const sidebars = {
           items: [
             'guides/human-approval-v2',
             'guides/connectors',
+            'guides/agent-identities',
             'concepts/outbound-access',
             'concepts/transaction-tokens',
           ],

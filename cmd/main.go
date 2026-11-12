@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -50,6 +53,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -60,6 +64,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/agenthost"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -96,6 +101,7 @@ import (
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	serviceAccountTokenFile     = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101 -- a path, not a credential.
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
 	// storageConfigResolveTimeout bounds the startup Secret reads for storage
 	// adapters.
@@ -131,6 +137,18 @@ func splitCommaList(raw string) []string {
 		}
 	}
 	return out
+}
+
+// validateAgentIdentityProvenance refuses an identity issuer without Task
+// provenance admission. Identity binding judges a Task by who created it: the
+// RepositoryScan or RepositoryMonitor owner and markers it carries. Without
+// the webhook any Task editor could remove them and let an unchecked
+// automation Task bind as a root Task.
+func validateAgentIdentityProvenance(config agentidentity.Config, provenanceProtected bool) error {
+	if config.Entra != nil && !provenanceProtected {
+		return fmt.Errorf("an Agent identity issuer requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect how Tasks record who created them")
+	}
+	return nil
 }
 
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
@@ -243,6 +261,10 @@ func main() {
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
+	var agentUseAuthorizationEnabled bool
+	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
+	var agentIdentityEntraAuthority, agentIdentityTokenFile string
+	var agentIdentityMaxDelegationAge time.Duration
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -447,6 +469,24 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
+		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
+	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
+		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
+	flag.StringVar(&agentIdentityEntraAuthority, "agent-identity-entra-authority",
+		envStringDefault("ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY", agentidentity.DefaultEntraAuthority),
+		"Entra authority URL used for agent identity tokens, for example a sovereign cloud's login endpoint.")
+	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
+		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
+	flag.DurationVar(&agentIdentityMaxDelegationAge, "agent-identity-max-delegation-age",
+		envDurationDefault("ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE", outboundaccess.DefaultMaxDelegationAgeCap),
+		"Longest maxDelegationAge any Delegated agentIdentity policy may use.")
+	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
+		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -489,7 +529,7 @@ func main() {
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
-			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
+			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
 			ConnectorPrivateEndpointsAcknowledgement+" and only with a plain-http localhost --connector-callback-base-url; never enable this in production.")
 	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
 		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
@@ -811,6 +851,40 @@ func main() {
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
+	agentIdentityEntraBlueprintClientID = strings.TrimSpace(agentIdentityEntraBlueprintClientID)
+	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
+		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
+			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: strings.TrimSpace(agentIdentityEntraAuthority),
+		}
+	}
+	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	// No OutboundAccessPolicy may mint tokens for the controller's own
+	// ServiceAccount, which the agent identity blueprint trusts.
+	controllerServiceAccount, controllerServiceAccountErr := currentServiceAccount()
+	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
+		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
+	var agentIdentitySource *agentidentity.Source
+	if agentIdentityConfig.Entra != nil {
+		agentIdentitySource = &agentidentity.Source{
+			Config: agentIdentityConfig,
+			Entra: &agentidentity.EntraIssuer{
+				Config:     *agentIdentityConfig.Entra,
+				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
+			},
+		}
+	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -907,7 +981,13 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to every worker ServiceAccount,
+	// however the provenance trust list is overridden.
+	api.SetWorkerServiceAccountNames(orkaadmission.WorkerServiceAccountNames(
+		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
+		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
+	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 	// Read the storage configuration before anything opens storage. It reads
@@ -1156,6 +1236,18 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Record whether Agent use is enforced before anything serves requests,
+	// so work created while it was off can never bind an Agent identity. A
+	// new period starts only once this controller leads.
+	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to identify the leader election Lease")
+		os.Exit(1)
+	}
+	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+		setupLog.Error(err, "unable to record the Agent use enforcement period")
+		os.Exit(1)
+	}
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
 	if err != nil {
 		setupLog.Error(err, "unable to set up webhook certificate rotation")
@@ -1252,6 +1344,8 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
+			admissionConfig.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+				admissionConfig.TrustedServiceAccountNames, []string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName})
 			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
@@ -1287,10 +1381,17 @@ func main() {
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
-		Reader:     mgr.GetAPIReader(),
-		KubeClient: kubeClient,
-		Trust:      outboundAccessTrust,
-		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		Reader:                 mgr.GetAPIReader(),
+		ReservedServiceAccount: controllerServiceAccount,
+		KubeClient:             kubeClient,
+		Trust:                  outboundAccessTrust,
+		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		AuditLog:               agentIdentityAuditLog,
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.AgentIdentities = agentIdentitySource
+		outboundAccessResolver.MaxDelegationAge = agentIdentityMaxDelegationAge
+		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger
@@ -1395,6 +1496,19 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	// Identity-use records pseudonymize the requester with this key, also for
+	// calls refused while no issuer is configured.
+	auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+	if keyErr != nil {
+		setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+		os.Exit(1)
+	}
+	outboundAccessResolver.AuditPseudonymKey = auditKey
+	if agentIdentitySource != nil {
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
+		}.Check
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
@@ -1422,7 +1536,7 @@ func main() {
 		os.Exit(1)
 	}
 	if connectorsAllowPrivateEndpoints {
-		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector and Agent identity Tool endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
 		connectors.SetAllowPrivateEndpoints(true)
 		worker.SetAllowPrivateConnectionEndpoints(true)
 	}
@@ -1512,7 +1626,8 @@ func main() {
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 	}
 	controlStoreOptions := []storekube.Option{
@@ -1768,6 +1883,7 @@ func main() {
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
 		ACPToolboxPolicy:            acpToolboxPolicy,
+		Identity:                    agentIdentityConfig,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
@@ -1805,7 +1921,8 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
 		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
 		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
@@ -1850,9 +1967,11 @@ func main() {
 	if err := (&controller.OutboundAccessPolicyReconciler{
 		Client:                     mgr.GetClient(),
 		APIReader:                  mgr.GetAPIReader(),
+		ReservedServiceAccount:     controllerServiceAccount,
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+		MaxDelegationAge:           agentIdentityMaxDelegationAge,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)
@@ -2048,6 +2167,14 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
+		Identity:      agentIdentityConfig,
+		APIReader:     mgr.GetAPIReader(),
+		IdentityVerifier: func() controller.AgentIdentityVerifier {
+			if agentIdentitySource == nil {
+				return nil
+			}
+			return agentIdentitySource
+		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2212,8 +2339,9 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled: dashboardEnabled,
-		TaskWebhookKeys:  taskWebhookKeys,
+		DashboardEnabled:      dashboardEnabled,
+		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2262,7 +2390,7 @@ func main() {
 				// Children the broker creates for this Task inherit its
 				// verified requester only through this seal.
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
-				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName, AgentUID: task.AgentUID,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
 				Tenant: request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
@@ -2615,6 +2743,83 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 	return options
 }
 
+// establishAgentUseEnforcementPeriod records this run's Agent use
+// enforcement with a direct client, since the manager's cache is not running
+// yet, and stores when the current enforcement period began.
+func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	period := &agentidentity.EnforcementPeriod{}
+	config.Enforcement = period
+	if !config.AgentUseAuthorization {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+			return err
+		}
+		period.Start(time.Time{})
+		// An enforcing leader may have started a period since: end it again
+		// once this controller leads, or stop rather than serve beside it.
+		return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			var err error
+			for range 6 {
+				if err = agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return err
+		}))
+	}
+	// The period is decided each time this controller wins leadership, never
+	// from what it read before: the leader it replaces, or one that ran while
+	// this controller waited, may not have checked Agent use. Identity
+	// decisions wait until then.
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		for {
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace, leader)
+			if err == nil {
+				period.Start(since)
+				setupLog.Info("Agent use enforcement period started", "since", since)
+				return nil
+			}
+			setupLog.Error(err, "unable to start the Agent use enforcement period; retrying")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}))
+}
+
+// agentUseLeaderLease names the leader election Lease this controller holds
+// once it leads, as controller-runtime names it, or nil with leader election
+// off.
+func agentUseLeaderLease(leaderElection bool, watchNamespace string) (*agentidentity.LeaderLease, error) {
+	if !leaderElection {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(watchNamespace)
+	if namespace == "" {
+		namespace = currentPodNamespace()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &agentidentity.LeaderLease{
+		Key:          crclient.ObjectKey{Namespace: namespace, Name: controllerLeaderElectionID},
+		HolderPrefix: hostname + "_",
+	}, nil
+}
+
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
@@ -2764,6 +2969,19 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
 
+// agentIdentityAuditLogger returns the sink for agent identity use records.
+// It writes where and how the diagnostic logger does, but no
+// --zap-log-level filters it and it is never sampled: an audit record must
+// not depend on how verbose the controller's diagnostics are.
+func agentIdentityAuditLogger(opts zap.Options) logr.Logger {
+	opts.Level = uberzap.LevelEnablerFunc(func(zapcore.Level) bool { return true })
+	return zap.New(zap.UseFlagOptions(&opts))
+}
+
+// agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
+// requesters in agent identity use records.
+const agentIdentityAuditKeyInfo = "orka.agent-identity.audit-pseudonym.v1"
+
 // requesterStampKeyInfo is the HKDF label for the requester stamp key.
 const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
 
@@ -2791,4 +3009,22 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// currentServiceAccount returns the ServiceAccount this Pod runs as, from its
+// mounted API token.
+func currentServiceAccount() (outboundaccess.ReservedServiceAccount, error) {
+	token, err := os.ReadFile(serviceAccountTokenFile)
+	if err != nil {
+		return outboundaccess.ReservedServiceAccount{}, fmt.Errorf("read the controller's ServiceAccount token: %w", err)
+	}
+	return outboundaccess.ServiceAccountFromToken(string(token))
+}
+
+// envStringDefault returns the trimmed environment value, or fallback when unset.
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

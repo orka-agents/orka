@@ -223,6 +223,32 @@ controller:
   dashboard:
     enabled: false
 
+  # Require the `use` verb on an Agent before a request newly names it.
+  # Off by default, because callers without a `use` grant can no longer
+  # create Tasks, RepositoryScans, RepositoryMonitors, or GatewayBindings that
+  # name the Agent. Running an existing RepositoryMonitor needs only monitor-run
+  # permissions, not `use` on its Agents. Enabling it sets --agent-use-authorization-enabled for API
+  # callers and installs ValidatingAdmissionPolicies for direct Kubernetes
+  # writes. Grant it with a Role rule such as
+  # {apiGroups: [core.orka.ai], resources: [agents], verbs: [use], resourceNames: [<agent>]}.
+  agentUseAuthorization:
+    enabled: false
+
+  # External Agent identities (ADR 0039). Set both Entra values to accept
+  # Agent.spec.identity.entra; an identity-bound Agent also needs
+  # agentUseAuthorization.enabled and a runtime.ceiling.allowedTools.
+  agentIdentity:
+    entra:
+      tenantID: ""
+      blueprintClientID: ""
+      # Entra authority; empty means https://login.microsoftonline.com.
+      # Set a sovereign cloud's login URL here.
+      authority: ""
+      # When tenantID is set, the controller Pod mounts a projected
+      # ServiceAccount token audienced to api://AzureADTokenExchange. Give the
+      # blueprint a federated identity credential that trusts the controller
+      # ServiceAccount's subject and the cluster's OIDC issuer.
+
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:

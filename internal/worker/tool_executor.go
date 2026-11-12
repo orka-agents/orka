@@ -89,6 +89,23 @@ func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
 	return context.WithValue(ctx, toolCallIDContextKey{}, toolCallID)
 }
 
+type agentUIDContextKey struct{}
+
+// WithAgentUID records the Agent UID a Task's execution binding froze, so a
+// Tool CRD span joins identity records the way built-in tool spans do
+// (ADR 0039).
+func WithAgentUID(ctx context.Context, agentUID string) context.Context {
+	if strings.TrimSpace(agentUID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentUIDContextKey{}, agentUID)
+}
+
+func agentUIDFromContext(ctx context.Context) string {
+	agentUID, _ := ctx.Value(agentUIDContextKey{}).(string)
+	return strings.TrimSpace(agentUID)
+}
+
 func toolCallIDFromContext(ctx context.Context) string {
 	toolCallID, _ := ctx.Value(toolCallIDContextKey{}).(string)
 	return strings.TrimSpace(toolCallID)
@@ -113,6 +130,8 @@ type ToolExecutor struct {
 	authSecretValues            map[string]string
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
+	agentIdentity               *outboundaccess.AgentIdentityBinding
+	taskUID                     string
 	checkedPolicies             map[string]outboundaccess.PolicyIdentity
 	// sendGate, when set, is judged after every lookup and credential
 	// resolution and immediately before the request leaves the process.
@@ -146,8 +165,29 @@ func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
 	e.requester = requester.DeepCopy()
 }
 
+// SetTaskUID records the authenticated executing Task, which outbound access
+// resolution names in its identity use records.
+func (e *ToolExecutor) SetTaskUID(uid string) {
+	if e == nil {
+		return
+	}
+	e.taskUID = uid
+}
+
 // SetFrozenConnections records the Connection identities frozen into the
 // Task's execution snapshot, keyed by OutboundAccessPolicy name.
+// SetAgentIdentity binds the identity frozen into the executing Task's
+// binding for agentIdentity-mode outbound access. Nil makes those calls fail
+// closed.
+func (e *ToolExecutor) SetAgentIdentity(binding *outboundaccess.AgentIdentityBinding) {
+	if binding == nil {
+		e.agentIdentity = nil
+		return
+	}
+	copied := *binding
+	e.agentIdentity = &copied
+}
+
 func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.FrozenConnection) {
 	if e == nil {
 		return
@@ -194,6 +234,14 @@ func (e *ToolExecutor) Requester() *corev1alpha1.RequestedBy {
 		return nil
 	}
 	return e.requester.DeepCopy()
+}
+
+// TaskUID returns the bound executing Task's UID, or "".
+func (e *ToolExecutor) TaskUID() string {
+	if e == nil {
+		return ""
+	}
+	return e.taskUID
 }
 
 // FrozenConnections returns a copy of the frozen Connection bindings.
@@ -304,6 +352,9 @@ func NewToolExecutor() *ToolExecutor {
 		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
+		// The controller sets the Task's UID on the worker Pod and overrides
+		// any Task-supplied value, as it does for the namespace above.
+		taskUID: strings.TrimSpace(os.Getenv(workerenv.TaskUID)),
 	}
 }
 
@@ -414,7 +465,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 }
 
 func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string) []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs := make([]attribute.KeyValue, 0, 10)
 	attrs = append(attrs,
 		executeToolOperationAttr,
 		attribute.String(genai.AttrToolName, toolName),
@@ -434,6 +485,9 @@ func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string)
 	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
 		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
 	}
+	if agentUID := agentUIDFromContext(ctx); agentUID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrAgentID, agentUID))
+	}
 	return attrs
 }
 
@@ -449,7 +503,10 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway, prepared.connection)
+	// An Agent identity credential, like a linked-account one, is bound to
+	// the declared destination, so neither follows any redirect.
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway,
+		prepared.connection || prepared.agentIdentity)
 	if err != nil {
 		return "", err
 	}
@@ -459,10 +516,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		switch {
 		case prepared.trustedActorRoute:
 			dialContext = exactEndpointDialContext(prepared.request.URL)
-		case prepared.connection && allowPrivateConnectionEndpoints.Load():
-			// The fixture allowance relaxes only where a linked-account
-			// request may go; the transport keeps its hardening (no proxy,
-			// verified TLS 1.2 or newer, no custom TLS dial).
+		case (prepared.connection || prepared.agentIdentity) && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account or
+			// Agent identity request may go; the transport keeps its
+			// hardening (no proxy, verified TLS 1.2 or newer, no custom TLS
+			// dial).
 			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
@@ -553,8 +611,8 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 	}
 }
 
-// allowPrivateConnectionEndpoints lets connection-mode (linked-account)
-// requests reach private and cluster-local destinations. It exists for
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account) and
+// Agent identity requests reach private and cluster-local destinations. It exists for
 // local and CI fixtures only and is set once by the controller from its
 // dev-only flag; worker Pods never set it.
 var allowPrivateConnectionEndpoints atomic.Bool
@@ -615,9 +673,9 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 			return http.ErrUseLastResponse
 		}
 		if connection {
-			// A linked-account credential travels only to the origin the
-			// provider declared: Go forwards custom headers on redirects,
-			// so the redirect is returned unfollowed instead.
+			// A linked-account or Agent identity credential travels only
+			// to the declared origin: Go forwards custom headers on
+			// redirects, so the redirect is returned unfollowed instead.
 			return http.ErrUseLastResponse
 		}
 		if len(via) == 0 {
@@ -864,7 +922,9 @@ type preparedToolRequest struct {
 	direct           bool
 	// connection marks a request carrying a person's linked-account
 	// credential: it is never followed across a redirect.
-	connection        bool
+	connection bool
+	// agentIdentity marks a request carrying an Agent identity credential.
+	agentIdentity     bool
 	mcp               bool
 	trustedActorRoute bool
 }
@@ -1013,6 +1073,19 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	return prepared, nil
 }
 
+// agentIdentityOriginError keeps an Agent identity credential on the Tool's
+// declared destination, never an origin a call's arguments chose.
+func agentIdentityOriginError(adapter string, tool *corev1alpha1.Tool, target *neturl.URL) error {
+	if adapter != outboundaccess.AdapterAgentIdentity {
+		return nil
+	}
+	declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+	if err != nil || !sameHTTPOrigin(declared, target) {
+		return errors.New("agent identity credential request must target the declared tool origin")
+	}
+	return nil
+}
+
 func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, prepared *preparedToolRequest) error {
 	if e.outboundResolver == nil {
 		return errors.New("outbound access policy is configured but the resolver is unavailable")
@@ -1060,19 +1133,25 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
-		Arguments: args,
-		MCPBacked: isMCPSubstrateActorTool(tool) || prepared.mcp,
+		Arguments:     args,
+		MCPBacked:     isMCPSubstrateActorTool(tool) || prepared.mcp,
+		TaskUID:       e.taskUID,
+		AgentIdentity: e.agentIdentity,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
 	}
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
-	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection:
+	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection, outboundaccess.AdapterAgentIdentity:
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
 			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
+		if err := agentIdentityOriginError(resolution.Adapter, tool, prepared.request.URL); err != nil {
+			return err
+		}
+		prepared.agentIdentity = resolution.Adapter == outboundaccess.AdapterAgentIdentity
 		if resolution.Adapter == outboundaccess.AdapterConnection {
 			prepared.connection = true
 			// The linked-account credential is bound to the destination the
