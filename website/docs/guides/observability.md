@@ -421,8 +421,11 @@ the allowlist of every new Substrate runtime workload request:
 Validation fails closed. The controller refuses to start, and admission reports
 the pool `Degraded`, when an endpoint is not an absolute `http(s)` URL, names an
 IP address, a single-label or wildcard host, or conflicts with a core origin on
-the same host and port. Use a fully qualified in-cluster name such as
-`http://otel-collector.otel.svc:4317`. Scheme-less gRPC targets
+the same host and port. Native runtimes cannot resolve a short
+`<service>.<namespace>.svc` Service name, so admission also reports the pool
+`Degraded` for one. Use a fully qualified in-cluster name such as
+`http://otel-collector.otel.svc.cluster.local:4317`, substituting your cluster
+domain if it is not `cluster.local`. Scheme-less gRPC targets
 (`collector:4317`) are rejected because their transport cannot be determined.
 
 The flag does not change Kubernetes NetworkPolicies for Pod-backed runtimes, and
