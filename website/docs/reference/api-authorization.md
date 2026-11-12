@@ -121,6 +121,14 @@ with each OIDC group prefixed the same way, so bind Roles to, for example,
 Display claims such as `preferred_username`, `email`, and `name` are not used.
 Permission to read, create, or edit an Agent does not grant `use`.
 
+Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
+`agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
+`agentidentities/entra`), the lowercased identity ID as the name, and the Agent
+namespace. This applies to every authenticated identity, through the API and through
+the always-installed `agent-identity-bind` admission policy for direct writes.
+Removing an identity, or an edit that keeps it, needs no grant. Chat and worker
+tools cannot set an identity.
+
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
 

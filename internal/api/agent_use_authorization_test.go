@@ -66,7 +66,7 @@ func requireForbidden(t *testing.T, err error) {
 func TestAgentUseAuthorizationIsOffByDefault(t *testing.T) {
 	clientset, seen := agentUseClientset()
 	user := &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview}
-	err := authorizeKubernetesTaskCreate(context.Background(), clientset, user, agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"}))
+	err := authorizeKubernetesTaskCreate(context.Background(), nil, clientset, user, agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"}))
 	require.NoError(t, err)
 	require.Empty(t, *seen, "no Agent use review runs while the feature is off")
 }
@@ -76,7 +76,7 @@ func TestTaskCreateRequiresAgentUse(t *testing.T) {
 	user := &UserInfo{Username: "alice", Groups: []string{"team-a"}, AuthType: AuthTypeTokenReview}
 
 	denied, seen := agentUseClientset()
-	err := authorizeKubernetesTaskCreate(context.Background(), denied, user, agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"}))
+	err := authorizeKubernetesTaskCreate(context.Background(), nil, denied, user, agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"}))
 	requireForbidden(t, err)
 	require.Len(t, *seen, 1)
 	require.Equal(t, authorizationv1.ResourceAttributes{
@@ -84,18 +84,18 @@ func TestTaskCreateRequiresAgentUse(t *testing.T) {
 	}, (*seen)[0])
 
 	allowed, _ := agentUseClientset("team-a/reviewer")
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), allowed, user,
+	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, allowed, user,
 		agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"})))
 
 	// A Task without an Agent needs no grant.
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), denied, user, agentUseTask(nil)))
+	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, denied, user, agentUseTask(nil)))
 }
 
 func TestTaskCreateChecksAgentUseInTheAgentNamespace(t *testing.T) {
 	enableAgentUseAuthorization(t)
 	clientset, seen := agentUseClientset("agents-team/reviewer")
 	user := &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview}
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), clientset, user,
+	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, clientset, user,
 		agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer", Namespace: "agents-team"})))
 	require.Equal(t, "agents-team", (*seen)[0].Namespace)
 }

@@ -42,6 +42,7 @@ type ACPMCPAuthenticatedTask struct {
 	UID          string
 	ParentTaskID string
 	AgentName    string
+	AgentUID     string // frozen by the Task's execution binding, if any
 	SessionName  string
 	Deadline     time.Time
 }
@@ -513,9 +514,11 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if identity != nil {
 			executor.SetCheckedPolicy(policyName, *identity)
 		}
+		authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
 		execute = func(callCtx context.Context) (string, error) {
 			execCtx := workerexecutor.WithToolCallID(callCtx, request.Call.CallID)
 			execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
+			execCtx = workerexecutor.WithAgentUID(execCtx, authenticated.AgentUID)
 			result, err := executor.Execute(execCtx, tool, request.Call.Arguments)
 			return result, customToolNoEffectError(err)
 		}
@@ -1182,6 +1185,9 @@ func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials
 	credentials.Task.Deadline, _ = acpTaskDeadline(task, time.Now().UTC())
 	if task.Spec.AgentRef != nil {
 		credentials.Task.AgentName = strings.TrimSpace(task.Spec.AgentRef.Name)
+	}
+	if binding := task.Status.AgentExecutionBinding; binding != nil && binding.Agent != nil {
+		credentials.Task.AgentUID = string(binding.Agent.UID)
 	}
 	return credentials, nil
 }

@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stage 1 is implemented behind an opt-in flag; stages 2–4 are not. Builds on ADR 0048 (Agent runtime ceilings) and
+Proposed. Stages 1 and 2 are implemented; stage 1 is opt-in. Stages 3 and 4 are not. Builds on ADR 0048 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -103,25 +103,80 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   Agent. Delegation between Agents stays bounded by the parent Agent's
   `coordination.allowedAgents`.
 - The check is mandatory for every Agent that declares an identity: such an
-  Agent is not Ready unless the policies are installed, and a Task naming it
-  fails closed otherwise. For other Agents it is opt-in, with
-  `--agent-use-authorization-enabled` and the `config/agent-use-policy`
-  policies (Helm: `controller.agentUseAuthorization.enabled`), because
-  turning it on breaks every caller that lacks a `use` grant.
+  Agent is not Ready, holds no claim, and binds no Task unless the controller
+  runs with `--agent-use-authorization-enabled`. The flag asserts that the
+  `config/agent-use-policy` policies are installed; the Helm value
+  `controller.agentUseAuthorization.enabled` sets the flag and installs the
+  policies together, and the controller does not detect the policies itself.
+  For other Agents the check is opt-in, because turning it on breaks every
+  caller that lacks a `use` grant.
 - The check runs when an object is created or edited, but the controller
   resolves a Task's Agent only when it binds the Task. A Task created while
   the check was off, or before its Agent declared an identity, was never
   checked for that identity. So a claim (stage 2) records when it was
-  granted; claims are granted only while the check is enforced and are
-  released when the controller runs without it; and a Task binds an identity
-  only if it was created after the claim was granted. An older queued Task
-  fails closed and must be created again.
+  granted (`status.identityClaim.grantedAt`); claims are granted only while
+  the check is enforced and the issuer is configured, and are released when
+  the controller runs without either; and a Task binds an identity only if it
+  was created after the claim was granted. A claim can outlive a run without
+  the check when its Agent never reconciled during that run, so the
+  controller also records each unbroken period of enforcement in a Lease,
+  `orka-agent-use-enforcement`. A run without the check deletes it before
+  serving requests and again once it leads. An enforcing run decides its
+  period each time it wins leadership, never from what it read earlier, and
+  identity decisions wait until the period is recorded. A period continues
+  only across enforcing leaders that follow each other directly: the marker
+  records the leader election Lease's UID and transition count under the
+  last enforcing leader, and the next one keeps the marker only when that
+  count is its own or the one just before it. Leader election advances the
+  count whenever the holder changes, before the new leader runs anything,
+  so any leader in between, including one without the check whose deletion
+  had not yet run while it served requests, makes the next enforcing leader
+  start a new period, after that leader stopped. Every Task writer in the
+  controller runs only while it leads. Without leader election, every start
+  begins a new period. A Task or source also binds only if it
+  was created after the current period began. The grant time comes from the API server's clock, like
+  creation times, never the controller's: a granted claim first carries no
+  grant time and binds nothing, and the controller then records the latest
+  write time the API server stamped on the Agent's `managedFields`, which is
+  no earlier than the write that granted it. Both times are recorded to the
+  second, so a Task created in the grant's own second, which may predate the
+  grant, is refused too. A claim that stops releasing, because the Agent
+  names the identity again or the check is back on, is granted again the
+  same way. An older queued
+  Task fails closed and must be created again, as does a Task created
+  together with a new identity-bound Agent before or as its claim was
+  granted, so such Tasks are created once the Agent is Ready. A scheduled
+  Task never binds itself, so its runs bind only if the scheduled Task was
+  also created after the grant; an older one must be re-created. The same
+  holds for every durable object Orka creates Tasks from with its own broad
+  `use` grant: a Task controlled by a RepositoryScan or RepositoryMonitor
+  binds only if that object, matched by owner UID, was also created after
+  the grant, and fails closed with "re-create" otherwise. Task provenance
+  admission keeps that owner and the scan's or monitor's labels from being
+  removed or changed, so the controller refuses to start an identity issuer
+  without that admission. A Task that still carries those labels without its
+  owner (as after an orphaning delete) is refused rather than judged as a
+  root Task. GatewayBinding
+  Tasks record their binding only by name, so they cannot prove this and are
+  refused for identity-bound Agents. Before every runtime admission the
+  dispatcher checks again that the controller still enforces the check, that
+  the issuer instance the Task froze is still configured, and that the Agent
+  still holds a non-releasing claim the Task satisfies, and otherwise fails
+  the Task with `IdentityUnavailable`. The same check runs again just before
+  every prompt submission, the first and any resent after a RuntimePool
+  turned it away for capacity, since the RuntimeSession start and the wait
+  can outlast the claim.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0048), so a
   child must not borrow an identity its root requester was never checked
   against. This blocks the common pattern where a coordinator hands work to a
   different, identity-bound worker Agent. Lifting it needs a delegation
   ceiling (which Agents a parent may hand work to), which is outside this ADR.
+  Workers hold Agent `use` broadly, so Task provenance admission also refuses
+  a worker's Task that has no parent Task and names an identity-bound Agent;
+  otherwise it would bind as a root Task that no `use` check covered. The API
+  refuses the same request from a worker's ServiceAccount, because it writes
+  Tasks as the controller, which admission trusts.
 
 ### Stage 2: bind an identity and attribute actions to it
 
@@ -137,12 +192,17 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   it with a Role listing exact `resourceNames`. This is the pattern Kubernetes
   uses for binding Roles, and it settles who may claim which identity without
   a new CRD.
-- One identity maps to one Agent UID. A second Agent that claims an identity
-  already bound elsewhere reports `Ready=False`.
+- One identity maps to one Agent UID. The controller records the holder in
+  the Agent's `status.identityClaim`, granting a claim only when no other
+  Agent holds it; a second Agent naming the identity reports `Ready=False`.
+  An Agent that stops naming an identity keeps the claim until every Task
+  bound to it has finished, so two Agents never act as one identity at once,
+  but from that moment its bound Tasks' identity-backed calls are refused, as
+  cloud IAM revocation applies to running workloads at their next call.
 - The Task binding freezes the identity next to the Agent UID and generation
   that `AgentExecutionAgentRef` already pins, together with the issuer
   instance (for Entra, the tenant and blueprint). Editing the Agent or the
-  controller configuration does not change the identity a bound Task uses; a
+  controller configuration never moves a bound Task to another identity; a
   frozen issuer instance that no longer matches the controller's fails the
   call closed.
 - An Agent with an identity must set `ceiling.allowedTools` (ADR 0048). Every
@@ -154,8 +214,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   including Tasks whose Agent has no identity. A sibling is another child of
   the same parent, and an identity-bound child's parent runs the same Agent
   (stage 1), so those messages reach only Agents that Agent's
-  `coordination.allowedAgents` lists. That list, which its owner also sets,
-  bounds them, not the ceiling.
+  `coordination.allowedAgents` lists, plus Agents the parent Task created
+  itself with `create_agent`, which coordination admits without listing.
+  The list, which its owner also sets, bounds the rest; nothing but the
+  parent's own choices bounds the Agents it creates, and none of this is
+  the ceiling.
 - Emit `gen_ai.agent.id` as the Agent UID, not its reusable name, on Task and
   Tool-call spans, and write an identity use record for every identity-backed
   call (see below). Issuer logs and Orka records then share a join key.

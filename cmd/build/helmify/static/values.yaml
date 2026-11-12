@@ -234,6 +234,14 @@ controller:
   agentUseAuthorization:
     enabled: false
 
+  # External Agent identities (ADR 0039). Set both Entra values to accept
+  # Agent.spec.identity.entra; an identity-bound Agent also needs
+  # agentUseAuthorization.enabled and a runtime.ceiling.allowedTools.
+  agentIdentity:
+    entra:
+      tenantID: ""
+      blueprintClientID: ""
+
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:

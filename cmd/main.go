@@ -50,6 +50,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -60,6 +61,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/agenthost"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -130,6 +132,18 @@ func splitCommaList(raw string) []string {
 		}
 	}
 	return out
+}
+
+// validateAgentIdentityProvenance refuses an identity issuer without Task
+// provenance admission. Identity binding judges a Task by who created it: the
+// RepositoryScan or RepositoryMonitor owner and markers it carries. Without
+// the webhook any Task editor could remove them and let an unchecked
+// automation Task bind as a root Task.
+func validateAgentIdentityProvenance(config agentidentity.Config, provenanceProtected bool) error {
+	if config.Entra != nil && !provenanceProtected {
+		return fmt.Errorf("an Agent identity issuer requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect how Tasks record who created them")
+	}
+	return nil
 }
 
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
@@ -243,6 +257,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -447,6 +462,12 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
+		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
+	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
+		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
@@ -814,6 +835,20 @@ func main() {
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
+		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
+			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+		}
+	}
+	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -910,6 +945,11 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to every worker ServiceAccount,
+	// however the provenance trust list is overridden.
+	api.SetWorkerServiceAccountNames(orkaadmission.WorkerServiceAccountNames(
+		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
+		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
@@ -1159,6 +1199,18 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Record whether Agent use is enforced before anything serves requests,
+	// so work created while it was off can never bind an Agent identity. A
+	// new period starts only once this controller leads.
+	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to identify the leader election Lease")
+		os.Exit(1)
+	}
+	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+		setupLog.Error(err, "unable to record the Agent use enforcement period")
+		os.Exit(1)
+	}
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
 	if err != nil {
 		setupLog.Error(err, "unable to set up webhook certificate rotation")
@@ -1255,6 +1307,8 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
+			admissionConfig.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+				admissionConfig.TrustedServiceAccountNames, []string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName})
 			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
@@ -1506,7 +1560,8 @@ func main() {
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 	}
 	controlStoreOptions := []storekube.Option{
@@ -1762,6 +1817,7 @@ func main() {
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
 		ACPToolboxPolicy:            acpToolboxPolicy,
+		Identity:                    agentIdentityConfig,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
@@ -1799,7 +1855,8 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
 		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
@@ -2043,6 +2100,8 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
+		Identity:      agentIdentityConfig,
+		APIReader:     mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2258,7 +2317,7 @@ func main() {
 				// Children the broker creates for this Task inherit its
 				// verified requester only through this seal.
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
-				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName, AgentUID: task.AgentUID,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
 				Tenant: request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
@@ -2609,6 +2668,83 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 		options.ByObject[key] = cache.ByObject{Namespaces: namespaces}
 	}
 	return options
+}
+
+// establishAgentUseEnforcementPeriod records this run's Agent use
+// enforcement with a direct client, since the manager's cache is not running
+// yet, and stores when the current enforcement period began.
+func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	period := &agentidentity.EnforcementPeriod{}
+	config.Enforcement = period
+	if !config.AgentUseAuthorization {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+			return err
+		}
+		period.Start(time.Time{})
+		// An enforcing leader may have started a period since: end it again
+		// once this controller leads, or stop rather than serve beside it.
+		return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			var err error
+			for range 6 {
+				if err = agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return err
+		}))
+	}
+	// The period is decided each time this controller wins leadership, never
+	// from what it read before: the leader it replaces, or one that ran while
+	// this controller waited, may not have checked Agent use. Identity
+	// decisions wait until then.
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		for {
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace, leader)
+			if err == nil {
+				period.Start(since)
+				setupLog.Info("Agent use enforcement period started", "since", since)
+				return nil
+			}
+			setupLog.Error(err, "unable to start the Agent use enforcement period; retrying")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}))
+}
+
+// agentUseLeaderLease names the leader election Lease this controller holds
+// once it leads, as controller-runtime names it, or nil with leader election
+// off.
+func agentUseLeaderLease(leaderElection bool, watchNamespace string) (*agentidentity.LeaderLease, error) {
+	if !leaderElection {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(watchNamespace)
+	if namespace == "" {
+		namespace = currentPodNamespace()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &agentidentity.LeaderLease{
+		Key:          crclient.ObjectKey{Namespace: namespace, Name: controllerLeaderElectionID},
+		HolderPrefix: hostname + "_",
+	}, nil
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {

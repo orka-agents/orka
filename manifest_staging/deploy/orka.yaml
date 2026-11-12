@@ -292,6 +292,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agents
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connections
   - connectorproviders
   verbs:
@@ -1218,6 +1224,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentidentities/entra
+  verbs:
+  - bind
 - apiGroups:
   - core.orka.ai
   resources:
@@ -2635,6 +2647,7 @@ spec:
         - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
+        - --worker-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
         command:
         - /orka-admission
         image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -3252,8 +3265,9 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConditions:
-  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
-      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+  - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
@@ -3292,6 +3306,32 @@ spec:
         'system:serviceaccount:kube-system:namespace-controller',
         'system:kube-controller-manager']
     name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agents
+  validations:
+  - expression: |-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) || (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) && oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) || authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3812,6 +3852,15 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  policyName: orka-agent-identity-bind.orka.ai
   validationActions:
   - Deny
 ---
