@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -527,37 +528,52 @@ func (r *EvalRunReconciler) AbortAgentRollout(ctx context.Context, namespace, ag
 // RolloutInvalid, refusing when the Agent changed since the action read it.
 func (r *EvalRunReconciler) writeAgentRollout(ctx context.Context, stable *corev1alpha1.Agent,
 	rollout *corev1alpha1.AgentRolloutStatus) (int64, string, error) {
-	current := &corev1alpha1.Agent{}
-	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
+	var changed error
+	// Other writers update the Agent's status too, so a conflict on the
+	// status alone is retried; a changed spec is not.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
+			return err
+		}
+		if current.UID != stable.UID || current.Generation != stable.Generation {
+			changed = apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("agents").GroupResource(), stable.Name,
+				errors.New("the Agent changed since the rollout action read it"))
+			return nil
+		}
+		current.Status.Rollout = rollout
+		meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
+		return r.Status().Update(ctx, current)
+	})
+	if err == nil {
+		err = changed
+	}
+	if err != nil {
 		return 0, "", err
 	}
-	if current.UID != stable.UID || current.Generation != stable.Generation {
-		return 0, "", apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("agents").GroupResource(), stable.Name,
-			errors.New("the Agent changed since the rollout action read it"))
-	}
-	current.Status.Rollout = rollout
-	meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
-	if err := r.Status().Update(ctx, current); err != nil {
-		return 0, "", err
-	}
-	return current.Generation, "", nil
+	return stable.Generation, "", nil
 }
 
 // clearAgentRollout drops the Agent's canary, keeping recordID.
 func (r *EvalRunReconciler) clearAgentRollout(ctx context.Context, stable *corev1alpha1.Agent, recordID string) error {
-	current := &corev1alpha1.Agent{}
-	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
-		return err
-	}
-	if current.Status.Rollout == nil {
-		return nil
-	}
-	if recordID == "" {
-		recordID = current.Status.Rollout.RecordID
-	}
-	current.Status.Rollout = &corev1alpha1.AgentRolloutStatus{RecordID: recordID}
-	meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
-	return r.Status().Update(ctx, current)
+	// A promotion's spec write makes the Agent controller update the status
+	// at the same time, so a conflict here is expected and retried.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(stable), current); err != nil {
+			return err
+		}
+		if current.Status.Rollout == nil {
+			return nil
+		}
+		id := recordID
+		if id == "" {
+			id = current.Status.Rollout.RecordID
+		}
+		current.Status.Rollout = &corev1alpha1.AgentRolloutStatus{RecordID: id}
+		meta.RemoveStatusCondition(&current.Status.Conditions, AgentConditionRolloutInvalid)
+		return r.Status().Update(ctx, current)
+	})
 }
 
 // promotionExperimentRun reads the candidate EvalRun a decision names and

@@ -691,3 +691,26 @@ func TestCanaryOfAnotherDecisionAndLeftoverCleanup(t *testing.T) {
 		t.Fatalf("rollout = %+v", rollout)
 	}
 }
+
+// A canary's status writes, and the end of a canary its promotion carries
+// out, survive the Agent controller updating the status first.
+func TestRolloutStatusWritesRetryConflicts(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+
+	env.agentStatusConflicts = 1
+	if _, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 50, promotionTestActor); err != nil {
+		t.Fatalf("CanaryAgent() error = %v", err)
+	}
+	if rollout := env.getAgent("reviewer").Status.Rollout; rollout == nil || rollout.Candidate == nil {
+		t.Fatalf("rollout = %+v", rollout)
+	}
+	env.agentStatusConflicts = 1
+	if _, err := env.reconciler.PromoteAgent(ctx, evalTestNamespace, "reviewer", "d1", promotionTestActor); err != nil {
+		t.Fatalf("PromoteAgent() error = %v", err)
+	}
+	if rollout := env.getAgent("reviewer").Status.Rollout; rollout == nil || rollout.Candidate != nil {
+		t.Fatalf("rollout after promotion = %+v, want the canary ended", rollout)
+	}
+}
