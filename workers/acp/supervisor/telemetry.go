@@ -69,8 +69,8 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 	traceEndpoint := supervisorSignalEnv("TRACES", "ENDPOINT")
 	metricsEndpoint := supervisorSignalEnv("METRICS", "ENDPOINT")
 	if strings.TrimSpace(os.Getenv(supervisorMetricsExporterEnv)) == supervisorExporterNone {
-		// The controller drops metrics it cannot project safely; a generic
-		// endpoint kept for traces must not become the metrics collector.
+		// An explicit metrics opt-out keeps a generic endpoint for traces
+		// only.
 		metricsEndpoint = ""
 	}
 	if traceEndpoint == "" && metricsEndpoint == "" {

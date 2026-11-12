@@ -84,8 +84,8 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	}
 }
 
-// The controller projects OTEL_METRICS_EXPORTER=none when it drops metrics; a
-// generic endpoint kept for traces must not become the metrics collector.
+// OTEL_METRICS_EXPORTER=none keeps a generic endpoint for traces from becoming
+// the metrics collector.
 func TestSupervisorTelemetryMetricsExporterNone(t *testing.T) {
 	t.Setenv("ORKA_ENABLE_TELEMETRY", "true")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")

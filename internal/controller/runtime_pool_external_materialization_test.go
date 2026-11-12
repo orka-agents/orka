@@ -82,6 +82,9 @@ func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimitWithTelemetry(t *te
 		"trace endpoint only":            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces"},
 		"trace endpoint only, HTTP":      {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"},
 		"equal protocols set per signal": {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf"},
+		"generic endpoint, HTTP, unreachable metrics endpoint": {
+			"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			for _, signal := range []string{"", "TRACES_", "METRICS_"} {

@@ -104,9 +104,9 @@ A missing or invalid trace endpoint disables supervisor export. Metrics-only
 configuration enables neither supervisor tracing nor supervisor metrics. A
 metrics-specific endpoint that is not worker-reachable drops supervisor metrics
 rather than falling back to the generic collector; so does a metrics setting the
-supervisor would reject. When metrics are dropped, the supervisor also receives
-`OTEL_METRICS_EXPORTER=none` if it keeps a generic endpoint for traces, so that
-endpoint is not used for metrics. A protocol, insecure or compression value that
+supervisor would reject. When metrics are dropped, a generic endpoint kept for
+traces is passed as the trace-specific endpoint, with `/v1/traces` appended for
+OTLP/HTTP as the SDK would, so it is not used for metrics. A protocol, insecure or compression value that
 traces and metrics share is passed once, under its generic name. Substrate native
 runtimes accept 32 environment entries per container and Orka's own settings use
 most of them: a native runtime has room for the enable flag, one endpoint and one
