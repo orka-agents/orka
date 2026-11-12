@@ -110,7 +110,10 @@
 // support; names and semantics may change before then.
 package v1
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const (
 	// ContractVersion identifies this storage extension contract.
@@ -127,7 +130,8 @@ const (
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
 	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
-	ContractRevision = 5
+	// Revision 6 requires [SessionCreationReader] on state.v1.
+	ContractRevision = 6
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -146,6 +150,13 @@ type SessionTypeReader interface {
 	GetSessionType(ctx context.Context, namespace, name string) (string, error)
 }
 
+// SessionCreationReader reads when a Session record was created without
+// loading its transcript. A Session deleted and recreated under the same
+// name gets a new creation time, so the time identifies one incarnation.
+type SessionCreationReader interface {
+	GetSessionCreatedAt(ctx context.Context, namespace, name string) (time.Time, error)
+}
+
 // StateProvider is the provider side of state.v1.
 type StateProvider interface {
 	HealthChecker
@@ -158,6 +169,7 @@ type StateProvider interface {
 
 	SessionStore
 	SessionTypeReader
+	SessionCreationReader
 	SessionTurnCommitter
 	FencedSessionWriteStore
 	SessionSoulReader

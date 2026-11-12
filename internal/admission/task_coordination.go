@@ -57,7 +57,7 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 		return false, client.IgnoreNotFound(err)
 	}
 	if parent.UID != parentOwner.UID || parent.Status.JobName != job.Name || parent.Status.JobUID == "" || parent.Status.JobUID != string(job.UID) ||
-		!parent.DeletionTimestamp.IsZero() || parent.Status.ExecutionOutcome != nil {
+		!coordinationParentMayDelegate(parent) {
 		return false, nil
 	}
 	switch parent.Status.Phase {
@@ -66,6 +66,13 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 	default:
 		return false, nil
 	}
+}
+
+// coordinationParentMayDelegate reports whether a parent may still start
+// work: not being deleted, with no recorded outcome, and not asked to stop.
+func coordinationParentMayDelegate(parent *corev1alpha1.Task) bool {
+	_, cancelRequested := parent.Annotations[labels.AnnotationCancelRequested]
+	return parent.DeletionTimestamp.IsZero() && parent.Status.ExecutionOutcome == nil && !cancelRequested
 }
 
 // A worker can pass on its own session authority, including the history

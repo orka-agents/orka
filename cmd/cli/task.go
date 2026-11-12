@@ -81,6 +81,7 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskChildrenCmd())
 	cmd.AddCommand(newTaskWaitCmd())
 	cmd.AddCommand(newTaskDeleteCmd())
+	cmd.AddCommand(newTaskCancelCmd())
 	cmd.AddCommand(newTaskArtifactsCmd())
 	cmd.AddCommand(newTaskDownloadCmd())
 	return cmd
@@ -505,6 +506,9 @@ func newTaskWaitCmd() *cobra.Command {
 			}
 
 			c := newClientFromCmd(cmd)
+			// A Task held on an approval would otherwise look like a plain
+			// wait; say once, on stderr, that it needs a person.
+			announced := false
 			return waitForTaskPhase(
 				ctx,
 				args[0],
@@ -513,6 +517,12 @@ func newTaskWaitCmd() *cobra.Command {
 					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
 					if err != nil {
 						return "", err
+					}
+					if waitingOn := taskWaitingOn(*detail); waitingOn == "" {
+						announced = false
+					} else if !announced {
+						announced = true
+						fmt.Fprintf(cmd.ErrOrStderr(), "Task %s is waiting on %s.\n", args[0], waitingOn) //nolint:errcheck
 					}
 					return client.StringField(*detail, "status", "phase"), nil
 				},

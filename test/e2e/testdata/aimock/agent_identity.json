@@ -1,0 +1,59 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:agent-identity-self]",
+        "toolResultContains": "AGENT_IDENTITY_PROBE_OK"
+      },
+      "response": {
+        "content": "AGENT_IDENTITY_SELF_DONE"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:agent-identity-self]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "AGENT_IDENTITY_SELF_UNEXPECTED_RESULT"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:agent-identity-self]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__e2eidentityprobe",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:agent-identity-disabled]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "AGENT_IDENTITY_DISABLED_DONE"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:agent-identity-disabled]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__e2eidentityprobe",
+            "arguments": {}
+          }
+        ]
+      }
+    }
+  ]
+}

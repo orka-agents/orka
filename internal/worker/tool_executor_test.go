@@ -2347,6 +2347,7 @@ func TestToolExecutor_Execute_InjectsTraceparentAndEmitsHTTPToolSpan(t *testing.
 	}
 	ctx = baggage.ContextWithBaggage(ctx, bag)
 	ctx = WithToolCallID(ctx, "call-http")
+	ctx = WithAgentUID(ctx, "agent-uid")
 	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
 	parent.End()
 	if err != nil {
@@ -2374,6 +2375,9 @@ func TestToolExecutor_Execute_InjectsTraceparentAndEmitsHTTPToolSpan(t *testing.
 	}
 	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-http" {
 		t.Fatalf("tool call id = %q", got)
+	}
+	if got := attrs[genai.AttrAgentID].AsString(); got != "agent-uid" {
+		t.Fatalf("%s = %q, want the bound Agent's UID", genai.AttrAgentID, got)
 	}
 	if countMetricDataPoints(metrics.Collect(t), genai.MetricExecuteToolDuration) != 1 {
 		t.Fatalf("missing %s datapoint", genai.MetricExecuteToolDuration)

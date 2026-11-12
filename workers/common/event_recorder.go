@@ -213,12 +213,6 @@ func WithEventTaskName(taskName string) EventOption {
 	}
 }
 
-func WithEventAgentName(agentName string) EventOption {
-	return func(event *RecordedEvent) {
-		event.AgentName = agentName
-	}
-}
-
 func WithEventToolName(toolName string) EventOption {
 	return func(event *RecordedEvent) {
 		event.ToolName = toolName
