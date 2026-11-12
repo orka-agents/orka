@@ -217,16 +217,40 @@ func testlessRequestDigest() harnessv2.RequestDigest {
 
 func (s *mcpProxySession) markRunning(promptID harnessv2.PromptID, now time.Time) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if lockedNow := time.Now(); now.Before(lockedNow) {
 		now = lockedNow
 	}
 	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
 		s.gateCancel == nil || !s.authorization.AuthorizedAt(harnessv2.RuntimeSessionStatePromptRunning, s.lease, now) {
+		s.mu.Unlock()
 		return fmt.Errorf("MCP prompt authority is not active")
 	}
 	s.state = harnessv2.RuntimeSessionStatePromptRunning
+	forwarders := append([]*azureGateway(nil), s.forwarders...)
+	s.mu.Unlock()
+	// The prompt can now make broker calls, so az can be signed in.
+	for _, forwarder := range forwarders {
+		forwarder.signInAtPromptStart()
+	}
 	return nil
+}
+
+// promptRunning reports whether prompt is the session's running prompt.
+func (s *mcpProxySession) promptRunning(prompt harnessv2.PromptID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return prompt != "" && !s.closed && s.authorization != nil && s.authorization.PromptID == prompt &&
+		s.state == harnessv2.RuntimeSessionStatePromptRunning
+}
+
+// approvalRequired reports whether the session's approval policy requires
+// approval for a tool. It reads the session's frozen configuration, which
+// every prompt's policy must match and which, unlike a prompt's
+// authorization, stays set between prompts.
+func (s *mcpProxySession) approvalRequired(toolName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.configuration.ApprovalPolicy.Requires(toolName)
 }
 
 func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {

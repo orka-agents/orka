@@ -33,6 +33,7 @@ type azureGatewayFixture struct {
 	respond   func(harnessv2.MCPBrokerCallRequest) json.RawMessage
 	fail      error
 	authorize harnessv2.PromptMCPAuthorization
+	gateway   *azureGateway
 }
 
 func (f *azureGatewayFixture) brokerCalls() []harnessv2.MCPBrokerCallRequest {
@@ -100,7 +101,24 @@ func newAzureGatewayFixture(t *testing.T) *azureGatewayFixture {
 
 func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture {
 	t.Helper()
-	fixture := &azureGatewayFixture{}
+	fixture := newAzureGatewayFixtureSigningIn(t, writes, nil)
+	// The prompt start signed az in; the tests below start from there.
+	fixture.waitForSignIn(t)
+	fixture.mu.Lock()
+	fixture.calls = nil
+	fixture.mu.Unlock()
+	return fixture
+}
+
+// newAzureGatewayFixtureSigningIn starts the prompt with respond already
+// answering, so the sign-in the prompt start begins is the test's to watch.
+// adjust, if given, changes the prompt's authorization before it starts.
+func newAzureGatewayFixtureSigningIn(
+	t *testing.T, writes bool, respond func(harnessv2.MCPBrokerCallRequest) json.RawMessage,
+	adjust ...func(*testing.T, *harnessv2.PromptMCPAuthorization),
+) *azureGatewayFixture {
+	t.Helper()
+	fixture := &azureGatewayFixture{respond: respond}
 	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
 		fixture.mu.Lock()
 		fixture.calls = append(fixture.calls, request)
@@ -137,6 +155,9 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 	}
 	now := time.Now().UTC()
 	authorization, lease := forwardingTestAuthorizationWith(t, fence, now, 1, writes)
+	for _, change := range adjust {
+		change(t, &authorization)
+	}
 	session, binding, err := proxy.newSession(fence, authorization.Configuration())
 	if err != nil {
 		t.Fatal(err)
@@ -144,10 +165,11 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 	fixture.session, fixture.endpoint, fixture.authorize = session, binding.URL, authorization
 	fixture.home = t.TempDir()
 	server := &Server{}
-	fixture.env, err = server.attachAzureGateway(session, authorization.Configuration(), fixture.home)
+	fixture.env, err = server.attachAzureGateway(session, authorization.Configuration(), fixture.home, os.Getuid(), os.Getgid())
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.gateway = session.forwarders[0]
 	bundle, err := os.ReadFile(fixture.env["REQUESTS_CA_BUNDLE"])
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +186,27 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+// waitForSignIn waits for the sign-in the prompt start began.
+func (f *azureGatewayFixture) waitForSignIn(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f.gateway.signInMu.Lock()
+		signedIn, attempt := f.gateway.signedIn, f.gateway.signInAttempt
+		f.gateway.signInMu.Unlock()
+		switch {
+		case attempt != nil:
+			<-attempt.done
+		case signedIn:
+			return
+		case time.Now().After(deadline):
+			t.Fatal("the prompt start did not sign az in")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
 }
 
 func (f *azureGatewayFixture) base() string {

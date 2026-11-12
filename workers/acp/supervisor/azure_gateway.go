@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -151,6 +152,24 @@ type azureGateway struct {
 	identityHeader string
 	tokenSecret    string
 	closeOnce      sync.Once
+	// ctx ends when the gateway closes, stopping a sign-in in flight.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// profileDir is the child's ~/.azure, opened at setup, so writes to
+	// az's profile cannot be redirected by a link the child plants. uid
+	// and gid own the profile.
+	profileDir *os.Root
+	uid, gid   int
+	// signInMu guards the sign-in state: the attempt in flight, if any,
+	// and whether one has written the identity's subscriptions.
+	signInMu      sync.Mutex
+	signInAttempt *azureSignIn
+	signedIn      bool
+	// autoSignInTried records that a prompt start has already tried to sign
+	// az in. It is tried once, whatever its outcome: after a failure the
+	// agent may sign in itself and choose a subscription, which a later
+	// automatic discovery must not overwrite.
+	autoSignInTried bool
 	// throttled counts, per write call ID, the throttled answers Azure gave
 	// it. Azure did not process a throttled request, so the client's retry
 	// is a new attempt under a new call ID rather than a replay.
@@ -316,6 +335,7 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 		session: session, toolName: descriptor.Name, writeToolName: writeToolName, origin: origin, listener: listener,
 		base: "https://" + listener.Addr().String(), identityHeader: identityHeader, tokenSecret: tokenSecret,
 	}
+	gateway.ctx, gateway.cancel = context.WithCancel(context.Background())
 	gateway.server = &http.Server{
 		Handler: http.HandlerFunc(gateway.serveHTTP), ErrorLog: log.New(io.Discard, "", 0), TLSConfig: tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
@@ -327,7 +347,7 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 // attachAzureGateway starts the session's Azure gateway when its tool policy
 // allows an Azure forwarding Tool, and returns the environment az needs. The
 // gateway closes with the session.
-func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harnessv2.MCPPolicyConfiguration, home string) (map[string]string, error) {
+func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harnessv2.MCPPolicyConfiguration, home string, uid, gid int) (map[string]string, error) {
 	descriptor, writeToolName, ok, err := azureForwardingTool(configuration)
 	if err != nil || !ok {
 		return nil, err
@@ -337,6 +357,7 @@ func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harn
 		return nil, err
 	}
 	_, caPEM, _ := s.azureAuthority.load()
+	gateway.uid, gateway.gid = uid, gid
 	environment, err := gateway.prepareHome(home, caPEM)
 	if err != nil {
 		gateway.close()
@@ -357,13 +378,21 @@ func (g *azureGateway) close() {
 	if g == nil {
 		return
 	}
-	g.closeOnce.Do(func() { _ = g.server.Close() })
+	g.closeOnce.Do(func() {
+		if g.cancel != nil {
+			g.cancel()
+		}
+		_ = g.server.Close()
+		if g.profileDir != nil {
+			_ = g.profileDir.Close()
+		}
+	})
 }
 
 // prepareHome writes az's configuration into the session home, selecting the
-// gateway as the active cloud, and returns the child environment az needs.
-// The files are written before session ownership is finalized, so the child
-// owns them.
+// gateway as the active cloud and the placeholder account as az's sign-in,
+// and returns the child environment az needs. The files are written before
+// session ownership is finalized, so the child owns them.
 func (g *azureGateway) prepareHome(home string, caPEM []byte) (map[string]string, error) {
 	dir := filepath.Join(home, ".azure")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -394,6 +423,14 @@ func (g *azureGateway) prepareHome(home string, caPEM []byte) (map[string]string
 		if err := os.WriteFile(name, content, 0o600); err != nil {
 			return nil, err
 		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	g.profileDir = root
+	if err := g.writeProfile(placeholderAzureProfile(azureSignInPendingName), false); err != nil {
+		return nil, err
 	}
 	return map[string]string{
 		"AZURE_CONFIG_DIR":   dir,
@@ -477,6 +514,10 @@ func (g *azureGateway) serveMetadata(w http.ResponseWriter) {
 func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Request) {
 	if !g.bearerMatches(r.Header.Get("Authorization")) {
 		writeAzureError(w, http.StatusUnauthorized, "OrkaGatewayUnauthorized", "Run `az login --identity` in this session first.")
+		return
+	}
+	if underPlaceholderAccount(r.URL.EscapedPath()) {
+		g.answerUnderPlaceholderAccount(w, r)
 		return
 	}
 	write := harnessv2.ForwardWriteMethod(r.Method)

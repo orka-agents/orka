@@ -11,7 +11,7 @@ Instead, the runtime presents itself to `az` as an Azure cloud:
 
 ```text
 agent runs:  az group list
-   az (from a toolbox) signs in with a placeholder that works only in this session
+   az (from a toolbox) is already signed in: Orka wrote its profile, and its token is a placeholder that works only in this session
    az sends the request to the runtime's loopback endpoint, not to Azure
       → the controller checks the Task may use the forwarding Tool
       → adds the real token: the Agent's own Entra identity, or the requester's linked account
@@ -41,17 +41,27 @@ identity you choose decides what they can see.
   `az` prefixes it with the runtime's endpoint. An absolute
   `https://management.azure.com/...` URL bypasses Orka, and the runtime's
   network policy blocks it, so the command hangs until it times out.
+- **No `az login`.** When the agent's first turn starts, Orka lists the
+  identity's subscriptions through the forwarding Tool and writes them as
+  `az`'s profile, with the first enabled one as the default. That read is
+  Orka's, not the agent's: it runs once per session, it is recorded like any
+  other call to the Tool, and it is skipped when reads of the Tool need
+  approval. Until it finishes, `az account show` names the account
+  "Orka is still signing az in; run the command again", and a command that
+  runs is answered with `OrkaSignedIn`; run it again. After `az account clear`, `az login --identity`
+  signs `az` in again.
 - `az account show` reports a tenant ID of all zeros. Subscription IDs and
-  everything Resource Manager returns are real. With no subscription, `az`
-  signs in to a tenant-level account and commands that need a subscription
-  say so.
+  everything Resource Manager returns are real. An identity with no role on a
+  subscription gets a tenant-level account, and commands that need a
+  subscription fail with `OrkaNoSubscription`.
 
 ## 1. Build the toolbox
 
 [`examples/azure-cli`](https://github.com/orka-agents/orka/tree/main/examples/azure-cli)
-has the Dockerfile. It installs a self-contained Python and the Azure CLI
-under `/opt/azure-cli`, plus a small `az` wrapper that signs in on the first
-command. The image carries no credential.
+has the Dockerfile. It installs a self-contained Python and the stock Azure
+CLI under `/opt/azure-cli`. The image carries no credential, and Orka needs
+nothing else from it: any toolbox that puts `az` on `PATH` works the same
+way.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -301,4 +311,6 @@ orka task get az-groups -n team-a
 | `(OrkaConnectionRequired)` | The person who asked has no usable linked account: none, expired, revoked, or changed since the Task started. The message names the `orka connect` command; run it, then run the Task again. |
 | `(OrkaToolRefused)` or `(OrkaBrokerError)` | The controller refused or could not complete the call: for example, the identity is disabled, the policy changed, or a write used a `readOnly` link. For an agent identity, the `agent-identity-audit` log says why. |
 | `(AuthorizationFailed)` | Azure refused the identity. Give it a role on the scope you are reading. |
-| `Please run 'az login'` | The Agent's toolbox is not this wrapper, or the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |
+| `(OrkaSignedIn)` | The command started before Orka finished signing `az` in, or under a sign-in that is out of date. Orka has signed in now; run the command again. |
+| `(OrkaNoSubscription)` | The identity has no role on any subscription, so `az` has no subscription to use. Give it a role on one, then run the command again. |
+| `Please run 'az login'` | `az` forgot its sign-in, for example after `az account clear`: run `az login --identity`. If that fails with one of the codes above, that row says why. If it cannot reach a managed identity endpoint at all, the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |
