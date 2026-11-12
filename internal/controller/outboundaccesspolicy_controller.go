@@ -41,7 +41,10 @@ const (
 // OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
-	APIReader                  client.Reader
+	APIReader client.Reader
+	// ReservedServiceAccount is the controller's own ServiceAccount, which
+	// no policy may request tokens for.
+	ReservedServiceAccount     outboundaccess.ReservedServiceAccount
 	Scheme                     *runtime.Scheme
 	Trust                      outboundaccess.TrustConfig
 	AIWorkerServiceAccountName string
@@ -100,7 +103,11 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		LastTransitionTime: now,
 	}
 
-	if issue := outboundaccess.ValidateSpec(policy); issue != nil {
+	issue := outboundaccess.ValidateSpec(policy)
+	if issue == nil {
+		issue = outboundaccess.ValidateReservedServiceAccount(policy, r.ReservedServiceAccount)
+	}
+	if issue != nil {
 		accepted.Status = metav1.ConditionFalse
 		accepted.Reason = issue.Reason
 		accepted.Message = issue.Message

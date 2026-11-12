@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stages 1 and 2 are implemented; stage 1 is opt-in. Stages 3 and 4 are not. Builds on ADR 0048 (Agent runtime ceilings) and
+Proposed. Stages 1–3 are implemented; stage 1 is opt-in. Identity use records and stage 4 are not. Builds on ADR 0048 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -293,8 +293,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   it. With Entra, the controller requests the blueprint's exchange token for
   the identity, which proves the identity is a child of the configured
   blueprint, which stage 2 cannot, and then the identity's own token, because
-  Entra still issues the exchange token for a disabled identity. The controller re-verifies when the Agent reconciles and at least
-  hourly while Tasks are bound to it. A failure, for example an identity
+  Entra still issues the exchange token for a disabled identity. The controller keeps the issuer's
+  answer, verified or refused, for one Agent generation and asks again when
+  the Agent is edited and at least hourly, so the Agent's own status writes
+  never call the issuer again early. A failure, for example an identity
   disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
   new calls; deleting the Agent fails identity-backed calls from Tasks still
   bound to it.

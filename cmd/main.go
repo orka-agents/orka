@@ -97,6 +97,7 @@ import (
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	serviceAccountTokenFile     = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101 -- a path, not a credential.
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
 	// storageConfigResolveTimeout bounds the startup Secret reads for storage
 	// adapters.
@@ -258,6 +259,7 @@ func main() {
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
+	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -468,6 +470,12 @@ func main() {
 	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
 		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
 		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
+	flag.StringVar(&agentIdentityEntraAuthority, "agent-identity-entra-authority",
+		envStringDefault("ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY", agentidentity.DefaultEntraAuthority),
+		"Entra authority URL used for agent identity tokens, for example a sovereign cloud's login endpoint.")
+	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
+		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
@@ -836,9 +844,12 @@ func main() {
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
+	agentIdentityEntraBlueprintClientID = strings.TrimSpace(agentIdentityEntraBlueprintClientID)
 	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
 		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
 			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: strings.TrimSpace(agentIdentityEntraAuthority),
 		}
 	}
 	if err := agentIdentityConfig.Validate(); err != nil {
@@ -848,6 +859,23 @@ func main() {
 	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
 		setupLog.Error(err, "invalid agent identity configuration")
 		os.Exit(1)
+	}
+	// No OutboundAccessPolicy may mint tokens for the controller's own
+	// ServiceAccount, which the agent identity blueprint trusts.
+	controllerServiceAccount, controllerServiceAccountErr := currentServiceAccount()
+	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
+		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
+	var agentIdentitySource *agentidentity.Source
+	if agentIdentityConfig.Entra != nil {
+		agentIdentitySource = &agentidentity.Source{
+			Config: agentIdentityConfig,
+			Entra: &agentidentity.EntraIssuer{
+				Config:     *agentIdentityConfig.Entra,
+				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
+			},
+		}
 	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
@@ -1344,10 +1372,15 @@ func main() {
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
-		Reader:     mgr.GetAPIReader(),
-		KubeClient: kubeClient,
-		Trust:      outboundAccessTrust,
-		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		Reader:                 mgr.GetAPIReader(),
+		ReservedServiceAccount: controllerServiceAccount,
+		KubeClient:             kubeClient,
+		Trust:                  outboundAccessTrust,
+		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.AgentIdentities = agentIdentitySource
+		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger
@@ -1902,6 +1935,7 @@ func main() {
 	if err := (&controller.OutboundAccessPolicyReconciler{
 		Client:                     mgr.GetClient(),
 		APIReader:                  mgr.GetAPIReader(),
+		ReservedServiceAccount:     controllerServiceAccount,
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
@@ -2102,6 +2136,12 @@ func main() {
 		ToolboxPolicy: acpToolboxPolicy,
 		Identity:      agentIdentityConfig,
 		APIReader:     mgr.GetAPIReader(),
+		IdentityVerifier: func() controller.AgentIdentityVerifier {
+			if agentIdentitySource == nil {
+				return nil
+			}
+			return agentIdentitySource
+		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2923,4 +2963,22 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// currentServiceAccount returns the ServiceAccount this Pod runs as, from its
+// mounted API token.
+func currentServiceAccount() (outboundaccess.ReservedServiceAccount, error) {
+	token, err := os.ReadFile(serviceAccountTokenFile)
+	if err != nil {
+		return outboundaccess.ReservedServiceAccount{}, fmt.Errorf("read the controller's ServiceAccount token: %w", err)
+	}
+	return outboundaccess.ServiceAccountFromToken(string(token))
+}
+
+// envStringDefault returns the trimmed environment value, or fallback when unset.
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -271,8 +271,46 @@ controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
 it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
-`IdentityVerified` condition stays `False` with reason `Declared`: the identity
-is an authorized declaration, not yet proven with the issuer.
+`IdentityVerified` condition turns `True` once the controller has obtained a token
+for the identity from its issuer, and the controller asks again at least hourly; a
+refusal sets it `False`, makes the Agent not Ready, and stops its identity-backed calls; an issuer that cannot answer sets it `Unknown` instead. Tokens for the identity are
+issued only by the controller, through `agentIdentity`-mode outbound access
+policies, and never reach the runtime.
+
+The controller's blueprint credential is a projected token on the node that
+runs it. AI workers can create Jobs in the release namespace, and a privileged
+Pod, or one with a `hostPath` volume, can read any token on its node, this one
+included, whichever ServiceAccount it runs as. Before you turn on agent
+identities, enforce at least the `baseline` Pod Security profile on the release
+namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
+admission control; the chart does not label a namespace it does not create.
+Admission checks only new Pods and evicts none, so also delete any running Pod
+that breaks the profile before you turn identities on. A server-side dry run of
+the label lists them:
+`kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline`.
+
+The release namespace's profile covers only Pods admitted there. A privileged
+or `hostPath` Pod from any other namespace that lands on the controller's node
+can read the credential too, and a taint does not keep one off: its author can
+add the toleration, or set `spec.nodeName` and skip the scheduler. So either
+every namespace whose Pods can run on that node enforces at least `baseline`
+as well, or admission control stops every Pod but the controller from
+tolerating the controller nodes' taint or binding to them by name. Only then do
+the chart's `nodeSelector` and `tolerations`, which apply to the controller
+Deployment, give it nodes of its own.
+
+The controller ServiceAccount's own policy admits Pods running as that
+ServiceAccount only for the controller Deployment's own ReplicaSets, which are
+named after it, so no other ReplicaSet running as it can create Pods, even
+when scaled up, and none can be created or given a new template. It evicts nothing, though, so before you turn
+identities on, delete any Pod already running as that ServiceAccount that the
+controller Deployment did not create, since it keeps the identity:
+`kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
+lists them. Also delete, or move to another ServiceAccount, any other
+Deployment or ReplicaSet whose Pod template runs as it, which the policy now
+leaves unable to run:
+`kubectl get deployments,replicasets -n <namespace> -o jsonpath='{range .items[?(@.spec.template.spec.serviceAccountName=="<controller ServiceAccount>")]}{.kind}/{.metadata.name}{"\n"}{end}'`
+lists them.
 
 ## Secret management
 
