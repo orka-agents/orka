@@ -193,14 +193,17 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 		resolver := &KubernetesResolver{Reader: newReader().Build(), Connections: source}
 		req := base
 		req.FrozenConnections = nil
-		if _, err := resolver.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "the requester has no link to") ||
-			!strings.Contains(err.Error(), "orka connect") {
+		_, err := resolver.Resolve(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "github is not linked for the person who asked") || !strings.Contains(err.Error(), "`orka connect github -n tenant`") {
 			t.Fatalf("err = %v, want the missing link named", err)
 		}
+		if _, ok := errors.AsType[*ConnectionRequiredError](err); !ok {
+			t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
+		}
 		for state, want := range map[string]string{
-			corev1alpha1.ConnectionStateExpired: "is expired",
-			corev1alpha1.ConnectionStateReady:   "is Ready but is not bound to this Task",
-			"Revoked":                           "is not Ready (Revoked)",
+			corev1alpha1.ConnectionStateExpired: "has expired",
+			corev1alpha1.ConnectionStateReady:   "does not match what the provider requires now",
+			"Revoked":                           "is not ready (Revoked)",
 		} {
 			link := &corev1alpha1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "alice-github"},
@@ -226,7 +229,7 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			}
 		}
 		duplicated := &KubernetesResolver{Reader: newReader().WithObjects(duplicate("alice-github"), duplicate("alice-github-2")).Build(), Connections: source}
-		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to") {
+		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to github") {
 			t.Fatalf("duplicate links: err = %v, want them named", err)
 		}
 		other := &corev1alpha1.Connection{
@@ -238,7 +241,7 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady},
 		}
 		if _, err := (&KubernetesResolver{Reader: newReader().WithObjects(other).Build(), Connections: source}).Resolve(context.Background(), req); err == nil ||
-			!strings.Contains(err.Error(), "the requester has no link to") {
+			!strings.Contains(err.Error(), "is not linked for the person who asked") {
 			t.Fatalf("another person's link must not count: err = %v", err)
 		}
 		req.FrozenConnections = map[string]FrozenConnection{"other": {UID: "x"}}
@@ -596,5 +599,31 @@ func TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst(t *test
 	}
 	if source.calls != 0 {
 		t.Fatalf("credential source calls = %d, want none", source.calls)
+	}
+}
+
+func TestDeclaredConnectorToolMatchesForwarding(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{
+			URL: "https://management.azure.com", Method: "POST",
+			Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+		},
+	}}}}
+	binding := ToolBinding{
+		Name: "azure_arm", URL: "https://management.azure.com", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+		Forward: corev1alpha1.HTTPForwardProtocolAzureResourceManager,
+	}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("a forwarding Tool must match its forwarding declaration: %v", err)
+	}
+	plain := binding
+	plain.Forward = ""
+	if _, err := DeclaredConnectorTool(provider, plain); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a plain Tool matched a forwarding declaration: %v", err)
+	}
+	provider.Spec.Tools[0].HTTP.Forward = nil
+	if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a forwarding Tool matched a plain declaration: %v", err)
 	}
 }

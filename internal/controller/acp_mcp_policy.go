@@ -444,6 +444,18 @@ func buildCanonicalMCPToolDescriptors(
 		if descriptorErr != nil {
 			return nil, descriptorErr
 		}
+		if descriptor.Forward != nil {
+			policy := &corev1alpha1.OutboundAccessPolicy{}
+			if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: custom.Spec.HTTP.OutboundAccessPolicyRef.Name}, policy); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil, permanentACPAgentConfiguration(fmt.Errorf("forwarding tool %q names a missing outbound access policy", name))
+				}
+				return nil, fmt.Errorf("load the outbound access policy of forwarding tool %q: %w", name, err)
+			}
+			if err := forwardingPolicySupported(custom, policy); err != nil {
+				return nil, permanentACPAgentConfiguration(err)
+			}
+		}
 		// Approval-bound reads share the same execution and receipt lease as
 		// approved writes. Equal timeouts would let the earlier broker deadline
 		// expire first. Ungated reads keep their configured timeout.
@@ -500,10 +512,73 @@ func customACPMCPToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolDescr
 		Name: tool.Name, Description: tool.Spec.Description, InputSchema: parameters,
 		Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: effect, DefinitionDigest: definitionDigest,
 	}
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
+		forward, forwardErr := forwardingToolDescriptor(tool)
+		if forwardErr != nil {
+			return harnessv2.MCPToolDescriptor{}, forwardErr
+		}
+		descriptor.InputSchema = append(json.RawMessage(nil), harnessv2.MCPForwardInputSchema...)
+		descriptor.Forward = &forward
+	}
 	if err := descriptor.Validate(); err != nil {
 		return harnessv2.MCPToolDescriptor{}, err
 	}
 	return descriptor, nil
+}
+
+// forwardingToolDescriptor checks a forwarding Tool again, after admission,
+// so a Tool stored before these rules existed cannot be exposed: it reads
+// only, takes its credential from an outbound access policy, and declares
+// nothing a call could use to leave its origin.
+func forwardingToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolForward, error) {
+	spec := tool.Spec.HTTP
+	switch {
+	case tool.Spec.BrokeredToolClass != corev1alpha1.AgentRuntimeBrokeredToolClassRead:
+		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q must declare brokeredToolClass read", tool.Name)
+	case spec.OutboundAccessPolicyRef == nil || strings.TrimSpace(spec.OutboundAccessPolicyRef.Name) == "":
+		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q takes its credential from an outbound access policy", tool.Name)
+	case tool.Spec.MCP != nil || (tool.Spec.Parameters != nil && len(tool.Spec.Parameters.Raw) > 0) || spec.AuthSecretRef != nil ||
+		len(spec.Headers) > 0 || (spec.AuthInject != "" && spec.AuthInject != "header") || spec.AuthBodyKey != "":
+		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q sets no parameters, MCP backend, auth Secret, or headers", tool.Name)
+	case spec.Forward.Protocol != corev1alpha1.HTTPForwardProtocolAzureResourceManager:
+		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q names an unsupported protocol", tool.Name)
+	}
+	origin, err := harnessv2.ForwardOrigin(spec.URL)
+	if err != nil {
+		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q: %w", tool.Name, err)
+	}
+	return harnessv2.MCPToolForward{Protocol: string(spec.Forward.Protocol), Origin: origin}, nil
+}
+
+// forwardingPolicySupported refuses a forwarding Tool whose outbound access
+// policy does not inject a credential: forwarding executes only Direct,
+// Connection, and AgentIdentity policies, so a Gateway policy would expose a
+// Tool whose every request fails.
+func forwardingPolicySupported(tool *corev1alpha1.Tool, policy *corev1alpha1.OutboundAccessPolicy) error {
+	if tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil {
+		return nil
+	}
+	var output *corev1alpha1.OutboundCredentialOutput
+	switch {
+	case policy.Spec.Direct != nil:
+		output = policy.Spec.Direct.Output
+	case policy.Spec.Connection != nil:
+		output = policy.Spec.Connection.Output
+	case policy.Spec.AgentIdentity != nil:
+		output = policy.Spec.AgentIdentity.Output
+	default:
+		return fmt.Errorf("forwarding tool %q needs a Direct, Connection, or AgentIdentity outbound access policy; %q is none", tool.Name, policy.Name)
+	}
+	// Azure Resource Manager reads the credential only as
+	// "Authorization: Bearer <token>", so any other output would expose a
+	// Tool whose every request Azure refuses.
+	if output != nil {
+		header := strings.TrimSpace(output.Header)
+		if (header != "" && !strings.EqualFold(header, "Authorization")) || (output.Prefix != nil && *output.Prefix != "Bearer ") {
+			return fmt.Errorf("forwarding tool %q needs outbound access policy %q to send the credential as \"Authorization: Bearer\"; remove its output header and prefix", tool.Name, policy.Name)
+		}
+	}
+	return nil
 }
 
 func brokeredToolEffect(name string) harnessv2.MCPToolEffect {

@@ -68,6 +68,9 @@ type mcpProxySession struct {
 	leaseVersion  uint64
 	closed        bool
 	calls         chan struct{}
+	// forwarders serve command-line clients for this session's forwarding
+	// Tools; they close with the session.
+	forwarders []*azureGateway
 }
 
 type mcpJSONRPCRequest struct {
@@ -361,7 +364,7 @@ func (s *mcpProxySession) authorizePermissionTool(provider string, promptID harn
 	return nil
 }
 
-func (s *mcpProxySession) authorizeCall(toolName string, now time.Time) (
+func (s *mcpProxySession) authorizeCall(toolName string, now time.Time, forward bool) (
 	context.Context,
 	harnessv2.PromptMCPAuthorization,
 	harnessv2.PromptLease,
@@ -378,7 +381,7 @@ func (s *mcpProxySession) authorizeCall(toolName string, now time.Time) (
 		return s.revokedGate, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("prompt-scoped MCP authority is inactive")
 	}
 	descriptor, ok := s.authorization.ToolPolicy.Descriptor(toolName)
-	if !ok || !descriptor.Source.Brokered() {
+	if !ok || !descriptor.Source.Brokered() || (descriptor.Forward != nil) != forward {
 		return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("MCP tool is not allowed")
 	}
 	return s.gateContext, clonePromptMCPAuthorization(*s.authorization), s.lease, nil
@@ -392,7 +395,12 @@ func (s *mcpProxySession) close() {
 	}
 	s.closed = true
 	s.revokeLocked(harnessv2.RuntimeSessionStateDeleted)
+	forwarders := s.forwarders
+	s.forwarders = nil
 	s.mu.Unlock()
+	for _, forwarder := range forwarders {
+		forwarder.close()
+	}
 	s.proxy.mu.Lock()
 	delete(s.proxy.sessions, s.route)
 	s.proxy.mu.Unlock()
@@ -477,19 +485,59 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	// Reject this tool request with its own JSON-RPC ID. A transport-level
 	// rejection can close a client's shared MCP stream and strand other calls.
 	// The global HTTP guard still bounds request parsing and control messages.
-	if !tryAcquireMCPSlot(s.calls) {
-		writeMCPRPCError(w, rpc.ID, -32003, "MCP session is at capacity")
+	response, err := s.callBrokeredTool(r.Context(), callID, params.Name, params.Arguments, false)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMCPSessionAtCapacity):
+			writeMCPRPCError(w, rpc.ID, -32003, "MCP session is at capacity")
+		case errors.Is(err, errMCPCallNotAuthorized):
+			writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
+		case errors.Is(err, errMCPBrokerInvalidResponse):
+			writeMCPRPCError(w, rpc.ID, -32002, "MCP broker returned an invalid response")
+		default:
+			writeMCPRPCError(w, rpc.ID, -32002, "MCP broker call failed")
+		}
 		return
+	}
+	result := map[string]any{
+		"content": []map[string]any{{"type": "text", "text": string(response.Result)}},
+		"isError": response.IsError,
+	}
+	var structured map[string]any
+	if json.Unmarshal(response.Result, &structured) == nil && structured != nil {
+		result["structuredContent"] = structured
+	}
+	if response.Replayed {
+		result["_meta"] = map[string]any{"orka.replayed": true}
+	}
+	writeMCPRPCResult(w, rpc.ID, result)
+}
+
+var (
+	errMCPSessionAtCapacity     = errors.New("MCP session is at capacity")
+	errMCPCallNotAuthorized     = errors.New("MCP tool call is not authorized")
+	errMCPBrokerCallFailed      = errors.New("MCP broker call failed")
+	errMCPBrokerInvalidResponse = errors.New("MCP broker returned an invalid response")
+)
+
+// callBrokeredTool sends one call to the broker under the session's current
+// prompt authority. forward selects which tools the caller may name: the MCP
+// endpoint calls only model-facing tools, and a client forwarder calls only
+// its forwarding Tool.
+func (s *mcpProxySession) callBrokeredTool(
+	requestCtx context.Context, callID, toolName string, arguments json.RawMessage, forward bool,
+) (harnessv2.MCPBrokerCallResponse, error) {
+	if !tryAcquireMCPSlot(s.calls) {
+		return harnessv2.MCPBrokerCallResponse{}, errMCPSessionAtCapacity
 	}
 	defer releaseMCPSlot(s.calls)
 	now := time.Now().UTC()
-	gate, authorization, lease, err := s.authorizeCall(params.Name, now)
+	gate, authorization, lease, err := s.authorizeCall(toolName, now, forward)
 	if err != nil {
-		waitForPromptGateCancellation(r.Context(), gate)
-		writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
-		return
+		waitForPromptGateCancellation(requestCtx, gate)
+		return harnessv2.MCPBrokerCallResponse{}, errMCPCallNotAuthorized
 	}
-	call := harnessv2.MCPToolCall{CallID: callID, ToolName: params.Name, Arguments: params.Arguments}
+	call := harnessv2.MCPToolCall{CallID: callID, ToolName: toolName, Arguments: arguments}
 	expiresAt := now.Add(30 * time.Second)
 	if authorization.ExpiresAt.Before(expiresAt) {
 		expiresAt = authorization.ExpiresAt
@@ -508,9 +556,9 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	}
 	// Provider requests cannot choose the parent of a controller-side tool call.
 	// An empty trusted parent also clears any ambient request span.
-	ctx := trace.ContextWithSpanContext(r.Context(), trace.SpanContextFromContext(gate))
+	ctx := trace.ContextWithSpanContext(requestCtx, trace.SpanContextFromContext(gate))
 	var cancel context.CancelFunc
-	if authorization.ApprovalPolicy.Requires(params.Name) {
+	if authorization.ApprovalPolicy.Requires(toolName) {
 		ctx, cancel = context.WithTimeout(ctx, harnessv2.MCPApprovalCallTimeout)
 	} else {
 		ctx, cancel = context.WithCancel(ctx)
@@ -526,27 +574,14 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		// broker failure or a definitive response must keep its own meaning,
 		// even if gate revocation races its delivery.
 		if errors.Is(err, context.Canceled) {
-			waitForPromptGateCancellation(r.Context(), gate)
+			waitForPromptGateCancellation(requestCtx, gate)
 		}
-		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker call failed")
-		return
+		return harnessv2.MCPBrokerCallResponse{}, errMCPBrokerCallFailed
 	}
 	if response.CallID != callID || response.Validate() != nil {
-		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker returned an invalid response")
-		return
+		return harnessv2.MCPBrokerCallResponse{}, errMCPBrokerInvalidResponse
 	}
-	result := map[string]any{
-		"content": []map[string]any{{"type": "text", "text": string(response.Result)}},
-		"isError": response.IsError,
-	}
-	var structured map[string]any
-	if json.Unmarshal(response.Result, &structured) == nil && structured != nil {
-		result["structuredContent"] = structured
-	}
-	if response.Replayed {
-		result["_meta"] = map[string]any{"orka.replayed": true}
-	}
-	writeMCPRPCResult(w, rpc.ID, result)
+	return response, nil
 }
 
 func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
@@ -557,7 +592,8 @@ func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
 	}
 	result := make([]map[string]any, 0, len(s.configuration.ToolPolicy.Tools))
 	for _, descriptor := range s.configuration.ToolPolicy.Tools {
-		if !descriptor.Source.Brokered() {
+		// A forwarding Tool serves a command-line client, never the model.
+		if !descriptor.Source.Brokered() || descriptor.Forward != nil {
 			continue
 		}
 		var schema any
@@ -600,6 +636,10 @@ func cloneMCPPolicyConfiguration(input harnessv2.MCPPolicyConfiguration) harness
 	output.ToolPolicy.Tools = cloneMCPSlice(input.ToolPolicy.Tools)
 	for index := range output.ToolPolicy.Tools {
 		output.ToolPolicy.Tools[index].InputSchema = append(json.RawMessage(nil), input.ToolPolicy.Tools[index].InputSchema...)
+		if forward := input.ToolPolicy.Tools[index].Forward; forward != nil {
+			copied := *forward
+			output.ToolPolicy.Tools[index].Forward = &copied
+		}
 	}
 	output.ApprovalPolicy.RequiredTools = cloneMCPSlice(input.ApprovalPolicy.RequiredTools)
 	return output

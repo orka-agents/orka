@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -380,8 +381,27 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 	if err != nil {
 		return nil, err
 	}
-	return call(ctx)
+	result, err := call(ctx)
+	// A call answered directly gets the refusal as its tool result; only
+	// approval settlement needs to know it had no effect.
+	if refusal, ok := errors.AsType[*acpMCPRefusedWithoutEffect](err); ok {
+		return refusal.Result, nil
+	}
+	return result, err
 }
+
+// acpMCPRefusedWithoutEffect is a tool call Orka refused before any request
+// left, such as for a requester link found missing or unusable. It carries
+// the tool result the agent gets, and its code and reason for approval
+// settlement, which records the call as failed without effect. It is set
+// only by Orka's own refusal, never inferred from a tool's response.
+type acpMCPRefusedWithoutEffect struct {
+	Result json.RawMessage
+	Code   string
+	Reason string
+}
+
+func (e *acpMCPRefusedWithoutEffect) Error() string { return e.Reason }
 
 // Prepare the local executor without invoking a tool. Approval calls perform
 // these reads before starting their execution budget, then revalidate authority
@@ -499,6 +519,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
+		if descriptor.Forward != nil {
+			executor.AllowForwarding()
+		}
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
@@ -574,6 +597,22 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 				Code    string `json:"code"`
 				Error   string `json:"error"`
 			}{true, "invalid_arguments", argErr.Error()})
+		}
+		if required, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); ok {
+			// The requester's link is missing or unusable, so nothing was
+			// sent. The reason is Orka's own text naming the provider and the
+			// fix, safe for the agent to relay and for the log.
+			log.FromContext(ctx).Info("ACP MCP tool call refused: the requester's linked account is unavailable",
+				"tool", descriptor.Name, "provider", required.Provider, "kind", required.Kind, "reason", required.Error())
+			result, err := json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}{true, harnessv2.MCPToolErrorCodeConnectionRequired, required.Error()})
+			if err != nil {
+				return nil, err
+			}
+			return result, &acpMCPRefusedWithoutEffect{Result: result, Code: harnessv2.MCPToolErrorCodeConnectionRequired, Reason: required.Error()}
 		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the
