@@ -309,6 +309,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// A forwarding Tool that allows writes brings its write tool, approved
+	// unless the Tool waives it.
+	if task, agent, err = adjustInputsForForwardingWrites(ctx, reader, task, agent, connectorClassification); err != nil {
+		return nil, err
+	}
 	if len(agentToolboxes(agent)) > 0 && (strings.TrimSpace(workspaceSessionUID) != "" || taskRequestsExecutionWorkspace(task)) {
 		return nil, permanentACPAgentConfiguration(errors.New(
 			"runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces cannot mount toolboxes yet",

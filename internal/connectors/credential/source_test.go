@@ -280,8 +280,12 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	}
 	// The link is now not Ready, so the next call fails before any refresh.
 	calls := h.refresher.calls.Load()
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "not ready") {
+	_, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("err after revocation = %v", err)
+	}
+	if _, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok {
+		t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
 	}
 	if h.refresher.calls.Load() != calls {
 		t.Fatal("a revoked connection must not be refreshed again")
@@ -292,8 +296,8 @@ func TestResolveExpiredWithoutRefreshTokenMarksExpired(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", ExpiresAt: h.now.Add(-time.Minute)})
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
-	if err == nil || !strings.Contains(err.Error(), "cannot be refreshed") {
-		t.Fatalf("err = %v", err)
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok || refusal.Kind != outboundaccess.ConnectionExpired {
+		t.Fatalf("err = %v, want an expired-link refusal", err)
 	}
 	if h.refresher.calls.Load() != 0 {
 		t.Fatal("no refresh token means no refresh call")
@@ -473,7 +477,7 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	// Either fence may refuse first: the re-consent changed the grant and
 	// the mode change bumped the generation.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil ||
-		!strings.Contains(err.Error(), "changed since the task was dispatched") && !strings.Contains(err.Error(), "re-linked") {
+		!strings.Contains(err.Error(), "changed after this Task started") && !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("generation change during refresh err = %v", err)
 	}
 	h.refresher.onRefresh = reconsent
@@ -788,9 +792,7 @@ func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -874,9 +876,7 @@ func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -1189,8 +1189,10 @@ func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
 	if h.reload().Status.GrantSequence != request.Frozen.GrantSequence {
 		t.Fatal("the status must still show the frozen grant")
 	}
-	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "re-linked") {
-		t.Fatalf("err = %v, want the stale grant refused", err)
+	err = h.source.RequireLiveConnection(context.Background(), request)
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok ||
+		refusal.Kind != outboundaccess.ConnectionRelinked || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the stale grant refused as a re-linked Connection", err)
 	}
 
 	// Custody that cannot report its grant fails closed.
@@ -1379,5 +1381,17 @@ func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testi
 	}}
 	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
 		t.Fatal("a link disconnected during the grant read must refuse the exchanged credential")
+	}
+}
+
+// requireDisconnectedDuringRefresh resolves a credential whose refresh a
+// disconnect wins, and requires the typed connection-required refusal the
+// broker reports as OrkaConnectionRequired, not a plain error.
+func requireDisconnectedDuringRefresh(t *testing.T, h *harness) {
+	t.Helper()
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	var required *outboundaccess.ConnectionRequiredError
+	if !errors.As(err, &required) || required.Kind != outboundaccess.ConnectionNoCredential {
+		t.Fatalf("refresh after disconnect err = %v, want a ConnectionRequiredError for a missing credential", err)
 	}
 }

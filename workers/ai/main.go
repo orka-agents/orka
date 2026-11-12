@@ -767,8 +767,12 @@ func buildLLMTools(
 			continue
 		}
 
-		// Check if it's a custom tool
+		// Check if it's a custom tool. A forwarding Tool serves a
+		// command-line client in an ACP runtime and is never a function.
 		if tool, ok := customTools[name]; ok {
+			if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
+				continue
+			}
 			var params json.RawMessage
 			if tool.Spec.Parameters != nil {
 				params = tool.Spec.Parameters.Raw

@@ -182,6 +182,7 @@ type ConnectorTool struct {
 // ConnectorHTTPTool defines a curated HTTPS request executed with a person's
 // linked credential.
 // +kubebuilder:validation:XValidation:rule="self.url.startsWith('https://')",message="connector tool url must use https"
+// +kubebuilder:validation:XValidation:rule="!has(self.forward) || !has(self.headers) || size(self.headers) == 0",message="a forwarding connector tool sets no headers"
 type ConnectorHTTPTool struct {
 	// URL is the absolute HTTPS endpoint called when the tool is invoked.
 	// +kubebuilder:validation:MinLength=1
@@ -210,6 +211,14 @@ type ConnectorHTTPTool struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('10m')",message="timeout must be positive and at most 10m"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// Forward makes this curated tool a route for a command-line client in an
+	// ACP runtime, as for a Tool's spec.http.forward. The person consents to
+	// the provider's scopes, and every request goes to this origin only. A
+	// forwarding tool must be class read, its url an HTTPS origin with no
+	// path, and it declares no parameters; provider validation checks these.
+	// +optional
+	Forward *HTTPForward `json:"forward,omitempty"`
 }
 
 // ConnectorProviderStatus contains only safe validation state.
