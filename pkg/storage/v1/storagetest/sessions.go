@@ -218,6 +218,8 @@ func runSessions(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 		_, err = provider.GetSessionType(ctx, "tenant-a", "missing")
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
+		_, err = provider.GetSessionCreatedAt(ctx, "tenant-a", "missing")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
 		createSessionFixture(t, provider, "tenant-a", "alpha", sessionsTypeTask, time.Now().UTC())
 		createSessionFixture(t, provider, "tenant-b", "alpha", sessionsTypeChat, time.Now().UTC())
@@ -236,6 +238,9 @@ func runSessions(t *testing.T, newProvider StateFactory) {
 		sessionType, err := provider.GetSessionType(ctx, "tenant-b", "alpha")
 		require.NoError(t, err)
 		require.Equal(t, sessionsTypeChat, sessionType)
+		createdAt, err := provider.GetSessionCreatedAt(ctx, "tenant-a", "alpha")
+		require.NoError(t, err)
+		require.True(t, createdAt.Equal(got.CreatedAt), "the creation time matches the Session record")
 
 		listed, err := provider.ListSessions(ctx, "tenant-a")
 		require.NoError(t, err)

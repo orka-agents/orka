@@ -464,3 +464,52 @@ func TestDeferredFinalizationRejectsARefusedResultWithStagedOutput(t *testing.T)
 	_, err = r.loadDeferredTaskFinalization(t.Context(), task)
 	require.ErrorContains(t, err, "intent is invalid")
 }
+
+// TestDeferredFinalizationStopsTheJobBeforeItsChildren covers a stop already
+// decided whose Job delete failed: once storage recovers, the reconcile that
+// records it deletes the Job before it cancels the Task's children.
+func TestDeferredFinalizationStopsTheJobBeforeItsChildren(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	controller := true
+	owner := []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID, Controller: &controller,
+	}}
+	job.OwnerReferences = owner
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated", Namespace: task.Namespace, OwnerReferences: owner,
+			Labels: map[string]string{labels.LabelParentTask: task.Name},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace, child)
+	serveDeferredResultLogs(t, r, "output")
+	// The stop was decided and saved, but its Job delete never happened.
+	require.NoError(t, r.stageDeferredTaskFinalization(t.Context(), task, deferredTaskFinalization{
+		Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: "stop",
+	}))
+	watched, ok := r.Client.(client.WithWatch)
+	require.True(t, ok)
+	var order []string
+	r.Client = interceptor.NewClient(watched, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isJob := obj.(*batchv1.Job); isJob {
+				order = append(order, "job deleted")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if obj.GetName() == child.Name {
+				order = append(order, "child cancelled")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseCancelled, current.Status.Phase)
+	require.Equal(t, []string{"job deleted", "child cancelled"}, order)
+}

@@ -260,6 +260,7 @@ var methodCatalog = map[string]MethodInfo{
 	"GetSealedNativeSession":                    stateRead().as(CallBulk),
 	"GetSession":                                stateRead(),
 	"GetSessionCleanupCompletion":               stateRead(),
+	"GetSessionCreatedAt":                       stateRead(),
 	"GetSessionCleanupIdentity":                 stateRead(),
 	"GetSessionCleanupIntent":                   stateRead(),
 	"GetSessionLineage":                         stateRead(),

@@ -79,8 +79,8 @@ type ToolReconciler struct {
 	SkipSSRFValidation bool
 
 	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
-	// a Tool behind a connection-mode outbound access policy may target a
-	// private or cluster-local endpoint. Local fixtures only.
+	// a Tool behind a connection-mode or agentIdentity outbound access policy
+	// may target a private or cluster-local endpoint. Local fixtures only.
 	AllowPrivateConnectorEndpoints bool
 
 	// SubstrateMCPToolsEnabled enables durable MCP tool actors.
@@ -220,22 +220,21 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	// Only a Tool behind a connection-mode outbound access policy is
-	// called with a linked account, so only such a Tool may point at a
-	// private endpoint under the fixture allowance.
+	// Only a Tool behind a connection-mode or agentIdentity outbound access
+	// policy may point at a private endpoint under the fixture allowance.
 	allowPrivate := false
 	if r.AllowPrivateConnectorEndpoints {
-		connectionMode, err := r.toolPolicyIsConnectionMode(ctx, tool)
+		fixtureMode, err := r.toolPolicyAllowsPrivateFixture(ctx, tool)
 		if err != nil {
 			return err
 		}
-		allowPrivate = connectionMode
+		allowPrivate = fixtureMode
 	}
 	if allowPrivate {
-		// The allowance relaxes where a linked-account call may go, never
-		// how: execution refuses plain http for credential-injecting
-		// policies, so a private endpoint is accepted only over HTTPS and
-		// the Tool's status matches what can actually run.
+		// The allowance relaxes where such a call may go, never how:
+		// execution refuses plain http for credential-injecting policies,
+		// so a private endpoint is accepted only over HTTPS and the Tool's
+		// status matches what can actually run.
 		if parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL)); err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 			return fmt.Errorf("a private connector endpoint requires an HTTPS Tool URL")
 		}
@@ -243,9 +242,10 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 
-// toolPolicyIsConnectionMode reports whether the Tool's outbound access
-// policy injects a linked-account credential.
-func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+// toolPolicyAllowsPrivateFixture reports whether the Tool's outbound access
+// policy injects a linked-account or Agent identity credential, the two modes
+// the fixture-only private-endpoint allowance covers.
+func (r *ToolReconciler) toolPolicyAllowsPrivateFixture(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
 	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
 	if ref == nil {
 		return false, nil
@@ -254,7 +254,8 @@ func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *c
 	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
 		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
 	}
-	return policy.Spec.Connection != nil, nil
+	_, connectorBacked := outboundaccess.ConnectionProviderName(policy)
+	return connectorBacked || policy.Spec.AgentIdentity != nil, nil
 }
 
 // validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
@@ -349,10 +350,11 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
-		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil || policy.Spec.Connection != nil) {
+		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil ||
+			policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
 			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
 		}
-		if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
+		if policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
 				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
@@ -1619,11 +1621,12 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 		if policy.Spec.Gateway != nil {
 			return nil
 		}
-		// Under the fixture allowance a connection-mode Tool skipped the
-		// DNS-based private-address rule, so its probe dials through the
-		// hardened private-endpoint dialer (infrastructure addresses
-		// refused, no proxy, no redirect hops) rather than the plain one.
-		if r.AllowPrivateConnectorEndpoints && policy.Spec.Connection != nil {
+		// Under the fixture allowance a connection-mode or agentIdentity
+		// Tool skipped the DNS-based private-address rule, so its probe
+		// dials through the hardened private-endpoint dialer (infrastructure
+		// addresses refused, no proxy, no redirect hops) rather than the
+		// plain one.
+		if r.AllowPrivateConnectorEndpoints && (policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
 			httpClient = privateEndpointHealthClient(httpClient.Timeout)
 		}
 	}

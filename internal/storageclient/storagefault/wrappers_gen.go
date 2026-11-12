@@ -1437,6 +1437,19 @@ func (p *stateProvider) GetSessionCleanupIntent(ctx context.Context, a1 string, 
 	return r0, err
 }
 
+func (p *stateProvider) GetSessionCreatedAt(ctx context.Context, a1 string, a2 string) (time.Time, error) {
+	var r0 time.Time
+	injected, err := p.injector.call(ctx, p.contract, "GetSessionCreatedAt", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetSessionCreatedAt(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 time.Time
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetSessionLineage(ctx context.Context, a1 string, a2 string) (*storagev1.SessionLineage, error) {
 	var r0 *storagev1.SessionLineage
 	injected, err := p.injector.call(ctx, p.contract, "GetSessionLineage", func(ctx context.Context) (err error) {

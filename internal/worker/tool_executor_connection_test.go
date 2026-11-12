@@ -219,3 +219,54 @@ func TestToolExecutorPrivateConnectionEndpointsKeepTransportHardening(t *testing
 		t.Fatal("the executor must clone the transport rather than strip the caller's proxy")
 	}
 }
+
+func TestToolExecutorPrivateEndpointAllowanceCoversAgentIdentityButNotDirect(t *testing.T) {
+	var authorization string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "probe", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     server.URL,
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "as-agent"},
+		}},
+	}
+	execute := func(adapter string) error {
+		resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+			Adapter:          adapter,
+			CredentialHeader: "Authorization",
+			CredentialValue:  "Bearer agent_token",
+			SensitiveValues:  []string{"agent_token"},
+		}}
+		executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+		_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{}`))
+		return err
+	}
+
+	SetAllowPrivateConnectionEndpoints(false)
+	if err := execute(outboundaccess.AdapterAgentIdentity); err == nil {
+		t.Fatal("a private endpoint must be refused to an Agent identity call without the allowance")
+	}
+	if authorization != "" {
+		t.Fatalf("the Agent identity bearer reached the endpoint without the allowance: %q", authorization)
+	}
+
+	SetAllowPrivateConnectionEndpoints(true)
+	t.Cleanup(func() { SetAllowPrivateConnectionEndpoints(false) })
+	if err := execute(outboundaccess.AdapterDirect); err == nil {
+		t.Fatal("the allowance must not let a direct-mode credential reach a private endpoint")
+	}
+	if authorization != "" {
+		t.Fatalf("the direct-mode credential reached the endpoint: %q", authorization)
+	}
+	if err := execute(outboundaccess.AdapterAgentIdentity); err != nil {
+		t.Fatalf("under the allowance an Agent identity call reaches the private endpoint: %v", err)
+	}
+	if authorization != "Bearer agent_token" {
+		t.Fatalf("Authorization = %q", authorization)
+	}
+}

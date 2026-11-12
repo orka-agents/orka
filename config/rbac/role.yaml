@@ -130,7 +130,6 @@ rules:
   resources:
   - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
@@ -214,6 +213,25 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
   - watch
 - apiGroups:
   - core.orka.ai
