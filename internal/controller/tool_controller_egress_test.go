@@ -744,6 +744,77 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	}
 }
 
+// failingPoolLeaseGetClient fails every Lease read in one namespace, as when
+// the API server cannot serve a pool's lease.
+type failingPoolLeaseGetClient struct {
+	client.Client
+	namespace string
+}
+
+func (c failingPoolLeaseGetClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*coordinationv1.Lease); ok && key.Namespace == c.namespace {
+		return errors.New("lease read unavailable")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// During a pooled-to-dedicated replacement the Tool holds the dedicated Actor
+// while its status still names the pooled one. When the Tool becomes invalid
+// and the pooled Actor's lease cannot be read, the dedicated Actor, whose
+// lease is proven, still has its egress denied and is stopped, and the lookup
+// failure is returned so the reconcile retries.
+func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testing.T) {
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: "pools"},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+			TargetActors: 2,
+		},
+	}
+	var denied []string
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, running := runningEgressTestTool(t, executor, func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+		if rules == nil {
+			denied = append(denied, actorID)
+		}
+		return nil
+	}, pool)
+	if running.Status.Actor.PoolRef == nil || running.Status.Actor.PoolRef.Namespace != "pools" {
+		t.Fatalf("actor status = %+v, want a pooled actor from the pools namespace", running.Status.Actor)
+	}
+	pooled := running.Status.Actor.ActorID
+	dedicated := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, dedicated)); err != nil {
+		t.Fatalf("Create dedicated lease: %v", err)
+	}
+	executor.describeTemplates = map[string]workspace.TemplateRef{dedicated: {Namespace: "ate-demo", Name: "mcp-template"}}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	r.Client = failingPoolLeaseGetClient{Client: r.Client, namespace: "pools"}
+	_, err := r.Reconcile(context.Background(), mcpToolRequest())
+	if err == nil || !strings.Contains(err.Error(), "lease read unavailable") {
+		t.Fatalf("Reconcile() error = %v, want the failed pool lease lookup so the reconcile retries", err)
+	}
+	if !slices.Contains(denied, dedicated) {
+		t.Fatalf("denied = %v, want deny-all for the dedicated actor %q", denied, dedicated)
+	}
+	if slices.Contains(denied, pooled) {
+		t.Fatalf("denied = %v, want no change to the pooled actor %q whose lease was not proven", denied, pooled)
+	}
+	stopped := false
+	for _, req := range executor.releaseReqs {
+		if req.Ref.ID == dedicated {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatalf("releases = %v, want the dedicated actor %q suspended", executor.releaseReqs, dedicated)
+	}
+}
+
 // A held Actor that Substrate no longer has needs no stop: Describe reports it
 // deleted, without a template, and the invalid Tool must not keep retrying.
 func TestToolReconcilerTreatsAnAbsentHeldActorAsStopped(t *testing.T) {

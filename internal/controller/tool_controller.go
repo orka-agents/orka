@@ -1609,22 +1609,28 @@ func (r *ToolReconciler) substrateMCPPoolActorLeaseForTool(
 	return "", false, nil
 }
 
+// heldSubstrateMCPPoolActorLeaseRefs returns the refs whose pool lease the
+// Tool holds. A lease that cannot be read does not stop the others from being
+// checked: it returns every ref proven held together with the joined lookup
+// errors.
 func (r *ToolReconciler) heldSubstrateMCPPoolActorLeaseRefs(
 	ctx context.Context,
 	tool *corev1alpha1.Tool,
 	refs []substrateMCPPoolActorLeaseRef,
 ) ([]substrateMCPPoolActorLeaseRef, error) {
 	heldRefs := make([]substrateMCPPoolActorLeaseRef, 0, len(refs))
+	var errs []error
 	for _, ref := range refs {
 		_, held, err := r.substrateMCPPoolActorLeaseHeldByTool(ctx, tool, ref.poolNamespace, ref.actorID)
 		if err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("read the pool lease of actor %q: %w", ref.actorID, err))
+			continue
 		}
 		if held {
 			heldRefs = append(heldRefs, ref)
 		}
 	}
-	return heldRefs, nil
+	return heldRefs, goerrors.Join(errs...)
 }
 
 func substrateMCPPoolActorLeaseRefs(tool *corev1alpha1.Tool) []substrateMCPPoolActorLeaseRef {
@@ -2206,18 +2212,23 @@ func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, too
 // gateway-injected credentials; startup validates the recovery configuration
 // whenever a Tool still carries the actor finalizer. An actor Substrate no
 // longer has cannot egress, so it counts as revoked. It returns every actor
-// held, and the joined errors of those whose egress was not denied.
+// proven held, and the joined errors of lease lookups that failed and of the
+// actors whose egress was not denied.
 func (r *ToolReconciler) revokeSubstrateMCPToolActorEgress(ctx context.Context, tool *corev1alpha1.Tool) ([]substrateMCPHeldActor, error) {
 	if tool == nil || !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return nil, nil
 	}
+	// A lease that cannot be read must not cost the Actors proven held their
+	// revocation and stop; the lookup error is still returned so the reconcile
+	// retries.
+	var errs []error
 	leased, err := r.substrateMCPToolActorLeaseDeleteRefs(ctx, tool, "")
 	if err != nil {
-		return nil, err
+		errs = append(errs, fmt.Errorf("list the Tool's actor leases: %w", err))
 	}
 	pooled, err := r.heldSubstrateMCPPoolActorLeaseRefs(ctx, tool, substrateMCPPoolActorLeaseRefs(tool))
 	if err != nil {
-		return nil, err
+		errs = append(errs, err)
 	}
 	held := make([]substrateMCPHeldActor, 0, len(leased)+len(pooled))
 	seen := map[string]struct{}{}
@@ -2252,7 +2263,6 @@ func (r *ToolReconciler) revokeSubstrateMCPToolActorEgress(ctx context.Context, 
 	}
 	// Every actor is attempted: one that cannot be reached must not leave the
 	// others with their previous rules.
-	var errs []error
 	for _, actor := range held {
 		if err := apply(ctx, cfg, actor.actorID, nil); err != nil && !workspace.IsKind(err, workspace.ErrorKindNotFound) {
 			errs = append(errs, fmt.Errorf("deny egress for actor %q: %w", actor.actorID, err))
