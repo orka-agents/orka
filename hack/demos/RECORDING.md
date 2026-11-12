@@ -1,6 +1,6 @@
 # Demo recording design
 
-> **Orka harness v2 cutover:** the Demo 60/70 storyboards below capture a retired execution-workspace prototype. Current built-in agent Tasks use RuntimePools, top-level `spec.workspace`, and the separate Workspace/Publisher. Keep these storyboards archived until the scripts and manifests are rebuilt around an Orka harness v2 supervisor; they are not release evidence.
+> **Orka harness v2 cutover:** the Demo 60/70 storyboards below capture a retired execution-workspace prototype. The Demo 60 script, prompts, and helpers have been removed; its storyboard remains only as design history. Current built-in agent Tasks use RuntimePools, top-level `spec.workspace`, and the separate Workspace/Publisher. Keep these storyboards archived until the scripts and manifests are rebuilt around an Orka harness v2 supervisor; they are not release evidence.
 
 This is the design doc for turning `hack/demos/` from a presenter rehearsal kit
 into a small, tasteful library of recorded terminal demos. The goal is to
