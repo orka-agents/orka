@@ -263,7 +263,7 @@ func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context,
 		return nil, nil, nil, errors.New("authenticated ACP MCP task identity changed")
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
-	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+	if err := bindFrozenConnections(ctx, e.Reader, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return nil, nil, nil, err
 	}
 	// Only a requester the controller key sealed for this Task is handed
@@ -630,7 +630,7 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
-	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+	if err := bindFrozenConnections(ctx, e.Reader, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return err
 	}
 	return bindVerifiedTaskTransactionAuthority(

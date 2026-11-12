@@ -473,6 +473,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
 	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
 	executor.dashboardEnabled = ch.config.DashboardEnabled
+	executor.chatSessionEpoch = chatSessionEpoch(ctx, ch.sessionStore, namespace, sessionID)
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
@@ -1616,6 +1617,23 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 	}
 
 	return resultProvider, nil
+}
+
+// chatSessionEpoch returns the label value pinning the chat Session's current
+// incarnation, or "" when the store cannot tell, which leaves the chat's
+// Tasks unable to act for their requester through an Agent identity.
+func chatSessionEpoch(ctx context.Context, sessions store.SessionStore, namespace, sessionID string) string {
+	reader, ok := sessions.(store.SessionCreationReader)
+	if !ok {
+		return ""
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, sessionID)
+	if err != nil {
+		logf.FromContext(ctx).Info("chat Session incarnation unavailable; its Tasks cannot act for the requester through an Agent identity",
+			"namespace", namespace, "session", sessionID, "error", err.Error())
+		return ""
+	}
+	return labels.SessionEpoch(createdAt)
 }
 
 // generateChatID returns 8 random hex characters.

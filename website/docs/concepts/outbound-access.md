@@ -75,6 +75,49 @@ MCP broker; native `type: ai` workers fail closed. The Tool URL must be HTTPS wi
 template placeholders, and requests must go to the Tool's declared origin. Permissions are
 the agent identity's app roles in Entra. See [ADR 0039](https://github.com/orka-agents/orka/blob/main/docs/adr/0039-agent-identities.md).
 
+### Acting for the requester (Delegated)
+
+With `mode: Delegated`, the Agent acts for the Task's verified requester, and both sides
+are enforced: Entra issues an on-behalf-of token only for permissions granted to the agent
+identity, and the resource applies the requester's own rights.
+
+```yaml
+spec:
+  agentIdentity:
+    mode: Delegated
+    delegated:
+      providerRef:
+        name: entra-blueprint-signin
+      maxDelegationAge: 1h
+    entra:
+      resource: https://graph.microsoft.com
+```
+
+Delegated mode is validated against Microsoft Graph. On-behalf-of tokens for other
+resources, such as Azure Storage, are not yet validated against a live tenant.
+
+- **The requester's grant** is their own Connection to the named `ConnectorProvider`, an
+  Entra front-end client that requests the blueprint's scope. The controller refuses a
+  linked token whose audience is not the blueprint, so the requester must sign in through
+  Entra, not through Orka's GitHub dashboard sign-in.
+- **What it may do** is exactly the provider's curated tool declarations, enforced as in
+  connection mode. Write tools always need approval. On a Task bound with a Delegated
+  policy, only the requester can approve any call; anyone else allowed to decide
+  approvals may still decline.
+- **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
+  `--agent-identity-max-delegation-age`) after the chain's root Task was created, whether
+  the requester created it directly or with a Session message. Time spent in the chat
+  before that does not count. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
+  its parent no immutable UID proves, such as one Kubernetes orphaned, fails closed. A
+  fork of an identity-bound Task does not carry the identity; create a new Task instead.
+  Calls also stop at once when the Task is cancelled, deleted, or finished, or when its
+  Session, or that of any Task it was delegated from, is deleted: the controller checks
+  both live before every call. A chat deleted and recreated under the same name is a new
+  Session, so it does not revive its earlier Tasks.
+- **Where:** only Tasks on built-in RuntimePools, whose Pods reach the network only
+  through Orka. External `runtimeRef` runtimes, workspace-backed sessions, and native
+  `type: ai` workers fail closed.
+
 ## Direct credential exchange
 
 ```yaml

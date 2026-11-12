@@ -73,6 +73,29 @@ func TestAgentIdentityBindSkipsUnchangedAndRemovedIdentities(t *testing.T) {
 		identityBoundAgent("44444444-4444-4444-4444-444444444444"), bound))
 }
 
+func TestOnlyTheRequesterApprovesOnTasksThatActForThem(t *testing.T) {
+	task := func(actsForRequester bool) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "work"},
+			Spec:       corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://login.example", Subject: "alice"}},
+			Status: corev1alpha1.TaskStatus{AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+				Agent: &corev1alpha1.AgentExecutionAgentRef{Identity: &corev1alpha1.AgentExecutionIdentityRef{
+					Issuer: "entra", ID: "id", Instance: "entra:t/b", ActsForRequester: actsForRequester,
+				}},
+			}},
+		}
+	}
+	alice := &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://login.example", Subject: "alice"}
+	bob := &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://login.example", Subject: "bob"}
+	admin := &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:admin"}
+
+	require.NoError(t, requireRequesterApprovesDelegatedWrite(task(true), alice))
+	requireForbidden(t, requireRequesterApprovesDelegatedWrite(task(true), bob))
+	requireForbidden(t, requireRequesterApprovesDelegatedWrite(task(true), admin))
+	require.NoError(t, requireRequesterApprovesDelegatedWrite(task(false), bob), "other Tasks keep the existing rules")
+	require.NoError(t, requireRequesterApprovesDelegatedWrite(&corev1alpha1.Task{}, bob))
+}
+
 func TestAgentIdentityBindReviewsTheSameSubjectAsAgentUse(t *testing.T) {
 	agent := identityBoundAgent("33333333-3333-3333-3333-33333333aaaa")
 	for name, tc := range map[string]struct {

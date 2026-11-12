@@ -260,6 +260,7 @@ func main() {
 	var agentUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
+	var agentIdentityMaxDelegationAge time.Duration
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -476,6 +477,9 @@ func main() {
 	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
 		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
 		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
+	flag.DurationVar(&agentIdentityMaxDelegationAge, "agent-identity-max-delegation-age",
+		envDurationDefault("ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE", outboundaccess.DefaultMaxDelegationAgeCap),
+		"Longest maxDelegationAge any Delegated agentIdentity policy may use.")
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
@@ -1380,6 +1384,7 @@ func main() {
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
+		outboundAccessResolver.MaxDelegationAge = agentIdentityMaxDelegationAge
 		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
@@ -1479,6 +1484,11 @@ func main() {
 	if err := appStorage.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
+		}.Check
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
@@ -1939,6 +1949,7 @@ func main() {
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+		MaxDelegationAge:           agentIdentityMaxDelegationAge,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)

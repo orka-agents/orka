@@ -256,15 +256,18 @@ func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, n
 	return agent.HoldsIdentity(), nil
 }
 
-// A Task's creator establishes its coordination ancestry. Later metadata
-// updates must not move an existing worker into another Task's scope.
+// A Task's creator establishes its coordination ancestry and, for a chat
+// Task, the chat Session incarnation it belongs to. Later metadata updates
+// must not move an existing worker into another Task's scope, nor detach a
+// Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
 	// The markers of the scan, monitor, or GatewayBinding that created a
 	// Task are held too: they keep it from binding an identity as a root
 	// Task, also after the garbage collector orphans it. A GatewayBinding's
 	// Task has no owner reference, so its markers are all that say so.
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
-		[]string{labels.LabelParentTask, labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
+			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
 		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation})...)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent

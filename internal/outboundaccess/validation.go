@@ -88,9 +88,44 @@ func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) strin
 	return strings.TrimSpace(identity.Mode)
 }
 
+// ConnectionProviderName returns the ConnectorProvider whose Connections a
+// policy draws on: a connection-mode policy, or an agentIdentity policy in
+// Delegated mode, which exchanges the requester's token for the Agent's.
+func ConnectionProviderName(policy *corev1alpha1.OutboundAccessPolicy) (string, bool) {
+	switch {
+	case policy == nil:
+		return "", false
+	case policy.Spec.Connection != nil:
+		return policy.Spec.Connection.ProviderRef.Name, true
+	case policy.Spec.AgentIdentity != nil && policy.Spec.AgentIdentity.Delegated != nil &&
+		AgentIdentityMode(policy.Spec.AgentIdentity) == corev1alpha1.OutboundAgentIdentityModeDelegated:
+		return policy.Spec.AgentIdentity.Delegated.ProviderRef.Name, true
+	}
+	return "", false
+}
+
 func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAccess) *Issue {
-	if AgentIdentityMode(identity) != corev1alpha1.OutboundAgentIdentityModeSelf {
-		return invalid("agentIdentity mode must be Self")
+	switch AgentIdentityMode(identity) {
+	case corev1alpha1.OutboundAgentIdentityModeSelf:
+		if identity.Delegated != nil {
+			return invalid("agentIdentity delegated is allowed only with mode Delegated")
+		}
+	case corev1alpha1.OutboundAgentIdentityModeDelegated:
+		if identity.Delegated == nil {
+			return invalid("agentIdentity mode Delegated requires delegated")
+		}
+		name := strings.TrimSpace(identity.Delegated.ProviderRef.Name)
+		if name == "" || name != identity.Delegated.ProviderRef.Name {
+			return invalid("agentIdentity delegated providerRef name is required and must not contain surrounding whitespace")
+		}
+		if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			return invalid("agentIdentity delegated providerRef name must be a valid resource name")
+		}
+		if age := identity.Delegated.MaxDelegationAge; age != nil && age.Duration <= 0 {
+			return invalid("agentIdentity delegated maxDelegationAge must be positive")
+		}
+	default:
+		return invalid("agentIdentity mode must be Self or Delegated")
 	}
 	if identity.Entra == nil {
 		return invalid("agentIdentity requires an entra target")
@@ -382,8 +417,11 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
 	}
 	if policy.Spec.AgentIdentity != nil {
-		// The identity comes from the Task binding at call time; the policy
-		// references nothing in the cluster.
+		// The identity comes from the Task binding at call time. Only a
+		// delegated policy references a cluster object: its provider.
+		if provider, ok := ConnectionProviderName(policy); ok {
+			return resolveConnectorProvider(ctx, reader, policy.Namespace, provider)
+		}
 		return nil, nil
 	}
 	if policy.Spec.Direct != nil {

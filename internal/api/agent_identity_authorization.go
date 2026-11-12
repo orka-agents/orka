@@ -56,3 +56,26 @@ func authorizeAgentIdentityBind(
 	}
 	return nil
 }
+
+// requireRequesterApprovesDelegatedWrite lets only the Task's requester
+// approve a call on a Task whose binding froze a Delegated agentIdentity
+// policy, because such a call can act as that person. The decision rests on
+// the write-once binding, never on the live Tool or policy, which an editor
+// could change and restore around an approval. Anyone authorized to decide
+// approvals may still decline.
+func requireRequesterApprovesDelegatedWrite(task *corev1alpha1.Task, userInfo *UserInfo) error {
+	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil {
+		return nil
+	}
+	identity := task.Status.AgentExecutionBinding.Agent.Identity
+	if identity == nil || !identity.ActsForRequester {
+		return nil
+	}
+	requester := task.Spec.RequestedBy
+	if requester == nil || userInfo == nil ||
+		(userInfo.AuthType != AuthTypeOIDC && userInfo.AuthType != AuthTypeContextToken) ||
+		strings.TrimSpace(userInfo.Issuer) == "" || userInfo.Issuer != requester.Issuer || userInfo.Subject != requester.Subject {
+		return fiber.NewError(fiber.StatusForbidden, "only the Task's requester can approve calls on a Task that acts on their behalf")
+	}
+	return nil
+}

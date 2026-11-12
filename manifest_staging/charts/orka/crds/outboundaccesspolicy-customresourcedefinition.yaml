@@ -60,6 +60,46 @@ spec:
                   names an identity. Only the controller issues these credentials, so
                   native worker Pods fail closed.
                 properties:
+                  delegated:
+                    description: |-
+                      Delegated configures acting for the requester. The requester's own
+                      Connection to the named ConnectorProvider supplies the user grant, and
+                      that provider's curated tool declarations are the only operations the
+                      credential is released for, exactly as in connection mode.
+                    properties:
+                      maxDelegationAge:
+                        description: |-
+                          MaxDelegationAge bounds how long after the root requester's last
+                          authenticated action in the Task chain the Agent may act for them.
+                          Defaults to one hour; the controller caps it. It must be a duration
+                          from just above zero to 8760h, as one bounded component ("24h", "90m")
+                          or the canonical form a typed client sends ("24h0m0s"). Every component
+                          is bounded so the value decodes without overflow: one that cannot
+                          decode would keep the controller from reading any OutboundAccessPolicy.
+                        maxLength: 32
+                        pattern: ^([0-9]{1,4}(\.[0-9]{1,9})?(ns|us|µs|μs|ms|s|m|h)|([0-9]{1,4}h)?([0-9]{1,4}m)?[0-9]{1,4}(\.[0-9]{1,9})?s)$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: maxDelegationAge must be a positive duration of
+                            at most 8760h
+                          rule: duration(self) > duration('0s') && duration(self)
+                            <= duration('8760h')
+                      providerRef:
+                        description: |-
+                          ProviderRef names the same-namespace ConnectorProvider whose Connections
+                          hold the requester's token for the identity's issuer. For Entra this is
+                          a front-end client that requests the blueprint's scope.
+                        properties:
+                          name:
+                            description: Name is the referenced object name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - providerRef
+                    type: object
                   entra:
                     description: |-
                       Entra targets a resource protected by Microsoft Entra. The Agent's
@@ -78,9 +118,12 @@ spec:
                     type: object
                   mode:
                     default: Self
-                    description: Mode selects whether the Agent acts as itself.
+                    description: |-
+                      Mode selects whether the Agent acts as itself (Self) or for the Task's
+                      requester (Delegated).
                     enum:
                     - Self
+                    - Delegated
                     type: string
                   output:
                     description: 'Output configures credential injection. Defaults
@@ -105,6 +148,9 @@ spec:
                 x-kubernetes-validations:
                 - message: agentIdentity requires exactly one issuer target
                   rule: has(self.entra)
+                - message: delegated is required with mode Delegated and allowed only
+                    then
+                  rule: (has(self.mode) && self.mode == 'Delegated') == has(self.delegated)
               connection:
                 description: |-
                   Connection injects the requesting person's linked-account credential for

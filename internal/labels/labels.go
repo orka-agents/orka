@@ -9,7 +9,9 @@ package labels
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -251,3 +253,19 @@ func isAlphaNum(r rune) bool {
 // RequestedBySourceAPI is the AnnotationRequestedBySource value for Tasks whose
 // requester was verified by the API server.
 const RequestedBySourceAPI = "api"
+
+// LabelChatSessionEpoch pins the incarnation of the chat Session named by
+// LabelChatSession: its creation time as SessionEpoch formats it. A chat
+// deleted and recreated under its name gets another epoch.
+const LabelChatSessionEpoch = "orka.ai/chat-session-epoch"
+
+// LabelChatSessionNamespace names the namespace of the chat Session named by
+// LabelChatSession, which a chat may create Tasks outside of. A chat Task
+// without it belongs to a chat in its own namespace.
+const LabelChatSessionNamespace = "orka.ai/chat-session-namespace"
+
+// SessionEpoch formats a Session's creation time as the label value that
+// identifies that incarnation of the Session.
+func SessionEpoch(createdAt time.Time) string {
+	return strconv.FormatInt(createdAt.UTC().UnixNano(), 10)
+}
