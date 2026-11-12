@@ -516,10 +516,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		switch {
 		case prepared.trustedActorRoute:
 			dialContext = exactEndpointDialContext(prepared.request.URL)
-		case prepared.connection && allowPrivateConnectionEndpoints.Load():
-			// The fixture allowance relaxes only where a linked-account
-			// request may go; the transport keeps its hardening (no proxy,
-			// verified TLS 1.2 or newer, no custom TLS dial).
+		case (prepared.connection || prepared.agentIdentity) && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account or
+			// Agent identity request may go; the transport keeps its
+			// hardening (no proxy, verified TLS 1.2 or newer, no custom TLS
+			// dial).
 			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
@@ -610,8 +611,8 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 	}
 }
 
-// allowPrivateConnectionEndpoints lets connection-mode (linked-account)
-// requests reach private and cluster-local destinations. It exists for
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account) and
+// Agent identity requests reach private and cluster-local destinations. It exists for
 // local and CI fixtures only and is set once by the controller from its
 // dev-only flag; worker Pods never set it.
 var allowPrivateConnectionEndpoints atomic.Bool
