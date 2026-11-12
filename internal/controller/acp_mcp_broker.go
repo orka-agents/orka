@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -178,17 +181,19 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	if e.Reader == nil {
 		return "", errors.New("connector digest resolution requires a reader")
 	}
-	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{descriptor.Name})
+	// A forwarding write tool acts under its forwarding Tool's binding.
+	name := customACPMCPToolResource(descriptor)
+	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{name})
 	if err != nil {
-		return "", fmt.Errorf("classify connector tool %q: %w", descriptor.Name, err)
+		return "", fmt.Errorf("classify connector tool %q: %w", name, err)
 	}
-	info, ok := infos[descriptor.Name]
+	info, ok := infos[name]
 	if !ok {
 		// Not connector-backed as read now. If the Task froze a Connection
 		// for this Tool's policy, it was connection mode at dispatch and
 		// has since been retargeted; that drift never executes under the
 		// policy's new credentials.
-		return "", e.refuseConnectorClassificationDrift(ctx, request, descriptor.Name)
+		return "", e.refuseConnectorClassificationDrift(ctx, request, name)
 	}
 	frozen, err := e.taskFrozenConnections(ctx, request)
 	if err != nil {
@@ -336,6 +341,251 @@ func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *too
 	return info.PolicyName, &outboundaccess.PolicyIdentity{UID: info.PolicyUID, Generation: info.PolicyGeneration}, nil
 }
 
+// forwardedWriteKeptResult returns the form of a forwarded write's result
+// that its effect record keeps. The record is an ExternalEffect status that
+// anyone who can read the resource sees, and any write can answer with a
+// secret: an action (POST) such as listKeys or listClusterUserCredential
+// returns keys or a kubeconfig, and a PUT of a function key echoes the key.
+// So no answer is kept: the record keeps a note with its status, and a
+// redelivery that joins it gets that note.
+func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result json.RawMessage) json.RawMessage {
+	if descriptor.Forward == nil || !descriptor.Forward.Write || mcpToolResultIsError(result) {
+		return result
+	}
+	status, keptStatus := "an unreadable status", http.StatusConflict
+	headers := map[string]string{"Content-Type": "application/json"}
+	if response, err := harnessv2.DecodeMCPForwardResponse(result); err == nil {
+		status = "status " + strconv.Itoa(response.Status)
+		if azureRetryableStatus(response.Status) {
+			// A throttled or failing write keeps its status and delay, so a
+			// replay still tells the client to retry, as Azure did.
+			keptStatus = response.Status
+			if after := response.Headers["Retry-After"]; after != "" {
+				headers["Retry-After"] = after
+			}
+		}
+	}
+	type azureError struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	body, _ := json.Marshal(struct {
+		Error azureError `json:"error"`
+	}{azureError{
+		Code: "OrkaResultNotKept",
+		Message: "Azure already answered this request, with " + status + ". Orka does not keep the answers to Azure writes, " +
+			"which can carry secrets; check the resource, or run the command again to read the result.",
+	}})
+	kept, err := harnessv2.CanonicalValue(harnessv2.MCPForwardResponse{
+		Status: keptStatus, Headers: headers, Body: string(body),
+	})
+	if err != nil {
+		return json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`)
+	}
+	return kept
+}
+
+// azureRetryableStatus reports whether the Azure SDK retries a write that
+// got status, so a replay of it must keep that status.
+func azureRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// maskForwardedWriteArguments returns a forwarded write's arguments with
+// every value in its body masked, keeping the body's shape and field names,
+// for an approval preview. Arguments that do not decode keep no body.
+func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
+	request, err := harnessv2.DecodeMCPForwardRequest(arguments)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	var body any
+	decoder := json.NewDecoder(bytes.NewReader(request.Body))
+	decoder.UseNumber()
+	var shown map[string]azurePreviewKind
+	if request.Method == http.MethodPut || request.Method == http.MethodPatch {
+		shown = azurePreviewSchemas[azureResourceType(request.Path)]
+	}
+	if len(request.Body) > 0 && decoder.Decode(&body) == nil {
+		body = maskJSONValues(body, "", shown)
+	} else {
+		body = nil
+	}
+	masked, err := json.Marshal(struct {
+		Method      string `json:"method"`
+		Path        string `json:"path"`
+		Query       string `json:"query,omitempty"`
+		Body        any    `json:"body,omitempty"`
+		IfMatch     string `json:"ifMatch,omitempty"`
+		IfNoneMatch string `json:"ifNoneMatch,omitempty"`
+	}{request.Method, request.Path, maskForwardedQuery(request.Query), body, request.IfMatch, request.IfNoneMatch})
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return masked
+}
+
+// maskForwardedQuery masks every query value of a forwarded write for an
+// approval preview except the API version, keeping the parameter names: a
+// value such as a signature can be a secret.
+func maskForwardedQuery(query string) string {
+	if query == "" {
+		return ""
+	}
+	parameters := strings.Split(query, "&")
+	for index, parameter := range parameters {
+		key, _, hasValue := strings.Cut(parameter, "=")
+		if !hasValue {
+			continue
+		}
+		if name, err := url.QueryUnescape(key); err == nil && strings.EqualFold(name, "api-version") {
+			continue
+		}
+		parameters[index] = key + "=[masked]"
+	}
+	return strings.Join(parameters, "&")
+}
+
+// azurePreviewSchemas lists, per Resource Manager resource type, the
+// request-body paths a PUT or PATCH of that resource carries that only size,
+// place, or version it and never a secret, each with the JSON type its
+// value must have to be shown. Paths start at the body's root; "*" stands
+// for any array element. A write to any other resource type, and every
+// action (POST), whose body is the action's own parameters, keeps every
+// value masked.
+var azurePreviewSchemas = func() map[string]map[string]azurePreviewKind {
+	pool := "mode:s ostype:s ossku:s orchestratorversion:s count:n vmsize:s enableautoscaling:b mincount:n maxcount:n"
+	schemas := map[string]string{
+		azureResourceGroupType: "location:s",
+		"microsoft.containerservice/managedclusters": "location:s zones.*:s sku.name:s sku.tier:s identity.type:s " +
+			"properties.kubernetesversion:s properties.agentpoolprofiles.*.name:s " + prefixed("properties.agentpoolprofiles.*.", pool),
+		"microsoft.containerservice/managedclusters/agentpools": prefixed("properties.", pool),
+		"microsoft.compute/virtualmachines":                     "location:s zones.*:s properties.hardwareprofile.vmsize:s",
+	}
+	kinds := map[string]azurePreviewKind{"s": azurePreviewString, "n": azurePreviewNumber, "b": azurePreviewBool}
+	out := make(map[string]map[string]azurePreviewKind, len(schemas))
+	for resourceType, paths := range schemas {
+		out[resourceType] = map[string]azurePreviewKind{}
+		for field := range strings.FieldsSeq(paths) {
+			path, kind, _ := strings.Cut(field, ":")
+			out[resourceType][path] = kinds[kind]
+		}
+	}
+	return out
+}()
+
+// azurePreviewKind is the JSON type a shown preview value must have.
+type azurePreviewKind int
+
+const (
+	azurePreviewString azurePreviewKind = iota + 1
+	azurePreviewNumber
+	azurePreviewBool
+)
+
+// azureResourceGroupType names a resource group path in azurePreviewSchemas.
+const azureResourceGroupType = "resourcegroups"
+
+// prefixed returns each space-separated field of fields with prefix.
+func prefixed(prefix, fields string) string {
+	var out []string
+	for field := range strings.FieldsSeq(fields) {
+		out = append(out, prefix+field)
+	}
+	return strings.Join(out, " ")
+}
+
+// azureResourceType returns the lowercase resource type a Resource Manager
+// path names the resource itself of, such as
+// "microsoft.containerservice/managedclusters", or "" for an action or
+// collection path.
+func azureResourceType(path string) string {
+	segments := strings.Split(strings.Trim(strings.ToLower(path), "/"), "/")
+	if len(segments) == 4 && segments[0] == "subscriptions" && segments[2] == azureResourceGroupType {
+		return azureResourceGroupType
+	}
+	providers := -1
+	for index, segment := range segments {
+		if segment == "providers" {
+			providers = index
+		}
+	}
+	rest := segments[providers+1:]
+	// A namespace, then type/name pairs: an odd tail is an action or a list.
+	if providers < 0 || len(rest) < 3 || len(rest)%2 == 0 {
+		return ""
+	}
+	resourceTypes := []string{rest[0]}
+	for index := 1; index < len(rest); index += 2 {
+		resourceTypes = append(resourceTypes, rest[index])
+	}
+	return strings.Join(resourceTypes, "/")
+}
+
+// maxAzurePreviewString bounds a shown string value.
+const maxAzurePreviewString = 64
+
+// azurePreviewText is what a shown string value may contain: the letters,
+// digits, and separators of Azure locations, SKU and size names, and
+// versions, such as "westus2", "Standard_D2s_v3", or "1.30.3". Anything else
+// in a shown field is masked like an unknown field.
+var azurePreviewText = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
+
+// maskJSONValues masks a decoded JSON value for an approval preview: a value
+// at one of shown (path names it from the body's root) is shown when it has
+// the type shown expects and is not a long string; every other value is
+// masked, so a secret sent in a sizing field of the wrong type stays
+// hidden. A key that is empty or holds a separator or the wildcard could
+// pose as another path, so it, and everything under it, never matches.
+func maskJSONValues(value any, path string, shown map[string]azurePreviewKind) any {
+	child := func(segment string) string {
+		if path == "" {
+			return segment
+		}
+		return path + "." + segment
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for field, item := range typed {
+			segment := strings.ToLower(field)
+			if segment == "" || strings.ContainsAny(segment, ".*\x00") {
+				segment = "\x00"
+			}
+			typed[field] = maskJSONValues(item, child(segment), shown)
+		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = maskJSONValues(item, child("*"), shown)
+		}
+		return typed
+	}
+	if azurePreviewShows(shown[path], value) {
+		return value
+	}
+	return "[masked]"
+}
+
+// azurePreviewShows reports whether a preview may show value as kind: a
+// short string of sizing-value text as a string, a number as a number, a
+// boolean as a boolean.
+func azurePreviewShows(kind azurePreviewKind, value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return kind == azurePreviewString && len(typed) <= maxAzurePreviewString && azurePreviewText.MatchString(typed)
+	case json.Number:
+		return kind == azurePreviewNumber
+	case bool:
+		return kind == azurePreviewBool
+	}
+	return false
+}
+
 // connectorBindingDigest combines the frozen Connection identity digest with
 // the dispatch digest of the Tool and its policy.
 func connectorBindingDigest(connectionDigest, specDigest string) string {
@@ -353,20 +603,39 @@ func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, requ
 		return errors.New("custom MCP tool reader is unavailable")
 	}
 	tool := &corev1alpha1.Tool{}
-	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: descriptor.Name}, tool); err != nil {
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: customACPMCPToolResource(descriptor)}, tool); err != nil {
 		return acpMCPAuthorityReadError(err)
 	}
+	return matchCurrentCustomACPMCPTool(tool, descriptor, request.Authorization.ApprovalPolicy)
+}
+
+// customACPMCPToolResource names the Tool behind a custom descriptor: a
+// forwarding write tool is derived from its forwarding Tool.
+func customACPMCPToolResource(descriptor harnessv2.MCPToolDescriptor) string {
+	if descriptor.Forward != nil && descriptor.Forward.Write {
+		return harnessv2.MCPForwardToolResource(descriptor.Name)
+	}
+	return descriptor.Name
+}
+
+// matchCurrentCustomACPMCPTool refuses a call whose Tool no longer describes
+// the descriptor the prompt was authorized with, or a forwarded write the
+// Tool now requires approval for although the prompt's policy does not.
+func matchCurrentCustomACPMCPTool(tool *corev1alpha1.Tool, descriptor harnessv2.MCPToolDescriptor, approval harnessv2.MCPApprovalPolicy) error {
 	current, err := customACPMCPToolDescriptor(tool)
+	if err == nil && descriptor.Forward != nil && descriptor.Forward.Write {
+		current, err = forwardingWriteDescriptor(tool, current)
+		if err == nil && tool.Spec.HTTP.Forward.Writes.WriteApprovalRequired() && !approval.Requires(descriptor.Name) {
+			return fmt.Errorf("forwarding write tool %q now requires approval", descriptor.Name)
+		}
+	}
 	if err != nil {
 		return err
 	}
-	expectedJSON, err := harnessv2.CanonicalValue(descriptor)
-	if err != nil {
-		return err
-	}
-	currentJSON, err := harnessv2.CanonicalValue(current)
-	if err != nil || !bytes.Equal(expectedJSON, currentJSON) {
-		return errors.New("custom MCP tool changed after prompt authorization")
+	expected, expectedErr := harnessv2.CanonicalValue(descriptor)
+	currentJSON, currentErr := harnessv2.CanonicalValue(current)
+	if expectedErr != nil || currentErr != nil || !bytes.Equal(expected, currentJSON) {
+		return fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
 	}
 	return nil
 }
@@ -378,10 +647,34 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 ) (json.RawMessage, error) {
 	call, err := e.prepareACPMCPTool(ctx, request, descriptor)
 	if err != nil {
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// Preparation sends nothing, so a forwarded write refused here
+			// is reported as refused, never as possibly applied.
+			return nil, &tools.NoEffectError{Summary: "The tool refused the request before sending it.", Err: err}
+		}
 		return nil, err
 	}
-	return call(ctx)
+	result, err := call(ctx)
+	// A call answered directly gets the refusal as its tool result; only
+	// approval settlement needs to know it had no effect.
+	if refusal, ok := errors.AsType[*acpMCPRefusedWithoutEffect](err); ok {
+		return refusal.Result, nil
+	}
+	return result, err
 }
+
+// acpMCPRefusedWithoutEffect is a tool call Orka refused before any request
+// left, such as for a requester link found missing or unusable. It carries
+// the tool result the agent gets, and its code and reason for approval
+// settlement, which records the call as failed without effect. It is set
+// only by Orka's own refusal, never inferred from a tool's response.
+type acpMCPRefusedWithoutEffect struct {
+	Result json.RawMessage
+	Code   string
+	Reason string
+}
+
+func (e *acpMCPRefusedWithoutEffect) Error() string { return e.Reason }
 
 // Prepare the local executor without invoking a tool. Approval calls perform
 // these reads before starting their execution budget, then revalidate authority
@@ -485,20 +778,24 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		// Descriptor and Task authority mismatches remain definitive.
 		e.Reader = acpMCPAuthorityReader{e.Reader}
 		tool := &corev1alpha1.Tool{}
-		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: descriptor.Name}, tool); getErr != nil {
-			return nil, fmt.Errorf("load custom MCP tool %q: %w", descriptor.Name, getErr)
+		resource := customACPMCPToolResource(descriptor)
+		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: resource}, tool); getErr != nil {
+			return nil, fmt.Errorf("load custom MCP tool %q: %w", resource, getErr)
 		}
-		currentDescriptor, descriptorErr := customACPMCPToolDescriptor(tool)
-		if descriptorErr != nil {
-			return nil, descriptorErr
-		}
-		expected, expectedErr := harnessv2.CanonicalValue(descriptor)
-		current, currentErr := harnessv2.CanonicalValue(currentDescriptor)
-		if expectedErr != nil || currentErr != nil || !bytes.Equal(expected, current) {
-			return nil, fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
+		if matchErr := matchCurrentCustomACPMCPTool(tool, descriptor, request.Authorization.ApprovalPolicy); matchErr != nil {
+			return nil, matchErr
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
+		if descriptor.Forward != nil {
+			executor.AllowForwarding()
+			if descriptor.Forward.Write {
+				// The write tool resolves its credential as a write, so a
+				// linked account must allow writes.
+				tool = tool.DeepCopy()
+				tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
+			}
+		}
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
@@ -574,6 +871,22 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 				Code    string `json:"code"`
 				Error   string `json:"error"`
 			}{true, "invalid_arguments", argErr.Error()})
+		}
+		if required, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); ok {
+			// The requester's link is missing or unusable, so nothing was
+			// sent. The reason is Orka's own text naming the provider and the
+			// fix, safe for the agent to relay and for the log.
+			log.FromContext(ctx).Info("ACP MCP tool call refused: the requester's linked account is unavailable",
+				"tool", descriptor.Name, "provider", required.Provider, "kind", required.Kind, "reason", required.Error())
+			result, err := json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}{true, harnessv2.MCPToolErrorCodeConnectionRequired, required.Error()})
+			if err != nil {
+				return nil, err
+			}
+			return result, &acpMCPRefusedWithoutEffect{Result: result, Code: harnessv2.MCPToolErrorCodeConnectionRequired, Reason: required.Error()}
 		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the
@@ -861,9 +1174,40 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				effectRequest["connection"] = digest
 			}
 		}
-		result, replayed, err = runExternalEffectWithReplay(
-			promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call,
-		)
+		run, execute := runExternalEffectWithReplay[json.RawMessage], call
+		var live json.RawMessage
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarded POST or PATCH need not be idempotent.
+			run = runExternalEffectOnceWithReplay[json.RawMessage]
+			// The caller gets the answer; the record keeps what it may.
+			execute = func(ctx context.Context) (json.RawMessage, error) {
+				answer, callErr := call(ctx)
+				if callErr != nil {
+					return nil, callErr
+				}
+				live = answer
+				return forwardedWriteKeptResult(descriptor, answer), nil
+			}
+		}
+		result, replayed, err = run(promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, execute)
+		if err == nil && !replayed && live != nil {
+			result = live
+		}
+		if errors.Is(err, errExternalEffectAlreadyStarted) {
+			// Another delivery claimed it and may have sent it. Leave its
+			// record to that delivery or to reconciliation.
+			result, err = json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`), nil
+		}
+		if noEffect, ok := errors.AsType[*tools.NoEffectError](err); ok && descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarded write refused before it was sent is a definite
+			// failure, as on the approval path, not an unknown outcome.
+			failure := acpApprovalResult("", acpApprovalCodeNoEffect, acpApprovalFailureSummary(noEffect.Summary))
+			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			if settleErr := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, identity, store.ExternalEffectFailed, failure); settleErr == nil {
+				result, err = failure, nil
+			}
+			cancel()
+		}
 	} else {
 		result, err = call(promptCtx)
 	}
