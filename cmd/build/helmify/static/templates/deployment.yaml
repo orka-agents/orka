@@ -194,6 +194,21 @@ spec:
             - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- if dig "agentUseAuthorization" "enabled" false .Values.controller }}
+            - --agent-use-authorization-enabled=true
+            {{- end }}
+            {{- $entraTenant := dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+            {{- $entraBlueprint := dig "agentIdentity" "entra" "blueprintClientID" "" .Values.controller }}
+            {{- if or $entraTenant $entraBlueprint }}
+            {{- if not (and $entraTenant $entraBlueprint) }}
+            {{- fail "controller.agentIdentity.entra.tenantID and controller.agentIdentity.entra.blueprintClientID must be set together" }}
+            {{- end }}
+            - {{ printf "--agent-identity-entra-tenant-id=%s" $entraTenant | quote }}
+            - {{ printf "--agent-identity-entra-blueprint-client-id=%s" $entraBlueprint | quote }}
+            {{- with dig "agentIdentity" "entra" "authority" "" .Values.controller }}
+            - {{ printf "--agent-identity-entra-authority=%s" . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
             {{- end }}
@@ -573,6 +588,12 @@ spec:
             - name: agent-execution-snapshot-key
               mountPath: /var/run/orka/agent-execution-snapshot
               readOnly: true
+            {{- if dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+            # The blueprint's federated credential trusts this token's subject.
+            - name: agent-identity-token
+              mountPath: /var/run/secrets/orka.ai/agent-identity
+              readOnly: true
+            {{- end }}
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
               readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
@@ -663,6 +684,15 @@ spec:
             items:
               - key: {{ .Values.providerProxy.auth.tokenKey | default "token" }}
                 path: token
+        {{- end }}
+        {{- if dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+        - name: agent-identity-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: token
         {{- end }}
         - name: agent-execution-snapshot-key
           secret:

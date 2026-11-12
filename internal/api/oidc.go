@@ -61,6 +61,19 @@ type oidcDiscoveryDocument struct {
 
 var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
+// oidcSubjectNotAllowedError marks a token that passed verification but whose
+// subject is not on the allow-list. The caller proved it holds that subject,
+// so the API may name it back to them.
+type oidcSubjectNotAllowedError struct {
+	Subject string
+}
+
+func (e *oidcSubjectNotAllowedError) Error() string {
+	return fmt.Sprintf("%v: subject %q is not authorized", errOIDCAuthorization, e.Subject)
+}
+
+func (e *oidcSubjectNotAllowedError) Unwrap() error { return errOIDCAuthorization }
+
 func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig) (*UserInfo, error) {
 	jwksURL := cfg.JWKSURL
 	if jwksURL == "" {
@@ -114,10 +127,8 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 }
 
 func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
-	if len(cfg.AllowedSubjects) == 0 {
-		return fmt.Errorf("%w: OIDC subject authorization is not configured", errOIDCAuthorization)
-	}
-
+	// An empty list allows no one, yet a verified caller is still told its
+	// subject, which is how an installation learns the first subjects to add.
 	for _, allowed := range cfg.AllowedSubjects {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {
@@ -132,7 +143,7 @@ func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
 		}
 	}
 
-	return fmt.Errorf("%w: subject %q is not authorized", errOIDCAuthorization, claims.Subject)
+	return &oidcSubjectNotAllowedError{Subject: claims.Subject}
 }
 
 func wildcardMatch(pattern, value string) (bool, error) {

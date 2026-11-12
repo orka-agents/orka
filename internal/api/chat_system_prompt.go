@@ -130,16 +130,6 @@ func (b *SystemPromptBuilder) renderNumbered(parts []promptPart, label func(int)
 	return strings.Join(items, sep)
 }
 
-// promptSections returns every guidance part list, for tests that check the
-// declared requirements.
-func promptSections() map[string][]promptPart {
-	return map[string][]promptPart{
-		"behavior": behaviorParts(), "tool_call_style": toolCallStyleParts(), "task_types": taskTypeParts(),
-		"validation": validationParts(), "coordination": coordinationParts(), "coordination fallback": coordinationFallbackParts(),
-		"scheduling": schedulingParts(), "rules": ruleParts(), "examples": exampleParts(),
-	}
-}
-
 // chatCatalogStart opens the cluster catalog, the first part of the chat
 // system prompt that changes with the cluster.
 const chatCatalogStart = "<available_agents>\n"
@@ -275,10 +265,6 @@ has completed or failed. After completion, call fetch_task_output to get the res
 	}
 }
 
-func buildBehaviorSection() string {
-	return (&SystemPromptBuilder{}).behaviorSection()
-}
-
 // behaviorSection keeps the behavior guidance whose tools are offered.
 func (b *SystemPromptBuilder) behaviorSection() string {
 	return b.render(behaviorParts())
@@ -294,10 +280,6 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 
 `},
 	}
-}
-
-func buildToolCallStyleSection() string {
-	return (&SystemPromptBuilder{}).render(toolCallStyleParts())
 }
 
 // taskTypeParts describes each task type separately, and splits out sentences
@@ -355,10 +337,6 @@ func taskTypeParts() []promptPart {
 	}
 }
 
-func buildTaskTypesSection() string {
-	return (&SystemPromptBuilder{}).taskTypesSection()
-}
-
 // taskTypesSection describes the task types whose tools are offered.
 func (b *SystemPromptBuilder) taskTypesSection() string {
 	parts := b.render(taskTypeParts())
@@ -386,10 +364,6 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 
 `, requires: []string{promptToolContainerTask}},
 	}
-}
-
-func buildValidationSection() string {
-	return (&SystemPromptBuilder{}).render(validationParts())
 }
 
 // coordinationParts splits the coordination guidance by the chat tools each
@@ -456,10 +430,6 @@ func coordinationFallbackParts() []promptPart {
 	}
 }
 
-func buildCoordinationSection() string {
-	return (&SystemPromptBuilder{}).coordinationSection()
-}
-
 // coordinationSection keeps the coordination guidance whose tools are offered.
 func (b *SystemPromptBuilder) coordinationSection() string {
 	parts := b.render(coordinationParts())
@@ -489,10 +459,6 @@ set the schedule parameter on the task.
 
 `, anyOf: promptTaskCreators},
 	}
-}
-
-func buildSchedulingSection() string {
-	return (&SystemPromptBuilder{}).render(schedulingParts())
 }
 
 // ruleParts lists the orchestration rules. General rules have no
@@ -563,10 +529,6 @@ func ruleParts() []promptPart {
 	}
 }
 
-func buildRulesSection() string {
-	return (&SystemPromptBuilder{}).rulesSection()
-}
-
 // rulesSection numbers the rules whose tools are offered.
 func (b *SystemPromptBuilder) rulesSection() string {
 	rules := b.renderNumbered(ruleParts(), func(n int) string { return fmt.Sprintf("%d. ", n) }, "")
@@ -619,10 +581,6 @@ func exampleParts() []promptPart {
   3. Return the winning result
 `, requires: []string{promptToolCancel}, anyOf: []string{promptToolCreateAgent, chatCreateAITaskTool, promptToolAgentTask}},
 	}
-}
-
-func buildExamplesSection() string {
-	return (&SystemPromptBuilder{}).examplesSection()
 }
 
 // examplesSection numbers the examples whose tools are offered.

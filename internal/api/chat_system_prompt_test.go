@@ -1262,3 +1262,47 @@ func TestSystemPromptAgentTaskExamplesMatchSchema(t *testing.T) {
 		})
 	}
 }
+
+// Test helpers that render a single guidance section as if every tool were offered.
+
+// promptSections returns every guidance part list, for tests that check the
+// declared requirements.
+func promptSections() map[string][]promptPart {
+	return map[string][]promptPart{
+		"behavior": behaviorParts(), "tool_call_style": toolCallStyleParts(), "task_types": taskTypeParts(),
+		"validation": validationParts(), "coordination": coordinationParts(), "coordination fallback": coordinationFallbackParts(),
+		"scheduling": schedulingParts(), "rules": ruleParts(), "examples": exampleParts(),
+	}
+}
+
+func buildBehaviorSection() string {
+	return (&SystemPromptBuilder{}).behaviorSection()
+}
+
+func buildToolCallStyleSection() string {
+	return (&SystemPromptBuilder{}).render(toolCallStyleParts())
+}
+
+func buildTaskTypesSection() string {
+	return (&SystemPromptBuilder{}).taskTypesSection()
+}
+
+func buildValidationSection() string {
+	return (&SystemPromptBuilder{}).render(validationParts())
+}
+
+func buildCoordinationSection() string {
+	return (&SystemPromptBuilder{}).coordinationSection()
+}
+
+func buildSchedulingSection() string {
+	return (&SystemPromptBuilder{}).render(schedulingParts())
+}
+
+func buildRulesSection() string {
+	return (&SystemPromptBuilder{}).rulesSection()
+}
+
+func buildExamplesSection() string {
+	return (&SystemPromptBuilder{}).examplesSection()
+}
