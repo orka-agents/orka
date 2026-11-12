@@ -423,7 +423,8 @@ func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	if err != nil || strings.Join(visible, ",") != "web_search" || len(write) != 0 {
 		t.Fatalf("visible = %v write = %v err = %v, want the built-in kept and the connector write hidden", visible, write, err)
 	}
-	digests, err := FrozenConnectorToolDigests(context.Background(), reader, f.task.Namespace, names)
+	_, classification, err := freezeClassifiedRequesterConnections(context.Background(), reader, tools.DefaultRegistry, f.task, names, connectorScope{})
+	digests := nativeConnectorToolDigests(classification)
 	if err != nil || len(digests) != 1 || digests["gh_write"] == "" {
 		t.Fatalf("digests = %v err = %v, want only the real connector tool", digests, err)
 	}

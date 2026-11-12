@@ -528,7 +528,7 @@ func main() {
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
-			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
+			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
 			ConnectorPrivateEndpointsAcknowledgement+" and only with a plain-http localhost --connector-callback-base-url; never enable this in production.")
 	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
 		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
@@ -1526,7 +1526,7 @@ func main() {
 		os.Exit(1)
 	}
 	if connectorsAllowPrivateEndpoints {
-		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector and Agent identity Tool endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
 		connectors.SetAllowPrivateEndpoints(true)
 		worker.SetAllowPrivateConnectionEndpoints(true)
 	}

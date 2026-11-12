@@ -469,23 +469,12 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tas
 	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }
 
-// RunExternalEffectWithReplay runs one idempotent external effect from outside
-// the ACP dispatcher, such as the controller's connector-tool endpoint, with
-// the same reservation, lease, and replay semantics the ACP broker uses.
-func RunExternalEffectWithReplay[T any](
-	ctx context.Context,
-	effects store.ExternalEffectStore,
-	fence store.ControllerEpochFence,
-	identity store.ExternalEffectIdentity,
-	request any,
-	call func(context.Context) (T, error),
-) (T, bool, error) {
-	return runExternalEffectWithReplay(ctx, effects, fence, identity, request, call)
-}
-
-// RunExternalEffectWithReplayCallTimeout is RunExternalEffectWithReplay with
-// the caller's real operation deadline, so the effect call and its ledger
-// lease cover a legitimately long tool timeout instead of the per-kind clamp.
+// RunExternalEffectWithReplayCallTimeout runs one idempotent external effect
+// from outside the ACP dispatcher, such as the controller's connector-tool
+// endpoint, with the same reservation, lease, and replay semantics the ACP
+// broker uses. callTimeout is the caller's real operation deadline, so the
+// effect call and its ledger lease cover a legitimately long tool timeout
+// instead of the per-kind clamp.
 func RunExternalEffectWithReplayCallTimeout[T any](
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -556,8 +545,9 @@ func SettlePendingExternalEffect(
 	return nil
 }
 
-// ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
-// reserves an effect, so a caller can recognize its own committed record.
+// ExternalEffectRequestDigest is the digest under which
+// RunExternalEffectWithReplayCallTimeout reserves an effect, so a caller can
+// recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
 	return acpDomainDigest("external-effect-request", map[string]any{
 		identityKey: identity, requestKey: request,
