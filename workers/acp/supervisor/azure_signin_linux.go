@@ -15,10 +15,25 @@ import (
 // DAC_OVERRIDE, so as itself it cannot create files in the child's 0700
 // directories at all. The thread is never unlocked: the runtime retires it
 // when the goroutine exits instead of reusing its changed identity.
+//
+// Only this thread changes identity, so fn must do its work on it: use only
+// os.Root operations on a handle opened beforehand, and start no goroutines
+// or processes, which would run as the supervisor.
 func asSessionChild(uid, gid int, fn func() error) error {
 	result := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
+		// Drop the supervisor's supplementary groups on this thread, as
+		// session children are started without any. The raw call changes
+		// only this thread; syscall.Setgroups would change every thread.
+		if _, _, errno := unix.RawSyscall(unix.SYS_SETGROUPS, 0, 0, 0); errno != 0 {
+			result <- fmt.Errorf("drop the supervisor's groups: %w", errno)
+			return
+		}
+		if groups, err := unix.Getgroups(); err != nil || len(groups) != 0 {
+			result <- fmt.Errorf("the thread kept supplementary groups %v: %v", groups, err)
+			return
+		}
 		if _, err := unix.SetfsgidRetGid(gid); err != nil {
 			result <- fmt.Errorf("take the session's group: %w", err)
 			return

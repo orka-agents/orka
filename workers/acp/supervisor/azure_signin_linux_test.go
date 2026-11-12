@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // The runtime's supervisor is root with CHOWN, SETUID and SETGID but not
@@ -18,6 +20,7 @@ func TestAzureProfileWriteActsAsTheSessionChild(t *testing.T) {
 		t.Skip("needs root, as the runtime's supervisor runs")
 	}
 	const child = 4242
+	supervisorGroups := mustGetgroups(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, ".azure")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -57,7 +60,11 @@ func TestAzureProfileWriteActsAsTheSessionChild(t *testing.T) {
 	// Only the child can look inside its directory without DAC_OVERRIDE, and
 	// only through the directory handle: the test's temporary parent is root's.
 	var info os.FileInfo
+	var childGroups []int
 	if err := asSessionChild(child, child, func() (err error) {
+		if childGroups, err = unix.Getgroups(); err != nil {
+			return err
+		}
 		info, err = root.Lstat(azureProfileName)
 		return err
 	}); err != nil || !info.Mode().IsRegular() {
@@ -65,6 +72,14 @@ func TestAzureProfileWriteActsAsTheSessionChild(t *testing.T) {
 	}
 	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Uid != child || stat.Gid != child {
 		t.Fatalf("profile owner = %+v", info.Sys())
+	}
+	// The child's thread carries none of the supervisor's groups, and the
+	// supervisor keeps its own afterwards.
+	if len(childGroups) != 0 {
+		t.Fatalf("the child's thread kept supplementary groups %v", childGroups)
+	}
+	if before, after := supervisorGroups, mustGetgroups(t); len(before) != len(after) {
+		t.Fatalf("the supervisor's groups changed from %v to %v", before, after)
 	}
 	// The supervisor's own identity is unchanged afterwards.
 	own := filepath.Join(home, "own")
@@ -74,4 +89,15 @@ func TestAzureProfileWriteActsAsTheSessionChild(t *testing.T) {
 	if info, err := os.Stat(own); err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 {
 		t.Fatalf("a later supervisor file = %v, %v", info, err)
 	}
+}
+
+// mustGetgroups reads the calling thread's supplementary groups. Outside
+// asSessionChild every thread carries the supervisor's.
+func mustGetgroups(t *testing.T) []int {
+	t.Helper()
+	groups, err := unix.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return groups
 }
