@@ -849,3 +849,88 @@ func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateProviderSpecForwardingTools(t *testing.T) {
+	forwarding := func(mutate func(*corev1alpha1.ConnectorTool)) *corev1alpha1.ConnectorProvider {
+		provider := validProvider()
+		tool := corev1alpha1.ConnectorTool{
+			Name: "azure_arm", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
+			Description: "Azure Resource Manager",
+			HTTP: &corev1alpha1.ConnectorHTTPTool{
+				URL: "https://management.azure.com", Method: "GET",
+				Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+			},
+		}
+		if mutate != nil {
+			mutate(&tool)
+		}
+		provider.Spec.Tools = append(provider.Spec.Tools, tool)
+		return provider
+	}
+	if issue := ValidateProviderSpec(forwarding(nil), nil); issue != nil {
+		t.Fatalf("valid forwarding tool refused: %v", issue)
+	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	}), nil); issue != nil {
+		t.Fatalf("a forwarding tool that grants writes was refused: %v", issue)
+	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.URL = "https://management.azure.com:443"
+	}), nil); issue != nil {
+		t.Fatalf("the default HTTPS port was refused: %v", issue)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1alpha1.ConnectorTool)
+		want   string
+	}{
+		"write":    {func(tool *corev1alpha1.ConnectorTool) { tool.Class = corev1alpha1.ConnectorToolClassWrite }, "must be class read"},
+		"path":     {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.URL = "https://management.azure.com/subscriptions" }, "origin with no path"},
+		"headers":  {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Headers = map[string]string{"Accept": "x"} }, "sets no headers"},
+		"protocol": {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Forward.Protocol = "Other" }, "unsupported forwarding protocol"},
+		"parameters": {func(tool *corev1alpha1.ConnectorTool) {
+			tool.Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
+		}, "declares no parameters"},
+	} {
+		issue := ValidateProviderSpec(forwarding(tc.mutate), nil)
+		if issue == nil || !strings.Contains(issue.Message, tc.want) {
+			t.Errorf("%s: issue = %v, want %q", name, issue, tc.want)
+		}
+	}
+}
+
+func TestProviderAuthorityDigestRenewsConsentForForwarding(t *testing.T) {
+	provider := validProvider()
+	provider.UID = "provider-uid"
+	before := ProviderAuthorityDigest(provider)
+	connection := &corev1alpha1.Connection{Status: corev1alpha1.ConnectionStatus{Consent: &corev1alpha1.ConnectionConsent{
+		ProviderUID: string(provider.UID), AuthorityDigest: before,
+	}}}
+	if !ConsentMatchesProvider(connection, provider) {
+		t.Fatal("consent must match the provider it was given for")
+	}
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.URL = "https://api.github.com"
+		}
+	}
+	plain := ProviderAuthorityDigest(provider)
+	connection.Status.Consent.AuthorityDigest = plain
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward = &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == plain || ConsentMatchesProvider(connection, provider) {
+		t.Fatal("turning a tool into a forwarding tool must need renewed consent")
+	}
+	reads := ProviderAuthorityDigest(provider)
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == reads {
+		t.Fatal("letting a forwarding tool write must need renewed consent")
+	}
+}

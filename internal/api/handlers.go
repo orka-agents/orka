@@ -129,6 +129,8 @@ type Handlers struct {
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
 	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
+	// chatTurns stops a chat Session's in-flight request on session cancel.
+	chatTurns chatTurnStopper
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -631,7 +633,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 }
 
 func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
-	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
+	return authorizeKubernetesTaskCreate(ctx, h.uncachedReader(), h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks
@@ -1594,6 +1596,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentSpec(c.Context(), h.uncachedReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
 		return err
 	}
+	if err := authorizeAgentIdentityBind(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1652,6 +1657,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+			return err
+		}
+		if err := authorizeAgentIdentityBind(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {

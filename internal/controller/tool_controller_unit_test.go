@@ -19,6 +19,7 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -90,6 +91,22 @@ func TestValidateTool(t *testing.T) {
 					HTTP:        &corev1alpha1.HTTPExecution{URL: "http://example.com/api?max_tokens=10&tokenizer=model&pagination-token=next"},
 				},
 			},
+		},
+		{
+			name: "forwarding tool with a parameter schema",
+			tool: &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "forward-parameters", Namespace: "default"},
+				Spec: corev1alpha1.ToolSpec{
+					Description: "Azure Resource Manager",
+					Parameters:  &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+					HTTP: &corev1alpha1.HTTPExecution{
+						URL:     "https://management.azure.com",
+						Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "takes no parameter schema",
 		},
 		{
 			name: "missing URL",

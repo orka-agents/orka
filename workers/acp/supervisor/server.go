@@ -30,6 +30,7 @@ type Server struct {
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
 	genai                  *supervisorGenAI
+	azureAuthority         azureGatewayAuthority
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
@@ -792,7 +793,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "requested provider profile is not available in this image", nil, false)
 		return
 	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+	if request.MCPConfiguration.ApprovalPolicy.NeedsRuntimeApprovals(request.MCPConfiguration.ToolPolicy) &&
+		!s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
 		return
 	}
@@ -1238,6 +1240,11 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	azureEnvironment, err := s.attachAzureGateway(mcpProxy, request.MCPConfiguration, paths.Home, uid, gid)
+	if err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
+	}
+	maps.Copy(envValues, azureEnvironment)
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot

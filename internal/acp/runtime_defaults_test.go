@@ -78,6 +78,37 @@ func TestBuiltInRuntimeNativeToolPolicy(t *testing.T) {
 	}
 }
 
+// TestBuiltInRuntimeNativePolicyUnrestrictedCountsOnlyNativeDenies covers the
+// deny list: denying one of the provider's own tools narrows the native
+// policy, and denying anything else, such as a forwarding Tool's write tool,
+// leaves it whole.
+func TestBuiltInRuntimeNativePolicyUnrestrictedCountsOnlyNativeDenies(t *testing.T) {
+	for _, provider := range []string{"codex", "copilot"} {
+		all := append(BuiltInRuntimeNativeToolNames(provider), "azurearm")
+		for name, tc := range map[string]struct {
+			allowed, disallowed []string
+			allowBash           bool
+			want                bool
+		}{
+			"no denies":                    {allowed: all, allowBash: true, want: true},
+			"a write tool denied":          {allowed: all, disallowed: []string{"azurearm:write"}, allowBash: true, want: true},
+			"a brokered Tool denied":       {allowed: all, disallowed: []string{"azurearm"}, allowBash: true, want: true},
+			"implicit grant, Tool denied":  {disallowed: []string{"azurearm"}, allowBash: true, want: true},
+			"a native tool denied":         {allowed: all, disallowed: []string{"WebSearch"}, allowBash: true},
+			"a native tool denied by case": {allowed: all, disallowed: []string{" bash "}, allowBash: true},
+			"a scoped native deny":         {allowed: all, disallowed: []string{"Read(/workspace/private/**)"}, allowBash: true},
+			"a scoped native deny by case": {allowed: all, disallowed: []string{" bash (git push:*)"}, allowBash: true},
+			"a scoped deny of a Tool":      {allowed: all, disallowed: []string{"azurearm(/subscriptions/**)"}, allowBash: true, want: true},
+			"Bash gated off":               {allowed: all, disallowed: []string{"azurearm:write"}},
+			"a native tool not allowed":    {allowed: []string{"Read", "azurearm"}, disallowed: []string{"azurearm:write"}, allowBash: true},
+		} {
+			if got := BuiltInRuntimeNativePolicyUnrestricted(provider, tc.allowed, tc.disallowed, tc.allowBash); got != tc.want {
+				t.Errorf("%s, %s: unrestricted = %t, want %t", provider, name, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestNormalizeBuiltInRuntimeToolPolicy(t *testing.T) {
 	allowed, disallowed, allowBash := NormalizeBuiltInRuntimeToolPolicy("claude", nil, []string{"Write"}, true)
 	if !slices.Equal(allowed, []string{"Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch"}) {
