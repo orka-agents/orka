@@ -29,6 +29,19 @@ type fakeConnectionSource struct {
 	credential ConnectionCredential
 	err        error
 	calls      int
+	// liveErr is what the post-exchange Connection re-check reports.
+	liveErr    error
+	liveChecks []ConnectionCredentialRequest
+	// duringLive runs inside the post-exchange Connection re-check.
+	duringLive func()
+}
+
+func (f *fakeConnectionSource) RequireLiveConnection(_ context.Context, req ConnectionCredentialRequest) error {
+	f.liveChecks = append(f.liveChecks, req)
+	if f.duringLive != nil {
+		f.duringLive()
+	}
+	return f.liveErr
 }
 
 func (f *fakeConnectionSource) ResolveConnectionCredential(_ context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {
@@ -74,11 +87,11 @@ func TestValidateSpecConnectionMode(t *testing.T) {
 		"with direct": {spec: corev1alpha1.OutboundAccessPolicySpec{
 			Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
 			Direct:     &corev1alpha1.DirectOutboundAccess{},
-		}, wantErr: "exactly one of direct, gateway, or connection"},
+		}, wantErr: "exactly one of direct, gateway, connection, or agentIdentity"},
 		"with gateway": {spec: corev1alpha1.OutboundAccessPolicySpec{
 			Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
 			Gateway:    &corev1alpha1.GatewayOutboundAccess{},
-		}, wantErr: "exactly one of direct, gateway, or connection"},
+		}, wantErr: "exactly one of direct, gateway, connection, or agentIdentity"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			issue := ValidateSpec(&corev1alpha1.OutboundAccessPolicy{Spec: tt.spec})
@@ -180,8 +193,56 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 		resolver := &KubernetesResolver{Reader: newReader().Build(), Connections: source}
 		req := base
 		req.FrozenConnections = nil
-		if _, err := resolver.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "frozen into the execution snapshot") {
-			t.Fatalf("err = %v", err)
+		_, err := resolver.Resolve(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "github is not linked for the person who asked") || !strings.Contains(err.Error(), "`orka connect github -n tenant`") {
+			t.Fatalf("err = %v, want the missing link named", err)
+		}
+		if _, ok := errors.AsType[*ConnectionRequiredError](err); !ok {
+			t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
+		}
+		for state, want := range map[string]string{
+			corev1alpha1.ConnectionStateExpired: "has expired",
+			corev1alpha1.ConnectionStateReady:   "does not match what the provider requires now",
+			"Revoked":                           "is not ready (Revoked)",
+		} {
+			link := &corev1alpha1.Connection{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "alice-github"},
+				Spec: corev1alpha1.ConnectionSpec{
+					Subject:     corev1alpha1.ConnectionSubject{Issuer: "https://issuer.example.test", Subject: "alice"},
+					ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+				},
+				Status: corev1alpha1.ConnectionStatus{State: state},
+			}
+			linked := &KubernetesResolver{Reader: newReader().WithObjects(link).Build(), Connections: source}
+			if _, err := linked.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s link: err = %v, want %q", state, err, want)
+			}
+		}
+		duplicate := func(name string) *corev1alpha1.Connection {
+			return &corev1alpha1.Connection{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: name},
+				Spec: corev1alpha1.ConnectionSpec{
+					Subject:     corev1alpha1.ConnectionSubject{Issuer: "https://issuer.example.test", Subject: "alice"},
+					ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+				},
+				Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady},
+			}
+		}
+		duplicated := &KubernetesResolver{Reader: newReader().WithObjects(duplicate("alice-github"), duplicate("alice-github-2")).Build(), Connections: source}
+		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to github") {
+			t.Fatalf("duplicate links: err = %v, want them named", err)
+		}
+		other := &corev1alpha1.Connection{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "bob-github"},
+			Spec: corev1alpha1.ConnectionSpec{
+				Subject:     corev1alpha1.ConnectionSubject{Issuer: "https://issuer.example.test", Subject: "bob"},
+				ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+			},
+			Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady},
+		}
+		if _, err := (&KubernetesResolver{Reader: newReader().WithObjects(other).Build(), Connections: source}).Resolve(context.Background(), req); err == nil ||
+			!strings.Contains(err.Error(), "is not linked for the person who asked") {
+			t.Fatalf("another person's link must not count: err = %v", err)
 		}
 		req.FrozenConnections = map[string]FrozenConnection{"other": {UID: "x"}}
 		if _, err := resolver.Resolve(context.Background(), req); err == nil {
@@ -538,5 +599,64 @@ func TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst(t *test
 	}
 	if source.calls != 0 {
 		t.Fatalf("credential source calls = %d, want none", source.calls)
+	}
+}
+
+func TestDeclaredConnectorToolMatchesForwarding(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{
+			URL: "https://management.azure.com", Method: "POST",
+			Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+		},
+	}}}}
+	binding := ToolBinding{
+		Name: "azure_arm", URL: "https://management.azure.com", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+		Forward: corev1alpha1.HTTPForwardProtocolAzureResourceManager,
+	}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("a forwarding Tool must match its forwarding declaration: %v", err)
+	}
+	plain := binding
+	plain.Forward = ""
+	if _, err := DeclaredConnectorTool(provider, plain); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a plain Tool matched a forwarding declaration: %v", err)
+	}
+	provider.Spec.Tools[0].HTTP.Forward = nil
+	if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a forwarding Tool matched a plain declaration: %v", err)
+	}
+}
+
+// TestDeclaredConnectorToolMatchesForwardedWritesItGrants covers a forwarding
+// Tool's write: it matches only a declaration that grants writes, and is
+// then judged as a write, so it needs a readWrite link.
+func TestDeclaredConnectorToolMatchesForwardedWritesItGrants(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{
+			URL: "https://management.azure.com", Method: "POST",
+			Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+		},
+	}}}}
+	write := ToolBinding{
+		Name: "azure_arm", URL: "https://management.azure.com", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+		Forward: corev1alpha1.HTTPForwardProtocolAzureResourceManager,
+	}
+	if _, err := DeclaredConnectorTool(provider, write); err == nil || !strings.Contains(err.Error(), "does not declare") {
+		t.Fatalf("a write matched a declaration without writes: %v", err)
+	}
+	provider.Spec.Tools[0].HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	declared, err := DeclaredConnectorTool(provider, write)
+	if err != nil || declared.Class != corev1alpha1.ConnectorToolClassWrite {
+		t.Fatalf("a granted write = %v, class %q; want class write", err, declared.Class)
+	}
+	if provider.Spec.Tools[0].Class != corev1alpha1.ConnectorToolClassRead {
+		t.Fatal("matching a write changed the provider's declaration")
+	}
+	read := write
+	read.Class = corev1alpha1.AgentRuntimeBrokeredToolClassRead
+	if declared, err := DeclaredConnectorTool(provider, read); err != nil || declared.Class != corev1alpha1.ConnectorToolClassRead {
+		t.Fatalf("a read on a declaration with writes = %v, class %q", err, declared.Class)
 	}
 }

@@ -26,6 +26,7 @@ const (
 	labelName              = "Name"
 	labelNamespace         = "Namespace"
 	labelPhase             = "Phase"
+	labelWaitingOn         = "Waiting on"
 	labelStatus            = "Status"
 	labelType              = "Type"
 	labelAgent             = "Agent"
