@@ -201,7 +201,9 @@ stops admitting sessions and prompts, as it would for a drain, and stays alive
 for that window.
 
 Core sees the eviction either through the worker Pod's termination or through
-the supervisor's `worker_eviction` drain. It closes admission and records the
+the eviction time the supervisor reports in its drain status. The supervisor
+reports it even when a suspension or capacity drain was already running and
+keeps that drain's reason. Core closes admission and records the
 eviction deadline. It then reuses the normal retirement: an authenticated drain,
 settlement of prompts already accepted, and a synchronous data-only suspension.
 After suspension the workspace resumes on a new worker. The RuntimePool's

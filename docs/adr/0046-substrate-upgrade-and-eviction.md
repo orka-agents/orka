@@ -51,7 +51,9 @@ cross-runtime restore crash looked like any other lost instance.
   the native backend admits at most 32 environment entries.
 - **Core owns the trigger.** Core observes either the exact attested worker Pod
   terminating (`deletionTimestamp` or `DisruptionTarget`) or the supervisor's
-  `worker_eviction` drain in an authenticated probe. It records an eviction
+  reported worker eviction time in an authenticated probe. The supervisor
+  reports that time separately from the drain reason, so a `SIGTERM` during a
+  suspension or capacity drain is still seen. It records an eviction
   bound to workspace UID, sequence, and instance identity, with the earliest
   signal and the shortest deadline, then requests exact retirement. Retirement
   reuses the authenticated drain, quiescence, and epoch fences. Suspend is

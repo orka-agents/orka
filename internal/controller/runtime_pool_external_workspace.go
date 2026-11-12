@@ -872,13 +872,25 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 
 // externalPoolStopped records a stopped instance. An eviction outcome is
 // persisted before the retirement and eviction markers that hold the pool in
-// retirement are removed: the markers are cleared only by a later reconcile
-// that observes the recorded outcome, so a status conflict or a controller
-// restart retries the recording instead of letting the allocation cold-boot.
+// retirement are removed: once the status write is confirmed, the outcome is
+// acknowledged in the instance's eviction record, and the markers are cleared
+// only by a later reconcile that observes that acknowledgement, so a status
+// conflict or a controller restart retries the recording instead of letting
+// the allocation cold-boot.
 func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (ctrl.Result, error) {
 	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" || pool.Annotations[externalRuntimeEvictionAnnotation] != "" {
 		if externalEvictionSettlementPending(pool, w) {
-			return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w), time.Second)
+			recorded, err := r.recordRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w))
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !recorded {
+				return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+			}
+			if err := r.acknowledgeExternalEvictionOutcome(ctx, pool, w); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		before := pool.DeepCopy()
 		delete(pool.Annotations, externalRuntimeRetirementRequestedAnnotation)

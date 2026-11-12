@@ -1828,7 +1828,7 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
-	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}

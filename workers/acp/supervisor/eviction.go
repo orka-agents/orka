@@ -75,6 +75,12 @@ func (s *Server) BeginEviction(now time.Time) bool {
 	if !s.drain.Requested {
 		cleanup = s.beginDrainLocked(harnessv2.DrainReasonWorkerEviction, now.UTC())
 	}
+	// The eviction is reported on its own, whatever drain closed admission
+	// first: Core enforces the eviction deadline from this timestamp, and a
+	// suspension or capacity drain's reason would otherwise hide it.
+	if s.drain.WorkerEvictionAt.IsZero() {
+		s.drain.WorkerEvictionAt = now.UTC()
+	}
 	s.mu.Unlock()
 	s.startDrainCleanup(cleanup)
 	return true

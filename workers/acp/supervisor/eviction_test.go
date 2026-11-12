@@ -66,7 +66,7 @@ func TestBeginEvictionDrainsAndRejectsFreshPromptsWithoutAcceptance(t *testing.T
 		t.Fatalf("eviction status is not protocol-valid: %v", err)
 	}
 	if !status.Drain.Requested || status.Drain.AcceptingNewSessions || status.Drain.Reason != harnessv2.DrainReasonWorkerEviction ||
-		!status.Drain.RequestedAt.Equal(signalledAt) || status.Lifecycle != harnessv2.SupervisorLifecycleDraining {
+		!status.Drain.RequestedAt.Equal(signalledAt) || !status.Drain.WorkerEvictionAt.Equal(signalledAt) || status.Lifecycle != harnessv2.SupervisorLifecycleDraining {
 		t.Fatalf("eviction did not self-report a worker eviction drain: %+v lifecycle=%s", status.Drain, status.Lifecycle)
 	}
 	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
@@ -161,6 +161,57 @@ func TestBeginEvictionReleasesOnlyForControllerStopRetirement(t *testing.T) {
 			}
 			if status := server.status(); status.Drain.Reason != test.reason {
 				t.Fatalf("eviction rewrote the controller drain reason to %q", status.Drain.Reason)
+			}
+		})
+	}
+}
+
+// The eviction is reported on its own whatever drain closed admission first,
+// so Core can enforce its deadline. It never replaces the existing drain
+// reason, never moves later on a repeated signal, and survives poisoning.
+// This uses a bare server so it runs without the root-only session fence.
+func TestBeginEvictionReportsEvictionIndependentlyOfTheDrainReason(t *testing.T) {
+	signalledAt := time.Date(2026, time.November, 6, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		drain string
+	}{
+		{drain: ""},
+		{drain: harnessv2.DrainReasonWorkspaceSuspend},
+		{drain: harnessv2.DrainReasonSessionIdentityCapacity},
+		{drain: harnessv2.DrainReasonWorkspaceRetirement},
+	} {
+		t.Run("drain="+test.drain, func(t *testing.T) {
+			server := &Server{drain: harnessv2.DrainStatus{AcceptingNewSessions: true}, lifecycle: harnessv2.SupervisorLifecycleReady}
+			wantReason := harnessv2.DrainReasonWorkerEviction
+			if test.drain != "" {
+				server.BeginDrain(test.drain)
+				wantReason = test.drain
+			}
+			hold := server.BeginEviction(signalledAt)
+			if hold != (test.drain != harnessv2.DrainReasonWorkspaceRetirement) {
+				t.Fatalf("BeginEviction hold = %t", hold)
+			}
+			if server.drain.Reason != wantReason {
+				t.Fatalf("drain reason = %q, want %q", server.drain.Reason, wantReason)
+			}
+			if !hold {
+				if !server.drain.WorkerEvictionAt.IsZero() {
+					t.Fatalf("released hold reported an eviction at %s", server.drain.WorkerEvictionAt)
+				}
+				return
+			}
+			if !server.drain.WorkerEvictionAt.Equal(signalledAt) {
+				t.Fatalf("eviction during a %q drain reported workerEvictionAt=%s, want %s", test.drain, server.drain.WorkerEvictionAt, signalledAt)
+			}
+			server.BeginEviction(signalledAt.Add(time.Minute))
+			if !server.drain.WorkerEvictionAt.Equal(signalledAt) {
+				t.Fatalf("repeated SIGTERM moved workerEvictionAt to %s", server.drain.WorkerEvictionAt)
+			}
+			server.mu.Lock()
+			server.poisonPoolLocked("poisoned")
+			server.mu.Unlock()
+			if !server.drain.WorkerEvictionAt.Equal(signalledAt) {
+				t.Fatalf("poisoning dropped the reported eviction: %+v", server.drain)
 			}
 		})
 	}

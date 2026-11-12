@@ -232,6 +232,57 @@ func TestExternalNativeSupervisorEvictionSignalStartsEviction(t *testing.T) {
 	}
 }
 
+// A SIGTERM that arrives during a capacity drain keeps that drain's reason.
+// The supervisor reports the eviction separately, and Core starts the
+// deadline-bound retirement even though identity rotation would otherwise
+// keep handling the drain.
+func TestExternalNativeSupervisorEvictionDuringCapacityDrainStartsEviction(t *testing.T) {
+	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	probe := runtimePoolValidProbe(f.pool, &pod, "native-recycle-boot", true)
+	signaledAt := runtimePoolTestNow.Add(-2 * time.Minute)
+	probe.Status.Drain.Reason = harnessv2.DrainReasonSessionIdentityCapacity
+	probe.Status.Drain.WorkerEvictionAt = signaledAt
+	probe.Status.SessionIdentityCapacity.Remaining = probe.Status.SessionIdentityCapacity.ExhaustionReserve
+	if err := probe.Status.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	f.supervisor.probe = probe
+	runtimePoolReconcile(t, f.r, f.pool)
+	record := evictionRecord(t, f)
+	if record == nil || record.Source != externalEvictionSourceSupervisor || !record.SignaledAt.Equal(signaledAt) ||
+		!record.Deadline.Equal(signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("eviction during a capacity drain = %#v", record)
+	}
+	if pool := runtimePoolTestGetPool(t, f.r, f.pool); pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != booleanTrueValue {
+		t.Fatal("eviction during a capacity drain did not request exact retirement")
+	}
+}
+
+// A SIGTERM that arrives during Core's own suspension drain keeps the
+// workspace_suspend reason. Its separately reported time still bounds the
+// window, so a probe past that cutoff never earns Suspend.
+func TestExternalSupervisorEvictionDuringSuspendDrainIsGatedByItsDeadline(t *testing.T) {
+	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	startRetirementDrain(t, f)
+	late := quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	late.Status.Drain.WorkerEvictionAt = runtimePoolTestNow.Add(-harnessv2.WorkerEvictionSuspendWindow - time.Minute)
+	f.supervisor.probe = late
+	runtimePoolReconcile(t, f.r, f.pool)
+	record := evictionRecord(t, f)
+	if record == nil || record.Source != externalEvictionSourceSupervisor || !record.Deadline.Equal(late.Status.Drain.WorkerEvictionAt.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("eviction during a suspension drain = %#v", record)
+	}
+	for range 2 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement != nil {
+		t.Fatalf("Suspend authorized after the eviction window reported during a suspension drain: %#v", retirement)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+		t.Fatalf("deadline condition = %#v", condition)
+	}
+}
+
 func TestExternalNativeEvictionKeepsEarliestSignalAndShortestWindow(t *testing.T) {
 	f, w, _, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
@@ -654,17 +705,28 @@ func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
 // which the provider may report the instance Failed and then Stopped before any
 // drain probe republishes it. The persisted exact-instance record must still
 // hold the markers until this instance's outcome is recorded, whether the
-// condition was absent or still showed an earlier instance's outcome.
+// condition was absent or still showed an earlier instance's outcome, including
+// one with the same reason as this instance's.
 func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testing.T) {
-	for _, previous := range []string{"no earlier outcome", "earlier instance suspended"} {
-		t.Run(previous, func(t *testing.T) {
+	const previousMessage = "an earlier instance's outcome"
+	for _, previous := range []struct {
+		name   string
+		status metav1.ConditionStatus
+		reason string
+	}{
+		{name: "no earlier outcome"},
+		{name: "earlier instance suspended", status: metav1.ConditionFalse, reason: corev1alpha1.RuntimePoolReasonEvictionSuspended},
+		{name: "earlier instance lost", status: metav1.ConditionFalse, reason: corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded},
+		{name: "earlier instance past its deadline", status: metav1.ConditionTrue, reason: corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded},
+	} {
+		t.Run(previous.name, func(t *testing.T) {
 			f, w, _, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 			sequence := w.Spec.Workload.Sequence
-			if previous == "earlier instance suspended" {
+			if previous.reason != "" {
 				pool := runtimePoolTestGetPool(t, f.r, f.pool)
 				meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
-					Type: corev1alpha1.RuntimePoolConditionWorkerEviction, Status: metav1.ConditionFalse,
-					Reason: corev1alpha1.RuntimePoolReasonEvictionSuspended, Message: "an earlier instance was suspended",
+					Type: corev1alpha1.RuntimePoolConditionWorkerEviction, Status: previous.status,
+					Reason: previous.reason, Message: previousMessage,
 					LastTransitionTime: metav1.NewTime(runtimePoolTestNow.Add(-time.Hour)),
 				})
 				if err := f.r.Status().Update(t.Context(), &pool); err != nil {
@@ -719,8 +781,8 @@ func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testin
 			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
 				t.Fatalf("eviction outcome = %#v, want EvictionDeadlineExceeded for the failed instance", condition)
 			}
-			if !condition.LastTransitionTime.After(runtimePoolTestNow.Add(-time.Hour)) {
-				t.Fatalf("outcome kept the earlier instance's transition time %s", condition.LastTransitionTime)
+			if !condition.LastTransitionTime.After(runtimePoolTestNow.Add(-time.Hour)) || condition.Message == previousMessage {
+				t.Fatalf("outcome kept the earlier instance's condition: %#v", condition)
 			}
 			if pool.Annotations[externalRuntimeEvictionAnnotation] != "" || pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" {
 				t.Fatal("recorded eviction kept its markers")

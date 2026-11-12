@@ -57,6 +57,11 @@ type externalRuntimeEviction struct {
 	// authorized at or after it.
 	Deadline    time.Time `json:"deadline"`
 	Suspendable bool      `json:"suspendable"`
+	// Outcome acknowledges the settled reason Core persisted for this exact
+	// instance once it stopped. It is written only after that status write
+	// is confirmed, so a WorkerEviction condition with the same reason left by
+	// an earlier instance is never mistaken for this instance's outcome.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 func (e *externalRuntimeEviction) matches(w *workspacev1alpha1.ExecutionWorkspace) bool {
@@ -197,20 +202,43 @@ func externalRetirementDrainReason(action workspacev1alpha1.WorkloadRetirementAc
 	return harnessv2.DrainReasonWorkspaceRetirement
 }
 
+// supervisorWorkerEvictionSignal returns when an authenticated supervisor
+// status reports its host worker's termination signal. The eviction timestamp
+// is reported independently of the drain reason, because the signal can
+// arrive during a suspension or capacity drain that keeps its own reason; a
+// worker_eviction drain without it still counts from its request time.
+func (r *RuntimePoolReconciler) supervisorWorkerEvictionSignal(status harnessv2.StatusResponse) (time.Time, bool) {
+	if !status.Drain.Requested {
+		return time.Time{}, false
+	}
+	signaledAt := status.Drain.WorkerEvictionAt
+	if signaledAt.IsZero() {
+		if status.Drain.Reason != harnessv2.DrainReasonWorkerEviction {
+			return time.Time{}, false
+		}
+		signaledAt = status.Drain.RequestedAt
+	}
+	signaledAt = signaledAt.UTC()
+	if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
+		// A supervisor clock ahead of Core never extends the window.
+		signaledAt = now
+	}
+	return signaledAt, true
+}
+
 // observeExternalSupervisorEviction handles a supervisor that self-reported
 // its worker's termination signal through an authenticated status probe.
 func (r *RuntimePoolReconciler) observeExternalSupervisorEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, status harnessv2.StatusResponse) (ctrl.Result, bool, error) {
-	if !runtimePoolHasExternalWorkspace(pool) || !status.Drain.Requested || status.Drain.Reason != harnessv2.DrainReasonWorkerEviction {
+	if !runtimePoolHasExternalWorkspace(pool) {
+		return ctrl.Result{}, false, nil
+	}
+	signaledAt, evicting := r.supervisorWorkerEvictionSignal(status)
+	if !evicting {
 		return ctrl.Result{}, false, nil
 	}
 	w, err := r.externalPoolWorkspace(ctx, pool)
 	if err != nil {
 		return ctrl.Result{}, false, err
-	}
-	signaledAt := status.Drain.RequestedAt.UTC()
-	if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
-		// A supervisor clock ahead of Core never extends the window.
-		signaledAt = now
 	}
 	result, err := r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceSupervisor, signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow))
 	return result, true, err
@@ -272,7 +300,7 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 		return nil, errExternalEvictionUnbound
 	}
 	if existing != nil {
-		record.Source, record.Suspendable = existing.Source, existing.Suspendable
+		record.Source, record.Suspendable, record.Outcome = existing.Source, existing.Suspendable, existing.Outcome
 		if existing.SignaledAt.Before(record.SignaledAt) {
 			record.SignaledAt = existing.SignaledAt
 		}
@@ -324,11 +352,10 @@ func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx contex
 			}
 		}
 	}
-	if status != nil && status.Drain.Requested && status.Drain.Reason == harnessv2.DrainReasonWorkerEviction {
-		signaledAt := status.Drain.RequestedAt.UTC()
-		if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
-			signaledAt = now
-		}
+	if status == nil {
+		return nil
+	}
+	if signaledAt, evicting := r.supervisorWorkerEvictionSignal(*status); evicting {
 		record, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceSupervisor, signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), false)
 		if err != nil {
 			return err
@@ -389,33 +416,60 @@ func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alp
 
 // externalEvictionSettlementPending reports whether an eviction still needs
 // its outcome recorded before the markers that hold the pool in retirement are
-// removed. That is the case while the persisted condition reports this
-// eviction draining. It is also the case when the persisted record binds the
-// exact instance w but the draining report never landed, for example because
-// its status write conflicted: the condition is then absent or still shows an
-// earlier instance's outcome, and the record is the only evidence left. A
-// record for any other instance never makes this one pending.
+// removed. That is the case while the persisted condition reports an eviction
+// draining. It is also the case while the persisted record binds the exact
+// instance w and has not acknowledged its outcome, for example because the
+// draining report was lost to a status conflict: the condition is then absent
+// or still shows an earlier instance's outcome, possibly with the same reason,
+// and only the record's acknowledgement tells them apart. A record for any
+// other instance never makes this one pending.
 func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
-	if condition != nil && condition.Status == metav1.ConditionTrue {
-		return condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
+	if condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining {
+		return true
 	}
-	if !externalEvictionAwaitingOutcome(pool, w) {
+	record := externalEvictionAwaitingOutcome(pool, w)
+	if record == nil {
 		return false
 	}
 	reason, _ := externalEvictionOutcome(w)
-	return condition == nil || condition.Reason != reason
+	return record.Outcome != reason
 }
 
-// externalEvictionAwaitingOutcome reports whether the pool's persisted
-// eviction record binds the exact instance w and announced a data-only
-// suspension, so that how it ended must be reported.
-func externalEvictionAwaitingOutcome(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
+// externalEvictionAwaitingOutcome returns the pool's persisted eviction record
+// when it binds the exact instance w and announced a data-only suspension, so
+// that how it ended must be reported.
+func externalEvictionAwaitingOutcome(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) *externalRuntimeEviction {
 	if w == nil {
-		return false
+		return nil
 	}
 	record, malformed := currentExternalRuntimeEviction(pool, w)
-	return !malformed && record != nil && record.Suspendable
+	if malformed || record == nil || !record.Suspendable {
+		return nil
+	}
+	return record
+}
+
+// acknowledgeExternalEvictionOutcome binds the outcome just persisted in
+// status to the exact instance's eviction record. Callers invoke it only after
+// that status write is confirmed.
+func (r *RuntimePoolReconciler) acknowledgeExternalEvictionOutcome(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) error {
+	record := externalEvictionAwaitingOutcome(pool, w)
+	if record == nil {
+		return nil
+	}
+	reason, _ := externalEvictionOutcome(w)
+	if record.Outcome == reason {
+		return nil
+	}
+	record.Outcome = reason
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	before := pool.DeepCopy()
+	pool.Annotations[externalRuntimeEvictionAnnotation] = string(encoded)
+	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
 // externalEvictionOutcome is how an eviction ended once its exact instance
@@ -433,15 +487,16 @@ func externalEvictionOutcome(w *workspacev1alpha1.ExecutionWorkspace) (string, s
 }
 
 // externalEvictionSettledCondition records how an eviction ended once its
-// exact instance stopped. An outcome recorded over an absent condition or an
-// earlier instance's is a new transition, so it carries the current time.
+// exact instance stopped. Until the instance's record acknowledges an outcome,
+// any condition other than a draining report is not this instance's outcome,
+// even with the same reason, so the outcome is recorded as a new transition
+// that carries the current time.
 func (r *RuntimePoolReconciler) externalEvictionSettledCondition(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, w *workspacev1alpha1.ExecutionWorkspace) {
 	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
 	reason, message := externalEvictionOutcome(w)
 	draining := condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
 	if !draining {
-		if (condition != nil && condition.Status == metav1.ConditionTrue) || !externalEvictionAwaitingOutcome(pool, w) ||
-			(condition != nil && condition.Reason == reason) {
+		if record := externalEvictionAwaitingOutcome(pool, w); record == nil || record.Outcome == reason {
 			return
 		}
 		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
