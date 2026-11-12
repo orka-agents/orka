@@ -59,6 +59,9 @@ type externalProviderTokenInjection struct {
 // gateway discards it and the proxy never accepts it.
 const externalProviderTokenEgressPlaceholder = harnessv2.ProviderTokenEgressInjectionPlaceholder
 
+// bearerAuthorizationPrefix is the scheme prefix of a bearer Authorization value.
+const bearerAuthorizationPrefix = "Bearer "
+
 // externalRuntimeEgress compiles Core's runtime egress intent into the
 // host-name allowlist: the in-cluster provider authentication proxy and the
 // controller artifact/MCP broker API, the destinations Core's NetworkPolicy
@@ -126,7 +129,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, inj
 		rule := workspacev1alpha1.RuntimeEgressRule{Protocol: key.protocol, Host: key.host, Ports: rulePorts}
 		if injection != nil && key.host == proxyHost {
 			rule.ReplaceHeaders = []workspacev1alpha1.RuntimeEgressCredentialHeader{{
-				Header: "Authorization", Prefix: "Bearer ",
+				Header: "Authorization", Prefix: bearerAuthorizationPrefix,
 				SecretKeyRef: workspacev1alpha1.RuntimeEgressSecretKeyReference{Namespace: injection.namespace, Name: injection.name, Key: runtimePoolProviderTokenKey},
 			}}
 		}
