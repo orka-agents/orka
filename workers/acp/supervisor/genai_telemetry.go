@@ -287,6 +287,23 @@ func (p *promptGenAI) finish(result acp.PromptResult, settledAt time.Time) {
 	p.end(settledAt, errorType, finishReason, result.Outcome == acp.PromptOutcomeCancelled)
 }
 
+// finishSettlement records the invoke_agent span and metrics for the prompt's
+// canonical settlement, so their outcome and end time match it.
+func (p *promptGenAI) finishSettlement(settlement harnessv2.PromptSettlement) {
+	result := acp.PromptResult{StopReason: acp.StopReason(settlement.StopReason)}
+	switch settlement.TerminalEvent {
+	case harnessv2.EventCompleted:
+		result.Outcome = acp.PromptOutcomeCompleted
+	case harnessv2.EventCancelled:
+		result.Outcome = acp.PromptOutcomeCancelled
+	case harnessv2.EventOutcomeUnknown:
+		result.Outcome = acp.PromptOutcomeOutcomeUnknown
+	default:
+		result.Outcome = acp.PromptOutcomeFailed
+	}
+	p.finish(result, settlement.SettledAt)
+}
+
 // abandon ends a prompt that never reached settlement, such as one rejected
 // before the agent accepted it.
 func (p *promptGenAI) abandon() {

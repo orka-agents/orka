@@ -377,6 +377,38 @@ func TestPromptGenAIRecordsEachToolCallOnce(t *testing.T) {
 	}
 }
 
+// Cancellation can settle a prompt before its stream finisher runs. The
+// invoke_agent span and duration must report that canonical settlement, not
+// the finisher's later result.
+func TestFinishPromptGenAIFollowsCanonicalSettlement(t *testing.T) {
+	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
+	start := time.Now().UTC()
+	state := &sessionState{id: "session-1"}
+	prompt := &promptState{request: testGenAIPromptRequest()}
+	prompt.genai = h.server.startInvokeAgent(context.Background(), state, prompt.request, start)
+	cancelledAt := start.Add(2 * time.Second)
+	h.server.mu.Lock()
+	recordPromptSettlementLocked(state, prompt, settlementFromResult(acp.PromptResult{Outcome: acp.PromptOutcomeCancelled}, cancelledAt))
+	h.server.mu.Unlock()
+
+	h.server.finishPrompt(state, prompt, acp.PromptResult{Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn}, start.Add(time.Minute))
+
+	if prompt.settlement == nil || prompt.settlement.TerminalEvent != harnessv2.EventCancelled || !prompt.settlement.SettledAt.Equal(cancelledAt) {
+		t.Fatalf("canonical settlement = %+v", prompt.settlement)
+	}
+	invoke := h.spans("invoke_agent codex")
+	if len(invoke) != 1 {
+		t.Fatalf("invoke spans = %d", len(invoke))
+	}
+	if got := genAISpanAttributes(invoke[0])[genai.AttrResponseFinishReasons].AsStringSlice(); !slices.Equal(got, []string{"cancelled"}) || !invoke[0].EndTime().Equal(cancelledAt) {
+		t.Fatalf("invoke_agent finish reasons = %v end = %v, want cancelled at %v", got, invoke[0].EndTime(), cancelledAt)
+	}
+	durations, ok := h.metrics(t)[genai.MetricInvokeAgentDuration].(metricdata.Histogram[float64])
+	if !ok || len(durations.DataPoints) != 1 || durations.DataPoints[0].Count != 1 || durations.DataPoints[0].Sum != 2 {
+		t.Fatalf("invoke_agent duration = %+v, want one 2s sample", durations)
+	}
+}
+
 func TestGenAIToolNameIsContentFree(t *testing.T) {
 	for _, test := range []struct{ name, kind, want string }{
 		{"Bash", "execute", "Bash"},

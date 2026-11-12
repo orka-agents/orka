@@ -2534,10 +2534,12 @@ func promptResultFromSettlement(settlement harnessv2.PromptSettlement) acp.Promp
 }
 
 func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result acp.PromptResult, settledAt time.Time) {
-	prompt.genai.finish(result, settledAt)
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	// Cancellation can settle the prompt first; telemetry follows the
+	// canonical settlement, not this finisher's result.
+	prompt.genai.finishSettlement(settlement)
 	next := state.descriptor.State
 	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
 	if sessionCleanup {
