@@ -105,6 +105,10 @@ type ServerConfig struct {
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
+	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
+	// or RepositoryMonitor they create or edit names.
+	AgentUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -136,6 +140,7 @@ type Server struct {
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
+	agentUseAuthorization.Store(config.AgentUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,

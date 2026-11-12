@@ -180,6 +180,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// The controller, API, gateways, and monitors create Tasks for callers they
+// have already authorized, so they hold Agent `use` broadly.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=use
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.

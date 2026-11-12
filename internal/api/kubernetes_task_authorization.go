@@ -20,6 +20,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, clientset kubernetes.Int
 	if err := authorizeTaskWorkspaceClassUse(ctx, clientset, userInfo, task); err != nil {
 		return err
 	}
+	if err := authorizeTaskAgentUse(ctx, clientset, userInfo, task); err != nil {
+		return err
+	}
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
 		return nil
 	}

@@ -223,6 +223,17 @@ controller:
   dashboard:
     enabled: false
 
+  # Require the `use` verb on an Agent before a request newly names it.
+  # Off by default, because callers without a `use` grant can no longer
+  # create Tasks, RepositoryScans, RepositoryMonitors, or GatewayBindings that
+  # name the Agent. Running an existing RepositoryMonitor needs only monitor-run
+  # permissions, not `use` on its Agents. Enabling it sets --agent-use-authorization-enabled for API
+  # callers and installs ValidatingAdmissionPolicies for direct Kubernetes
+  # writes. Grant it with a Role rule such as
+  # {apiGroups: [core.orka.ai], resources: [agents], verbs: [use], resourceNames: [<agent>]}.
+  agentUseAuthorization:
+    enabled: false
+
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:
