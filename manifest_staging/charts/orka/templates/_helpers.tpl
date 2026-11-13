@@ -905,6 +905,83 @@ first, so an upgrade from a release without it does not fail on the kind. */ -}}
 {{- end -}}
 {{- end }}
 
+{{/*
+The in-cluster guide is off unless guide.enabled is true. dig keeps upgrades
+with --reuse-values from a release without guide values working.
+*/}}
+{{- define "orka.guideEnabled" -}}
+{{- if dig "enabled" false (.Values.guide | default dict) -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.guideDocsImage" -}}
+{{- $guide := .Values.guide | default dict -}}
+{{- printf "%s@%s" (trim (toString (dig "docs" "image" "repository" "" $guide))) (trim (toString (dig "docs" "image" "digest" "" $guide))) -}}
+{{- end }}
+
+{{/*
+Reject a guide the controller would refuse at startup. The controller repeats
+every check; these fail the render first with the value to change.
+*/}}
+{{- define "orka.validateGuide" -}}
+{{- if include "orka.guideEnabled" . -}}
+{{- $guide := .Values.guide -}}
+{{- $runtime := toString (dig "runtime" "claude" $guide) -}}
+{{- if not (has $runtime (list "claude" "copilot")) -}}
+{{- fail (printf "guide.runtime %q is not supported; use claude or copilot" $runtime) -}}
+{{- end -}}
+{{- if not (get .Values.controller.acpRuntime (printf "%sImage" $runtime)) -}}
+{{- fail (printf "guide.runtime=%s needs controller.acpRuntime.%sImage" $runtime $runtime) -}}
+{{- end -}}
+{{- if not (trim (toString (dig "model" "" $guide))) -}}
+{{- fail "guide.model is required when guide.enabled=true: the model ID the runtime requests through the provider proxy" -}}
+{{- end -}}
+{{- $maxTurns := toString (dig "maxTurns" 30 $guide) -}}
+{{- if or (not (regexMatch `^[0-9]{1,4}$` $maxTurns)) (lt (atoi $maxTurns) 1) (gt (atoi $maxTurns) 1000) -}}
+{{- fail "guide.maxTurns must be a whole number between 1 and 1000" -}}
+{{- end -}}
+{{- if not .Values.providerProxy.enabled -}}
+{{- fail "guide.enabled=true needs providerProxy.enabled=true: built-in runtimes reach models only through the provider proxy" -}}
+{{- end -}}
+{{- $repository := trim (toString (dig "docs" "image" "repository" "" $guide)) -}}
+{{- $digest := trim (toString (dig "docs" "image" "digest" "" $guide)) -}}
+{{- if not $repository -}}
+{{- fail "guide.docs.image.repository is required when guide.enabled=true" -}}
+{{- end -}}
+{{- /* The controller accepts only canonical, fully qualified toolbox references and exits at startup on anything else. */ -}}
+{{- $repositoryHost := first (splitList "/" $repository) -}}
+{{- $repositoryPath := join "/" (rest (splitList "/" $repository)) -}}
+{{- $qualifiedHost := and (regexMatch `^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*(:[0-9]+)?$` $repositoryHost) (or (eq $repositoryHost "localhost") (contains "." $repositoryHost) (contains ":" $repositoryHost)) -}}
+{{- if or (not $qualifiedHost) (not (regexMatch `^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*$` $repositoryPath)) -}}
+{{- fail (printf "guide.docs.image.repository %q must be <registry host>/<lowercase path> with no tag, where the host is localhost or contains a dot or port, such as ghcr.io or registry:5000" $repository) -}}
+{{- end -}}
+{{- /* Docker Hub references are canonical only as docker.io/<namespace>/<name>; index.docker.io and docker.io/<name> are rewritten. */ -}}
+{{- if or (eq $repositoryHost "index.docker.io") (and (eq $repositoryHost "docker.io") (lt (len (splitList "/" $repositoryPath)) 2)) -}}
+{{- fail (printf "guide.docs.image.repository %q is not canonical: use docker.io/<namespace>/<name> for Docker Hub" $repository) -}}
+{{- end -}}
+{{- if not (regexMatch `^sha256:[0-9a-f]{64}$` $digest) -}}
+{{- fail "guide.docs.image.digest must be a sha256 digest: the guide mounts its docs snapshot by digest" -}}
+{{- end -}}
+{{- $toolboxes := .Values.controller.acpRuntime.toolboxes | default dict -}}
+{{- if not $toolboxes.enabled -}}
+{{- fail "guide.enabled=true needs controller.acpRuntime.toolboxes.enabled=true: the docs snapshot is mounted as a toolbox" -}}
+{{- end -}}
+{{- $repositorySegments := splitList "/" $repository -}}
+{{- $allowed := false -}}
+{{- range $entry := ($toolboxes.allowedRegistries | default list) -}}
+{{- $prefix := trimSuffix "/" (trim (toString $entry)) -}}
+{{- $prefixSegments := splitList "/" $prefix -}}
+{{- if and $prefix (le (len $prefixSegments) (len $repositorySegments)) -}}
+{{- if eq (join "/" (slice $repositorySegments 0 (len $prefixSegments))) $prefix -}}
+{{- $allowed = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not $allowed -}}
+{{- fail (printf "guide.docs.image.repository %q is not covered by controller.acpRuntime.toolboxes.allowedRegistries; add its registry host or host/path prefix" $repository) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.agentHostGitHubEnabled" -}}
 {{- if dig "agentHosts" "github" "enabled" false .Values.controller -}}true{{- end -}}
 {{- end }}

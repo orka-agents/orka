@@ -18,6 +18,19 @@ AGENTKIT_RUNTIME_IMAGE ?=
 # Digest-pinned AgentKit source image identity used as the adapter authority.
 AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+# Docs snapshot for the in-cluster Orka guide, built from the committed files of
+# GUIDE_DOCS_REF (a release tag, or HEAD by default). VERSION inside the image is
+# the ref's release tag, or dev, plus its commit and commit date.
+GUIDE_DOCS_IMG ?= ghcr.io/orka-agents/orka/guide-docs:latest
+GUIDE_DOCS_REF ?= HEAD
+GUIDE_DOCS_VERSION ?= $(shell git describe --tags --exact-match "$(GUIDE_DOCS_REF)" 2>/dev/null || echo dev)
+GUIDE_DOCS_COMMIT ?= $(shell git rev-parse --verify --quiet "$(GUIDE_DOCS_REF)^{commit}" 2>/dev/null || echo unknown)
+GUIDE_DOCS_COMMIT_DATE ?= $(shell git log -1 --format=%cs "$(GUIDE_DOCS_REF)" -- 2>/dev/null || echo unknown)
+# What the snapshot holds, as git pathspecs. Building from git archive keeps
+# untracked files out and gives every file a world-readable mode.
+GUIDE_DOCS_PATHS = build/guide-docs README.md SECURITY.md website/docs docs/adr docs/development \
+	':(glob)api/**/*.go' ':(exclude,glob)api/**/*_test.go' ':(glob)config/crd/bases/workspace.orka.ai_*.yaml' \
+	manifest_staging/charts/orka/values.yaml charts/orka/values.yaml .agents/skills
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
 ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
@@ -426,6 +439,19 @@ $(foreach provider,$(ACP_RUNTIME_PROVIDERS),$(eval $(call acp-runtime-image-targ
 .PHONY: docker-push-workspace-publisher
 docker-push-workspace-publisher: ## Push the clean-room workspace publisher image.
 	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
+
+.PHONY: docker-build-guide-docs
+docker-build-guide-docs: ## Build the in-cluster guide's docs snapshot image from GUIDE_DOCS_REF (default HEAD).
+	git -c tar.umask=0022 archive --format=tar "$(GUIDE_DOCS_REF)" -- $(GUIDE_DOCS_PATHS) | $(CONTAINER_TOOL) build \
+		--build-arg ORKA_VERSION="$(GUIDE_DOCS_VERSION)" \
+		--build-arg ORKA_COMMIT="$(GUIDE_DOCS_COMMIT)" \
+		--build-arg ORKA_COMMIT_DATE="$(GUIDE_DOCS_COMMIT_DATE)" \
+		-t ${GUIDE_DOCS_IMG} \
+		-f build/guide-docs/Dockerfile -
+
+.PHONY: docker-push-guide-docs
+docker-push-guide-docs: ## Push the in-cluster guide's docs snapshot image.
+	$(CONTAINER_TOOL) push ${GUIDE_DOCS_IMG}
 
 .PHONY: docker-build-all
 docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.

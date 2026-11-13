@@ -434,6 +434,12 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |
 | `--acp-toolbox-node-selector` | `ORKA_ACP_TOOLBOX_NODE_SELECTOR` env or `""` | Comma-separated `key=value` node selector merged into runtime Pods that bind toolboxes |
 | `--acp-toolbox-mount-method` | `ORKA_ACP_TOOLBOX_MOUNT_METHOD` env or `copy` | `copy` or `imageVolume`. With `imageVolume` on an API server older than 1.36, toolbox Agents are rejected with `ToolboxUnavailable`; there is no silent fallback |
+| `--guide-enabled` | `ORKA_GUIDE_ENABLED` env or `false` | Create and maintain the read-only `orka-guide` Agent in the watch namespace. Disabling it deletes the Agent the controller created; see [In-cluster guide](../guides/orka-guide.md) |
+| `--guide-runtime` | `ORKA_GUIDE_RUNTIME` env or `claude` | Guide runtime: `claude` or `copilot`. Its `--acp-<runtime>-runtime-image` must be set |
+| `--guide-model` | `ORKA_GUIDE_MODEL` env or `""` | Model ID the guide requests through the provider proxy. Required with `--guide-enabled` |
+| `--guide-max-turns` | `ORKA_GUIDE_MAX_TURNS` env or `30` | Default turn limit for one answer (1-1000) |
+| `--guide-docs-image` | `ORKA_GUIDE_DOCS_IMAGE` env or `""` | Digest-pinned docs snapshot image mounted at `/opt/orka-docs`. Required with `--guide-enabled`; needs `--acp-toolboxes-enabled` and an allowed registry |
+| `--guide-owner-deployment` | `ORKA_GUIDE_OWNER_DEPLOYMENT` env or `""` | Controller Deployment that owns the guide Agent, so deleting the installation deletes it. Needs the controller in the watch namespace; the Agent is created only once the Deployment exists. With the guide disabled, it identifies a guide Agent the controller created, so it's deleted even without its labels; the chart always passes it |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
