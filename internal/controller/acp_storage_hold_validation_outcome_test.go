@@ -156,11 +156,13 @@ type failedEnqueueRecovery struct {
 	adopted bool
 	// lostResponse stores the projection whose enqueue reports a failure.
 	lostResponse bool
-	// beforeValidation records the unknown outcome before the attempt
-	// reached workspace validation; otherwise the attempt is in it.
+	// beforeValidation records the unknown outcome for a prompt found lost
+	// while it was running, before the controller saw it complete.
 	beforeValidation bool
-	// acknowledged also holds the Task for its lost result receipt and
-	// acknowledges the hold before the unknown outcome is recorded.
+	// acknowledged instead records it after an operator acknowledged a hold
+	// for the lost result receipt of a settling attempt whose validation had
+	// not started. Both leave the delivery NotRequested; otherwise the
+	// attempt is in workspace validation.
 	acknowledged bool
 }
 
@@ -215,6 +217,9 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 	control.attempt.SessionUID = ""
 	control.attempt.SessionLeaseGeneration = 0
 	control.attempt.ExecutionState = store.PromptExecutionSettling
+	// unsettled is the Task's execution state until recovery records the
+	// unknown outcome on it.
+	unsettled := corev1alpha1.TaskExecutionStateSettling
 	// wantAttemptDelivery and wantDelivery are the deliveries the attempt
 	// and the Task record once recovery settled the attempt as unknown.
 	wantAttemptDelivery := store.PromptDeliveryConflict
@@ -229,9 +234,13 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 		control.attempt.Version = 1
 		wantAttemptDelivery = store.PromptDeliveryNotRequested
 		wantDelivery = func(delivery *corev1alpha1.TaskDeliveryStatus) bool {
-			return delivery != nil && delivery.State == corev1alpha1.TaskDeliveryStateNotRequested
+			return delivery != nil && delivery.State == corev1alpha1.TaskDeliveryStateNotRequested &&
+				delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeNotRequested
 		}
 		if !scenario.acknowledged {
+			unsettled = corev1alpha1.TaskExecutionStateRunning
+			task.Status.Execution.State = unsettled
+			control.attempt.ExecutionState = store.PromptExecutionRunning
 			break
 		}
 		// The settling transition recorded the receipt at version 1, which
@@ -328,7 +337,7 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 		t.Fatalf("attempt = %s/%s, want the recorded unknown outcome and delivery %s",
 			control.attempt.ExecutionState, control.attempt.DeliveryState, wantAttemptDelivery)
 	}
-	if latest := read(); latest.Status.Execution.State != corev1alpha1.TaskExecutionStateSettling || !wantDelivery(latest.Status.Delivery) {
+	if latest := read(); latest.Status.Execution.State != unsettled || !wantDelivery(latest.Status.Delivery) {
 		t.Fatalf("after the failed enqueue the Task records execution %s and delivery %#v",
 			latest.Status.Execution.State, latest.Status.Delivery)
 	}
@@ -340,7 +349,7 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 				t.Fatalf("recovery before the projection is delivered: %v", err)
 			}
 		}
-		if calls := runtimeCalls(); len(calls) != 0 || read().Status.Execution.State != corev1alpha1.TaskExecutionStateSettling {
+		if calls := runtimeCalls(); len(calls) != 0 || read().Status.Execution.State != unsettled {
 			t.Fatalf("recovery acted before the projection was delivered: calls=%v", calls)
 		}
 		if len(controls.projections) != 1 {

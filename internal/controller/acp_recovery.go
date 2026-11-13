@@ -2677,14 +2677,15 @@ func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
 // the terminal projection could not be enqueued. The attempt and the Task
 // record either the recovered validation conflict or no delivery
 // (abandonedValidationDelivery): the runtime starts validating when the prompt
-// completes, before the controller records it, and an acknowledged storage
-// hold records the outcome without reaching validation. Runtime cleanup
-// abandons a validation the runtime still holds only for a Task that records
-// the unknown outcome, so a later pass would otherwise stop at cleanup and
-// never reach that record. The record is written from the attempt in the
-// order the settling pass uses, the projection and then the Task's execution
-// state, which keeps the Task's runtime identity; an enqueued projection is
-// left to the outbox projector. task is refreshed with the result.
+// completes, before the controller records it, and an acknowledged hold for a
+// result receipt lost before validation started records the outcome with no
+// delivery. Runtime cleanup abandons a validation the runtime still holds only
+// for a Task that records the unknown outcome, so a later pass would otherwise
+// stop at cleanup and never reach that record. The record is written from the
+// attempt in the order the settling pass uses, the projection and then the
+// Task's execution state, which keeps the Task's runtime identity; an enqueued
+// projection is left to the outbox projector. task is refreshed with the
+// result.
 func (d *ACPDispatcher) recordRecoveredValidationOutcome(
 	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt,
 ) error {
