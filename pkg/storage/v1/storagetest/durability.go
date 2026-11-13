@@ -138,6 +138,8 @@ func readDurableState[P suiteProvider](t *testing.T, provider P) (durableState, 
 
 // runDurableWrite commits one write, restarts or fails over the provider, and
 // checks that the change, its receipt and the dataset's ownership survive.
+// The receipt is resolved before the write is replayed, so a receipt the
+// switch lost fails the case before a replay can record it again.
 func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], reopen func(*testing.T, P) P, failover bool) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
@@ -160,15 +162,15 @@ func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], 
 		require.NotEqual(t, incarnation, reopenedIncarnation, "a failover changes the incarnation")
 	}
 	require.Equal(t, after, c.observe(t, provider), "the committed change survives")
-
-	requireSameOutcome(t, first, callWrite(ctx, t, provider, c, envelope, suiteFence))
-	require.Equal(t, after, c.observe(t, provider), "a replay after the switch changed state")
 	resolved, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
 		DatasetID: dataset, OperationID: envelope.OperationID, Method: c.method,
 		RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
 	})
 	require.NoError(t, err)
 	require.Equal(t, storagev1.OperationCommitted, resolved.State, "the receipt survives with the change")
+
+	requireSameOutcome(t, first, callWrite(ctx, t, provider, c, envelope, suiteFence))
+	require.Equal(t, after, c.observe(t, provider), "a replay after the switch changed state")
 
 	advanceEpoch(t, provider, nextFence)
 	stale := envelopeFor(t, dataset, c, suiteFence)

@@ -573,9 +573,11 @@ type switchingEpochDataset struct {
 	*recordingEpochDataset
 	durability storagev1.DurabilityClass
 	switched   chan struct{}
-	// lose, when set, drops the watermark to zero at the switch.
-	lose bool
-	lost bool
+	// lose, when set, drops the watermark to restoreTo, zero unless set
+	// before switched closes, at the switch.
+	lose      bool
+	lost      bool
+	restoreTo int64
 	// mirrorErrs fails that many epoch reads after the switch.
 	mirrorErrs atomic.Int32
 }
@@ -588,7 +590,7 @@ func (d *switchingEpochDataset) Describe(ctx context.Context) (storagev1.Provide
 		info.Incarnation = "incarnation-2"
 		d.mu.Lock()
 		if d.lose && !d.lost {
-			d.watermark, d.lost = 0, true
+			d.watermark, d.lost = d.restoreTo, true
 		}
 		d.mu.Unlock()
 	default:
@@ -651,6 +653,63 @@ func TestControllerEpochManagerChecksASwitchedDataset(t *testing.T) {
 			requireHeld(t, manager, storagev1.StateContract)
 		})
 	}
+}
+
+// failingWatermarkRecords fails every watermark record while fail is set, as
+// an API server that times out does.
+type failingWatermarkRecords struct {
+	installationEpochStore
+	fail atomic.Bool
+}
+
+func (s *failingWatermarkRecords) RecordStorageWatermark(
+	ctx context.Context, fence store.ControllerEpochFence, datasetID string, watermark int64, at time.Time,
+) error {
+	if s.fail.Load() {
+		return errors.New("the API server timed out")
+	}
+	return s.memoryStorageRecords.RecordStorageWatermark(ctx, fence, datasetID, watermark, at)
+}
+
+// A watermark the dataset acknowledged counts in the switch check even when
+// recording it failed: a dataset that switches back to the recorded
+// watermark lost the writes it acknowledged since, and holds.
+func TestSwitchCheckCountsAWatermarkWhoseRecordFailed(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	authority := &failingWatermarkRecords{installationEpochStore: installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	dataset := &switchingEpochDataset{
+		recordingEpochDataset: newRecordingEpochDataset("dataset-a"), durability: storagev1.DurabilitySynchronousReplicated,
+		switched: make(chan struct{}), lose: true,
+	}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a recorded watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+	authority.fail.Store(true)
+	// Two advances after the record failed: the record keeps the last
+	// watermark recorded before, and the dataset acknowledged more.
+	eventually(t, "the dataset to acknowledge watermarks the record lacks", func() bool {
+		return datasetWatermark(t, dataset) >= recordedWatermarkOf(t, records, storagev1.StateContract)+2
+	})
+	recorded := recordedWatermarkOf(t, records, storagev1.StateContract)
+	dataset.restoreTo = recorded
+	close(dataset.switched)
+	eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+	hold := recordedHoldOf(t, records)
+	if hold.Reason != store.StorageRecoveryWatermarkRegressed || hold.StoredWatermark != recorded || hold.AcknowledgedWatermark <= recorded {
+		t.Fatalf("hold = %#v, want the dataset at the recorded watermark %d held below the one it acknowledged", hold, recorded)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
 }
 
 // A hold closes fences that were already open and wakes callers waiting for
@@ -810,10 +869,10 @@ func (d *describeGatedDataset) Describe(ctx context.Context) (storagev1.Provider
 	return d.recordingEpochDataset.Describe(ctx)
 }
 
-// A hold that leaves the record without this manager releasing it, as an
-// edit of the status does, reopens no fence it closed: each opens again only
-// once its dataset passes the takeover step, which here holds again for the
-// writes the dataset lost.
+// A hold an operator acknowledged that leaves the record without this
+// manager releasing it, as an edit of the status does, reopens no fence it
+// closed: each opens again only once its dataset passes the takeover step,
+// which here holds again for the writes the dataset lost.
 func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T) {
 	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
 	if err != nil {
@@ -854,6 +913,7 @@ func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T)
 	dataset.gate.Store(&gate)
 	records.mu.Lock()
 	records.record.Hold = nil
+	records.record.AcknowledgedHoldID = first.ID
 	records.mu.Unlock()
 	eventually(t, "the manager to drop the hold that left the record", func() bool {
 		var held *store.StorageHoldError
@@ -880,6 +940,131 @@ func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T)
 		t.Fatalf("hold = %#v, want the lost watermark held again", hold)
 	}
 	requireHeld(t, manager, storagev1.StateContract)
+}
+
+// A hold that leaves the record without an operator acknowledging it, as an
+// edit of the status does, is recorded again with every fence still closed,
+// because the takeover step cannot detect again a switch of an
+// async-replicated dataset that kept its epoch and watermark. Acknowledging
+// the hold recorded again releases it.
+func TestHoldRemovedFromTheRecordWithoutAcknowledgementIsRecordedAgain(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}
+	dataset := &switchingEpochDataset{
+		recordingEpochDataset: newRecordingEpochDataset("dataset-a"), durability: storagev1.DurabilityAsyncReplicated,
+		switched: make(chan struct{}),
+	}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	close(dataset.switched)
+	eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+	first := *recordedHoldOf(t, records)
+	if first.Reason != store.StorageRecoveryUnsafeSwitch {
+		t.Fatalf("hold = %#v, want the async-replicated switch held", first)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+
+	var released atomic.Bool
+	stop, sampled := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(sampled)
+		for {
+			if !errors.Is(manager.StorageHold(), store.ErrStorageRecoveryRequired) {
+				released.Store(true)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	records.mu.Lock()
+	records.record.Hold = nil
+	records.mu.Unlock()
+	eventually(t, "the hold to be recorded again", func() bool {
+		hold := recordedHoldOf(t, records)
+		return hold != nil && *hold == first
+	})
+	time.Sleep(5 * durabilityTestInterval)
+	close(stop)
+	<-sampled
+	if released.Load() {
+		t.Fatal("the manager released a hold that left the record without an acknowledgement")
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+
+	records.mu.Lock()
+	records.record.AcknowledgedHoldID = first.ID
+	records.mu.Unlock()
+	eventually(t, "the state fence after the hold recorded again was acknowledged", func() bool {
+		_, _, err := writeFenceWithin(manager, storagev1.StateContract, 50*time.Millisecond)
+		return err == nil
+	})
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold after the release = %#v", hold)
+	}
+}
+
+// annotationDroppingRecords removes the acknowledgement annotation as soon as
+// a release commits, as an operator cleaning up after the release does.
+type annotationDroppingRecords struct {
+	installationEpochStore
+}
+
+func (s annotationDroppingRecords) ReleaseStorageHold(
+	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
+) error {
+	if err := s.memoryStorageRecords.ReleaseStorageHold(ctx, fence, id, acks); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.record.AcknowledgedHoldID = ""
+	return nil
+}
+
+// A hold this manager released stays released when the acknowledgement
+// annotation is removed before the manager reads the record again: the
+// release itself showed that an operator acknowledged the hold.
+func TestHoldReleasedByTheManagerIsNotRecordedAgain(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Hold = &store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Contract: storagev1.StateContract,
+		DatasetID: "dataset-a", RaisedAt: time.Now().UTC(),
+	}
+	records.record.AcknowledgedHoldID = "hold-a"
+	authority := annotationDroppingRecords{installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	dataset := newRecordingEpochDataset("dataset-a")
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the state fence after the release", func() bool {
+		_, _, err := writeFenceWithin(manager, storagev1.StateContract, 50*time.Millisecond)
+		return err == nil
+	})
+	eventually(t, "a recorded watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold after the release = %#v, want none", hold)
+	}
 }
 
 // After an operator acknowledges a hold raised because a contract moved to
@@ -1403,7 +1588,7 @@ func TestSharedDatasetIsWatchedFromTheIncarnationItsAdvanceSaw(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(dataset.switched)
-	if outcome := takeover.check(ctx, storagev1.ArtifactsContract, dataset, store.StorageRecord{}, advances); outcome.err != nil || outcome.hold != nil {
+	if outcome := takeover.check(ctx, takeover.attempt, storagev1.ArtifactsContract, dataset, store.StorageRecord{}, advances); outcome.err != nil || outcome.hold != nil {
 		t.Fatalf("the artifacts takeover step = %v, %#v", outcome.err, outcome.hold)
 	}
 	hold := takeover.tickDataset(ctx, info.DatasetID)
@@ -1462,6 +1647,229 @@ func TestHeldDatasetIsFencedOnlyAfterTheHoldIsRecorded(t *testing.T) {
 		t.Fatalf("recorded hold = %#v, want the lost epoch with its evidence", record.Hold)
 	}
 	requireHeld(t, manager, storagev1.StateContract)
+}
+
+// A held dataset that cannot be fenced when the hold is read, because its
+// description fails, its advance times out or it is briefly not ready, is
+// fenced once it answers, while the hold is still recorded.
+func TestHeldDatasetIsFencedOnceItAnswers(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Acknowledgements = []store.StorageAcknowledgement{{
+		Contract: storagev1.StateContract, DatasetID: "dataset-a", Epoch: 5, AcknowledgedAt: time.Now().UTC(),
+	}}
+	records.record.Hold = &store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Contract: storagev1.StateContract,
+		DatasetID: "dataset-a", RaisedAt: time.Now().UTC(),
+	}
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}
+	dataset := newRecordingEpochDataset("dataset-a")
+	// The dataset holds its acknowledged epoch, so a fencing advance with it
+	// as the floor succeeds once the dataset answers.
+	dataset.requests = []storagev1.AdvanceControllerEpochRequest{{
+		DatasetID: "dataset-a", Epoch: store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 5}, InstallationID: "installation-a",
+	}}
+	dataset.describeErrs = []error{storagev1.ErrUnavailable}
+	dataset.advanceErrs = []error{context.DeadlineExceeded, storagev1.ErrNotReady}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the held dataset to be fenced", func() bool { return len(dataset.advanceRequests()) == 2 })
+	if fenced := dataset.advanceRequests()[1]; fenced.AcknowledgedEpoch != 5 || fenced.InstallationID != "installation-a" {
+		t.Fatalf("fencing advance = %+v, want acknowledged epoch 5 as its floor", fenced)
+	}
+	if refused := dataset.refusedBelowFloor(); len(refused) != 0 {
+		t.Fatalf("a dataset that holds its acknowledged epoch refused the fencing advance: %+v", refused)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+	if hold := recordedHoldOf(t, records); hold == nil || hold.ID != "hold-a" {
+		t.Fatalf("recorded hold = %#v, want hold-a still recorded", hold)
+	}
+}
+
+func recordedHoldOf(t *testing.T, records store.StorageRecordStore) *store.StorageRecoveryHold {
+	t.Helper()
+	record, err := records.GetStorageRecord(context.Background(), store.DefaultControllerEpochName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record.Hold
+}
+
+// stragglingAckStore records contract's first acknowledgement and then
+// returns only once resume closes, whatever its context, as a contract
+// worker whose update committed but that paused before it went on. A later
+// acknowledgement of contract waits while gate is set, and closes gated when
+// one first waits.
+type stragglingAckStore struct {
+	installationEpochStore
+	contract  string
+	recorded  chan struct{}
+	resume    chan struct{}
+	once      sync.Once
+	gate      atomic.Pointer[chan struct{}]
+	gated     chan struct{}
+	gatedOnce sync.Once
+}
+
+func (s *stragglingAckStore) RecordStorageAcknowledgement(
+	ctx context.Context, fence store.ControllerEpochFence, ack store.StorageAcknowledgement,
+) error {
+	if ack.Contract != s.contract {
+		return s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack)
+	}
+	first := false
+	s.once.Do(func() { first = true })
+	if !first {
+		if gate := s.gate.Load(); gate != nil {
+			s.gatedOnce.Do(func() { close(s.gated) })
+			select {
+			case <-*gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack)
+	}
+	if err := s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack); err != nil {
+		return err
+	}
+	close(s.recorded)
+	<-s.resume
+	return nil
+}
+
+// advanceGatedDataset makes AdvanceControllerEpoch wait while a gate is set,
+// and closes entered when an advance first waits.
+type advanceGatedDataset struct {
+	*recordingEpochDataset
+	gate    atomic.Pointer[chan struct{}]
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (d *advanceGatedDataset) AdvanceControllerEpoch(
+	ctx context.Context, request storagev1.AdvanceControllerEpochRequest,
+) (storagev1.ControllerEpochMirrorState, error) {
+	if gate := d.gate.Load(); gate != nil {
+		d.once.Do(func() { close(d.entered) })
+		select {
+		case <-*gate:
+		case <-ctx.Done():
+			return storagev1.ControllerEpochMirrorState{}, ctx.Err()
+		}
+	}
+	return d.recordingEpochDataset.AdvanceControllerEpoch(ctx, request)
+}
+
+// A contract worker of a takeover attempt that ended, here one whose
+// acknowledgement committed just as a hold ended the attempt, opens no fence
+// once it goes on during the next attempt, whether the next attempt is still
+// advancing the contract's dataset or already tracks it and is recording the
+// contract's acknowledgement: the fence opens only once the next attempt
+// recorded that acknowledgement itself.
+func TestWorkerOfAnEndedTakeoverAttemptOpensNoFence(t *testing.T) {
+	for name, waitInAdvance := range map[string]bool{"advance": true, "acknowledgement": false} {
+		t.Run("next attempt in its "+name, func(t *testing.T) {
+			authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = authorityDB.Close() })
+			records := newMemoryStorageRecords()
+			authority := &stragglingAckStore{
+				installationEpochStore: installationEpochStore{
+					ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+					installationID: "installation-a",
+				},
+				contract: storagev1.ArtifactsContract, recorded: make(chan struct{}), resume: make(chan struct{}),
+				gated: make(chan struct{}),
+			}
+			var resumed sync.Once
+			resume := func() { resumed.Do(func() { close(authority.resume) }) }
+			t.Cleanup(resume)
+			state := newRecordingEpochDataset("dataset-state")
+			artifacts := &advanceGatedDataset{recordingEpochDataset: newRecordingEpochDataset("dataset-artifacts"), entered: make(chan struct{})}
+			manager := fastEpochManager(authority, "controller-a").
+				WithStorage(storagev1.StateContract, state).
+				WithStorage(storagev1.ArtifactsContract, artifacts)
+			startEpochManager(t, manager)
+			if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-authority.recorded:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the artifacts acknowledgement was never recorded")
+			}
+			eventually(t, "a recorded state watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+			// The state dataset loses acknowledged writes while the artifacts
+			// worker is paused, and the hold ends the attempt.
+			state.mu.Lock()
+			state.watermark = 0
+			state.mu.Unlock()
+			eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+			hold := recordedHoldOf(t, records)
+			if hold.Reason != store.StorageRecoveryWatermarkRegressed {
+				t.Fatalf("hold = %#v, want the lost state watermark held", hold)
+			}
+			eventually(t, "the held artifacts dataset to be fenced", func() bool { return len(artifacts.advanceRequests()) == 2 })
+
+			// The next attempt, after the release, waits while the paused
+			// worker of the attempt that ended goes on.
+			gate := make(chan struct{})
+			waiting := authority.gated
+			if waitInAdvance {
+				artifacts.gate.Store(&gate)
+				waiting = artifacts.entered
+			} else {
+				authority.gate.Store(&gate)
+			}
+			records.mu.Lock()
+			records.record.AcknowledgedHoldID = hold.ID
+			records.mu.Unlock()
+			select {
+			case <-waiting:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the next attempt never reached the artifacts %s", name)
+			}
+			resume()
+			if _, _, err := writeFenceWithin(manager, storagev1.ArtifactsContract, 200*time.Millisecond); err == nil {
+				t.Fatal("a worker of the attempt the hold ended opened the artifacts fence before the next attempt recorded its acknowledgement")
+			}
+			close(gate)
+			if _, _, err := writeFenceWithin(manager, storagev1.ArtifactsContract, 5*time.Second); err != nil {
+				t.Fatalf("the artifacts fence after the next attempt recorded its acknowledgement: %v", err)
+			}
+		})
+	}
+}
+
+// A contract worker of a takeover attempt that ended tracks nothing in the
+// next attempt, which watches each dataset from what its own advance
+// described.
+func TestWorkerOfAnEndedTakeoverAttemptTracksNothing(t *testing.T) {
+	takeover := &storageTakeover{}
+	dataset := newRecordingEpochDataset("dataset-a")
+	ended := takeover.startAttempt()
+	takeover.endAttempt()
+	takeover.track(ended, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "before"}, dataset, 0)
+	if _, ok := takeover.snapshot("dataset-a"); ok {
+		t.Fatal("the attempt that ended tracked a dataset")
+	}
+	next := takeover.startAttempt()
+	takeover.track(ended, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "before"}, dataset, 7)
+	takeover.track(next, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "after"}, dataset, 3)
+	tracked, ok := takeover.snapshot("dataset-a")
+	if !ok || tracked.incarnation != "after" || tracked.acknowledged != 3 || len(tracked.contracts) != 1 {
+		t.Fatalf("tracked = %+v, %v; want only what the next attempt's advance described", tracked, ok)
+	}
 }
 
 // A manager with storage datasets reports storage as not ready until each

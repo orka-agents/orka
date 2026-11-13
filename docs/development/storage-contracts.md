@@ -968,7 +968,8 @@ nothing, and only advances each dataset that still serves the contract it
 acknowledged, so a replaced controller cannot write to it. Each such advance
 supplies the dataset's acknowledged epoch as `AcknowledgedEpoch`, so a
 dataset that lost that epoch refuses it and keeps the evidence until the
-hold is released. A check after a
+hold is released. An advance that fails with an error a retry may fix, such
+as a dataset that does not answer yet, is tried again while the hold lasts. A check after a
 restart or switch that cannot read the dataset is not a pass: the fences of
 the contracts the dataset serves stay closed until a later check finishes. An operator releases the hold,
 after the recovery procedure, by setting the
@@ -978,7 +979,14 @@ dataset holds now as acknowledged and clears the hold in the same update,
 without advancing anything first, so every advance keeps supplying the
 recorded acknowledgement as its floor; each contract's fence opens again once
 its dataset passes the takeover checks against the new record. An annotation naming another hold releases
-nothing. A release retried after its update committed but its response was
+nothing. A hold removed from `status.storageRecovery` without that
+annotation is recorded again with the same ID, and every fence stays closed
+meanwhile, because the takeover checks cannot detect again a switch of an
+`async-replicated` dataset that kept its epoch and watermark; a controller
+that restarts before it records the hold again no longer knows it (see
+**Not yet covered**). A hold that leaves the record after the annotation
+named it, without the controller releasing it, opens no fence before the
+takeover checks pass. A release retried after its update committed but its response was
 lost succeeds when the record, under the same controller epoch, shows
 exactly that release: no hold, the acknowledgement of that hold, the
 condition the release set and the acknowledgements it recorded; any other
@@ -1027,13 +1035,16 @@ under a new UID, or when an attempt in workspace validation is recorded as
 unknown although its receipt was found; there the Task reports the hold
 while its outcome stays the one recovery settled. Detecting a restart or
 switch of an `async-replicated` dataset that happened while no controller
-ran needs the incarnation recorded with the acknowledgement.
+ran needs the incarnation recorded with the acknowledgement, and so does
+keeping such a hold across a controller restart when it was removed from
+the status without being acknowledged.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
 restart and after each declared failover the change, its receipt, the
 dataset's identity, controller epoch, installation and watermark survive, and
-a replay changes nothing. Each failover must change the incarnation. Before
+a replay changes nothing. The receipt is resolved before the replay, so a
+receipt the switch lost fails the case before a replay can record it again. Each failover must change the incarnation. Before
 each failover, `HoldWrites` keeps watermark writes waiting inside the
 database, and the suite checks that they were in flight when the switch
 began. Each must then settle through `ResolveOperation` as its error said.
