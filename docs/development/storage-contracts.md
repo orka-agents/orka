@@ -980,11 +980,12 @@ without advancing anything first, so every advance keeps supplying the
 recorded acknowledgement as its floor; each contract's fence opens again once
 its dataset passes the takeover checks against the new record. An annotation naming another hold releases
 nothing. A hold removed from `status.storageRecovery` without that
-annotation is recorded again with the same ID, and every fence stays closed
-meanwhile, because the takeover checks cannot detect again a switch of an
-`async-replicated` dataset that kept its epoch and watermark; a controller
-that restarts before it records the hold again no longer knows it (see
-**Not yet covered**). A hold that leaves the record after the annotation
+annotation is recorded again with the same ID, because the takeover checks
+cannot detect again a switch of an `async-replicated` dataset that kept its
+epoch and watermark; a controller that restarts before it records the hold
+again no longer knows it (see **Not yet covered**). Meanwhile every fence
+stays closed, and each held dataset is still fenced: an advance the dataset
+has not answered yet is tried again. A hold that leaves the record after the annotation
 named it, without the controller releasing it, opens no fence before the
 takeover checks pass. A release retried after its update committed but its response was
 lost succeeds when the record, under the same controller epoch, shows
