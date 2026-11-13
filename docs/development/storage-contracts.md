@@ -1001,9 +1001,9 @@ outcome as unknown and never re-runs the prompt or reports success), a
 finalized turn without its store record, and reclamation without the turn
 cleanup receipt. Detecting a restart or switch of an `async-replicated`
 dataset that happened while no controller ran needs the incarnation recorded
-with the acknowledgement, and so does keeping such a hold across a
-controller restart when it was removed from the status without being
-acknowledged.
+with the acknowledgement, and so does keeping an installation hold across a
+controller restart when it was removed from `status.storageRecovery` without
+being acknowledged.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
