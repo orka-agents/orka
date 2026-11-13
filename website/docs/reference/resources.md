@@ -358,7 +358,7 @@ spec:
 | --- | --- |
 | `model.name` | Required. A model your gateway lists. |
 | `runtime.type` | `codex`, `claude`, `copilot`, or `opencode`. |
-| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value, and cannot change once set. |
+| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value. |
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |

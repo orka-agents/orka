@@ -126,13 +126,14 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
 	}
-	if oldObject != nil && oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil {
-		// Once written, the selector never changes or disappears. Adding a
-		// matching value to an Agent that omitted it is allowed above.
-		if object.Spec.Runtime.ContractVersion == nil ||
-			*oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
-			return ctrladmission.Denied("Agent contractVersion is immutable")
-		}
+	if oldObject != nil && oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil &&
+		object.Spec.Runtime.ContractVersion != nil &&
+		*oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
+		// A written selector never moves to another contract. Clearing it is
+		// allowed: an omitted selector already means the namespace mode, so
+		// reapplying a manifest that no longer spells it out changes nothing,
+		// and the Agent controller writes the value back.
+		return ctrladmission.Denied("Agent contractVersion is immutable")
 	}
 	return ctrladmission.Allowed("Agent contract matches the immutable namespace mode")
 }

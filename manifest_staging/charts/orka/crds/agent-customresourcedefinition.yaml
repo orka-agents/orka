@@ -1363,7 +1363,9 @@ spec:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
                       types. Only orka.harness.v2 is supported, so an omitted selector means
-                      orka.harness.v2. Once written, the value never changes. runtime.type
+                      orka.harness.v2. A written value never changes to another contract;
+                      clearing it keeps orka.harness.v2, and the controller writes it back, so
+                      reapplying a manifest that dropped the selector succeeds. runtime.type
                       alone is never protocol evidence.
                     enum:
                     - orka.harness.v2
@@ -1472,8 +1474,8 @@ spec:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
                 - message: runtime.contractVersion is immutable once set
-                  rule: '!has(oldSelf.contractVersion) || (has(self.contractVersion)
-                    && self.contractVersion == oldSelf.contractVersion)'
+                  rule: '!has(oldSelf.contractVersion) || !has(self.contractVersion)
+                    || self.contractVersion == oldSelf.contractVersion'
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'

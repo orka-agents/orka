@@ -180,6 +180,15 @@ spec:
   model: {name: gpt-5.2-codex}
 EOF
 
+expect_accept "reapplying a built-in Agent without its selector is accepted" <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata: {name: v2-agent, namespace: ${NAMESPACE}}
+spec:
+  runtime: {type: codex}
+  model: {name: gpt-5.2-codex}
+EOF
+
 expect_reject "selector with runtimeRef is rejected" "runtimeRef derives the protocol" <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
