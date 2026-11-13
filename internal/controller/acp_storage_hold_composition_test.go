@@ -219,14 +219,18 @@ func (s *holdingReceiptStore) GetPromptResultReceipt(ctx context.Context, attemp
 
 // An installation hold raised while a recovery pass is under way also keeps
 // that pass from placing or releasing a Task record hold: the condition write
-// is admitted only while storage is not held.
+// is admitted only while storage is not held, also under the epoch mutation
+// interlock of a control store that has one.
 func TestInstallationHoldRaisedDuringRecoveryWritesNoTaskRecordHold(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		acknowledged bool
+		interlock    bool
 	}{
 		{name: "placing the record hold"},
 		{name: "releasing the acknowledged record hold", acknowledged: true},
+		{name: "placing the record hold under the interlock", interlock: true},
+		{name: "releasing the acknowledged record hold under the interlock", acknowledged: true, interlock: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
@@ -239,12 +243,19 @@ func TestInstallationHoldRaisedDuringRecoveryWritesNoTaskRecordHold(t *testing.T
 					key: fixture.attemptID, expected: digest,
 				}.id())
 			}
+			var interlock *taskStorageHoldInterlockStore
+			if test.interlock {
+				interlock = &taskStorageHoldInterlockStore{DurableControlStore: fixture.dispatcher.Store}
+				fixture.dispatcher.Store = interlock
+			}
 			fixture.dispatcher.ResultStore = &holdingReceiptStore{Store: fixture.controlStore, epochs: fixture.dispatcher.Epochs}
 
 			err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx)
-			var held *store.StorageHoldError
-			if !errors.As(err, &held) {
+			if _, ok := errors.AsType[*store.StorageHoldError](err); !ok {
 				t.Fatalf("recovery after the installation hold was raised = %v, want the installation hold", err)
+			}
+			if interlock != nil && interlock.calls == 0 {
+				t.Fatal("the condition write did not use the epoch mutation interlock")
 			}
 			requireAttemptState(t, fixture, store.PromptExecutionSettling)
 			updated := &corev1alpha1.Task{}
