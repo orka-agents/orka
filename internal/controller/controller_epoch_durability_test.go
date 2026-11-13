@@ -1403,7 +1403,7 @@ func TestSharedDatasetIsWatchedFromTheIncarnationItsAdvanceSaw(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(dataset.switched)
-	if outcome := takeover.check(ctx, storagev1.ArtifactsContract, dataset, store.StorageRecord{}, advances); outcome.err != nil || outcome.hold != nil {
+	if outcome := takeover.check(ctx, takeover.attempt, storagev1.ArtifactsContract, dataset, store.StorageRecord{}, advances); outcome.err != nil || outcome.hold != nil {
 		t.Fatalf("the artifacts takeover step = %v, %#v", outcome.err, outcome.hold)
 	}
 	hold := takeover.tickDataset(ctx, info.DatasetID)
@@ -1515,6 +1515,176 @@ func recordedHoldOf(t *testing.T, records store.StorageRecordStore) *store.Stora
 		t.Fatal(err)
 	}
 	return record.Hold
+}
+
+// stragglingAckStore records contract's first acknowledgement and then
+// returns only once resume closes, whatever its context, as a contract
+// worker whose update committed but that paused before it went on. A later
+// acknowledgement of contract waits while gate is set, and closes gated when
+// one first waits.
+type stragglingAckStore struct {
+	installationEpochStore
+	contract  string
+	recorded  chan struct{}
+	resume    chan struct{}
+	once      sync.Once
+	gate      atomic.Pointer[chan struct{}]
+	gated     chan struct{}
+	gatedOnce sync.Once
+}
+
+func (s *stragglingAckStore) RecordStorageAcknowledgement(
+	ctx context.Context, fence store.ControllerEpochFence, ack store.StorageAcknowledgement,
+) error {
+	if ack.Contract != s.contract {
+		return s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack)
+	}
+	first := false
+	s.once.Do(func() { first = true })
+	if !first {
+		if gate := s.gate.Load(); gate != nil {
+			s.gatedOnce.Do(func() { close(s.gated) })
+			select {
+			case <-*gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack)
+	}
+	if err := s.memoryStorageRecords.RecordStorageAcknowledgement(ctx, fence, ack); err != nil {
+		return err
+	}
+	close(s.recorded)
+	<-s.resume
+	return nil
+}
+
+// advanceGatedDataset makes AdvanceControllerEpoch wait while a gate is set,
+// and closes entered when an advance first waits.
+type advanceGatedDataset struct {
+	*recordingEpochDataset
+	gate    atomic.Pointer[chan struct{}]
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (d *advanceGatedDataset) AdvanceControllerEpoch(
+	ctx context.Context, request storagev1.AdvanceControllerEpochRequest,
+) (storagev1.ControllerEpochMirrorState, error) {
+	if gate := d.gate.Load(); gate != nil {
+		d.once.Do(func() { close(d.entered) })
+		select {
+		case <-*gate:
+		case <-ctx.Done():
+			return storagev1.ControllerEpochMirrorState{}, ctx.Err()
+		}
+	}
+	return d.recordingEpochDataset.AdvanceControllerEpoch(ctx, request)
+}
+
+// A contract worker of a takeover attempt that ended, here one whose
+// acknowledgement committed just as a hold ended the attempt, opens no fence
+// once it goes on during the next attempt, whether the next attempt is still
+// advancing the contract's dataset or already tracks it and is recording the
+// contract's acknowledgement: the fence opens only once the next attempt
+// recorded that acknowledgement itself.
+func TestWorkerOfAnEndedTakeoverAttemptOpensNoFence(t *testing.T) {
+	for name, waitInAdvance := range map[string]bool{"advance": true, "acknowledgement": false} {
+		t.Run("next attempt in its "+name, func(t *testing.T) {
+			authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = authorityDB.Close() })
+			records := newMemoryStorageRecords()
+			authority := &stragglingAckStore{
+				installationEpochStore: installationEpochStore{
+					ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+					installationID: "installation-a",
+				},
+				contract: storagev1.ArtifactsContract, recorded: make(chan struct{}), resume: make(chan struct{}),
+				gated: make(chan struct{}),
+			}
+			var resumed sync.Once
+			resume := func() { resumed.Do(func() { close(authority.resume) }) }
+			t.Cleanup(resume)
+			state := newRecordingEpochDataset("dataset-state")
+			artifacts := &advanceGatedDataset{recordingEpochDataset: newRecordingEpochDataset("dataset-artifacts"), entered: make(chan struct{})}
+			manager := fastEpochManager(authority, "controller-a").
+				WithStorage(storagev1.StateContract, state).
+				WithStorage(storagev1.ArtifactsContract, artifacts)
+			startEpochManager(t, manager)
+			if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-authority.recorded:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the artifacts acknowledgement was never recorded")
+			}
+			eventually(t, "a recorded state watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+			// The state dataset loses acknowledged writes while the artifacts
+			// worker is paused, and the hold ends the attempt.
+			state.mu.Lock()
+			state.watermark = 0
+			state.mu.Unlock()
+			eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+			hold := recordedHoldOf(t, records)
+			if hold.Reason != store.StorageRecoveryWatermarkRegressed {
+				t.Fatalf("hold = %#v, want the lost state watermark held", hold)
+			}
+			eventually(t, "the held artifacts dataset to be fenced", func() bool { return len(artifacts.advanceRequests()) == 2 })
+
+			// The next attempt, after the release, waits while the paused
+			// worker of the attempt that ended goes on.
+			gate := make(chan struct{})
+			waiting := authority.gated
+			if waitInAdvance {
+				artifacts.gate.Store(&gate)
+				waiting = artifacts.entered
+			} else {
+				authority.gate.Store(&gate)
+			}
+			records.mu.Lock()
+			records.record.AcknowledgedHoldID = hold.ID
+			records.mu.Unlock()
+			select {
+			case <-waiting:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the next attempt never reached the artifacts %s", name)
+			}
+			resume()
+			if _, _, err := writeFenceWithin(manager, storagev1.ArtifactsContract, 200*time.Millisecond); err == nil {
+				t.Fatal("a worker of the attempt the hold ended opened the artifacts fence before the next attempt recorded its acknowledgement")
+			}
+			close(gate)
+			if _, _, err := writeFenceWithin(manager, storagev1.ArtifactsContract, 5*time.Second); err != nil {
+				t.Fatalf("the artifacts fence after the next attempt recorded its acknowledgement: %v", err)
+			}
+		})
+	}
+}
+
+// A contract worker of a takeover attempt that ended tracks nothing in the
+// next attempt, which watches each dataset from what its own advance
+// described.
+func TestWorkerOfAnEndedTakeoverAttemptTracksNothing(t *testing.T) {
+	takeover := &storageTakeover{}
+	dataset := newRecordingEpochDataset("dataset-a")
+	ended := takeover.startAttempt()
+	takeover.endAttempt()
+	takeover.track(ended, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "before"}, dataset, 0)
+	if _, ok := takeover.snapshot("dataset-a"); ok {
+		t.Fatal("the attempt that ended tracked a dataset")
+	}
+	next := takeover.startAttempt()
+	takeover.track(ended, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "before"}, dataset, 7)
+	takeover.track(next, storagev1.StateContract, storagev1.ProviderInfo{DatasetID: "dataset-a", Incarnation: "after"}, dataset, 3)
+	tracked, ok := takeover.snapshot("dataset-a")
+	if !ok || tracked.incarnation != "after" || tracked.acknowledged != 3 || len(tracked.contracts) != 1 {
+		t.Fatalf("tracked = %+v, %v; want only what the next attempt's advance described", tracked, ok)
+	}
 }
 
 // A manager with storage datasets reports storage as not ready until each

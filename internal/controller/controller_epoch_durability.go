@@ -63,7 +63,13 @@ type storageTakeover struct {
 	records        store.StorageRecordStore
 	contracts      map[string]*contractFence
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// attempt numbers the takeover attempts, and ended is set once the
+	// latest one ends. A contract worker of an attempt that is no longer in
+	// progress, which can still be finishing a call, tracks nothing and
+	// opens no fence.
+	attempt  uint64
+	ended    bool
 	datasets map[string]*trackedDataset
 }
 
@@ -246,14 +252,12 @@ type takeoverResult struct {
 // the first hold either raises, an error retrying cannot fix, or nothing once
 // ctx ends.
 func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
-	t.mu.Lock()
-	t.datasets = map[string]*trackedDataset{}
-	t.mu.Unlock()
+	attempt := t.startAttempt()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	opened := make(chan takeoverResult, 1)
 	go func() {
-		hold, err := t.open(ctx, record)
+		hold, err := t.open(ctx, attempt, record)
 		opened <- takeoverResult{hold: hold, err: err}
 	}()
 	maintained := make(chan *store.StorageRecoveryHold, 1)
@@ -265,10 +269,12 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 				opened = nil
 				continue
 			}
+			t.endAttempt()
 			cancel()
 			<-maintained
 			return result.hold, result.err
 		case hold := <-maintained:
+			t.endAttempt()
 			cancel()
 			if opened != nil {
 				<-opened
@@ -278,19 +284,46 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 	}
 }
 
+// startAttempt starts a takeover attempt, which tracks no dataset yet, and
+// returns its number.
+func (t *storageTakeover) startAttempt() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.attempt++
+	t.ended = false
+	t.datasets = map[string]*trackedDataset{}
+	return t.attempt
+}
+
+// endAttempt ends the takeover attempt in progress. The contract workers of
+// open are not waited for, because a provider call that ignores its context
+// would hold back the hold that ends the attempt; once it ended, they change
+// nothing.
+func (t *storageTakeover) endAttempt() {
+	t.mu.Lock()
+	t.ended = true
+	t.mu.Unlock()
+}
+
+// inProgress reports whether attempt is the takeover attempt in progress.
+// The caller holds t.mu.
+func (t *storageTakeover) inProgress(attempt uint64) bool {
+	return attempt == t.attempt && !t.ended
+}
+
 // open runs the takeover step of every contract and opens each contract's
 // fence once its own dataset passed and its acknowledgement is recorded. It
 // returns the first hold a contract raises.
-func (t *storageTakeover) open(ctx context.Context, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
+func (t *storageTakeover) open(ctx context.Context, attempt uint64, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	advances := &datasetAdvances{advances: map[string]*datasetAdvance{}}
 	outcomes := make(chan contractOutcome, len(t.contracts))
 	for contract, fence := range t.contracts {
 		go func() {
-			outcome := t.check(ctx, contract, fence.dataset, record, advances)
+			outcome := t.check(ctx, attempt, contract, fence.dataset, record, advances)
 			if outcome.err == nil && outcome.hold == nil {
-				outcome.err = t.openContract(ctx, contract, outcome.ack)
+				outcome.err = t.openContract(ctx, attempt, contract, outcome.ack)
 			}
 			outcomes <- outcome
 		}()
@@ -314,39 +347,51 @@ func (t *storageTakeover) open(ctx context.Context, record store.StorageRecord) 
 // openContract records a contract's acknowledgement and opens its fence,
 // unless a switch check of its dataset is running, which opens it once it
 // passes.
-func (t *storageTakeover) openContract(ctx context.Context, contract string, ack store.StorageAcknowledgement) error {
+func (t *storageTakeover) openContract(ctx context.Context, attempt uint64, contract string, ack store.StorageAcknowledgement) error {
 	if _, err := retryEpochStorageStep(ctx, "record the "+contract+" acknowledgement", func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, t.records.RecordStorageAcknowledgement(ctx, t.fence, ack)
 	}); err != nil {
 		return err
 	}
 	log := logf.FromContext(ctx).WithValues("contract", contract, "dataset", ack.DatasetID, "epoch", t.acquired.Epoch)
-	if !t.acknowledged(contract, ack.DatasetID) {
+	opened, current := t.acknowledged(attempt, contract, ack.DatasetID)
+	switch {
+	case !current:
+		// The attempt ended while the acknowledgement was recorded; the next
+		// attempt checks the dataset again before its fence opens.
+	case !opened:
 		log.Info("Recorded the storage acknowledgement; the write fence opens once the restarted or switched dataset passes its check")
-		return nil
+	default:
+		log.Info("Opened the storage write fence")
 	}
-	log.Info("Opened the storage write fence")
 	return nil
 }
 
 // acknowledged marks contract's acknowledgement on datasetID as recorded and
 // opens its fence, unless the watermark loop is checking a restart or switch
 // of the dataset, whose check then opens it. It reports whether the fence
-// opened.
-func (t *storageTakeover) acknowledged(contract, datasetID string) bool {
+// opened, and whether attempt is still in progress: a worker of an attempt
+// that ended opens nothing, and neither does one whose dataset the attempt
+// does not track.
+func (t *storageTakeover) acknowledged(attempt uint64, contract, datasetID string) (opened, current bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if tracked := t.datasets[datasetID]; tracked != nil {
-		if tracked.opened == nil {
-			tracked.opened = map[string]bool{}
-		}
-		tracked.opened[contract] = true
-		if tracked.checking {
-			return false
-		}
+	if !t.inProgress(attempt) {
+		return false, false
+	}
+	tracked := t.datasets[datasetID]
+	if tracked == nil {
+		return false, true
+	}
+	if tracked.opened == nil {
+		tracked.opened = map[string]bool{}
+	}
+	tracked.opened[contract] = true
+	if tracked.checking {
+		return false, true
 	}
 	t.manager.openContractFence(contract, datasetID, t.acquired)
-	return true
+	return true, true
 }
 
 // release records what each dataset holds now as acknowledged and clears the
@@ -458,7 +503,7 @@ func (t *storageTakeover) storedEpoch(ctx context.Context, datasetID string, dat
 // check describes one contract's dataset, compares it with what the record
 // says it acknowledged and, when it passed, advances it.
 func (t *storageTakeover) check(
-	ctx context.Context, contract string, dataset EpochDataset, record store.StorageRecord, advances *datasetAdvances,
+	ctx context.Context, attempt uint64, contract string, dataset EpochDataset, record store.StorageRecord, advances *datasetAdvances,
 ) contractOutcome {
 	outcome := contractOutcome{contract: contract}
 	info, err := t.describe(ctx, contract, dataset)
@@ -499,7 +544,7 @@ func (t *storageTakeover) check(
 	// after it is checked even if this contract described the dataset later.
 	described := info
 	described.Incarnation = advanced.incarnation
-	t.track(contract, described, dataset, outcome.ack.Watermark)
+	t.track(attempt, contract, described, dataset, outcome.ack.Watermark)
 	return outcome
 }
 
@@ -591,10 +636,15 @@ func highestAcknowledged(record store.StorageRecord, datasetID string) (epochCon
 }
 
 // track records a dataset the takeover advanced, for the watermark loop, and
-// a contract it serves whose acknowledgement is still to be recorded.
-func (t *storageTakeover) track(contract string, info storagev1.ProviderInfo, dataset EpochDataset, acknowledged int64) {
+// a contract it serves whose acknowledgement is still to be recorded. A
+// worker of an attempt that ended tracks nothing, so the next attempt
+// watches only the datasets it advanced itself.
+func (t *storageTakeover) track(attempt uint64, contract string, info storagev1.ProviderInfo, dataset EpochDataset, acknowledged int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.inProgress(attempt) {
+		return
+	}
 	if t.datasets == nil {
 		t.datasets = map[string]*trackedDataset{}
 	}
