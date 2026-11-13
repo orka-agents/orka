@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orka Guide"
+  short_description: "Answer Orka questions from its sources"
+  default_prompt: "Use $orka-guide to answer this Orka question with cited sources and released-vs-main status."
