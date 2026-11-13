@@ -1693,6 +1693,153 @@ func TestHeldDatasetIsFencedOnceItAnswers(t *testing.T) {
 	}
 }
 
+// failingHoldRecords fails every HoldStorage while fail is set, as an API
+// server that times out does, and counts the failed attempts.
+type failingHoldRecords struct {
+	installationEpochStore
+	fail   atomic.Bool
+	failed atomic.Int32
+}
+
+func (s *failingHoldRecords) HoldStorage(
+	ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold,
+) (store.StorageRecoveryHold, error) {
+	if s.fail.Load() {
+		s.failed.Add(1)
+		return store.StorageRecoveryHold{}, errors.New("the API server timed out")
+	}
+	return s.memoryStorageRecords.HoldStorage(ctx, fence, hold)
+}
+
+// unreachableEpochDataset does not answer while down is set, and counts the
+// descriptions it refused.
+type unreachableEpochDataset struct {
+	*recordingEpochDataset
+	down       atomic.Bool
+	unanswered atomic.Int32
+}
+
+func (d *unreachableEpochDataset) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	if d.down.Load() {
+		d.unanswered.Add(1)
+		return storagev1.ProviderInfo{}, storagev1.ErrUnavailable
+	}
+	return d.recordingEpochDataset.Describe(ctx)
+}
+
+// A held dataset that answers only while a hold that left the record without
+// an acknowledgement is being recorded again is still fenced, so a replaced
+// controller cannot keep writing to it while Kubernetes is unavailable.
+func TestHeldDatasetIsFencedWhileTheHoldIsRecordedAgain(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Acknowledgements = []store.StorageAcknowledgement{{
+		Contract: storagev1.StateContract, DatasetID: "dataset-a", Epoch: 5, AcknowledgedAt: time.Now().UTC(),
+	}}
+	records.record.Hold = &store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Contract: storagev1.StateContract,
+		DatasetID: "dataset-a", RaisedAt: time.Now().UTC(),
+	}
+	authority := &failingHoldRecords{installationEpochStore: installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	dataset := &unreachableEpochDataset{recordingEpochDataset: newRecordingEpochDataset("dataset-a")}
+	// The dataset holds its acknowledged epoch, so a fencing advance with it
+	// as the floor succeeds once the dataset answers.
+	dataset.requests = []storagev1.AdvanceControllerEpochRequest{{
+		DatasetID: "dataset-a", Epoch: store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 5}, InstallationID: "installation-a",
+	}}
+	dataset.down.Store(true)
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the fencing of the held dataset to start", func() bool { return dataset.unanswered.Load() > 0 })
+
+	authority.fail.Store(true)
+	records.mu.Lock()
+	records.record.Hold = nil
+	records.mu.Unlock()
+	eventually(t, "recording the hold again to fail twice", func() bool { return authority.failed.Load() >= 2 })
+	requireHeld(t, manager, storagev1.StateContract)
+
+	dataset.down.Store(false)
+	eventually(t, "the held dataset to be fenced while the hold is recorded again", func() bool {
+		return len(dataset.advanceRequests()) == 2
+	})
+	if fenced := dataset.advanceRequests()[1]; fenced.AcknowledgedEpoch != 5 || fenced.InstallationID != "installation-a" {
+		t.Fatalf("fencing advance = %+v, want acknowledged epoch 5 as its floor", fenced)
+	}
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold = %#v, want none while recording it again fails", hold)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+}
+
+// holdDroppingRecords removes a hold from the record as soon as it is first
+// recorded and fails every later HoldStorage, as a status edit right after
+// the hold followed by an API server that times out does.
+type holdDroppingRecords struct {
+	installationEpochStore
+	recorded atomic.Bool
+}
+
+func (s *holdDroppingRecords) HoldStorage(
+	ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold,
+) (store.StorageRecoveryHold, error) {
+	if s.recorded.Load() {
+		return store.StorageRecoveryHold{}, errors.New("the API server timed out")
+	}
+	recorded, err := s.memoryStorageRecords.HoldStorage(ctx, fence, hold)
+	if err != nil {
+		return recorded, err
+	}
+	s.recorded.Store(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.record.Hold = nil
+	return recorded, nil
+}
+
+// A hold that leaves the record before the manager reads it back still has
+// its held datasets fenced while it is recorded again.
+func TestHeldDatasetIsFencedWhenTheHoldLeavesBeforeItIsReadBack(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Acknowledgements = []store.StorageAcknowledgement{{
+		Contract: storagev1.StateContract, DatasetID: "dataset-a", Epoch: 5, AcknowledgedAt: time.Now().UTC(),
+	}}
+	authority := &holdDroppingRecords{installationEpochStore: installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	// The dataset lost its acknowledged epoch, so the takeover step holds,
+	// and the fencing advance with that epoch as its floor is refused.
+	dataset := newRecordingEpochDataset("dataset-a")
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the fencing advance while the hold is recorded again", func() bool {
+		return len(dataset.refusedBelowFloor()) > 0
+	})
+	if refused := dataset.refusedBelowFloor()[0]; refused.AcknowledgedEpoch != 5 {
+		t.Fatalf("fencing advance = %+v, want acknowledged epoch 5 as its floor", refused)
+	}
+	if !authority.recorded.Load() {
+		t.Fatal("the dataset was fenced before the hold was recorded")
+	}
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold = %#v, want none while recording it again fails", hold)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+}
+
 func recordedHoldOf(t *testing.T, records store.StorageRecordStore) *store.StorageRecoveryHold {
 	t.Helper()
 	record, err := records.GetStorageRecord(context.Background(), store.DefaultControllerEpochName)

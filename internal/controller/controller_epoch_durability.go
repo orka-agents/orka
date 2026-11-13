@@ -106,6 +106,27 @@ func (t *storageTakeover) run(ctx context.Context) error {
 	// held is the hold this manager last raised or read, until it releases
 	// the hold or a record without it shows that an operator acknowledged it.
 	var held *store.StorageRecoveryHold
+	// fencingHold names the hold whose acknowledged datasets fenceHeld is
+	// advancing until stopFencing ends it. The fencing lasts until the hold
+	// is released or acknowledged, also while a hold that left the record
+	// is recorded again.
+	fencingHold, stopFencing := "", context.CancelFunc(func() {})
+	endFencing := func() {
+		stopFencing()
+		fencingHold, stopFencing = "", func() {}
+	}
+	defer endFencing()
+	// fence starts fencing the datasets that record says the recorded hold
+	// id acknowledged, unless that fencing already runs.
+	fence := func(id string, record store.StorageRecord) {
+		if fencingHold == id {
+			return
+		}
+		endFencing()
+		fencing, cancel := context.WithCancel(ctx)
+		fencingHold, stopFencing = id, cancel
+		t.fenceHeld(fencing, record)
+	}
 	for {
 		record, err := retryEpochStorageStep(ctx, "read the storage record", func(ctx context.Context) (store.StorageRecord, error) {
 			return t.records.GetStorageRecord(ctx, t.acquired.Name)
@@ -118,9 +139,13 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			// as an edit of the status does. The takeover step cannot detect
 			// again a switch of an async-replicated dataset that kept its
 			// epoch and watermark, so the hold is recorded again, with every
-			// fence still closed, until an operator acknowledges it.
+			// fence still closed and the held datasets still being fenced,
+			// until an operator acknowledges it.
 			log.Info("The storage recovery hold left the record without being acknowledged; recording it again", "hold", held.ID)
 			hold := *held
+			// The hold was recorded before it left, so its datasets are
+			// fenced also when it left before this manager read it back.
+			fence(hold.ID, record)
 			if _, err := retryEpochStorageStep(ctx, "record the storage recovery hold again", func(ctx context.Context) (store.StorageRecoveryHold, error) {
 				return t.records.HoldStorage(ctx, t.fence, hold)
 			}); err != nil {
@@ -135,15 +160,13 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			if record.AcknowledgedHoldID != hold.ID {
 				log.Info("Storage is held for recovery; storage contract writes and control-store changes are refused until an operator acknowledges the hold",
 					"hold", hold.ID, "reason", hold.Reason, "message", hold.Message)
-				fencing, stopFencing := context.WithCancel(ctx)
-				t.fenceHeld(fencing, record)
-				err := t.waitForAcknowledgement(ctx, hold.ID)
-				stopFencing()
-				if err != nil {
+				fence(hold.ID, record)
+				if err := t.waitForAcknowledgement(ctx, hold.ID); err != nil {
 					return err
 				}
 				continue
 			}
+			endFencing()
 			if err := t.release(ctx, hold.ID); err != nil {
 				return err
 			}
@@ -158,6 +181,7 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		// also after an acknowledged hold that left the record without this
 		// manager releasing it.
 		held = nil
+		endFencing()
 		t.manager.closeFences()
 		t.manager.clearHold()
 		hold, err := t.openAndMaintain(ctx, record)
