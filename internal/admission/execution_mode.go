@@ -158,7 +158,7 @@ func (v *AgentRuntimeContractValidator) Handle(ctx context.Context, req ctrladmi
 		return response
 	}
 	if object.Spec.ContractVersion == nil {
-		return ctrladmission.Denied("AgentRuntime requires an explicit contractVersion")
+		return ctrladmission.Denied("AgentRuntime has no contractVersion; install the current AgentRuntime CRD, which defaults it to orka.harness.v2")
 	}
 	if *object.Spec.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("AgentRuntime contractVersion must match namespace execution mode %q", mode))
