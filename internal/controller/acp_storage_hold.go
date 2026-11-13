@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -87,14 +88,15 @@ func (e *taskStorageRecordHoldError) Is(target error) bool {
 }
 
 // settleTaskStorageRecordHold applies a detected hold. When the Task's
-// acknowledgement annotation names the hold, it records the release and
+// acknowledgement annotation names the hold, ignoring surrounding whitespace
+// as the ControllerEpoch's acknowledgement does, it records the release and
 // returns nil, and recovery continues as it did before holds existed, which
 // never runs the prompt again or reports success. Otherwise it records the
 // StorageRecoveryRequired condition and returns a taskStorageRecordHoldError.
 func (d *ACPDispatcher) settleTaskStorageRecordHold(
 	ctx context.Context, task *corev1alpha1.Task, observed taskStorageRecordObservation, hold taskStorageRecordHold,
 ) error {
-	if task.Annotations[corev1alpha1.StorageRecoveryAcknowledgedAnnotation] == hold.id() {
+	if strings.TrimSpace(task.Annotations[corev1alpha1.StorageRecoveryAcknowledgedAnnotation]) == hold.id() {
 		_, err := d.setTaskStorageRecordCondition(ctx, task, observed, metav1.Condition{
 			Type: corev1alpha1.ConditionStorageRecoveryRequired, Status: metav1.ConditionFalse,
 			Reason:  corev1alpha1.StorageRecoveryAcknowledgedReason,

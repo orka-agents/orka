@@ -121,8 +121,24 @@ func requireTaskStorageCondition(t *testing.T, fixture *recoveryFixture, task *c
 // A settling attempt whose result receipt the store lost holds the Task: the
 // prompt is not run again, the outcome is not guessed and success is not
 // reported, until the operator acknowledges the exact hold, after which the
-// outcome is recorded as unknown.
+// outcome is recorded as unknown. Whitespace around the acknowledged ID, as a
+// value written from a file or a YAML block scalar carries, is ignored, as it
+// is for the ControllerEpoch's hold.
 func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		acknowledge func(id string) string
+	}{
+		{name: "exact hold ID", acknowledge: func(id string) string { return id }},
+		{name: "hold ID with surrounding whitespace", acknowledge: func(id string) string { return " " + id + "\n" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testHoldsSettlingTaskWhoseResultReceiptIsMissing(t, test.acknowledge)
+		})
+	}
+}
+
+func testHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T, acknowledge func(id string) string) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
 	task, _, digest := settlingTaskWithReceipt(t, fixture)
@@ -138,7 +154,7 @@ func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T)
 	acknowledgeTaskStorageHold(t, fixture, task, "record-0000000000000000")
 	requireTaskHeld(t, fixture, task, hold) // Another hold's ID releases nothing.
 
-	acknowledgeTaskStorageHold(t, fixture, task, hold.id())
+	acknowledgeTaskStorageHold(t, fixture, task, acknowledge(hold.id()))
 	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
 		t.Fatalf("recovery after acknowledgement: %v", err)
 	}
