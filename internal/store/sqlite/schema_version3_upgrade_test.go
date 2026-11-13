@@ -52,7 +52,7 @@ func TestSchemaVersion3UpgradeMakesRetryPendingOwnItsDedupeKey(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
 	state := readVersion1StoreState(t, s.db, path)
-	require.Equal(t, schema171, state.fingerprint)
+	require.Equal(t, schema172, state.fingerprint)
 	require.Equal(t, SchemaVersion, state.version)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)

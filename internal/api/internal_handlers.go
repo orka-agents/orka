@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	maxResultSize                        = 10 << 20 // 10MB
+	maxResultSize                        = store.MaxResultBytes
 	defaultInternalTranscriptSearchLimit = 10
 	maxInternalTranscriptSearchLimit     = 50
 )

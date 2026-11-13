@@ -68,6 +68,10 @@ type ProviderLimits struct {
 	// artifacts.v1 provider reports at least MaxArtifactBytes; a provider that
 	// does not serve artifacts.v1 reports zero.
 	MaxArtifactBytes int64
+	// MaxResultBytes is the largest Task result the provider stores. A
+	// state.v1 provider reports at least MaxResultBytes; a provider that does
+	// not serve state.v1 reports zero.
+	MaxResultBytes int64
 	// MaxValueBytes is the largest single stored value the provider accepts,
 	// or zero when the provider imposes no limit of its own.
 	MaxValueBytes int64
