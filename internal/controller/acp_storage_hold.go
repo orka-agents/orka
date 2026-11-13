@@ -138,14 +138,14 @@ func (d *ACPDispatcher) clearTaskStorageRecordHold(ctx context.Context, task *co
 // recovery recorded success, or recorded the outcome as unknown while the
 // store holds a receipt matching the attempt's own settling operation, as for
 // an attempt in workspace validation whose receipt recovery found but whose
-// completion the journal no longer showed. A hold whose receipt is gone is
-// kept. Recovery holds a Task only while the attempt is Settling, and an
-// acknowledged hold is already False, so such a hold is a late condition
-// write from a replaced controller that the API server applied after the
-// successor read the Task. The caller writes latest with its resourceVersion,
-// through Epochs.AdmitWork when the hold was released: a late write that
-// lands earlier is cleared there, and one that lands later fails its own
-// resourceVersion precondition.
+// completion the journal no longer showed. For an unknown outcome, a hold
+// whose receipt is gone is kept. Recovery holds a Task only while the
+// attempt is Settling, and an acknowledged hold is already False, so such a
+// hold is a late condition write from a replaced controller that the API
+// server applied after the successor read the Task. The caller writes latest
+// with its resourceVersion, through Epochs.AdmitWork when the hold was
+// released: a late write that lands earlier is cleared there, and one that
+// lands later fails its own resourceVersion precondition.
 func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, latest *corev1alpha1.Task) (bool, error) {
 	if !meta.IsStatusConditionTrue(latest.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) {
 		return false, nil
