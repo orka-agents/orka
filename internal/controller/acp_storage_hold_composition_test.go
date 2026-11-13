@@ -202,3 +202,58 @@ func TestInstallationHoldPrecedesTaskRecordHolds(t *testing.T) {
 	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
+
+// holdingReceiptStore raises an installation hold while recovery reads a
+// result receipt, after the recovery pass started.
+type holdingReceiptStore struct {
+	*sqlite.Store
+	epochs *ControllerEpochManager
+}
+
+func (s *holdingReceiptStore) GetPromptResultReceipt(ctx context.Context, attemptID string) (*store.PromptResultReceipt, error) {
+	s.epochs.setHold(store.StorageRecoveryHold{
+		ID: "installation-hold", Reason: store.StorageRecoveryWatermarkRegressed, Message: "test hold",
+	})
+	return s.Store.GetPromptResultReceipt(ctx, attemptID)
+}
+
+// An installation hold raised while a recovery pass is under way also keeps
+// that pass from placing or releasing a Task record hold: the condition write
+// is admitted only while storage is not held.
+func TestInstallationHoldRaisedDuringRecoveryWritesNoTaskRecordHold(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		acknowledged bool
+	}{
+		{name: "placing the record hold"},
+		{name: "releasing the acknowledged record hold", acknowledged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+			task, _, digest := settlingTaskWithReceipt(t, fixture)
+			loseResultReceipt(t, fixture, task)
+			if test.acknowledged {
+				acknowledgeTaskStorageHold(t, fixture, task, taskStorageRecordHold{
+					reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
+					key: fixture.attemptID, expected: digest,
+				}.id())
+			}
+			fixture.dispatcher.ResultStore = &holdingReceiptStore{Store: fixture.controlStore, epochs: fixture.dispatcher.Epochs}
+
+			err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx)
+			var held *store.StorageHoldError
+			if !errors.As(err, &held) {
+				t.Fatalf("recovery after the installation hold was raised = %v, want the installation hold", err)
+			}
+			requireAttemptState(t, fixture, store.PromptExecutionSettling)
+			updated := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if condition := apiMeta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired); condition != nil {
+				t.Fatalf("recovery changed the Task's record hold after the installation was held: %#v", condition)
+			}
+		})
+	}
+}

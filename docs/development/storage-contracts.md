@@ -1021,8 +1021,10 @@ and the condition becomes `False` with reason `RecoveryAcknowledged`. An
 annotation naming another hold releases nothing. The Gateway Task admission
 policy admits an update of a Gateway-owned Task that changes only this
 annotation, from a user who may also update that Task's status. A recovery
-pass that starts while the installation is held acts on no Task, so record
-holds are placed and released once the installation hold clears. Recovery
+pass that starts while the installation is held acts on no Task, and one
+already under way writes the condition only through the same admission as
+Job creation, so record holds are placed and released once the installation
+hold clears. Recovery
 keeps acting on a held Task that is marked for deletion, without replaying
 its prompt, so the deletion completes once the hold is released.
 

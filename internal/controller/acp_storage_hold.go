@@ -248,14 +248,21 @@ func (d *ACPDispatcher) setTaskStorageRecordCondition(
 }
 
 // withTaskStorageRecordAuthority runs write only while fence is the current
-// controller epoch. A control store with the epoch mutation interlock checks
-// the fence and keeps a successor from taking over until write returns;
-// otherwise the authoritative epoch record is read before write.
+// controller epoch and storage is not held. A control store with the epoch
+// mutation interlock checks the fence and keeps a successor from taking over
+// until write returns; otherwise the authoritative epoch record is read
+// before write. Within that, write runs through Epochs.AdmitWork, as Job
+// creation and success status writes do, so an installation hold raised
+// after the recovery pass started, or a dataset whose checks have not passed,
+// keeps it from changing the Task's record hold too.
 func (d *ACPDispatcher) withTaskStorageRecordAuthority(
 	ctx context.Context, fence store.ControllerEpochFence, write func(context.Context) error,
 ) error {
+	admitted := func(ctx context.Context) error {
+		return d.Epochs.AdmitWork(ctx, write)
+	}
 	if guard, ok := d.Store.(store.ControllerEpochMutationStore); ok {
-		return guard.WithControllerEpochMutation(ctx, fence, write)
+		return guard.WithControllerEpochMutation(ctx, fence, admitted)
 	}
 	current, err := d.Store.GetControllerEpoch(ctx, fence.Name)
 	if err != nil {
@@ -265,7 +272,7 @@ func (d *ACPDispatcher) withTaskStorageRecordAuthority(
 		return store.ConflictErrorf("controller epoch fence %s/%d/%s does not match current %d/%s",
 			fence.Name, fence.Epoch, fence.HolderID, current.Epoch, current.HolderID)
 	}
-	return write(ctx)
+	return admitted(ctx)
 }
 
 // requireTaskStorageRecordObservation checks that no later controller epoch
