@@ -2672,21 +2672,24 @@ func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
 
 // recordRecoveredValidationOutcome records the unknown outcome on a Task
 // without a bound Session whose attempt recovery settled as OutcomeUnknown
-// with the recovered validation conflict, when the pass that settled it
-// stopped before the Task's terminal record, for example because the terminal
-// projection could not be enqueued. Runtime cleanup abandons a validation the
-// runtime still holds only for a Task that records the unknown outcome, so a
-// later pass would otherwise stop at cleanup and never reach that record. The
-// record is written from the attempt in the order the settling pass uses, the
-// projection and then the Task's execution state, which keeps the Task's
-// runtime identity; an enqueued projection is left to the outbox projector.
-// task is refreshed with the result.
+// while the runtime may still hold a workspace validation, when the pass that
+// settled it stopped before the Task's terminal record, for example because
+// the terminal projection could not be enqueued. The attempt and the Task
+// record either the recovered validation conflict or no delivery
+// (abandonedValidationDelivery): the runtime starts validating when the prompt
+// completes, before the controller records it, and an acknowledged storage
+// hold records the outcome without reaching validation. Runtime cleanup
+// abandons a validation the runtime still holds only for a Task that records
+// the unknown outcome, so a later pass would otherwise stop at cleanup and
+// never reach that record. The record is written from the attempt in the
+// order the settling pass uses, the projection and then the Task's execution
+// state, which keeps the Task's runtime identity; an enqueued projection is
+// left to the outbox projector. task is refreshed with the result.
 func (d *ACPDispatcher) recordRecoveredValidationOutcome(
 	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt,
 ) error {
 	if task.Status.Execution == nil || task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown ||
-		attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.DeliveryState != store.PromptDeliveryConflict ||
-		!recoveredValidationConflict(task.Status.Delivery) {
+		attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || !abandonedValidationDelivery(attempt, task) {
 		return nil
 	}
 	exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt)

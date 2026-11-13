@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 // errInjectedProjectionEnqueue fails a terminal projection enqueue.
@@ -106,22 +112,91 @@ func (s *residentValidatingSupervisor) deletedSession() bool {
 // outbox projector, and cleanup waits for it.
 func TestRecoveryRecordsTheValidationOutcomeBeforeCleanupAfterAFailedEnqueue(t *testing.T) {
 	for _, test := range []struct {
-		name                  string
-		adopted, lostResponse bool
+		name     string
+		scenario failedEnqueueRecovery
 	}{
 		{name: "runtime under the replaced epoch"},
-		{name: "runtime adopted by the recovering epoch", adopted: true},
-		{name: "lost enqueue response", lostResponse: true},
+		{name: "runtime adopted by the recovering epoch", scenario: failedEnqueueRecovery{adopted: true}},
+		{name: "lost enqueue response", scenario: failedEnqueueRecovery{lostResponse: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			testRecoveredValidationOutcomeAfterFailedEnqueue(t, test.adopted, test.lostResponse)
+			testRecoveredValidationOutcomeAfterFailedEnqueue(t, test.scenario)
 		})
 	}
 }
 
+// The runtime starts validating when the prompt completes, before the
+// controller records it, so it can hold a validation of an attempt whose
+// delivery is still NotRequested when recovery records the unknown outcome,
+// whether that pass found the prompt lost or continued after an operator
+// acknowledged a hold for its lost result receipt. When the terminal
+// projection cannot be enqueued, a later pass records the outcome on the Task
+// from the attempt before runtime cleanup here too, so cleanup finishes that
+// validation and the Task moves to the recovering epoch.
+func TestRecoveryRecordsAnOutcomeBeforeValidationAndCleanupAfterAFailedEnqueue(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		scenario failedEnqueueRecovery
+	}{
+		{name: "runtime under the replaced epoch", scenario: failedEnqueueRecovery{beforeValidation: true}},
+		{name: "runtime adopted by the recovering epoch", scenario: failedEnqueueRecovery{beforeValidation: true, adopted: true}},
+		{name: "acknowledged hold", scenario: failedEnqueueRecovery{acknowledged: true}},
+		{name: "acknowledged hold with the runtime adopted", scenario: failedEnqueueRecovery{acknowledged: true, adopted: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testRecoveredValidationOutcomeAfterFailedEnqueue(t, test.scenario)
+		})
+	}
+}
+
+// failedEnqueueRecovery selects how testRecoveredValidationOutcomeAfterFailedEnqueue
+// reaches the failed terminal projection enqueue.
+type failedEnqueueRecovery struct {
+	// adopted runs the runtime under the recovering controller's epoch.
+	adopted bool
+	// lostResponse stores the projection whose enqueue reports a failure.
+	lostResponse bool
+	// beforeValidation records the unknown outcome before the attempt
+	// reached workspace validation; otherwise the attempt is in it.
+	beforeValidation bool
+	// acknowledged also holds the Task for its lost result receipt and
+	// acknowledges the hold before the unknown outcome is recorded.
+	acknowledged bool
+}
+
+// appendAcceptedPrompt journals the acceptance of the Task's prompt.
+func appendAcceptedPrompt(t *testing.T, events store.ExecutionEventStore, task *corev1alpha1.Task) {
+	t.Helper()
+	execution := task.Status.Execution
+	now := time.Now().UTC()
+	state, err := (v2eventjournal.Journal{EventStore: events, MapContext: mappedPromptRecoveryContext(task)}).Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, isNew, err := state.AppendPromptLifecycleIfNew(t.Context(), harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID:        harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+			SupervisorBootID:         harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+			RuntimeSessionUID:        harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
+			RuntimeSessionGeneration: uint64(execution.RuntimeSessionGeneration),
+			TaskUID:                  harnessv2.TaskUID(task.UID), TaskAttempt: uint32(execution.Attempt),
+			PromptID: harnessv2.PromptID(execution.PromptID), Sequence: 1,
+			RequestDigest: harnessv2.RequestDigest(execution.RequestDigest), Timestamp: now,
+		},
+		Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now, Lease: harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute)},
+			ACPVersion: harnessv2.ACPProfileV1,
+		},
+	}); err != nil || !isNew {
+		t.Fatalf("journal prompt acceptance: new=%t err=%v", isNew, err)
+	}
+}
+
 //nolint:gocyclo // One recovery sequence with its checks after each step.
-func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, lostResponse bool) {
+func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario failedEnqueueRecovery) {
 	ctx := t.Context()
+	adopted, lostResponse := scenario.adopted, scenario.lostResponse
 	d, task, control, runtimeFence := validationRecoveryFixture(t, false)
 	d.Epochs = readyAgentRuntimeTestEpochManager(2)
 	if adopted {
@@ -137,12 +212,54 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, los
 	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSettling
 	task.Status.Execution.Outcome = ""
 	task.Status.Execution.ControllerEpoch = 1
-	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateValidating}
 	control.attempt.SessionUID = ""
 	control.attempt.SessionLeaseGeneration = 0
 	control.attempt.ExecutionState = store.PromptExecutionSettling
-	control.attempt.DeliveryState = store.PromptDeliveryValidating
-	control.attempt.Version = 1
+	// wantAttemptDelivery and wantDelivery are the deliveries the attempt
+	// and the Task record once recovery settled the attempt as unknown.
+	wantAttemptDelivery := store.PromptDeliveryConflict
+	wantDelivery := recoveredValidationConflict
+	var hold taskStorageRecordHold
+	switch {
+	case scenario.acknowledged || scenario.beforeValidation:
+		task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+			State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+		}
+		control.attempt.DeliveryState = store.PromptDeliveryNotRequested
+		control.attempt.Version = 1
+		wantAttemptDelivery = store.PromptDeliveryNotRequested
+		wantDelivery = func(delivery *corev1alpha1.TaskDeliveryStatus) bool {
+			return delivery != nil && delivery.State == corev1alpha1.TaskDeliveryStateNotRequested
+		}
+		if !scenario.acknowledged {
+			break
+		}
+		// The settling transition recorded the receipt at version 1, which
+		// the store lost with the result.
+		control.attempt.Version = 2
+		control.attempt.LastOperationID = acpSettlingOperationID(1)
+		digest, err := acpSettlingTransitionDigest(control.attempt.ID, 1, []byte("the result the store lost"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		control.attempt.LastOperationDigest = digest
+		hold = taskStorageRecordHold{
+			reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
+			key: control.attempt.ID, expected: digest,
+		}
+		db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "acknowledged-outcome.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		records := sqlite.NewStore(db, "test")
+		d.ResultStore, d.EventStore = records, records
+		appendAcceptedPrompt(t, records, task)
+	default:
+		task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateValidating}
+		control.attempt.DeliveryState = store.PromptDeliveryValidating
+		control.attempt.Version = 1
+	}
 	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -183,14 +300,35 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, los
 		}
 		return latest
 	}
+	runtimeCalls := func() []string {
+		supervisor.mu.Lock()
+		defer supervisor.mu.Unlock()
+		return append([]string(nil), supervisor.calls...)
+	}
+	if scenario.acknowledged {
+		if err := d.recoverStaleTask(ctx, read(), fence); !errors.Is(err, store.ErrStorageRecoveryRequired) {
+			t.Fatalf("recovery error = %v, want the hold for the lost result receipt", err)
+		}
+		if calls := runtimeCalls(); len(calls) != 0 || control.attempt.ExecutionState != store.PromptExecutionSettling {
+			t.Fatalf("held recovery acted: calls=%v attempt=%s", calls, control.attempt.ExecutionState)
+		}
+		acknowledged := read()
+		if acknowledged.Annotations == nil {
+			acknowledged.Annotations = map[string]string{}
+		}
+		acknowledged.Annotations[corev1alpha1.StorageRecoveryAcknowledgedAnnotation] = hold.id()
+		if err := d.Client.Update(ctx, acknowledged); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := d.recoverStaleTask(ctx, read(), fence); !errors.Is(err, errInjectedProjectionEnqueue) {
 		t.Fatalf("recovery error = %v, want the injected enqueue failure", err)
 	}
-	if control.attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || control.attempt.DeliveryState != store.PromptDeliveryConflict {
-		t.Fatalf("attempt = %s/%s, want the recorded unknown outcome and validation conflict",
-			control.attempt.ExecutionState, control.attempt.DeliveryState)
+	if control.attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || control.attempt.DeliveryState != wantAttemptDelivery {
+		t.Fatalf("attempt = %s/%s, want the recorded unknown outcome and delivery %s",
+			control.attempt.ExecutionState, control.attempt.DeliveryState, wantAttemptDelivery)
 	}
-	if latest := read(); latest.Status.Execution.State != corev1alpha1.TaskExecutionStateSettling || !recoveredValidationConflict(latest.Status.Delivery) {
+	if latest := read(); latest.Status.Execution.State != corev1alpha1.TaskExecutionStateSettling || !wantDelivery(latest.Status.Delivery) {
 		t.Fatalf("after the failed enqueue the Task records execution %s and delivery %#v",
 			latest.Status.Execution.State, latest.Status.Delivery)
 	}
@@ -202,10 +340,7 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, los
 				t.Fatalf("recovery before the projection is delivered: %v", err)
 			}
 		}
-		supervisor.mu.Lock()
-		calls := append([]string(nil), supervisor.calls...)
-		supervisor.mu.Unlock()
-		if len(calls) != 0 || read().Status.Execution.State != corev1alpha1.TaskExecutionStateSettling {
+		if calls := runtimeCalls(); len(calls) != 0 || read().Status.Execution.State != corev1alpha1.TaskExecutionStateSettling {
 			t.Fatalf("recovery acted before the projection was delivered: calls=%v", calls)
 		}
 		if len(controls.projections) != 1 {
@@ -233,8 +368,14 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, los
 	latest := read()
 	execution := latest.Status.Execution
 	if execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown || execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown ||
-		latest.Status.Phase != corev1alpha1.TaskPhaseFailed || !recoveredValidationConflict(latest.Status.Delivery) {
+		latest.Status.Phase != corev1alpha1.TaskPhaseFailed || !wantDelivery(latest.Status.Delivery) {
 		t.Fatalf("Task status = phase %s execution %s/%s delivery %#v", latest.Status.Phase, execution.State, execution.Outcome, latest.Status.Delivery)
+	}
+	if scenario.acknowledged {
+		condition := meta.FindStatusCondition(latest.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.StorageRecoveryAcknowledgedReason {
+			t.Fatalf("storage recovery condition = %#v, want the acknowledged release", condition)
+		}
 	}
 	if execution.ControllerEpoch != fence.Epoch || !runtimeSessionCleanupCompleteForUID(latest, task.UID) {
 		t.Fatalf("Task epoch = %d (want %d), cleanup recorded = %v",
@@ -259,7 +400,7 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, adopted, los
 		}
 		projected := payload.Execution
 		if payload.Phase != corev1alpha1.TaskPhaseFailed || projected.State != corev1alpha1.TaskExecutionStateOutcomeUnknown ||
-			!recoveredValidationConflict(payload.Delivery) {
+			!wantDelivery(payload.Delivery) {
 			t.Fatalf("projection = phase %s execution %s delivery %#v", payload.Phase, projected.State, payload.Delivery)
 		}
 		if projected.RuntimePoolUID != frozen.RuntimePoolUID || projected.RuntimeInstanceID != frozen.RuntimeInstanceID ||
