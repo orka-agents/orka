@@ -2609,6 +2609,7 @@ type recordingToolWorkspaceExecutor struct {
 	deletedActorIDs                []string
 	deleteReqs                     []workspace.DeleteRequest
 	deleteErrs                     []error
+	describePhase                  workspace.Phase
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2681,7 +2682,7 @@ func (e *recordingToolWorkspaceExecutor) Delete(ctx context.Context, req workspa
 }
 
 func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
-	return &workspace.Description{Ref: req.Ref}, nil
+	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {
