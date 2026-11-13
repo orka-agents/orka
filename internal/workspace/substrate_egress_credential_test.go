@@ -32,15 +32,15 @@ func TestCompileSubstrateActorEgressCredentialsReferenceSecrets(t *testing.T) {
 
 func TestSubstrateActorEgressCredentialsFailClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*SubstrateEgressRule){
-		"not configured":   func(r *SubstrateEgressRule) { r.Credential.Provider = "" },
-		"other provider":   func(r *SubstrateEgressRule) { r.Credential.Provider = "vault.example.com" },
-		"tls passthrough":  func(r *SubstrateEgressRule) { r.Scheme, r.Ports = "tls", []int32{443} },
-		"wildcard host":    func(r *SubstrateEgressRule) { r.Host = "*.github.com" },
-		"cookie header":    func(r *SubstrateEgressRule) { r.Credential.Header = "Cookie" },
-		"hop-by-hop":       func(r *SubstrateEgressRule) { r.Credential.Header = "Connection" },
-		"control prefix":   func(r *SubstrateEgressRule) { r.Credential.Prefix = "Bearer\n" },
-		"missing secret":   func(r *SubstrateEgressRule) { r.Credential.Name = "" },
-		"invalid key":      func(r *SubstrateEgressRule) { r.Credential.Key = "a/b" },
+		"not configured":    func(r *SubstrateEgressRule) { r.Credential.Provider = "" },
+		"other provider":    func(r *SubstrateEgressRule) { r.Credential.Provider = "vault.example.com" },
+		"tls passthrough":   func(r *SubstrateEgressRule) { r.Scheme, r.Ports = "tls", []int32{443} },
+		"wildcard host":     func(r *SubstrateEgressRule) { r.Host = "*.github.com" },
+		"cookie header":     func(r *SubstrateEgressRule) { r.Credential.Header = "Cookie" },
+		"hop-by-hop":        func(r *SubstrateEgressRule) { r.Credential.Header = "Connection" },
+		"control prefix":    func(r *SubstrateEgressRule) { r.Credential.Prefix = "Bearer\n" },
+		"missing secret":    func(r *SubstrateEgressRule) { r.Credential.Name = "" },
+		"invalid key":       func(r *SubstrateEgressRule) { r.Credential.Key = "a/b" },
 		"invalid namespace": func(r *SubstrateEgressRule) { r.Credential.Namespace = "Team_A" },
 	} {
 		t.Run(name, func(t *testing.T) {
