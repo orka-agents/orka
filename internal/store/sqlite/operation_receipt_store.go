@@ -27,7 +27,9 @@ const (
 	receiptClockStepAllowance = 15 * time.Minute
 	// maxReceiptResultBytes is the largest result SQLite keeps with a
 	// receipt: SQLite's own value limit. SQLite keeps every result whole, so
-	// a replay never reads records the write changed again.
+	// a replay never reads records the write changed again, except where a
+	// write keeps only identities and reads its records again on replay
+	// (writeOperationRereading).
 	maxReceiptResultBytes = 1_000_000_000
 	// receiptPruneBatch bounds one pruning statement of the maintenance loop.
 	receiptPruneBatch = 1000
@@ -113,7 +115,22 @@ func writeOperation[R any](
 	explicitFence *storagev1.ControllerEpochFence,
 	body func(context.Context) (R, error),
 ) (R, error) {
-	return writeOperationScoped(ctx, s, method, explicitFence, body, nil)
+	return writeOperationScoped(ctx, s, method, explicitFence, body, nil, nil)
+}
+
+// writeOperationRereading is writeOperation for a write whose receipt keeps
+// only the identifiers of the records it changed. On a replay, reread builds
+// the result again from those records, in the replay's transaction and after
+// its Task data fence check, so a replay sees the records as they are now and
+// never outside the fence.
+func writeOperationRereading[R any](
+	ctx context.Context,
+	s *Store,
+	method string,
+	body func(context.Context) (R, error),
+	reread func(context.Context, R) (R, error),
+) (R, error) {
+	return writeOperationScoped(ctx, s, method, nil, body, nil, reread)
 }
 
 // writeCustodyOperation is writeOperation for a connector custody write whose
@@ -128,11 +145,12 @@ func writeCustodyOperation[R any](
 	body func(context.Context) (R, error),
 	connectionUID func(R) string,
 ) (R, error) {
-	return writeOperationScoped(ctx, s, method, nil, body, connectionUID)
+	return writeOperationScoped(ctx, s, method, nil, body, connectionUID, nil)
 }
 
 // writeOperationScoped is writeOperation with an optional custody scope for
-// the receipt, derived from the result.
+// the receipt, derived from the result, and an optional reread of a replayed
+// result (see writeOperationRereading).
 func writeOperationScoped[R any](
 	ctx context.Context,
 	s *Store,
@@ -140,6 +158,7 @@ func writeOperationScoped[R any](
 	explicitFence *storagev1.ControllerEpochFence,
 	body func(context.Context) (R, error),
 	custodyScope func(R) string,
+	reread func(context.Context, R) (R, error),
 ) (R, error) {
 	var zero R
 	if ctx.Value(writeOperationKey{}) != nil {
@@ -179,6 +198,10 @@ func writeOperationScoped[R any](
 				}
 			}
 			result, err = decodeReceiptResult[R](method, stored)
+			if err != nil || reread == nil {
+				return err
+			}
+			result, err = reread(ctx, result)
 			return err
 		}
 		result, err = body(context.WithValue(ctx, writeOperationKey{}, method))
