@@ -2393,10 +2393,20 @@ func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *c
 			return nil
 		}
 		latest.Status.Execution.ControllerEpoch = epoch
-		if err := d.releaseSettledTaskStorageHold(ctx, latest); err != nil {
+		released, err := d.releaseSettledTaskStorageHold(ctx, latest)
+		if err != nil {
 			return err
 		}
-		return d.Client.Status().Update(ctx, latest)
+		update := func(ctx context.Context) error {
+			return d.Client.Status().Update(ctx, latest)
+		}
+		if released {
+			// Releasing a hold is admitted like every other record hold
+			// condition write, so an installation hold raised during this
+			// pass keeps it until that hold clears.
+			return d.Epochs.AdmitWork(ctx, update)
+		}
+		return update(ctx)
 	})
 }
 

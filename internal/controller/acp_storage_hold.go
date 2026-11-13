@@ -133,47 +133,50 @@ func (d *ACPDispatcher) clearTaskStorageRecordHold(ctx context.Context, task *co
 	return err
 }
 
-// releaseSettledTaskStorageHold marks latest's hold as released when its
-// attempt was settled from the store record: recovery recorded success, or
-// recorded the outcome as unknown for an attempt in workspace validation whose
-// receipt it found but whose completion the journal no longer showed, and the
-// store still holds that receipt. Recovery holds a Task only while the
-// attempt is Settling, so such a hold is a late condition write from a
-// replaced controller that the API server applied after the successor read
-// the Task. The caller writes latest with its resourceVersion: a late write
-// that lands earlier is cleared here, and one that lands later fails its own
+// releaseSettledTaskStorageHold marks latest's hold as released, and reports
+// whether it did, when its attempt was settled from the store record:
+// recovery recorded success, or recorded the outcome as unknown while the
+// store holds a receipt matching the attempt's own settling operation, as for
+// an attempt in workspace validation whose receipt recovery found but whose
+// completion the journal no longer showed. A hold whose receipt is gone is
+// kept. Recovery holds a Task only while the attempt is Settling, and an
+// acknowledged hold is already False, so such a hold is a late condition
+// write from a replaced controller that the API server applied after the
+// successor read the Task. The caller writes latest with its resourceVersion,
+// through Epochs.AdmitWork when the hold was released: a late write that
+// lands earlier is cleared there, and one that lands later fails its own
 // resourceVersion precondition.
-func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, latest *corev1alpha1.Task) error {
+func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, latest *corev1alpha1.Task) (bool, error) {
 	if !meta.IsStatusConditionTrue(latest.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) {
-		return nil
+		return false, nil
 	}
 	attemptID, err := promptAttemptIDFromTaskUID(latest, acpTaskControlUID(latest))
 	if err != nil {
-		return err
+		return false, err
 	}
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	switch attempt.ExecutionState {
 	case store.PromptExecutionSucceeded:
 	case store.PromptExecutionOutcomeUnknown:
 		found, err := d.settledResultReceiptFound(ctx, latest, attempt)
 		if err != nil || !found {
-			return err
+			return false, err
 		}
 	default:
-		return nil
+		return false, nil
 	}
 	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 		Type: corev1alpha1.ConditionStorageRecoveryRequired, Status: metav1.ConditionFalse,
 		Reason: corev1alpha1.StorageRecoveryRecordFoundReason, ObservedGeneration: latest.Generation,
 		Message: "the store record the Task was held for was found",
 	})
-	return nil
+	return true, nil
 }
 
 // settledResultReceiptFound reports whether the store holds attempt's result

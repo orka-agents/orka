@@ -1005,13 +1005,14 @@ Recovery writes the condition under its controller epoch, and only while the
 PromptAttempt is as recovery read it and still `Settling`. A write from a
 replaced controller that the API server applies late carries the Task's
 earlier resourceVersion, so it lands only before that resourceVersion next
-changes; when stale-epoch recovery settles the attempt from its restored
-receipt, its terminal epoch write releases such a hold. So does the terminal
-epoch write after recovery recorded the outcome as unknown for an attempt in
-workspace validation whose receipt it found, while the store still holds that
-receipt. While held, the
-prompt is not run again, the attempt stays `Settling`, the outcome is not
-guessed, success is not reported and nothing is deleted.
+changes. The successor's terminal epoch write releases such a hold once
+recovery settled the attempt from its record: after it recorded success from
+the restored receipt, or recorded the outcome as unknown while the store
+holds a receipt matching the attempt's own settling operation, as for an
+attempt in workspace validation whose receipt recovery found but whose
+completion the journal no longer showed. While held, the prompt is not run
+again, the attempt stays `Settling`, the outcome is not guessed, success is
+not reported and nothing is deleted.
 When the record is found again, after a restore, the condition becomes
 `False` with reason `RecordFound` and recovery settles the Task from it. An
 operator who cannot restore it sets the Task's
@@ -1022,11 +1023,11 @@ annotation naming another hold releases nothing. The Gateway Task admission
 policy admits an update of a Gateway-owned Task that changes only this
 annotation, from a user who may also update that Task's status. A recovery
 pass that starts while the installation is held acts on no Task, and one
-already under way writes the condition only through the same admission as
-Job creation, so record holds are placed and released once the installation
-hold clears. Recovery
-keeps acting on a held Task that is marked for deletion, without replaying
-its prompt, so the deletion completes once the hold is released.
+already under way changes a Task's record hold condition only through the
+same admission as Job creation, so record holds are placed and released once
+the installation hold clears. Recovery keeps acting on a held Task that is
+marked for deletion, without replaying its prompt, so the deletion completes
+once the hold is released.
 
 **Not yet covered.** Record holds for a finalized turn without its store
 record and for reclamation without the turn cleanup receipt come with the
@@ -1036,9 +1037,10 @@ digest, so a receipt is checked only against its own settling operation: a
 receipt replaced with another result and a matching digest is not detected.
 That needs the settling digest kept on the PromptAttempt across delivery
 transitions. Such a late hold write is not yet released on a Task restored
-under a new UID; there the Task reports the hold while its outcome stays the
-one recovery settled. Detecting a restart or
-switch of an `async-replicated` dataset that happened while no controller
+under a new UID, or when the store loses the receipt again after recovery
+found it and before its terminal epoch write; there the Task reports the
+hold while its outcome stays the one recovery settled. Detecting a restart
+or switch of an `async-replicated` dataset that happened while no controller
 ran needs the incarnation recorded with the acknowledgement, and so does
 keeping an installation hold across a controller restart when it was
 removed from `status.storageRecovery` without being acknowledged.

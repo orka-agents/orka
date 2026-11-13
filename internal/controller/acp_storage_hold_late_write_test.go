@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -163,6 +164,44 @@ func TestTerminalEpochWriteKeepsALateHoldWhoseReceiptIsMissing(t *testing.T) {
 
 	recoverUntilTaskEpoch(t, fixture, task)
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
+}
+
+// Releasing a late hold is admitted like the record hold writes: when the
+// installation is held after the terminal epoch write found the receipt, the
+// write is refused and the Task keeps both the hold and its earlier epoch,
+// until a pass after the installation hold clears releases it.
+func TestTerminalEpochWriteReleasesALateHoldOnlyWhileStorageIsNotHeld(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task := settlingTaskInWorkspaceValidationWithoutCompletion(t, fixture)
+	hold := taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord, key: fixture.attemptID,
+	}
+	interceptLateHold(t, fixture, task, hold)
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
+
+	fixture.dispatcher.ResultStore = &holdingReceiptStore{Store: fixture.controlStore, epochs: fixture.dispatcher.Epochs}
+	err := fixture.dispatcher.patchRecoveredTerminalEpoch(fixture.ctx, task, fixture.fence.Epoch)
+	if _, ok := errors.AsType[*store.StorageHoldError](err); !ok {
+		t.Fatalf("terminal epoch write after the installation hold was raised = %v, want the installation hold", err)
+	}
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
+	updated := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution != nil && updated.Status.Execution.ControllerEpoch == fixture.fence.Epoch {
+		t.Fatalf("Task recorded controller epoch %d while the installation was held", fixture.fence.Epoch)
+	}
+
+	fixture.dispatcher.ResultStore = fixture.controlStore
+	fixture.dispatcher.Epochs.clearHold()
+	recoverUntilTaskEpoch(t, fixture, task)
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 }
 
 // A hold on a Task whose attempt is still Settling is current, and the
