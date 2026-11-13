@@ -898,10 +898,14 @@ func (r *ToolReconciler) stopSubstrateMCPStatusActor(ctx context.Context, tool *
 // denySubstrateMCPActorEgressWithoutTemplate keeps an Actor whose template
 // cannot be read from reaching anything. Substrate refuses to suspend an Actor
 // without its template, before it touches the workload, so the Actor cannot be
-// stopped that way. Deleting it would discard data on durable volumes, which
-// only the template declares. Replacing its egress policy with one that denies
-// all needs neither. The gateway applies it within its cache window. The
-// error is still returned, so the reconcile retries the stop.
+// stopped that way. Replacing its egress policy with one that denies all needs
+// no template, but the gateway applies it only once its cached copy of the
+// previous rules expires. While it may not, an Actor that is not suspended is
+// deleted, as one whose template cannot be suspended is: that discards any data
+// on its durable volumes, which only the template declares, but leaves nothing
+// running under rules the Tool no longer allows. Once the deny-all is enforced
+// the Actor is left as it is, and the error is still returned, so the reconcile
+// retries the stop.
 func (r *ToolReconciler) denySubstrateMCPActorEgressWithoutTemplate(
 	ctx context.Context, tool *corev1alpha1.Tool, stop substrateMCPActorStop, templateErr error,
 ) error {
@@ -912,10 +916,38 @@ func (r *ToolReconciler) denySubstrateMCPActorEgressWithoutTemplate(
 	if !held {
 		return templateErr
 	}
-	if _, err := r.applySubstrateMCPActorEgressRules(ctx, stop.actorID, nil); err != nil {
+	policy, err := r.applySubstrateMCPActorEgressRules(ctx, stop.actorID, nil)
+	if err != nil {
 		return stderrors.Join(templateErr, fmt.Errorf("deny the actor's egress: %w", err))
 	}
-	return fmt.Errorf("%w; the actor's egress is denied instead", templateErr)
+	denied := fmt.Errorf("%w; the actor's egress is denied instead", templateErr)
+	if r.substrateMCPEgressPropagationWait(policy) <= 0 {
+		return denied
+	}
+	cfg := r.SubstrateConfig.WithDefaults()
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return stderrors.Join(denied, err)
+	}
+	defer closeWorkspaceExecutor(ctx, executor)
+	description, err := executor.Describe(ctx, workspace.DescribeRequest{Ref: stop.ref})
+	if err != nil {
+		return stderrors.Join(denied, fmt.Errorf("read the actor's state: %w", err))
+	}
+	if description.Phase == workspace.PhaseRetained || description.Phase == workspace.PhaseDeleted {
+		// Nothing runs that could use the previous rules.
+		return denied
+	}
+	if err := deleteSubstrateMCPActor(ctx, executor, stop.actorID, substrateMCPActorStopReason, cfg.ClaimTimeout); err != nil {
+		return stderrors.Join(denied, fmt.Errorf("delete the actor while the gateway may still apply its previous egress rules: %w", err))
+	}
+	return r.forgetSubstrateMCPToolActor(ctx, tool, stop.actorID)
 }
 
 func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, requested bool, created bool) bool {

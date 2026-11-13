@@ -268,9 +268,11 @@ keeps data, and the next successful reconcile resumes it. A template that
 snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
 Substrate, so its Actor is deleted and created again later. Substrate also lets
 an Actor outlive its template. When the template cannot be read, the controller
-can neither suspend the Actor (Substrate refuses without it) nor safely delete it
-(only the template says which volumes hold data), so it replaces the Actor's
-egress policy with one that denies all egress and keeps retrying the stop.
+cannot suspend the Actor (Substrate refuses without it), so it replaces the
+Actor's egress policy with one that denies all egress and keeps retrying the
+stop. While the gateway may still apply the previous rules from its cache (see
+below), a running Actor is deleted instead, which discards any data on its
+durable volumes; a suspended one is left as it is.
 
 A stored policy is not enforced at once. The Substrate egress gateway caches each
 Actor's policy by Actor name for `--egress-policy-cache-ttl` (10s by default) and
