@@ -58,6 +58,11 @@ type fakeReplicatedFaults struct {
 	keepIncarnation bool
 	// commitAborted commits a write whose operation settled as aborted.
 	commitAborted bool
+	// loseReceipts makes a failover drop every receipt while keeping the
+	// writes, and a replay of a write whose receipt it dropped record the
+	// receipt again and return the write's value, as an idempotent write
+	// does.
+	loseReceipts bool
 }
 
 func newFakeReplicated(faults fakeReplicatedFaults) func(*testing.T) *fakeReplicated {
@@ -134,6 +139,10 @@ func (p *fakeReplicated) AdvanceWriteWatermark(ctx context.Context) (storagev1.W
 			return storagev1.WriteWatermark{}, storagev1.ErrOperationAborted
 		}
 	}
+	if value, ok := p.values[envelope.OperationID]; ok && p.loseReceipts {
+		p.receipts[envelope.OperationID] = committedOutcome(envelope)
+		return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: value}, nil
+	}
 	if p.epoch == nil || envelope.Fence.Epoch != p.epoch.Epoch.Epoch || envelope.Fence.HolderID != p.epoch.Epoch.HolderID {
 		return storagev1.WriteWatermark{}, storagev1.FencedErrorf("the write's fence is not the dataset's controller epoch")
 	}
@@ -165,7 +174,12 @@ func (p *fakeReplicated) AdvanceWriteWatermark(ctx context.Context) (storagev1.W
 func (p *fakeReplicated) commit(envelope storagev1.WriteEnvelope) {
 	p.watermark++
 	p.values[envelope.OperationID] = p.watermark
-	p.receipts[envelope.OperationID] = storagev1.OperationOutcome{
+	p.receipts[envelope.OperationID] = committedOutcome(envelope)
+}
+
+// committedOutcome is the receipt of envelope's committed watermark write.
+func committedOutcome(envelope storagev1.WriteEnvelope) storagev1.OperationOutcome {
+	return storagev1.OperationOutcome{
 		OperationID: envelope.OperationID, Method: "AdvanceWriteWatermark", RequestDigest: envelope.RequestDigest,
 		State: storagev1.OperationCommitted, Fence: envelope.Fence, IssuedAt: envelope.IssuedAt,
 	}
@@ -202,6 +216,9 @@ func (p *fakeReplicated) failover() *fakeReplicated {
 	defer p.mu.Unlock()
 	if !p.keepIncarnation {
 		p.incarnation++
+	}
+	if p.loseReceipts {
+		p.receipts = map[string]storagev1.OperationOutcome{}
 	}
 	if p.release != nil {
 		close(p.release)
@@ -262,9 +279,10 @@ const failingFailoverEnv = "STORAGETEST_FAILING_FAILOVER"
 // neither committed nor aborted, a harness that declares failovers without
 // HoldWrites, and an async-replicated provider that declares a failover.
 // They also fail a provider that breaks what a failover must keep: one whose
-// failover keeps the incarnation, loses a write that returned nil, advances
-// the watermark for a write it kept no receipt for, or commits a write it
-// refused as unavailable or not ready, or one that settled as aborted.
+// failover keeps the incarnation, loses a write that returned nil, loses a
+// receipt that a replay would record again, advances the watermark for a
+// write it kept no receipt for, or commits a write it refused as unavailable
+// or not ready, or one that settled as aborted.
 func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 	duringFailover := func(faults fakeReplicatedFaults) func(t *testing.T) {
 		return func(t *testing.T) {
@@ -315,6 +333,12 @@ func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 				runDurability(t, newFakeReplicated(fakeReplicatedFaults{keepIncarnation: true}), fakeReplicatedWrites, fakeReplicatedHarness)
 			},
 			want: "a failover changes the incarnation",
+		},
+		"receipt lost and recorded again by the replay": {
+			run: func(t *testing.T) {
+				runDurability(t, newFakeReplicated(fakeReplicatedFaults{loseReceipts: true}), fakeReplicatedWrites, fakeReplicatedHarness)
+			},
+			want: "the receipt survives with the change",
 		},
 		"write that returned nil lost": {
 			run:  duringFailover(fakeReplicatedFaults{heldSucceeds: true}),

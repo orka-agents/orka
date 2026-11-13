@@ -1009,7 +1009,8 @@ acknowledged.
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
 restart and after each declared failover the change, its receipt, the
 dataset's identity, controller epoch, installation and watermark survive, and
-a replay changes nothing. Each failover must change the incarnation. Before
+a replay changes nothing. The receipt is resolved before the replay, so a
+replay cannot record a receipt the switch lost. Each failover must change the incarnation. Before
 each failover, `HoldWrites` keeps watermark writes waiting inside the
 database, and the suite checks that they were in flight when the switch
 began. Each must then settle through `ResolveOperation` as its error said.
