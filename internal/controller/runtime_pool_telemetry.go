@@ -4,157 +4,259 @@ import (
 	"fmt"
 	"net/url"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
-// otlpEndpointSuffix names the OTEL_EXPORTER_OTLP_*_ENDPOINT settings.
-const otlpEndpointSuffix = "ENDPOINT"
+// otlpEndpointSuffix and otlpProtocolSuffix name the
+// OTEL_EXPORTER_OTLP_*_ENDPOINT and OTEL_EXPORTER_OTLP_*_PROTOCOL settings.
+const (
+	otlpEndpointSuffix = "ENDPOINT"
+	otlpProtocolSuffix = "PROTOCOL"
+)
 
 const (
 	runtimePoolTelemetryEndpointEnv        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	runtimePoolTelemetryTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolTelemetryMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	runtimePoolTelemetryTracesProtocolEnv  = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
 	otlpProtocolHTTPProtobuf               = "http/protobuf"
-	// otlpHTTPTracesPath is the path OTLP/HTTP appends to a generic base URL
-	// for traces.
-	otlpHTTPTracesPath = "/v1/traces"
+	// otlpHTTPTracesPath and otlpHTTPMetricsPath are the paths OTLP/HTTP
+	// appends to a generic base URL for each signal.
+	otlpHTTPTracesPath  = "/v1/traces"
+	otlpHTTPMetricsPath = "/v1/metrics"
 )
 
 // runtimePoolTelemetryScalarSuffixes are the non-secret exporter settings a
 // supervisor accepts for each signal.
-var runtimePoolTelemetryScalarSuffixes = []string{"PROTOCOL", "INSECURE", "COMPRESSION"}
+var runtimePoolTelemetryScalarSuffixes = []string{otlpProtocolSuffix, "INSECURE", "COMPRESSION"}
+
+// runtimePoolTelemetryEnvBudget is how many environment entries supervisor
+// telemetry may use. The native backend admits 32 environment entries per
+// container and a native supervisor that cannot suspend already needs 29.
+const runtimePoolTelemetryEnvBudget = 3
+
+// runtimePoolOTLPSignal is one signal's resolved exporter configuration.
+type runtimePoolOTLPSignal struct {
+	// endpoint is a base URL when generic, else the signal's full URL.
+	endpoint string
+	generic  bool
+	// path is the path OTLP/HTTP appends to a generic base URL.
+	path string
+	// scalars holds PROTOCOL, INSECURE and COMPRESSION values; an explicit
+	// grpc protocol is stored empty because the supervisor defaults to it.
+	scalars map[string]string
+}
 
 // runtimePoolTelemetryEnv follows the native AI worker scalar allowlist for
 // supervisor traces and GenAI metrics. Traces gate the projection: a
-// metrics-only controller configuration enables nothing. Collector egress is
-// operator-owned unless --runtime-telemetry-collector-egress admits the
-// projected origins for gateway-enforced runtimes. Never copy headers,
-// certificate paths, resource attributes or Task context.
+// metrics-only controller configuration enables nothing. Settings are encoded
+// with as few entries as keep their SDK meaning, and metrics are dropped when
+// they would take supervisor telemetry past runtimePoolTelemetryEnvBudget.
+// Collector egress is operator-owned unless --runtime-telemetry-collector-egress
+// admits the projected origins for gateway-enforced runtimes. Never copy
+// headers, certificate paths, resource attributes or Task context.
 func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.EnvVar {
 	if !enabled {
 		return nil
 	}
+	traces := runtimePoolOTLPSignal{path: otlpHTTPTracesPath, scalars: map[string]string{}}
 	endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryTracesEndpointEnv))
 	if endpoint == "" {
 		endpoint = strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
+		traces.generic = true
 	}
 	if !isWorkerReachableOTLPEndpoint(endpoint) {
 		return nil
 	}
-	env := []corev1.EnvVar{
-		{Name: "ORKA_ENABLE_TELEMETRY", Value: strconv.FormatBool(enabled)},
-	}
-	for _, suffix := range append([]string{otlpEndpointSuffix}, runtimePoolTelemetryScalarSuffixes...) {
-		name := "OTEL_EXPORTER_OTLP_TRACES_" + suffix
-		value := strings.TrimSpace(getenv(name))
+	traces.endpoint = safeWorkerOTLPEnvValue(runtimePoolTelemetryTracesEndpointEnv, endpoint)
+	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
+		value := strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_TRACES_" + suffix))
 		if value == "" {
 			value = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_" + suffix))
-			// Generic HTTP endpoints are base URLs; signal endpoints include the
-			// signal path. Preserve SDK semantics when projecting a generic URL.
-			if suffix == otlpEndpointSuffix {
-				name = runtimePoolTelemetryEndpointEnv
-			}
 		}
-		if value != "" {
-			env = append(env, corev1.EnvVar{Name: name, Value: safeWorkerOTLPEnvValue(name, value)})
-		}
+		traces.scalars[suffix] = normalizedOTLPScalar(suffix, value)
 	}
-	metrics, ok := runtimePoolMetricsTelemetryEnv(env, getenv)
+	metrics, ok := runtimePoolMetricsTelemetrySignal(getenv)
 	if !ok {
-		// A generic trace endpoint must not become the metrics collector the
-		// controller just refused to project. Without a generic endpoint the
-		// supervisor resolves no metrics collector, so it needs no disable
-		// entry from the native environment budget.
-		return runtimePoolTraceOnlyTelemetryEnv(env)
+		// Dropped metrics need no disable entry: no generic endpoint is
+		// projected, so the supervisor resolves no metrics collector.
+		return encodeRuntimePoolTelemetryEnv(traces, nil)
 	}
-	return shareRuntimePoolTelemetryScalars(env, metrics)
-}
-
-// runtimePoolTraceOnlyTelemetryEnv projects a generic trace endpoint under the
-// trace-specific name. OTLP/HTTP treats a generic endpoint as a base URL and a
-// signal endpoint as the full URL, so the trace path is appended exactly as the
-// SDK would; gRPC treats both alike.
-func runtimePoolTraceOnlyTelemetryEnv(env []corev1.EnvVar) []corev1.EnvVar {
-	generic := slices.IndexFunc(env, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryEndpointEnv })
-	if generic < 0 {
-		return env
-	}
-	env[generic].Name = runtimePoolTelemetryTracesEndpointEnv
-	protocol := slices.IndexFunc(env, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryTracesProtocolEnv })
-	if protocol < 0 || env[protocol].Value != otlpProtocolHTTPProtobuf {
-		return env
-	}
-	if parsed, err := url.Parse(env[generic].Value); err == nil {
-		parsed.Path = path.Join(parsed.Path, otlpHTTPTracesPath)
-		parsed.RawPath = ""
-		env[generic].Value = parsed.String()
+	env := encodeRuntimePoolTelemetryEnv(traces, &metrics)
+	if len(env) > runtimePoolTelemetryEnvBudget {
+		// Traces take precedence over metrics for the native budget. Metrics
+		// are dropped only when that brings telemetry within it; trace
+		// settings that exceed it on their own already exceed the limit.
+		if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= runtimePoolTelemetryEnvBudget {
+			return traceOnly
+		}
 	}
 	return env
 }
 
-// shareRuntimePoolTelemetryScalars projects a scalar that traces and metrics
-// agree on once, under its generic name, which the supervisor and the SDK
-// resolve for both signals. The native backend admits 32 environment entries
-// per container, so a setting both signals share must not cost two of them.
-func shareRuntimePoolTelemetryScalars(traces, metrics []corev1.EnvVar) []corev1.EnvVar {
-	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
-		trace := slices.IndexFunc(traces, func(variable corev1.EnvVar) bool { return variable.Name == "OTEL_EXPORTER_OTLP_TRACES_"+suffix })
-		metric := slices.IndexFunc(metrics, func(variable corev1.EnvVar) bool { return variable.Name == "OTEL_EXPORTER_OTLP_METRICS_"+suffix })
-		if trace < 0 || metric < 0 || traces[trace].Value != metrics[metric].Value {
-			continue
-		}
-		traces[trace].Name = "OTEL_EXPORTER_OTLP_" + suffix
-		metrics = slices.Delete(metrics, metric, metric+1)
+// normalizedOTLPScalar stores an explicit grpc protocol as unset: the
+// supervisor exports gRPC when no protocol is set, so it costs no entry.
+func normalizedOTLPScalar(suffix, value string) string {
+	if suffix == otlpProtocolSuffix && value == "grpc" {
+		return ""
 	}
-	return append(traces, metrics...)
+	return value
 }
 
-// runtimePoolMetricsTelemetryEnv projects the metrics exporter for supervisor
-// GenAI metrics. An unreachable metrics-specific endpoint drops metrics
-// instead of falling back to a different collector, as worker Jobs do. The
-// supervisor disables all telemetry on any setting it does not accept, so a
-// metrics setting it would reject drops metrics rather than traces. It reports
-// false when metrics are dropped.
-func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(string) string) ([]corev1.EnvVar, bool) {
-	var env []corev1.EnvVar
-	if endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryMetricsEndpointEnv)); endpoint != "" {
-		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryMetricsEndpointEnv, endpoint)
-		if !isWorkerReachableOTLPEndpoint(endpoint) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
-			return nil, false
-		}
-		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryMetricsEndpointEnv, Value: value})
-	} else {
-		generic := strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
-		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryEndpointEnv, generic)
-		if !isWorkerReachableOTLPEndpoint(generic) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
-			return nil, false
-		}
-		if !slices.ContainsFunc(projected, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryEndpointEnv }) {
-			// The generic base URL keeps its SDK meaning; a trace-specific
-			// endpoint still takes precedence for traces.
-			env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryEndpointEnv, Value: value})
-		}
+// encodeRuntimePoolTelemetryEnv projects traces, and metrics when non-nil.
+// A generic endpoint is projected only when it resolves to both signals'
+// URLs, so a dropped signal never falls back to it. A scalar both signals
+// agree on is projected once under its generic name.
+func encodeRuntimePoolTelemetryEnv(traces runtimePoolOTLPSignal, metrics *runtimePoolOTLPSignal) []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "ORKA_ENABLE_TELEMETRY", Value: strconv.FormatBool(true)}}
+	switch base, shared := runtimePoolSharedOTLPBase(traces, metrics); {
+	case shared:
+		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryEndpointEnv, Value: base})
+	case metrics == nil:
+		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryTracesEndpointEnv, Value: traces.signalURL()})
+	default:
+		env = append(env,
+			corev1.EnvVar{Name: runtimePoolTelemetryTracesEndpointEnv, Value: traces.signalURL()},
+			corev1.EnvVar{Name: runtimePoolTelemetryMetricsEndpointEnv, Value: metrics.signalURL()},
+		)
 	}
 	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
-		name := "OTEL_EXPORTER_OTLP_METRICS_" + suffix
-		value := strings.TrimSpace(getenv(name))
+		trace := traces.scalars[suffix]
+		if metrics == nil {
+			if trace != "" {
+				env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_TRACES_" + suffix, Value: trace})
+			}
+			continue
+		}
+		metric := metrics.scalars[suffix]
+		if trace == metric {
+			if trace != "" {
+				env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_" + suffix, Value: trace})
+			}
+			continue
+		}
+		if trace != "" {
+			env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_TRACES_" + suffix, Value: trace})
+		}
+		if metric != "" {
+			env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_METRICS_" + suffix, Value: metric})
+		}
+	}
+	return env
+}
+
+// httpProtocol reports whether the signal exports OTLP/HTTP, whose generic
+// endpoint is a base URL; gRPC treats generic and signal endpoints alike.
+func (signal runtimePoolOTLPSignal) httpProtocol() bool {
+	return signal.scalars[otlpProtocolSuffix] == otlpProtocolHTTPProtobuf
+}
+
+// signalURL is the signal-specific endpoint equivalent to the signal's
+// configuration, appending the signal path to a generic OTLP/HTTP base URL
+// exactly as the SDK does.
+func (signal runtimePoolOTLPSignal) signalURL() string {
+	if !signal.generic {
+		return signal.endpoint
+	}
+	return otlpHTTPSignalURL(signal.endpoint, signal.path, signal.httpProtocol())
+}
+
+func otlpHTTPSignalURL(base, signalPath string, httpProtocol bool) string {
+	if !httpProtocol {
+		return base
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	parsed.Path = path.Join(parsed.Path, signalPath)
+	parsed.RawPath = ""
+	return parsed.String()
+}
+
+// runtimePoolSharedOTLPBase returns a generic endpoint that resolves to every
+// exported signal's URL under SDK semantics. A trace-only projection never
+// shares one, because metrics would resolve it too.
+func runtimePoolSharedOTLPBase(traces runtimePoolOTLPSignal, metrics *runtimePoolOTLPSignal) (string, bool) {
+	if metrics == nil {
+		return "", false
+	}
+	var candidates []string
+	for _, signal := range []runtimePoolOTLPSignal{traces, *metrics} {
+		switch {
+		case signal.generic:
+			candidates = append(candidates, signal.endpoint)
+		case !signal.httpProtocol():
+			candidates = append(candidates, signal.endpoint)
+		default:
+			if parsed, err := url.Parse(signal.endpoint); err == nil && strings.HasSuffix(parsed.Path, signal.path) {
+				parsed.Path = strings.TrimSuffix(parsed.Path, signal.path)
+				parsed.RawPath = ""
+				candidates = append(candidates, parsed.String())
+			}
+		}
+	}
+	for _, base := range candidates {
+		if sameOTLPURL(otlpHTTPSignalURL(base, traces.path, traces.httpProtocol()), traces.signalURL(), traces.httpProtocol()) &&
+			sameOTLPURL(otlpHTTPSignalURL(base, metrics.path, metrics.httpProtocol()), metrics.signalURL(), metrics.httpProtocol()) {
+			return base, true
+		}
+	}
+	return "", false
+}
+
+// sameOTLPURL compares two endpoint URLs as the exporter would use them. An
+// OTLP/HTTP signal URL without a path posts to "/".
+func sameOTLPURL(a, b string, httpProtocol bool) bool {
+	left, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	right, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	if httpProtocol {
+		for _, parsed := range []*url.URL{left, right} {
+			if parsed.Path == "" {
+				parsed.Path = "/"
+			}
+			parsed.RawPath = ""
+		}
+	}
+	return left.String() == right.String()
+}
+
+// runtimePoolMetricsTelemetrySignal resolves the metrics exporter for
+// supervisor GenAI metrics. An unreachable metrics-specific endpoint drops
+// metrics instead of falling back to a different collector, as worker Jobs
+// do. The supervisor disables all telemetry on any setting it does not
+// accept, so a metrics setting it would reject drops metrics rather than
+// traces. It reports false when metrics are dropped.
+func runtimePoolMetricsTelemetrySignal(getenv func(string) string) (runtimePoolOTLPSignal, bool) {
+	metrics := runtimePoolOTLPSignal{path: otlpHTTPMetricsPath, scalars: map[string]string{}}
+	endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryMetricsEndpointEnv))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
+		metrics.generic = true
+	}
+	metrics.endpoint = safeWorkerOTLPEnvValue(runtimePoolTelemetryMetricsEndpointEnv, endpoint)
+	if !isWorkerReachableOTLPEndpoint(endpoint) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, metrics.endpoint) {
+		return runtimePoolOTLPSignal{}, false
+	}
+	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
+		value := strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_METRICS_" + suffix))
 		if value == "" {
 			value = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_" + suffix))
 		}
-		if value == "" {
-			continue
+		if value != "" && !supervisorAcceptsOTLPSetting(suffix, value) {
+			return runtimePoolOTLPSignal{}, false
 		}
-		if !supervisorAcceptsOTLPSetting(suffix, value) {
-			return nil, false
-		}
-		env = append(env, corev1.EnvVar{Name: name, Value: value})
+		metrics.scalars[suffix] = normalizedOTLPScalar(suffix, value)
 	}
-	return env, true
+	return metrics, true
 }
 
 // supervisorAcceptsOTLPSetting mirrors the ACP supervisor's fail-closed
@@ -165,7 +267,7 @@ func supervisorAcceptsOTLPSetting(suffix, value string) bool {
 		parsed, err := url.Parse(value)
 		return err == nil && parsed.Hostname() != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&
 			(parsed.Scheme == urlSchemeHTTP || parsed.Scheme == urlSchemeHTTPS)
-	case "PROTOCOL":
+	case otlpProtocolSuffix:
 		return value == "grpc" || value == otlpProtocolHTTPProtobuf
 	case "INSECURE":
 		return strings.EqualFold(value, "true") || strings.EqualFold(value, "false")

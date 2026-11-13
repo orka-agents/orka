@@ -69,23 +69,20 @@ func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
 }
 
 // Supervisor telemetry shares that budget. A native runtime that cannot
-// suspend has three entries to spare, which the enable flag, one collector
-// endpoint and one exporter setting shared by traces and metrics must fit.
+// suspend has three entries to spare, which every endpoint and protocol
+// combination, and the enable flag, one collector endpoint and one exporter
+// setting shared by traces and metrics, must fit.
 func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimitWithTelemetry(t *testing.T) {
 	const collector = "http://collector.otel.svc:4318"
-	for name, values := range map[string]map[string]string{
-		"generic endpoint":               {"OTEL_EXPORTER_OTLP_ENDPOINT": collector},
-		"generic endpoint, HTTP":         {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"},
+	combinations := map[string]map[string]string{
 		"generic endpoint, insecure":     {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_INSECURE": "true"},
 		"generic endpoint, compression":  {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_COMPRESSION": "gzip"},
-		"endpoint per signal":            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": collector + "/v1/metrics"},
-		"trace endpoint only":            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces"},
-		"trace endpoint only, HTTP":      {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"},
 		"equal protocols set per signal": {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf"},
-		"generic endpoint, HTTP, unreachable metrics endpoint": {
-			"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
-		},
-	} {
+	}
+	for name, combination := range runtimePoolTelemetryCombinations() {
+		combinations[name] = combination.values
+	}
+	for name, values := range combinations {
 		t.Run(name, func(t *testing.T) {
 			for _, signal := range []string{"", "TRACES_", "METRICS_"} {
 				for _, suffix := range append([]string{otlpEndpointSuffix}, runtimePoolTelemetryScalarSuffixes...) {

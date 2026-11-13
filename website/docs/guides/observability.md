@@ -104,15 +104,28 @@ A missing or invalid trace endpoint disables supervisor export. Metrics-only
 configuration enables neither supervisor tracing nor supervisor metrics. A
 metrics-specific endpoint that is not worker-reachable drops supervisor metrics
 rather than falling back to the generic collector; so does a metrics setting the
-supervisor would reject. When metrics are dropped, a generic endpoint kept for
-traces is passed as the trace-specific endpoint, with `/v1/traces` appended for
-OTLP/HTTP as the SDK would, so it is not used for metrics. A protocol, insecure or compression value that
-traces and metrics share is passed once, under its generic name. Substrate native
-runtimes accept 32 environment entries per container and Orka's own settings use
-most of them: a native runtime has room for the enable flag, one endpoint and one
-shared setting, or for one endpoint per signal. More settings than that, or
-telemetry on a native runtime whose workspace can suspend, exceed the limit and
-the provider rejects the workload. Headers, certificate paths,
+supervisor would reject.
+
+Substrate native runtimes accept 32 environment entries per container and Orka's
+own settings use most of them, leaving three for supervisor telemetry. Orka
+therefore passes the fewest settings that keep each signal's SDK meaning:
+
+- One generic endpoint when it resolves to both signals' URLs, otherwise one
+  signal-specific endpoint per exported signal. A generic OTLP/HTTP base URL
+  becomes the signal URL the SDK would derive from it (`/v1/traces` or
+  `/v1/metrics` appended).
+- A protocol, insecure or compression value that both signals share, once, under
+  its generic name. An explicit `grpc` protocol is the supervisor's default and
+  is not passed.
+- When traces and metrics together would need more than three entries, for
+  example separate OTLP/HTTP collectors per signal, supervisor metrics are
+  dropped and traces are kept.
+
+A dropped signal never falls back to a generic endpoint. Trace settings that
+exceed three entries on their own, such as an OTLP/HTTP endpoint with an
+insecure or compression setting, or telemetry on a native runtime whose
+workspace can suspend, exceed the limit and the provider rejects the workload.
+Headers, certificate paths,
 resource attributes and content-capture settings are never copied. Adding metrics
 settings changes the supervisor Pod template, so existing RuntimePools roll through
 their normal drained replacement the first time a controller with these settings runs.
