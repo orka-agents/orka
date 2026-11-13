@@ -208,15 +208,32 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+	heldBy := ""
 	for {
-		if err := d.dispatchOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
-		}
+		logACPScanError(ctx, d.dispatchOnce(ctx), &heldBy)
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 		}
+	}
+}
+
+// logACPScanError logs the error a dispatcher scan returned. A scan stopped
+// by a storage recovery hold raised while the dispatcher runs is logged once
+// per hold, at Info, because dispatch resumes once the hold is released;
+// heldBy names the hold logged last.
+func logACPScanError(ctx context.Context, err error, heldBy *string) {
+	if hold, held := errors.AsType[*store.StorageHoldError](err); held {
+		if hold.Hold.ID != *heldBy {
+			*heldBy = hold.Hold.ID
+			logf.FromContext(ctx).Info("Storage is held for recovery; the ACP dispatcher dispatches once the hold is released",
+				"hold", hold.Hold.ID, "reason", hold.Hold.Reason, "error", err.Error())
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
 	}
 }
 
