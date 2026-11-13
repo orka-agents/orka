@@ -136,10 +136,11 @@ earlier releases omitted. */}}
 {{- $endpoint := trimPrefix "--controller-url=http://" $arg -}}
 {{- $hostPort := first (splitList "/" $endpoint) -}}
 {{- $host := first (splitList ":" $hostPort) -}}
-{{- $parts := splitList $namespaceSuffix $host -}}
+{{- /* Split only at the first suffix: the cluster domain may repeat it. */ -}}
+{{- $parts := splitn $namespaceSuffix 2 $host -}}
 {{- if eq (len $parts) 2 -}}
-{{- $fullname := index $parts 0 -}}
-{{- $clusterDomain := index $parts 1 -}}
+{{- $fullname := $parts._0 -}}
+{{- $clusterDomain := $parts._1 -}}
 {{- if and $fullname (not (contains "." $fullname)) (or (eq $clusterDomain "") (and (hasPrefix "." $clusterDomain) (gt (len $clusterDomain) 1))) -}}
 {{- $fullnames = append $fullnames $fullname -}}
 {{- end -}}

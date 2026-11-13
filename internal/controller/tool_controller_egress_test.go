@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +479,8 @@ func TestToolReconcilerKeepsRunningActorWhenItsEgressPolicyIsCurrent(t *testing.
 // an Actor outlive its template. Without the template Substrate cannot suspend
 // the Actor, and a delete could discard data on its durable volumes, so the
 // controller denies the Actor all egress instead, and keeps retrying the stop.
+// This applier reports no policy state, so the deny-all counts as enforced at
+// once; see the next test for one the gateway may not apply yet.
 func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	var applied []struct {
@@ -518,6 +521,76 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	r.SubstrateEgressPolicyApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error { return denyErr }
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); !errors.Is(err, denyErr) || !strings.Contains(err.Error(), "read the actor's template") {
 		t.Fatalf("Reconcile() error = %v, want both the template and the deny-all failure", err)
+	}
+}
+
+// A deny-all is enforced only once the gateway drops its cached copy of the
+// previous rules. Until then a running Actor whose template is gone could keep
+// reaching what they allowed, so it is deleted, which needs no template, and
+// the reconcile retries until it is. A suspended one runs nothing and keeps
+// its data.
+func TestToolReconcilerDeletesARunningActorWhoseTemplateIsGoneWhileItsDenyAllPropagates(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	for _, tc := range []struct {
+		name      string
+		phase     workspace.Phase
+		deleteErr error
+		deleted   bool
+	}{
+		{name: "running", phase: workspace.PhaseReady, deleted: true},
+		{name: "delete fails", phase: workspace.PhaseReady, deleteErr: deleteErr},
+		{name: "suspended", phase: workspace.PhaseRetained},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+			r, policy := propagatingEgressTestTool(t, executor)
+			running := getEgressTestTool(t, r)
+			var applied [][]workspace.SubstrateEgressRule
+			r.SubstrateEgressPolicyStateApplier = func(_ context.Context, _ SubstrateConfig, _ string, rules []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
+				applied = append(applied, rules)
+				// The deny-all replaces the stored rules now.
+				denied := *policy
+				denied.Version, denied.UpdateTime = policy.Version+1, time.Now()
+				return denied, nil
+			}
+			executor.describePhase = tc.phase
+			executor.deleteErrs = []error{tc.deleteErr}
+			if err := r.Delete(context.Background(), approvedMCPActorTemplateForTest()); err != nil {
+				t.Fatalf("Delete template: %v", err)
+			}
+			editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "https", Host: "docs.example.com"}}
+			})
+			_, err := r.Reconcile(context.Background(), mcpToolRequest())
+			if len(applied) == 0 || slices.ContainsFunc(applied, func(rules []workspace.SubstrateEgressRule) bool { return len(rules) != 0 }) {
+				t.Fatalf("applied = %+v, want only deny-all policies", applied)
+			}
+			got := getEgressTestTool(t, r)
+			requireEgressUnverified(t, got)
+			if len(executor.releaseReqs) != 0 {
+				t.Fatalf("releases = %v, want no suspend without the template", executor.releaseReqs)
+			}
+			switch {
+			case tc.deleted:
+				if err != nil {
+					t.Fatalf("Reconcile() error = %v, want the actor stopped", err)
+				}
+				if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != running.Status.Actor.ActorID || got.Status.Actor != nil {
+					t.Fatalf("deletes=%v actor=%+v, want %q deleted and forgotten", executor.deleteReqs, got.Status.Actor, running.Status.Actor.ActorID)
+				}
+				if strings.Contains(got.Status.Error, "could not be stopped") {
+					t.Fatalf("status = %+v, want the actor reported stopped", got.Status)
+				}
+			case tc.deleteErr != nil:
+				if !errors.Is(err, tc.deleteErr) || len(executor.deleteReqs) != 1 || !strings.Contains(got.Status.Error, "could not be stopped") {
+					t.Fatalf("Reconcile() error = %v deletes=%v status=%+v, want the failed delete reported and retried", err, executor.deleteReqs, got.Status)
+				}
+			default:
+				if err == nil || !strings.Contains(err.Error(), "egress is denied") || len(executor.deleteReqs) != 0 {
+					t.Fatalf("Reconcile() error = %v deletes=%v, want the suspended actor kept and the stop retried", err, executor.deleteReqs)
+				}
+			}
+		})
 	}
 }
 
