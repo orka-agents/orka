@@ -14,25 +14,16 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A hold condition that a replaced controller sent before it lost its epoch,
-// and that the API server applies only after the successor has settled the
-// attempt from its restored receipt, does not stay on the settled Task: the
-// successor's terminal epoch write clears it.
-func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
-	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
-	defer fixture.close(t)
-	task, _, digest := settlingTaskWithReceipt(t, fixture)
-	hold := taskStorageRecordHold{
-		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
-		key: fixture.attemptID, expected: digest,
-	}
+// interceptLateHold makes the hold condition write that a replaced controller
+// sent before it lost its epoch land at the successor's first status write to
+// the Task. That write carried the resourceVersion the successor read, so it
+// lands only before the successor's first write to the Task.
+func interceptLateHold(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task, hold taskStorageRecordHold) {
+	t.Helper()
 	var once sync.Once
 	lateHold := func(ctx context.Context) error {
 		var err error
 		once.Do(func() {
-			// The replaced controller's PATCH carried the resourceVersion the
-			// successor read, so it lands only before the successor's first
-			// write to the Task.
 			latest := &corev1alpha1.Task{}
 			if err = fixture.kubeClient.Get(ctx, clientObjectKey(task), latest); err != nil {
 				return
@@ -54,6 +45,28 @@ func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
 			}
 			return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, isTask := obj.(*corev1alpha1.Task); isTask {
+				if err := lateHold(ctx); err != nil {
+					return err
+				}
+			}
+			return c.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	})
+}
+
+// A hold condition that a replaced controller sent before it lost its epoch,
+// and that the API server applies only after the successor has settled the
+// attempt from its restored receipt, does not stay on the settled Task: the
+// successor's terminal epoch write clears it.
+func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, _, digest := settlingTaskWithReceipt(t, fixture)
+	interceptLateHold(t, fixture, task, taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
+		key: fixture.attemptID, expected: digest,
 	})
 
 	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
@@ -71,6 +84,85 @@ func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
 		t.Fatalf("the settled Task kept a late hold: %#v", updated.Status.Conditions)
 	}
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
+}
+
+// settlingTaskInWorkspaceValidationWithoutCompletion is
+// settlingTaskInWorkspaceValidation without the journaled completion: the
+// successor verifies the receipt, but finds no completion to settle the
+// attempt from, so it records the outcome as unknown.
+func settlingTaskInWorkspaceValidationWithoutCompletion(t *testing.T, fixture *recoveryFixture) *corev1alpha1.Task {
+	t.Helper()
+	task, _, _ := settlingTaskWithReceipt(t, fixture)
+	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(settledTestResult)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.dispatcher.transitionDelivery(
+		fixture.ctx, fixture.attemptID, fixture.fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// recoverUntilTaskEpoch runs recovery until the Task records the successor's
+// epoch, and returns the Task.
+func recoverUntilTaskEpoch(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) *corev1alpha1.Task {
+	t.Helper()
+	updated := &corev1alpha1.Task{}
+	for range 4 {
+		if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+			t.Fatalf("recovery: %v", err)
+		}
+		if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+			t.Fatal(err)
+		}
+		if updated.Status.Execution != nil && updated.Status.Execution.ControllerEpoch == fixture.fence.Epoch {
+			return updated
+		}
+	}
+	t.Fatalf("Task execution = %#v, want controller epoch %d", updated.Status.Execution, fixture.fence.Epoch)
+	return nil
+}
+
+// When the successor finds the receipt of an attempt in workspace validation
+// but no journaled completion, it records the outcome as unknown. The same
+// late hold does not stay on that Task either: the receipt it names is in the
+// store, so the terminal epoch write clears it.
+func TestTerminalRecoveryClearsALateHoldAfterRecordingAnUnknownOutcome(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task := settlingTaskInWorkspaceValidationWithoutCompletion(t, fixture)
+	interceptLateHold(t, fixture, task, taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord, key: fixture.attemptID,
+	})
+
+	updated := recoverUntilTaskEpoch(t, fixture, task)
+	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
+	if updated.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown {
+		t.Fatalf("Task execution state = %s, want %s", updated.Status.Execution.State, corev1alpha1.TaskExecutionStateOutcomeUnknown)
+	}
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
+}
+
+// An unknown outcome is not evidence that the receipt was found: when the
+// store no longer holds the receipt by the terminal epoch write, the late
+// hold stays, as it does for an attempt recovery has not settled.
+func TestTerminalEpochWriteKeepsALateHoldWhoseReceiptIsMissing(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task := settlingTaskInWorkspaceValidationWithoutCompletion(t, fixture)
+	hold := taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord, key: fixture.attemptID,
+	}
+	interceptLateHold(t, fixture, task, hold)
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
+	loseResultReceipt(t, fixture, task)
+
+	recoverUntilTaskEpoch(t, fixture, task)
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
 }
 
 // A hold on a Task whose attempt is still Settling is current, and the

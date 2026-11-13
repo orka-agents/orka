@@ -134,8 +134,11 @@ func (d *ACPDispatcher) clearTaskStorageRecordHold(ctx context.Context, task *co
 }
 
 // releaseSettledTaskStorageHold marks latest's hold as released when its
-// attempt was settled from the store record. Recovery holds a Task only while
-// the attempt is Settling, so such a hold is a late condition write from a
+// attempt was settled from the store record: recovery recorded success, or
+// recorded the outcome as unknown for an attempt in workspace validation whose
+// receipt it found but whose completion the journal no longer showed, and the
+// store still holds that receipt. Recovery holds a Task only while the
+// attempt is Settling, so such a hold is a late condition write from a
 // replaced controller that the API server applied after the successor read
 // the Task. The caller writes latest with its resourceVersion: a late write
 // that lands earlier is cleared here, and one that lands later fails its own
@@ -155,7 +158,14 @@ func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, lates
 	if err != nil {
 		return err
 	}
-	if attempt.ExecutionState != store.PromptExecutionSucceeded {
+	switch attempt.ExecutionState {
+	case store.PromptExecutionSucceeded:
+	case store.PromptExecutionOutcomeUnknown:
+		found, err := d.settledResultReceiptFound(ctx, latest, attempt)
+		if err != nil || !found {
+			return err
+		}
+	default:
 		return nil
 	}
 	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
@@ -164,6 +174,33 @@ func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, lates
 		Message: "the store record the Task was held for was found",
 	})
 	return nil
+}
+
+// settledResultReceiptFound reports whether the store holds attempt's result
+// receipt for task, matching the settling operation the receipt names, as
+// recovery checks it once the attempt records a later operation.
+func (d *ACPDispatcher) settledResultReceiptFound(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt) (bool, error) {
+	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
+	if !ok {
+		return false, nil
+	}
+	receipt, err := receipts.GetPromptResultReceipt(ctx, attempt.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	version, ok := acpSettlingOperationVersion(receipt.OperationID)
+	if !ok || version >= attempt.Version {
+		return false, nil
+	}
+	digest, err := acpSettlingTransitionDigest(attempt.ID, version, receipt.Data)
+	if err != nil {
+		return false, err
+	}
+	return receipt.Namespace == task.Namespace && receipt.TaskName == task.Name &&
+		receipt.OperationID == acpSettlingOperationID(version) && receipt.OperationDigest == digest, nil
 }
 
 // setTaskStorageRecordCondition writes condition to the exact Task

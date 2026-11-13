@@ -1006,7 +1006,10 @@ PromptAttempt is as recovery read it and still `Settling`. A write from a
 replaced controller that the API server applies late carries the Task's
 earlier resourceVersion, so it lands only before that resourceVersion next
 changes; when stale-epoch recovery settles the attempt from its restored
-receipt, its terminal epoch write releases such a hold. While held, the
+receipt, its terminal epoch write releases such a hold. So does the terminal
+epoch write after recovery recorded the outcome as unknown for an attempt in
+workspace validation whose receipt it found, while the store still holds that
+receipt. While held, the
 prompt is not run again, the attempt stays `Settling`, the outcome is not
 guessed, success is not reported and nothing is deleted.
 When the record is found again, after a restore, the condition becomes
@@ -1031,9 +1034,8 @@ digest, so a receipt is checked only against its own settling operation: a
 receipt replaced with another result and a matching digest is not detected.
 That needs the settling digest kept on the PromptAttempt across delivery
 transitions. Such a late hold write is not yet released on a Task restored
-under a new UID, or when an attempt in workspace validation is recorded as
-unknown although its receipt was found; there the Task reports the hold
-while its outcome stays the one recovery settled. Detecting a restart or
+under a new UID; there the Task reports the hold while its outcome stays the
+one recovery settled. Detecting a restart or
 switch of an `async-replicated` dataset that happened while no controller
 ran needs the incarnation recorded with the acknowledgement, and so does
 keeping an installation hold across a controller restart when it was
