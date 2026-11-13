@@ -41,7 +41,7 @@ func TestSubstrateActorEgressCredentialsFailClosed(t *testing.T) {
 		"control prefix":   func(r *SubstrateEgressRule) { r.Credential.Prefix = "Bearer\n" },
 		"missing secret":   func(r *SubstrateEgressRule) { r.Credential.Name = "" },
 		"invalid key":      func(r *SubstrateEgressRule) { r.Credential.Key = "a/b" },
-		"invalid namspace": func(r *SubstrateEgressRule) { r.Credential.Namespace = "Team_A" },
+		"invalid namespace": func(r *SubstrateEgressRule) { r.Credential.Namespace = "Team_A" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			rule := SubstrateEgressRule{Scheme: "https", Host: "api.github.com", Credential: githubCredential()}
