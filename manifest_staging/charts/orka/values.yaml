@@ -653,8 +653,9 @@ store:
   # SQLite synchronous mode. "normal" (the default) syncs the write-ahead log
   # at checkpoints: a commit survives a controller restart, but the latest
   # commits can be lost if the node or its disk fails first. "full" syncs every
-  # commit, so commits also survive a node failure, at the cost of a sync per
-  # commit on the volume.
+  # commit, so commits also survive a host crash while the volume survives, at
+  # the cost of a sync per commit on the volume. Neither mode keeps commits
+  # when the volume itself is lost.
   sqliteSynchronous: normal
   persistence:
     enabled: true        # ACP control records, gateway history, and Session state require durable RWO storage
