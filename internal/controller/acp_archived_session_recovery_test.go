@@ -6,15 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestACPDispatcherRestartPreservesArchivedSessionEvidence(t *testing.T) {
@@ -201,6 +206,206 @@ func TestACPDispatcherStartupStillRejectsGlobalListFailure(t *testing.T) {
 	})
 	if err := dispatcher.Start(fixture.ctx); !errors.Is(err, want) {
 		t.Fatalf("structural startup failure = %v, want original list error", err)
+	}
+}
+
+// A dispatcher that starts while the installation is held for storage
+// recovery waits for the release instead of failing the manager, which would
+// restart the controller into the same hold. It dispatches nothing while
+// held, and dispatches once the hold is released.
+func TestACPDispatcherStartWaitsForAnInstallationHold(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "queued-during-hold", "queued-during-hold-uid", "prompt queued during the hold", nil)
+	dispatcher := archivedSessionRecoveryDispatcher(fixture, fixture.controlStore, 1)
+	dispatcher.Epochs = fixture.epochs
+	dispatcher.Sessions = fixture.dispatcher.Sessions
+	fixture.epochs.setHold(store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Message: "the dataset switched unsafely", RaisedAt: time.Now().UTC(),
+	})
+	t.Cleanup(fixture.epochs.clearHold)
+	ctx, cancel := context.WithCancel(fixture.ctx)
+	var startErr error
+	returned := make(chan struct{})
+	go func() {
+		startErr = dispatcher.Start(ctx)
+		close(returned)
+	}()
+	defer func() {
+		cancel()
+		<-returned
+	}()
+	select {
+	case <-returned:
+		t.Fatalf("dispatcher start under an installation hold returned %v, want it to wait for the release", startErr)
+	case <-time.After(20 * dispatcher.Interval):
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if calls := fixture.createCalls.Load(); calls != 0 || current.Status.Phase != queued.Status.Phase ||
+		current.Status.Execution.State != queued.Status.Execution.State {
+		t.Fatalf("the dispatcher acted on a Task while the installation was held: %d runtime sessions created, status %#v", calls, current.Status)
+	}
+
+	fixture.epochs.clearHold()
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Phase == corev1alpha1.TaskPhaseSucceeded && runtimeSessionCleanupCompleteForUID(current, current.UID) {
+			break
+		}
+		select {
+		case <-returned:
+			t.Fatalf("dispatcher stopped after the release: %v", startErr)
+		case <-deadline:
+			t.Fatalf("queued Task did not finish after the hold was released: %#v", current.Status)
+		case <-tick.C:
+		}
+	}
+	cancel()
+	<-returned
+	if startErr != nil {
+		t.Fatalf("stop dispatcher: %v", startErr)
+	}
+}
+
+// A hold raised while the dispatcher runs stops dispatch without logging a
+// failed scan on every tick, and dispatch resumes once it is released.
+func TestACPDispatcherWaitsQuietlyForAHoldRaisedWhileItRuns(t *testing.T) {
+	// Two Tasks are dispatched, which needs more time under the race
+	// detector than the single-dispatch fixture default.
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
+	watchClient, ok := fixture.client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fixture client lacks watches")
+	}
+	// A Task queued before the hold reaches a dispatcher scan only after
+	// the hold is raised, as a scan that starts just after the hold does.
+	// Each scan lists the Tasks once, so heldScans counts the scans that
+	// started under the hold.
+	const queuedName = "queued-before-hold"
+	var hideQueued atomic.Bool
+	var heldScans atomic.Int32
+	hideQueued.Store(true)
+	dispatcher := archivedSessionRecoveryDispatcher(fixture, fixture.controlStore, 1)
+	dispatcher.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			tasks, ok := list.(*corev1alpha1.TaskList)
+			switch {
+			case !ok:
+			case hideQueued.Load():
+				tasks.Items = slices.DeleteFunc(tasks.Items, func(task corev1alpha1.Task) bool { return task.Name == queuedName })
+			default:
+				heldScans.Add(1)
+			}
+			return nil
+		},
+	})
+	dispatcher.Epochs = fixture.epochs
+	dispatcher.Sessions = fixture.dispatcher.Sessions
+	var (
+		logMu       sync.Mutex
+		failedScans []string
+		holdLines   []string
+	)
+	logger := funcr.New(func(prefix, args string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		switch {
+		case strings.Contains(args, "ACP dispatcher scan failed"):
+			failedScans = append(failedScans, args)
+		case strings.Contains(args, "Storage is held for recovery"):
+			holdLines = append(holdLines, args)
+		}
+	}, funcr.Options{})
+	ctx, cancel := context.WithCancel(logf.IntoContext(fixture.ctx, logger))
+	var startErr error
+	returned := make(chan struct{})
+	go func() {
+		startErr = dispatcher.Start(ctx)
+		close(returned)
+	}()
+	defer func() {
+		cancel()
+		<-returned
+	}()
+	waitForTask := func(task *corev1alpha1.Task, what string) {
+		t.Helper()
+		current := &corev1alpha1.Task{}
+		deadline := time.After(10 * time.Second)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase == corev1alpha1.TaskPhaseSucceeded && runtimeSessionCleanupCompleteForUID(current, current.UID) {
+				return
+			}
+			select {
+			case <-returned:
+				t.Fatalf("dispatcher stopped %s: %v", what, startErr)
+			case <-deadline:
+				t.Fatalf("queued Task did not finish %s: %#v", what, current.Status)
+			case <-tick.C:
+			}
+		}
+	}
+	waitForTask(fixture.queueTask(t, "dispatched-before-hold", "dispatched-before-hold-uid", "prompt dispatched before the hold", nil), "before the hold")
+	created := fixture.createCalls.Load()
+
+	queued := fixture.queueTask(t, queuedName, "queued-before-hold-uid", "prompt queued before the hold", nil)
+	fixture.epochs.setHold(store.StorageRecoveryHold{
+		ID: "hold-b", Reason: store.StorageRecoveryUnsafeSwitch, Message: "the dataset switched unsafely", RaisedAt: time.Now().UTC(),
+	})
+	t.Cleanup(fixture.epochs.clearHold)
+	hideQueued.Store(false)
+	// Five scans started under the hold means at least four ended at it.
+	held := func() []string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return slices.Clone(holdLines)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for heldScans.Load() < 5 || len(held()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d scans started under the hold and %d hold lines were logged within 10s", heldScans.Load(), len(held()))
+		}
+		time.Sleep(dispatcher.Interval)
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if calls := fixture.createCalls.Load(); calls != created || current.Status.Phase != queued.Status.Phase ||
+		current.Status.Execution.State != queued.Status.Execution.State {
+		t.Fatalf("the dispatcher acted on a Task while the installation was held: %d runtime sessions created, status %#v", calls-created, current.Status)
+	}
+	logMu.Lock()
+	failed := slices.Clone(failedScans)
+	logMu.Unlock()
+	if len(failed) != 0 {
+		t.Fatalf("the dispatcher logged %d failed scans under the hold, want none: %q", len(failed), failed)
+	}
+	if lines := held(); len(lines) != 1 || !strings.Contains(lines[0], `"hold"="hold-b"`) {
+		t.Fatalf("hold log lines = %q, want one naming hold-b", lines)
+	}
+
+	fixture.epochs.clearHold()
+	waitForTask(queued, "after the hold was released")
+	cancel()
+	<-returned
+	if startErr != nil {
+		t.Fatalf("stop dispatcher: %v", startErr)
 	}
 }
 

@@ -253,6 +253,7 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
 		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
+		reported := taskSuccessOf(task)
 		mutate(task)
 		write := func(writeCtx context.Context) error {
 			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
@@ -260,7 +261,9 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 					return err
 				}
 			}
-			return r.Status().Update(writeCtx, task)
+			return admitTaskStatus(writeCtx, r.ControllerEpochManager, reported, task, func(ctx context.Context) error {
+				return r.Status().Update(ctx, task)
+			})
 		}
 		if hadACPExecution && taskDataAuthorityEnded(task) {
 			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
@@ -1547,6 +1550,14 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// While storage is held for recovery, Orka starts no work. No storage
+	// write or control-store change guards a Job's creation, so the hold is
+	// checked before anything is prepared for it.
+	if holdErr := r.ControllerEpochManager.StorageHold(); holdErr != nil {
+		log.Info("not creating the Task Job while storage is held for recovery", "reason", holdErr.Error())
+		return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+	}
+
 	latest := &corev1alpha1.Task{}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
@@ -1755,7 +1766,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// deletion between the reads must not turn a skipped freshness check into
 	// a new execution from stale inputs.
 	if !existingGatewayJob {
-		err = r.Create(ctx, job)
+		// The hold is checked again at the creation itself: a hold raised
+		// while the Job was prepared either waits for this creation or
+		// refuses it.
+		err = r.ControllerEpochManager.AdmitWork(ctx, func(ctx context.Context) error {
+			return r.Create(ctx, job)
+		})
+		if errors.Is(err, store.ErrStorageRecoveryRequired) || errors.Is(err, store.ErrNotReady) {
+			log.Info("not creating the Task Job while storage is held for recovery", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
 		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)

@@ -383,10 +383,12 @@ spec:
             - --storage-config=/etc/orka/storage/storage.yaml
             {{- if include "orka.storageUsesSQLite" . }}
             - --store-path={{ .Values.store.path }}
+            - --store-sqlite-synchronous={{ .Values.store.sqliteSynchronous | default "normal" }}
             {{- end }}
             {{- else }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
+            - --store-sqlite-synchronous={{ .Values.store.sqliteSynchronous | default "normal" }}
             {{- end }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
