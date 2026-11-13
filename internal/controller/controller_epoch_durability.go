@@ -103,8 +103,8 @@ type contractOutcome struct {
 
 func (t *storageTakeover) run(ctx context.Context) error {
 	log := logf.FromContext(ctx)
-	// held is the hold this manager last raised or read, until a record
-	// without it shows that an operator acknowledged it.
+	// held is the hold this manager last raised or read, until it releases
+	// the hold or a record without it shows that an operator acknowledged it.
 	var held *store.StorageRecoveryHold
 	for {
 		record, err := retryEpochStorageStep(ctx, "read the storage record", func(ctx context.Context) (store.StorageRecord, error) {
@@ -147,6 +147,10 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			if err := t.release(ctx, hold.ID); err != nil {
 				return err
 			}
+			// The release succeeded only because the annotation named the
+			// hold, so a record read after the annotation is removed again
+			// does not record the released hold again.
+			held = nil
 			log.Info("Released the acknowledged storage recovery hold and recorded what each dataset holds now", "hold", hold.ID)
 			continue
 		}

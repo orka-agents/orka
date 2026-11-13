@@ -1017,6 +1017,56 @@ func TestHoldRemovedFromTheRecordWithoutAcknowledgementIsRecordedAgain(t *testin
 	}
 }
 
+// annotationDroppingRecords removes the acknowledgement annotation as soon as
+// a release commits, as an operator cleaning up after the release does.
+type annotationDroppingRecords struct {
+	installationEpochStore
+}
+
+func (s annotationDroppingRecords) ReleaseStorageHold(
+	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
+) error {
+	if err := s.memoryStorageRecords.ReleaseStorageHold(ctx, fence, id, acks); err != nil {
+		return err
+	}
+	s.memoryStorageRecords.mu.Lock()
+	defer s.memoryStorageRecords.mu.Unlock()
+	s.memoryStorageRecords.record.AcknowledgedHoldID = ""
+	return nil
+}
+
+// A hold this manager released stays released when the acknowledgement
+// annotation is removed before the manager reads the record again: the
+// release itself showed that an operator acknowledged the hold.
+func TestHoldReleasedByTheManagerIsNotRecordedAgain(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Hold = &store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Contract: storagev1.StateContract,
+		DatasetID: "dataset-a", RaisedAt: time.Now().UTC(),
+	}
+	records.record.AcknowledgedHoldID = "hold-a"
+	authority := annotationDroppingRecords{installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	dataset := newRecordingEpochDataset("dataset-a")
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the state fence after the release", func() bool {
+		_, _, err := writeFenceWithin(manager, storagev1.StateContract, 50*time.Millisecond)
+		return err == nil
+	})
+	eventually(t, "a recorded watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold after the release = %#v, want none", hold)
+	}
+}
+
 // After an operator acknowledges a hold raised because a contract moved to
 // another dataset, the contract's fence names the new dataset.
 func TestReleasedDatasetChangeMovesTheFence(t *testing.T) {
