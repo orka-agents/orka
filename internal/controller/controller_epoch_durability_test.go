@@ -1029,9 +1029,9 @@ func (s annotationDroppingRecords) ReleaseStorageHold(
 	if err := s.memoryStorageRecords.ReleaseStorageHold(ctx, fence, id, acks); err != nil {
 		return err
 	}
-	s.memoryStorageRecords.mu.Lock()
-	defer s.memoryStorageRecords.mu.Unlock()
-	s.memoryStorageRecords.record.AcknowledgedHoldID = ""
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.record.AcknowledgedHoldID = ""
 	return nil
 }
 
