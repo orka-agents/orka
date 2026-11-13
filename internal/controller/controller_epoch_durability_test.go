@@ -869,10 +869,10 @@ func (d *describeGatedDataset) Describe(ctx context.Context) (storagev1.Provider
 	return d.recordingEpochDataset.Describe(ctx)
 }
 
-// A hold that leaves the record without this manager releasing it, as an
-// edit of the status does, reopens no fence it closed: each opens again only
-// once its dataset passes the takeover step, which here holds again for the
-// writes the dataset lost.
+// A hold an operator acknowledged that leaves the record without this
+// manager releasing it, as an edit of the status does, reopens no fence it
+// closed: each opens again only once its dataset passes the takeover step,
+// which here holds again for the writes the dataset lost.
 func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T) {
 	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
 	if err != nil {
@@ -913,6 +913,7 @@ func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T)
 	dataset.gate.Store(&gate)
 	records.mu.Lock()
 	records.record.Hold = nil
+	records.record.AcknowledgedHoldID = first.ID
 	records.mu.Unlock()
 	eventually(t, "the manager to drop the hold that left the record", func() bool {
 		var held *store.StorageHoldError
@@ -939,6 +940,81 @@ func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T)
 		t.Fatalf("hold = %#v, want the lost watermark held again", hold)
 	}
 	requireHeld(t, manager, storagev1.StateContract)
+}
+
+// A hold that leaves the record without an operator acknowledging it, as an
+// edit of the status does, is recorded again with every fence still closed,
+// because the takeover step cannot detect again a switch of an
+// async-replicated dataset that kept its epoch and watermark. Acknowledging
+// the hold recorded again releases it.
+func TestHoldRemovedFromTheRecordWithoutAcknowledgementIsRecordedAgain(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}
+	dataset := &switchingEpochDataset{
+		recordingEpochDataset: newRecordingEpochDataset("dataset-a"), durability: storagev1.DurabilityAsyncReplicated,
+		switched: make(chan struct{}),
+	}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	close(dataset.switched)
+	eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+	first := *recordedHoldOf(t, records)
+	if first.Reason != store.StorageRecoveryUnsafeSwitch {
+		t.Fatalf("hold = %#v, want the async-replicated switch held", first)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+
+	var released atomic.Bool
+	stop, sampled := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(sampled)
+		for {
+			if !errors.Is(manager.StorageHold(), store.ErrStorageRecoveryRequired) {
+				released.Store(true)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	records.mu.Lock()
+	records.record.Hold = nil
+	records.mu.Unlock()
+	eventually(t, "the hold to be recorded again", func() bool {
+		hold := recordedHoldOf(t, records)
+		return hold != nil && *hold == first
+	})
+	time.Sleep(5 * durabilityTestInterval)
+	close(stop)
+	<-sampled
+	if released.Load() {
+		t.Fatal("the manager released a hold that left the record without an acknowledgement")
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+
+	records.mu.Lock()
+	records.record.AcknowledgedHoldID = first.ID
+	records.mu.Unlock()
+	eventually(t, "the state fence after the hold recorded again was acknowledged", func() bool {
+		_, _, err := writeFenceWithin(manager, storagev1.StateContract, 50*time.Millisecond)
+		return err == nil
+	})
+	if hold := recordedHoldOf(t, records); hold != nil {
+		t.Fatalf("recorded hold after the release = %#v", hold)
+	}
 }
 
 // After an operator acknowledges a hold raised because a contract moved to

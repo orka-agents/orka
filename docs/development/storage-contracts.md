@@ -979,7 +979,14 @@ dataset holds now as acknowledged and clears the hold in the same update,
 without advancing anything first, so every advance keeps supplying the
 recorded acknowledgement as its floor; each contract's fence opens again once
 its dataset passes the takeover checks against the new record. An annotation naming another hold releases
-nothing. A release retried after its update committed but its response was
+nothing. A hold removed from `status.storageRecovery` without that
+annotation is recorded again with the same ID, and every fence stays closed
+meanwhile, because the takeover checks cannot detect again a switch of an
+`async-replicated` dataset that kept its epoch and watermark; a controller
+that restarts before it records the hold again no longer knows it (see
+**Not yet covered**). A hold that leaves the record after the annotation
+named it, without the controller releasing it, opens no fence before the
+takeover checks pass. A release retried after its update committed but its response was
 lost succeeds when the record, under the same controller epoch, shows
 exactly that release: no hold, the acknowledgement of that hold, the
 condition the release set and the acknowledgements it recorded; any other
@@ -994,7 +1001,9 @@ outcome as unknown and never re-runs the prompt or reports success), a
 finalized turn without its store record, and reclamation without the turn
 cleanup receipt. Detecting a restart or switch of an `async-replicated`
 dataset that happened while no controller ran needs the incarnation recorded
-with the acknowledgement.
+with the acknowledgement, and so does keeping such a hold across a
+controller restart when it was removed from the status without being
+acknowledged.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a

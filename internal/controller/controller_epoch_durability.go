@@ -35,7 +35,8 @@ const (
 //
 //  1. Read the storage record Kubernetes keeps for the installation. While
 //     it holds a storage recovery hold that no operator acknowledged, keep
-//     every fence closed and wait for the acknowledgement. Once the hold is
+//     every fence closed and wait for the acknowledgement; a hold that
+//     leaves the record unacknowledged is recorded again. Once the hold is
 //     acknowledged, advance every dataset, record what each holds now as
 //     acknowledged, and clear the hold in the same update.
 //  2. For each contract, in parallel: describe its dataset. A contract served
@@ -102,6 +103,9 @@ type contractOutcome struct {
 
 func (t *storageTakeover) run(ctx context.Context) error {
 	log := logf.FromContext(ctx)
+	// held is the hold this manager last raised or read, until a record
+	// without it shows that an operator acknowledged it.
+	var held *store.StorageRecoveryHold
 	for {
 		record, err := retryEpochStorageStep(ctx, "read the storage record", func(ctx context.Context) (store.StorageRecord, error) {
 			return t.records.GetStorageRecord(ctx, t.acquired.Name)
@@ -109,7 +113,24 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if record.Hold == nil && held != nil && record.AcknowledgedHoldID != held.ID {
+			// The hold left the record without an operator acknowledging it,
+			// as an edit of the status does. The takeover step cannot detect
+			// again a switch of an async-replicated dataset that kept its
+			// epoch and watermark, so the hold is recorded again, with every
+			// fence still closed, until an operator acknowledges it.
+			log.Info("The storage recovery hold left the record without being acknowledged; recording it again", "hold", held.ID)
+			hold := *held
+			if _, err := retryEpochStorageStep(ctx, "record the storage recovery hold again", func(ctx context.Context) (store.StorageRecoveryHold, error) {
+				return t.records.HoldStorage(ctx, t.fence, hold)
+			}); err != nil {
+				return err
+			}
+			continue
+		}
 		if hold := record.Hold; hold != nil {
+			recordedHold := *hold
+			held = &recordedHold
 			t.manager.setHold(*hold)
 			if record.AcknowledgedHoldID != hold.ID {
 				log.Info("Storage is held for recovery; storage contract writes and control-store changes are refused until an operator acknowledges the hold",
@@ -130,8 +151,9 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			continue
 		}
 		// Each fence opens only once its dataset passes the takeover step,
-		// also after a hold that left the record without this manager
-		// releasing it, as an edit of the status does.
+		// also after an acknowledged hold that left the record without this
+		// manager releasing it.
+		held = nil
 		t.manager.closeFences()
 		t.manager.clearHold()
 		hold, err := t.openAndMaintain(ctx, record)
@@ -152,6 +174,7 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		held = &recorded
 		t.manager.setHold(recorded)
 	}
 }
