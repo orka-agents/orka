@@ -573,9 +573,11 @@ type switchingEpochDataset struct {
 	*recordingEpochDataset
 	durability storagev1.DurabilityClass
 	switched   chan struct{}
-	// lose, when set, drops the watermark to zero at the switch.
-	lose bool
-	lost bool
+	// lose, when set, drops the watermark to restoreTo, zero unless set
+	// before switched closes, at the switch.
+	lose      bool
+	lost      bool
+	restoreTo int64
 	// mirrorErrs fails that many epoch reads after the switch.
 	mirrorErrs atomic.Int32
 }
@@ -588,7 +590,7 @@ func (d *switchingEpochDataset) Describe(ctx context.Context) (storagev1.Provide
 		info.Incarnation = "incarnation-2"
 		d.mu.Lock()
 		if d.lose && !d.lost {
-			d.watermark, d.lost = 0, true
+			d.watermark, d.lost = d.restoreTo, true
 		}
 		d.mu.Unlock()
 	default:
@@ -651,6 +653,63 @@ func TestControllerEpochManagerChecksASwitchedDataset(t *testing.T) {
 			requireHeld(t, manager, storagev1.StateContract)
 		})
 	}
+}
+
+// failingWatermarkRecords fails every watermark record while fail is set, as
+// an API server that times out does.
+type failingWatermarkRecords struct {
+	installationEpochStore
+	fail atomic.Bool
+}
+
+func (s *failingWatermarkRecords) RecordStorageWatermark(
+	ctx context.Context, fence store.ControllerEpochFence, datasetID string, watermark int64, at time.Time,
+) error {
+	if s.fail.Load() {
+		return errors.New("the API server timed out")
+	}
+	return s.memoryStorageRecords.RecordStorageWatermark(ctx, fence, datasetID, watermark, at)
+}
+
+// A watermark the dataset acknowledged counts in the switch check even when
+// recording it failed: a dataset that switches back to the recorded
+// watermark lost the writes it acknowledged since, and holds.
+func TestSwitchCheckCountsAWatermarkWhoseRecordFailed(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	authority := &failingWatermarkRecords{installationEpochStore: installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}}
+	dataset := &switchingEpochDataset{
+		recordingEpochDataset: newRecordingEpochDataset("dataset-a"), durability: storagev1.DurabilitySynchronousReplicated,
+		switched: make(chan struct{}), lose: true,
+	}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a recorded watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+	authority.fail.Store(true)
+	// Two advances after the record failed: the record keeps the last
+	// watermark recorded before, and the dataset acknowledged more.
+	eventually(t, "the dataset to acknowledge watermarks the record lacks", func() bool {
+		return datasetWatermark(t, dataset) >= recordedWatermarkOf(t, records, storagev1.StateContract)+2
+	})
+	recorded := recordedWatermarkOf(t, records, storagev1.StateContract)
+	dataset.restoreTo = recorded
+	close(dataset.switched)
+	eventually(t, "a recorded hold", func() bool { return recordedHoldOf(t, records) != nil })
+	hold := recordedHoldOf(t, records)
+	if hold.Reason != store.StorageRecoveryWatermarkRegressed || hold.StoredWatermark != recorded || hold.AcknowledgedWatermark <= recorded {
+		t.Fatalf("hold = %#v, want the dataset at the recorded watermark %d held below the one it acknowledged", hold, recorded)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
 }
 
 // A hold closes fences that were already open and wakes callers waiting for

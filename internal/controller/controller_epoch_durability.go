@@ -803,11 +803,12 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 	if watermark.DatasetID != datasetID || watermark.Value <= tracked.acknowledged {
 		return watermarkHold(contract, info, tracked.acknowledged+1, watermark.Value)
 	}
+	// The dataset acknowledged the watermark once the advance returned it,
+	// so a later switch check counts it even if recording it fails.
+	t.update(datasetID, func(tracked *trackedDataset) { tracked.acknowledged = max(tracked.acknowledged, watermark.Value) })
 	if err := t.records.RecordStorageWatermark(callCtx, t.fence, datasetID, watermark.Value, t.manager.clock()); err != nil {
 		log.Error(err, "Recording a storage dataset's write watermark failed; trying again later")
-		return nil
 	}
-	t.update(datasetID, func(tracked *trackedDataset) { tracked.acknowledged = max(tracked.acknowledged, watermark.Value) })
 	return nil
 }
 
