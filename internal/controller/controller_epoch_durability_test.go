@@ -1464,6 +1464,59 @@ func TestHeldDatasetIsFencedOnlyAfterTheHoldIsRecorded(t *testing.T) {
 	requireHeld(t, manager, storagev1.StateContract)
 }
 
+// A held dataset that cannot be fenced when the hold is read, because its
+// description fails, its advance times out or it is briefly not ready, is
+// fenced once it answers, while the hold is still recorded.
+func TestHeldDatasetIsFencedOnceItAnswers(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	records.record.Acknowledgements = []store.StorageAcknowledgement{{
+		Contract: storagev1.StateContract, DatasetID: "dataset-a", Epoch: 5, AcknowledgedAt: time.Now().UTC(),
+	}}
+	records.record.Hold = &store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Contract: storagev1.StateContract,
+		DatasetID: "dataset-a", RaisedAt: time.Now().UTC(),
+	}
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}
+	dataset := newRecordingEpochDataset("dataset-a")
+	// The dataset holds its acknowledged epoch, so a fencing advance with it
+	// as the floor succeeds once the dataset answers.
+	dataset.requests = []storagev1.AdvanceControllerEpochRequest{{
+		DatasetID: "dataset-a", Epoch: store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 5}, InstallationID: "installation-a",
+	}}
+	dataset.describeErrs = []error{storagev1.ErrUnavailable}
+	dataset.advanceErrs = []error{context.DeadlineExceeded, storagev1.ErrNotReady}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	eventually(t, "the held dataset to be fenced", func() bool { return len(dataset.advanceRequests()) == 2 })
+	if fenced := dataset.advanceRequests()[1]; fenced.AcknowledgedEpoch != 5 || fenced.InstallationID != "installation-a" {
+		t.Fatalf("fencing advance = %+v, want acknowledged epoch 5 as its floor", fenced)
+	}
+	if refused := dataset.refusedBelowFloor(); len(refused) != 0 {
+		t.Fatalf("a dataset that holds its acknowledged epoch refused the fencing advance: %+v", refused)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+	if hold := recordedHoldOf(t, records); hold == nil || hold.ID != "hold-a" {
+		t.Fatalf("recorded hold = %#v, want hold-a still recorded", hold)
+	}
+}
+
+func recordedHoldOf(t *testing.T, records store.StorageRecordStore) *store.StorageRecoveryHold {
+	t.Helper()
+	record, err := records.GetStorageRecord(context.Background(), store.DefaultControllerEpochName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record.Hold
+}
+
 // A manager with storage datasets reports storage as not ready until each
 // dataset has passed its takeover checks, so a restarted controller creates
 // no Job against storage it has not checked yet.

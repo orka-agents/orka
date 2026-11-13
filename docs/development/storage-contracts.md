@@ -968,7 +968,8 @@ nothing, and only advances each dataset that still serves the contract it
 acknowledged, so a replaced controller cannot write to it. Each such advance
 supplies the dataset's acknowledged epoch as `AcknowledgedEpoch`, so a
 dataset that lost that epoch refuses it and keeps the evidence until the
-hold is released. A check after a
+hold is released. An advance that fails for another reason, such as a
+dataset that does not answer yet, is tried again while the hold lasts. A check after a
 restart or switch that cannot read the dataset is not a pass: the fences of
 the contracts the dataset serves stay closed until a later check finishes. An operator releases the hold,
 after the recovery procedure, by setting the

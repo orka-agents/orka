@@ -108,8 +108,11 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			if record.AcknowledgedHoldID != hold.ID {
 				log.Info("Storage is held for recovery; storage contract writes and control-store changes are refused until an operator acknowledges the hold",
 					"hold", hold.ID, "reason", hold.Reason, "message", hold.Message)
-				t.fenceHeld(ctx, record)
-				if err := t.waitForAcknowledgement(ctx, hold.ID); err != nil {
+				fencing, stopFencing := context.WithCancel(ctx)
+				t.fenceHeld(fencing, record)
+				err := t.waitForAcknowledgement(ctx, hold.ID)
+				stopFencing()
+				if err != nil {
 					return err
 				}
 				continue
@@ -155,7 +158,10 @@ func (t *storageTakeover) run(ctx context.Context) error {
 // while one that kept it, such as one that lost only watermark advances, is
 // fenced. A contract now served by another dataset is left alone, because
 // advancing that dataset would bind it to this installation before an
-// operator decided to switch.
+// operator decided to switch. Each advance is tried again until it
+// succeeds, the dataset refuses it for good, or ctx ends with the hold, so a
+// dataset that was unreachable when the hold was recorded is fenced once it
+// answers.
 func (t *storageTakeover) fenceHeld(ctx context.Context, record store.StorageRecord) {
 	for contract, fence := range t.contracts {
 		previous, acknowledged := record.Acknowledgement(contract)
@@ -164,26 +170,47 @@ func (t *storageTakeover) fenceHeld(ctx context.Context, record store.StorageRec
 		}
 		_, floor, _, _ := highestAcknowledged(record, previous.DatasetID)
 		go func() {
-			callCtx, cancel := context.WithTimeout(ctx, epochStorageCallTimeout)
-			defer cancel()
-			info, err := fence.dataset.Describe(callCtx)
-			if err != nil || info.DatasetID != previous.DatasetID {
-				return
-			}
-			_, err = fence.dataset.AdvanceControllerEpoch(callCtx, storagev1.AdvanceControllerEpochRequest{
-				DatasetID: info.DatasetID, Epoch: t.acquired, InstallationID: t.installationID, AcknowledgedEpoch: floor,
+			_, err := retryEpochStorageStep(ctx, "fence the held "+contract+" dataset", func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, t.fenceHeldDataset(ctx, fence.dataset, previous.DatasetID, floor)
 			})
+			log := logf.FromContext(ctx).WithValues("contract", contract, "dataset", previous.DatasetID)
 			switch {
 			case err == nil || ctx.Err() != nil:
-			case errors.Is(err, storagev1.ErrNotReady):
+			case errors.Is(err, errEpochBelowAcknowledgement):
 				// A dataset that lost its acknowledged epoch refuses the
 				// advance and keeps that evidence until the hold is released.
-				logf.FromContext(ctx).Info("A held storage dataset refused the advance and keeps its evidence", "contract", contract, "dataset", info.DatasetID, "reason", err.Error())
+				log.Info("A held storage dataset refused the advance and keeps its evidence", "reason", err.Error())
+			case errors.Is(err, storagev1.ErrDatasetMismatch):
+				log.Info("A held storage contract is served by another dataset now; leaving that dataset alone", "reason", err.Error())
 			default:
-				logf.FromContext(ctx).Error(err, "Fencing a held storage dataset failed", "contract", contract, "dataset", info.DatasetID)
+				log.Error(err, "Fencing a held storage dataset failed")
 			}
 		}()
 	}
+}
+
+// fenceHeldDataset advances, once, the dataset serving a held contract that
+// dataset datasetID acknowledged, with floor as the acknowledged epoch. A
+// refusal is final only when the dataset holds a lower epoch than floor; one
+// that is briefly not ready is tried again.
+func (t *storageTakeover) fenceHeldDataset(ctx context.Context, dataset EpochDataset, datasetID string, floor int64) error {
+	info, err := dataset.Describe(ctx)
+	if err != nil {
+		return err
+	}
+	if info.DatasetID != datasetID {
+		return fmt.Errorf("%w: dataset %s serves the contract, but dataset %s acknowledged it", storagev1.ErrDatasetMismatch, info.DatasetID, datasetID)
+	}
+	_, err = dataset.AdvanceControllerEpoch(ctx, storagev1.AdvanceControllerEpochRequest{
+		DatasetID: datasetID, Epoch: t.acquired, InstallationID: t.installationID, AcknowledgedEpoch: floor,
+	})
+	if errors.Is(err, storagev1.ErrNotReady) {
+		if stored, readErr := t.storedEpoch(ctx, datasetID, dataset); readErr == nil && stored < floor {
+			return fmt.Errorf("%w: dataset %s holds controller epoch %d, below its acknowledged epoch %d",
+				errEpochBelowAcknowledgement, datasetID, stored, floor)
+		}
+	}
+	return err
 }
 
 // waitForAcknowledgement returns once the hold named id is acknowledged or
