@@ -204,6 +204,71 @@ func TestACPDispatcherStartupStillRejectsGlobalListFailure(t *testing.T) {
 	}
 }
 
+// A dispatcher that starts while the installation is held for storage
+// recovery waits for the release instead of failing the manager, which would
+// restart the controller into the same hold. It dispatches nothing while
+// held, and dispatches once the hold is released.
+func TestACPDispatcherStartWaitsForAnInstallationHold(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	queued := fixture.queueTask(t, "queued-during-hold", "queued-during-hold-uid", "prompt queued during the hold", nil)
+	dispatcher := archivedSessionRecoveryDispatcher(fixture, fixture.controlStore, 1)
+	dispatcher.Epochs = fixture.epochs
+	dispatcher.Sessions = fixture.dispatcher.Sessions
+	fixture.epochs.setHold(store.StorageRecoveryHold{
+		ID: "hold-a", Reason: store.StorageRecoveryUnsafeSwitch, Message: "the dataset switched unsafely", RaisedAt: time.Now().UTC(),
+	})
+	t.Cleanup(fixture.epochs.clearHold)
+	ctx, cancel := context.WithCancel(fixture.ctx)
+	var startErr error
+	returned := make(chan struct{})
+	go func() {
+		startErr = dispatcher.Start(ctx)
+		close(returned)
+	}()
+	defer func() {
+		cancel()
+		<-returned
+	}()
+	select {
+	case <-returned:
+		t.Fatalf("dispatcher start under an installation hold returned %v, want it to wait for the release", startErr)
+	case <-time.After(20 * dispatcher.Interval):
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if calls := fixture.createCalls.Load(); calls != 0 || current.Status.Phase != queued.Status.Phase ||
+		current.Status.Execution.State != queued.Status.Execution.State {
+		t.Fatalf("the dispatcher acted on a Task while the installation was held: %d runtime sessions created, status %#v", calls, current.Status)
+	}
+
+	fixture.epochs.clearHold()
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := fixture.client.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Phase == corev1alpha1.TaskPhaseSucceeded && runtimeSessionCleanupCompleteForUID(current, current.UID) {
+			break
+		}
+		select {
+		case <-returned:
+			t.Fatalf("dispatcher stopped after the release: %v", startErr)
+		case <-deadline:
+			t.Fatalf("queued Task did not finish after the hold was released: %#v", current.Status)
+		case <-tick.C:
+		}
+	}
+	cancel()
+	<-returned
+	if startErr != nil {
+		t.Fatalf("stop dispatcher: %v", startErr)
+	}
+}
+
 func TestArchivedSessionRecoveryRejectsInvalidProof(t *testing.T) {
 	for _, test := range []struct {
 		name   string

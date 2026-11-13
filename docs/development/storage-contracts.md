@@ -1036,8 +1036,8 @@ unknown although its receipt was found; there the Task reports the hold
 while its outcome stays the one recovery settled. Detecting a restart or
 switch of an `async-replicated` dataset that happened while no controller
 ran needs the incarnation recorded with the acknowledgement, and so does
-keeping such a hold across a controller restart when it was removed from
-the status without being acknowledged.
+keeping an installation hold across a controller restart when it was
+removed from `status.storageRecovery` without being acknowledged.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a

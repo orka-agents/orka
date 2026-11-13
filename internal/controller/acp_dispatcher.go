@@ -183,17 +183,30 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		d.staleRecoveryMu.Lock()
 		d.staleRecoveryMu.Unlock() //nolint:staticcheck // SA2001: acquisition waits for the recovery worker to finish.
 	}()
-	if _, err := d.Epochs.CurrentFence(ctx); err != nil {
-		return err
-	}
-	if err := d.recoverStaleAttempts(ctx); err != nil {
-		if _, ok := errors.AsType[*acpTaskRecoveryErrors](err); !ok {
-			return fmt.Errorf("recover stale ACP attempts: %w", err)
-		}
-		logf.FromContext(ctx).Error(err, "ACP Tasks remain blocked on recovery; independent work may proceed")
-	}
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
+	// A controller that starts while the installation is held for storage
+	// recovery waits for the release, which needs this process running,
+	// instead of failing the manager and restarting into the same hold.
+	for waiting := false; ; waiting = true {
+		err := d.recoverAtStart(ctx)
+		if err == nil {
+			break
+		}
+		hold, held := errors.AsType[*store.StorageHoldError](err)
+		if !held {
+			return err
+		}
+		if !waiting {
+			logf.FromContext(ctx).Info("Storage is held for recovery; the ACP dispatcher recovers stale attempts and dispatches once the hold is released",
+				"hold", hold.Hold.ID, "reason", hold.Hold.Reason)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
 	for {
 		if err := d.dispatchOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
@@ -204,6 +217,22 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// recoverAtStart waits for the controller fence and recovers stale attempts
+// before the first dispatch. An ACP Task whose recovery is blocked is logged
+// and retried later, so independent work proceeds.
+func (d *ACPDispatcher) recoverAtStart(ctx context.Context) error {
+	if _, err := d.Epochs.CurrentFence(ctx); err != nil {
+		return err
+	}
+	if err := d.recoverStaleAttempts(ctx); err != nil {
+		if _, ok := errors.AsType[*acpTaskRecoveryErrors](err); !ok {
+			return fmt.Errorf("recover stale ACP attempts: %w", err)
+		}
+		logf.FromContext(ctx).Error(err, "ACP Tasks remain blocked on recovery; independent work may proceed")
+	}
+	return nil
 }
 
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
