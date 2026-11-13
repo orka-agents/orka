@@ -747,11 +747,10 @@ write without one.
   storage client refuses new writes to that dataset until it is. At the
   record level, a Kubernetes record requires a store record that is missing
   or different, such as a settling prompt attempt without its result receipt;
-  such a signal will hold only the affected Task or Session, with a
-  `StorageRecoveryRequired` condition, together with the Kubernetes protocol
-  checks. Held work makes no side effects, is never retried as a new
-  operation and never reports success. An operator releases a hold
-  explicitly after recovery.
+  such a signal holds only the affected Task, with a
+  `StorageRecoveryRequired` condition (see "Record holds" below). Held work
+  makes no side effects, is never retried as a new operation and never
+  reports success. An operator releases a hold explicitly after recovery.
 - **Store halves of the Kubernetes control protocols.** Session turn
   creation, finalization and projection activation, outbox enqueue, claim and
   completion, Session cleanup preparation and completion, prompt result
@@ -766,7 +765,8 @@ write without one.
   intent. Session turn creation and finalization are recognized by the turn
   key, and projection activation is idempotent by the state it changes. SQLite
   also checks the fence each Session turn step carries against the dataset's
-  controller epoch when it commits.
+  controller epoch when it commits. "Kubernetes control protocols" below lists
+  each protocol step by step.
 - **Execution event dedupe keys.** A repeated dedupe key returns the stored
   event only for a request with the same Task, Session and tool call;
   anything else returns `ErrDuplicateMismatch`, so a reused key is not
@@ -995,16 +995,56 @@ record still refuses it. A dataset that passed its own checks opens its fence wi
 waiting for the others, so another dataset's hold can close a fence that was
 already open.
 
-**Not yet covered.** Holding only the affected Task or Session for a missing
-or conflicting record comes with the Kubernetes protocol checks: a settling
-prompt attempt without its result receipt (today's recovery records the
-outcome as unknown and never re-runs the prompt or reports success), a
-finalized turn without its store record, and reclamation without the turn
-cleanup receipt. Detecting a restart or switch of an `async-replicated`
-dataset that happened while no controller ran needs the incarnation recorded
-with the acknowledgement, and so does keeping an installation hold across a
-controller restart when it was removed from `status.storageRecovery` without
-being acknowledged.
+**Record holds.** A Kubernetes record that requires a store record the
+store no longer holds, or holds with other content, holds only the affected
+object. Recovery does this for a settling prompt attempt whose result
+receipt is missing or conflicts (P5 in "Kubernetes control protocols"
+below): the Task gets `StorageRecoveryRequired=True` with reason
+`MissingRecord` or `ConflictingRecord`, and the message names the record,
+its key, the digest Kubernetes recorded and a hold ID derived from them.
+Recovery writes the condition under its controller epoch, and only while the
+PromptAttempt is as recovery read it and still `Settling`. A write from a
+replaced controller that the API server applies late carries the Task's
+earlier resourceVersion, so it lands only before that resourceVersion next
+changes. The successor's terminal epoch write releases such a hold once
+recovery settled the attempt from its record: after it recorded success from
+the restored receipt, or recorded the outcome as unknown while the store
+holds a receipt matching the attempt's own settling operation, as for an
+attempt in workspace validation whose receipt recovery found but whose
+completion the journal no longer showed. While held, the prompt is not run
+again, the attempt stays `Settling`, the outcome is not guessed, success is
+not reported and nothing is deleted.
+When the record is found again, after a restore, the condition becomes
+`False` with reason `RecordFound` and recovery settles the Task from it. An
+operator who cannot restore it sets the Task's
+`storage.orka.ai/recovery-acknowledged` annotation to the hold ID; recovery
+then records the outcome as unknown, as it did before record holds existed,
+and the condition becomes `False` with reason `RecoveryAcknowledged`. An
+annotation naming another hold releases nothing. The Gateway Task admission
+policy admits an update of a Gateway-owned Task that changes only this
+annotation, from a user who may also update that Task's status. A recovery
+pass that starts while the installation is held acts on no Task, and one
+already under way changes a Task's record hold condition only through the
+same admission as Job creation, so record holds are placed and released once
+the installation hold clears. Recovery keeps acting on a held Task that is
+marked for deletion, without replaying its prompt, so the deletion completes
+once the hold is released.
+
+**Not yet covered.** Record holds for a finalized turn without its store
+record and for reclamation without the turn cleanup receipt come with the
+Session turn protocols (P2 and P6). Once workspace validation records a
+delivery transition, the PromptAttempt no longer carries the settling
+digest, so a receipt is checked only against its own settling operation: a
+receipt replaced with another result and a matching digest is not detected.
+That needs the settling digest kept on the PromptAttempt across delivery
+transitions. Such a late hold write is not yet released on a Task restored
+under a new UID, or when the store loses the receipt again after recovery
+found it and before its terminal epoch write; there the Task reports the
+hold while its outcome stays the one recovery settled. Detecting a restart
+or switch of an `async-replicated` dataset that happened while no controller
+ran needs the incarnation recorded with the acknowledgement, and so does
+keeping an installation hold across a controller restart when it was
+removed from `status.storageRecovery` without being acknowledged.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
@@ -1026,6 +1066,151 @@ failover, and a `synchronous-replicated` one declares at least one. An
 `async-replicated` provider declares none either: its switch may lose
 acknowledged writes, which these cases do not allow, and Orka holds the
 installation after one. SQLite supplies `Restart` by closing and reopening its file.
+
+### Kubernetes control protocols
+
+The Kubernetes control store (`store/kube`) runs four protocols whose store
+half is a `state.v1` family: outbox delivery (P3), Session cleanup (P4),
+prompt result receipts (P5) and Gateway Task cleanup receipts (P7).
+Controller ownership (P1) is the takeover sequence in "Controller ownership"
+above. Session turn open and finalization (P2) and Task reclamation barriers
+(P6) are not written up here yet.
+
+In the tables, K is a Kubernetes step and S a store step. Every store step
+is a write with an envelope, so it commits only under the current fence, and
+a replay of the same operation returns its original outcome. The idempotency
+key says how a step run again as a new operation, for example by a successor
+controller, is recognized; where a step has none, its protocol says why
+running it again is safe or why Orka does not. When the storage client cannot
+settle a step's outcome, the protocol's caller sees `ErrOutcomeUnknown`,
+reports no success and goes on as each protocol says below. The shared
+suite's `protocols` family drives each store half step by step: it loses
+store steps' responses and retries them, runs them again as new operations,
+replaces the controller between steps, and delivers steps the replaced
+controller issued after the takeover.
+
+**P3. Outbox projection delivery.** The ACP outbox projector delivers Task
+status projections. `store/kube` checks the Kubernetes controller epoch
+around each store step.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `EnqueueOutboxProjectionRecord`, alone or inside Session turn finalization | Projection ID and payload digest |
+| 2 | S | `ClaimOutboxProjectionRecords(fence, worker, lease, now)` | The state it changes: a claim leases only due or expired records |
+| 3 | K | Apply the projection's terminal phase, execution and delivery status to the Task | None; applying it again writes the same terminal status |
+| 4 | S | `CompleteOutboxProjectionRecord(id, expected version, lease owner, operation ID and digest, new state)` | Operation ID and digest |
+
+- A lost claim response is retried with the same operation and returns the
+  same claim. A claim whose outcome stays unknown only delays its records
+  until the lease expires; a new claim before then finds nothing due.
+- The projector claims again on its next pass, so a claim or completion
+  whose outcome stays unknown is settled then: a completed projection is no
+  longer due, and an uncompleted one is claimed again once its lease expired.
+- A controller that stops after step 3 leaves the claim to expire; the
+  successor claims again, applies the projection again, which rewrites the
+  same terminal status with a new transition time, and completes.
+- A delayed step 4 from the replaced controller returns `ErrFenced`, and the
+  successor's claim and completion stand.
+- Store obligations: a claim returns only due or expired records; a
+  completion requires the exact version, lease owner, operation ID and
+  digest; a completion run again returns the stored projection.
+
+**P4. Session cleanup, including Gateway retention cleanup.** Session
+deletion and Gateway transcript retention reclaim a Session.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | Read the intent, or the completion; a completion for the same operation means: verify the Kubernetes records are absent and stop | — |
+| 2 | S | `PrepareSessionCleanup(intent)`: the operation ID and digest, the expected Kubernetes versions and UIDs, and the BranchClaim expectations | Namespace, Session and operation, while the intent is pending |
+| 3 | local | Retire the resident runtime, outside the epoch interlock | — |
+| 4 | K | Delete the BranchClaims, the Session Lease and the RuntimeSessionControl with exact UID and version preconditions, and check they are gone | Exact UIDs and versions |
+| 5 | S | `CompleteSessionCleanup`: delete the transcript, Session row and intent, write the completion and archive turn cleanup receipts, in one transaction | Namespace, Session, operation ID and digest |
+
+- From step 2 on, the intent refuses new work on the Session in the
+  transaction of each write: transcript appends, Task locks, chat turns and
+  turn commits return `ErrConflict`, and Gateway admission returns
+  `ErrGatewaySessionCleanupPending`. `HasSessionCleanupFenceForUID` fences the
+  Session UID.
+- The intent covers the crash window between the Kubernetes deletes (step 4)
+  and the transcript delete (step 5): a successor's `ResumeSessionCleanups`
+  runs every intent again under its own fence, with the operation ID the
+  intent holds.
+- A lost step 5 response is retried; once the intent is gone, the next run
+  finds the completion for the same operation in step 1 and stops.
+- A delayed step 2 or step 5 from the replaced controller returns
+  `ErrFenced`. Step 2 depends on this: once the cleanup completed it has no
+  natural key, and only step 1 keeps Orka from preparing it again.
+- Store obligations: preparation returns the pending intent for the same
+  operation and refuses another operation while one is pending; completion
+  is idempotent; the intent check runs in the transaction of every write it
+  blocks; a completion keeps fencing the Session UID and reserves the name of
+  a Session with a Kubernetes identity. A transcript-only Session, which has
+  none, may be created again, which removes its completion.
+- A Kubernetes record that reappears after a completion, such as a
+  RuntimeSessionControl, fails the cleanup with `ErrConflict` and deletes
+  nothing.
+
+**P5. Prompt result receipt before settling.** The ACP dispatcher settles a
+completed prompt.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `SavePromptResultReceipt(attempt ID, operation ID and digest, result)` | Attempt ID; a receipt is immutable |
+| 2 | K | Move the PromptAttempt from `Running` to `Settling`, recording the same operation ID and digest | The attempt's expected version, operation ID and digest |
+| 3 | S | `SaveResult` | The Task; a write replaces the result only with a later issue stamp |
+| 4 | K | Settle the attempt, then deliver | The attempt's expected version, operation ID and digest |
+
+- A successor repairs a result write interrupted after step 2 by reading the
+  receipt and running step 3 again.
+- The dispatcher does not run step 1 or step 3 again itself when its outcome
+  stays unknown, and reports no success. A Session Task's prompt is recorded
+  as unknown at once; a standalone Task waits for recovery after the next
+  takeover, which records an attempt still `Running` as unknown and repairs
+  step 3 from the receipt for one already `Settling`. An attempt whose
+  workspace validation had started is settled only when the journal records
+  the prompt's completion, and otherwise its outcome is recorded as unknown;
+  either way the validation, which recovery cannot finish, ends as a
+  delivery conflict.
+- A delayed step 1 or step 3 from the replaced controller returns
+  `ErrFenced`.
+- Step 2 moves a PromptAttempt to `Settling` only after its receipt was
+  stored, so a missing receipt, with no result that matches the recorded
+  digest, or a receipt that differs from the recorded digest, holds the Task
+  (see "Record holds" above), also when the journal already records the
+  prompt's completion. Workspace validation starts while the attempt is still
+  `Settling` and records a later operation on it; from then on the receipt is
+  checked against its own settling operation, and a missing one holds the
+  Task whatever result is stored. An attempt that reached `Settling` another
+  way never had a receipt, and its recovery is unchanged. Recovery reads the
+  receipt record itself: a step 1 replay answered from its operation receipt
+  does not show that the record is still stored.
+- A repair whose result write ends with its outcome unknown ends that
+  recovery pass without success; the next pass writes the receipt's result
+  again as a new operation, which replaces the result with the same bytes.
+
+**P7. Gateway Task cleanup receipts.** Gateway retention removes the Tasks
+of compacted events.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `MaintainGatewayRecords` compacts terminal events past retention and writes a `GatewayTaskCleanupReceipt` for each event's Task | The state it changes: compaction run again finds nothing left to compact |
+| 2 | K | Request ordinary deletion of the exact Task UID the receipt names, and prove with an uncached read that it is gone | Task UID precondition |
+| 3 | S | `DeleteGatewayTaskCleanupReceipt` | The state it changes: deleting a missing receipt succeeds |
+
+- A delayed step 1 from the replaced controller returns `ErrFenced` and
+  leaves the event, so the successor's own compaction writes the receipt.
+- A delayed step 3 returns `ErrFenced`; the successor deletes the receipt
+  itself once it proved the Task gone.
+- A Task with no event, tombstone, receipt or archive is never deleted.
+
+**Grouped writes.** Each grouped write commits all of its parts or none. The
+shared suite's `grouped-writes` family makes the part a provider would write
+last fail and checks that no part is visible: an execution event and plan
+update whose usage observation reuses a stored observation ID, a chat turn
+whose last message reuses a stored message ID with other content, and a
+Gateway terminal projection and expiry whose delivery ID belongs to another
+delivery. The ACP dispatcher writes a plan update only together with its
+execution event, through `AppendExecutionEventWithPlanIfAbsent`.
 
 ### Writer exclusivity and schema migration for adapters
 
@@ -1530,8 +1715,9 @@ Reads and administrative methods reach the provider unchanged.
   set: new writes to that dataset are refused with `ErrNotReady` while the
   client keeps resolving the set in the background. An operation that
   `ResolveOperation` finds too old to settle leaves the set with its outcome
-  permanently unknown; holding the affected work for recovery comes with the
-  record-level recovery holds.
+  permanently unknown. A Kubernetes protocol step in that state goes on as
+  its protocol says in "Kubernetes control protocols" above. Holding the work
+  that other writes affect is not covered yet.
 - **Sealed writes and callback protocols.** The client seals a record, or
   computes a conditional command, once per write, and every retry resends the
   same request with the same envelope. A seal uses a fresh nonce, so a

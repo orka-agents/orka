@@ -8,7 +8,8 @@
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
 // concurrent callers, conditional commands that refuse a changed target or a
-// stale fence, exact nanosecond times and the provider description.
+// stale fence, exact nanosecond times, the provider description and the
+// store halves of the Kubernetes control protocols.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 //
@@ -89,6 +90,8 @@ var stateFamilies = []stateFamily{
 		})
 	}},
 	{"lost-responses", runLostResponses},
+	{"grouped-writes", runGroupedWrites},
+	{"protocols", runProtocols},
 	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
 		runWriteCatalog(t, newProvider, stateWriteCases)
 	}},
