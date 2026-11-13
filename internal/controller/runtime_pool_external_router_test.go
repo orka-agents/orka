@@ -455,7 +455,10 @@ func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*workspacev1alpha1.StartupEvidence)
+		// unbound drops the pool's saved binding.
+		unbound bool
 	}{
+		{name: "no binding was saved", mutate: func(*workspacev1alpha1.StartupEvidence) {}, unbound: true},
 		{name: "router target names another Actor", mutate: func(e *workspacev1alpha1.StartupEvidence) {
 			e.Process.Name, e.Process.RouterTarget = "actor-2", "orka-atespace/actor-2"
 		}},
@@ -476,6 +479,10 @@ func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 			if err := f.r.bindExternalRuntimeInstanceEvidence(t.Context(), &pool, w); err != nil {
 				t.Fatal(err)
 			}
+			bound := pool.DeepCopy()
+			if test.unbound {
+				delete(pool.Annotations, externalRuntimeEvidenceAnnotation)
+			}
 			f.r.SupervisorClient = nil
 			changed := w.Status.Allocation.Startup.DeepCopy()
 			test.mutate(changed)
@@ -490,7 +497,7 @@ func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 				t.Fatalf("changed evidence carried controller credentials: routed=%d direct=%d", len(f.router.requests), f.direct.calls)
 			}
 			// The exact bound evidence still reaches its own Actor.
-			_, _ = f.r.externalStartupSupervisorClient(&pool, w.Status.Allocation.Startup).Probe(t.Context(), routedTestRouterURL, "token", []byte(strings.Repeat("s", 32)))
+			_, _ = f.r.externalStartupSupervisorClient(bound, w.Status.Allocation.Startup).Probe(t.Context(), routedTestRouterURL, "token", []byte(strings.Repeat("s", 32)))
 			if len(f.router.requests) == 0 || f.router.requests[0].Header.Get(daemonprotocol.TargetActorHeader) != "orka-atespace/actor-1" {
 				t.Fatal("bound evidence did not reach its routed target")
 			}

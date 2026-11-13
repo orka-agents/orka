@@ -178,14 +178,19 @@ func (c unavailableSupervisorClient) RequestDrain(context.Context, string, strin
 // evidence names exactly the instance, endpoint, router target and worker or
 // Pod that Core independently bound before credential delivery. Provider
 // status can change after binding; it must never redirect controller
-// credentials to another Actor that shares the bound instance identity.
+// credentials to another Actor that shares the bound instance identity. Core
+// binds before it delivers credentials, so evidence for a pool with no binding
+// is never trusted either.
 func externalStartupMatchesBoundEvidence(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) error {
 	if pool == nil || evidence == nil {
 		return nil
 	}
 	binding, err := externalRuntimeEvidence(pool)
-	if err != nil || binding == nil {
+	if err != nil {
 		return err
+	}
+	if binding == nil {
+		return fmt.Errorf("startup evidence has no bound runtime instance: %w", workspaceprovider.ErrStaleIdentity)
 	}
 	matches := binding.Identity == evidence.Identity && binding.Endpoint == evidence.Endpoint &&
 		binding.RouterTarget == externalStartupRouterTarget(evidence)
@@ -202,8 +207,8 @@ func externalStartupMatchesBoundEvidence(pool *corev1alpha1.RuntimePool, evidenc
 
 // externalStartupSupervisorClient selects the supervisor transport for exact
 // provider startup evidence: routed evidence uses only the configured router;
-// direct evidence keeps the pool's existing transport. Evidence for an
-// already-bound instance must match its saved binding first.
+// direct evidence keeps the pool's existing transport. The evidence must match
+// the pool's saved binding first.
 func (r *RuntimePoolReconciler) externalStartupSupervisorClient(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) RuntimePoolSupervisorClient {
 	if err := externalStartupMatchesBoundEvidence(pool, evidence); err != nil {
 		return unavailableSupervisorClient{err: err}
