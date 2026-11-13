@@ -138,8 +138,8 @@ func readDurableState[P suiteProvider](t *testing.T, provider P) (durableState, 
 
 // runDurableWrite commits one write, restarts or fails over the provider, and
 // checks that the change, its receipt and the dataset's ownership survive.
-// The receipt is resolved before the write is replayed, so a replay cannot
-// record a receipt the switch lost.
+// The receipt is resolved before the write is replayed, so a receipt the
+// switch lost fails the case before a replay can record it again.
 func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], reopen func(*testing.T, P) P, failover bool) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
