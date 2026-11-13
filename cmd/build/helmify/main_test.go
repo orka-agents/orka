@@ -1227,6 +1227,16 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			},
 		},
 		{
+			// The cluster domain may itself contain the namespace suffix.
+			name: "static harness v2 controller with a cluster domain repeating the namespace suffix",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc.orka-test.svc.example:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+			},
+		},
+		{
 			name: "static harness v2 controller with an unrecognized controller URL",
 			existingControllerArgs: []string{
 				"--controller-mode=harness-v2",

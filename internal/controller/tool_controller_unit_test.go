@@ -2614,6 +2614,7 @@ type recordingToolWorkspaceExecutor struct {
 	describeTemplates map[string]workspace.TemplateRef
 	// describeDeleted lists Actor IDs Describe reports as already deleted.
 	describeDeleted []string
+	describePhase   workspace.Phase
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2689,7 +2690,7 @@ func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req works
 	if slices.Contains(e.describeDeleted, req.Ref.ID) {
 		return &workspace.Description{Ref: req.Ref, Phase: workspace.PhaseDeleted}, nil
 	}
-	return &workspace.Description{Ref: req.Ref, Template: e.describeTemplates[req.Ref.ID]}, nil
+	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase, Template: e.describeTemplates[req.Ref.ID]}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {
