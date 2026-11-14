@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,13 +45,29 @@ func (f *externalRuntimePoolFixture) advertiseSubstrateV1Backend(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider.Status.Backend = &workspacev1alpha1.ExecutionWorkspaceBackendStatus{Version: "b34fbee7", APIVersions: []string{"ateapi.v1.0.0"}}
-	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressAllowlist)
+	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressAllowlist, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
 	if err := f.r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
 	// A native runtime on this backend resolves only fully qualified names.
 	f.r.ControllerAPIURL = "http://orka-api.default.svc.cluster.local:8080"
 	f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"
+}
+
+// withdrawEgressCredentialInjection models a gateway-enforcing provider that
+// cannot inject the provider-proxy token.
+func (f *externalRuntimePoolFixture) withdrawEgressCredentialInjection(t *testing.T) {
+	t.Helper()
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.provider), provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Status.SupportedFeatures = slices.DeleteFunc(provider.Status.SupportedFeatures, func(feature workspacev1alpha1.ExecutionWorkspaceFeature) bool {
+		return feature == workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection
+	})
+	if err := f.r.Update(t.Context(), provider); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // useShortServiceOrigins configures Core's origins with the short
@@ -98,7 +115,7 @@ func newRoutedRuntimeFixture(t *testing.T, substrateV1 bool, mutate func(*worksp
 func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *testing.T) {
 	r := &RuntimePoolReconciler{ControllerAPIURL: "https://Orka-API.orka-system.svc.cluster.local"}
 	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"}}
-	policy, err := r.externalRuntimeEgress(cfg)
+	policy, err := r.externalRuntimeEgress(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,13 +128,13 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 	}
 	// A cluster domain other than cluster.local is the operator's to choose.
 	r.ControllerAPIURL = "https://orka-api.orka-system.svc.corp.example"
-	if _, err := r.externalRuntimeEgress(cfg); err != nil {
+	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
 		t.Fatalf("custom cluster domain refused: %v", err)
 	}
 
 	// One origin serving both roles yields one grant.
 	r.ControllerAPIURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080/api"
-	if policy, err = r.externalRuntimeEgress(cfg); err != nil || len(policy.Rules) != 1 {
+	if policy, err = r.externalRuntimeEgress(cfg, nil); err != nil || len(policy.Rules) != 1 {
 		t.Fatalf("shared origin = %#v, %v", policy, err)
 	}
 	for name, controllerURL := range map[string]string{
@@ -127,7 +144,7 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 		"unsupported scheme":   "ftp://orka-api.orka-system.svc.cluster.local",
 	} {
 		r.ControllerAPIURL = controllerURL
-		if _, err := r.externalRuntimeEgress(cfg); err == nil {
+		if _, err := r.externalRuntimeEgress(cfg, nil); err == nil {
 			t.Errorf("%s: inexpressible controller origin was admitted", name)
 		}
 	}
@@ -154,14 +171,14 @@ func TestExternalRuntimeEgressAdmitsTelemetryCollectorOnlyWhenOptedIn(t *testing
 		{"opt-in without telemetry", false, true},
 	} {
 		r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc.cluster.local", EnableTelemetry: test.telemetry, TelemetryCollectorEgress: test.collect}
-		policy, err := r.externalRuntimeEgressWithEnv(cfg, getenv)
+		policy, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv)
 		if err != nil || !reflect.DeepEqual(policy.Rules, core) {
 			t.Fatalf("%s: egress rules = %#v, %v", test.name, policy, err)
 		}
 	}
 
 	r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc.cluster.local", EnableTelemetry: true, TelemetryCollectorEgress: true}
-	policy, err := r.externalRuntimeEgressWithEnv(cfg, getenv)
+	policy, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,20 +194,20 @@ func TestExternalRuntimeEgressAdmitsTelemetryCollectorOnlyWhenOptedIn(t *testing
 	// The opt-in fails closed: an inexpressible projected collector refuses
 	// admission instead of silently dropping or widening the allowlist.
 	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "http://10.0.0.7:4318/v1/traces"
-	if _, err := r.externalRuntimeEgressWithEnv(cfg, getenv); err == nil || !strings.Contains(err.Error(), "telemetry collector") {
+	if _, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err == nil || !strings.Contains(err.Error(), "telemetry collector") {
 		t.Fatalf("IP collector admitted: %v", err)
 	}
 	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://traces.otel.svc/v1/traces"
-	if _, err := r.externalRuntimeEgressWithEnv(cfg, getenv); err == nil || !strings.Contains(err.Error(), "short Kubernetes Service name") {
+	if _, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err == nil || !strings.Contains(err.Error(), "short Kubernetes Service name") {
 		t.Fatalf("short-named collector admitted: %v", err)
 	}
 	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://provider-auth-proxy.orka-system.svc.cluster.local:8080/v1/traces"
-	if _, err := r.externalRuntimeEgressWithEnv(cfg, getenv); err == nil {
+	if _, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err == nil {
 		t.Fatal("collector sharing a core origin with a conflicting protocol was admitted")
 	}
 	// Without a projected collector there is nothing to admit.
 	clear(values)
-	if policy, err = r.externalRuntimeEgressWithEnv(cfg, getenv); err != nil || !reflect.DeepEqual(policy.Rules, core) {
+	if policy, err = r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err != nil || !reflect.DeepEqual(policy.Rules, core) {
 		t.Fatalf("no collector: egress rules = %#v, %v", policy, err)
 	}
 }
@@ -213,7 +230,7 @@ func TestExternalRuntimeEgressRefusesShortServiceNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &RuntimePoolReconciler{ControllerAPIURL: tc.controllerURL}
-			_, err := r.externalRuntimeEgress(runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: tc.proxyURL}})
+			_, err := r.externalRuntimeEgress(runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: tc.proxyURL}}, nil)
 			if err == nil {
 				t.Fatal("a short Service name was admitted to a native egress allowlist")
 			}
@@ -278,12 +295,19 @@ func TestExternalRuntimePoolPublishesEgressAllowlistForSubstrateV1Native(t *test
 	if runtime.NetworkPolicy != nil || runtime.Egress == nil || runtime.BootstrapPort != workspacev1alpha1.NativeRouterTargetPort {
 		t.Fatalf("Substrate v1 native request network = %#v / %#v, port %d", runtime.NetworkPolicy, runtime.Egress, runtime.BootstrapPort)
 	}
+	providerSecret := findExternalProviderSecret(t, f)
 	want := []workspacev1alpha1.RuntimeEgressRule{
 		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "orka-api.default.svc.cluster.local", Ports: []int32{8080}},
-		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc.cluster.local", Ports: []int32{8080}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc.cluster.local", Ports: []int32{8080}, ReplaceHeaders: []workspacev1alpha1.RuntimeEgressCredentialHeader{{
+			Header: "Authorization", Prefix: "Bearer ",
+			SecretKeyRef: workspacev1alpha1.RuntimeEgressSecretKeyReference{Namespace: providerSecret.Namespace, Name: providerSecret.Name, Key: runtimePoolProviderTokenKey},
+		}}},
 	}
 	if !reflect.DeepEqual(runtime.Egress.Rules, want) {
 		t.Fatalf("admitted egress = %#v, want provider proxy and controller API origins", runtime.Egress.Rules)
+	}
+	if !slices.Contains(runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection) {
+		t.Fatal("injecting request does not require the provider's credential injection feature")
 	}
 }
 
@@ -301,7 +325,8 @@ func TestExternalRuntimePoolRefusesShortServiceNamesForSubstrateV1Native(t *test
 		t.Fatal("a workload request was published with a short Service name in its egress allowlist")
 	}
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
-	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "set --acp-provider-proxy-base-url to the fully qualified name") {
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "set --acp-provider-proxy-base-url to the fully qualified name") ||
+		strings.Contains(pool.Status.Message, "--acp-workspace-allow-provider-token-in-sandbox") {
 		t.Fatalf("pool status = %s %q, want Degraded naming the flag to fix", pool.Status.Lifecycle, pool.Status.Message)
 	}
 }

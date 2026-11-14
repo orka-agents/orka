@@ -458,20 +458,27 @@ func TestToolReconcilerRetriesWhenAnEditedToolHasNoExecutorToStopItsActor(t *tes
 	requireEgressUnverified(t, got)
 }
 
-// A failure while the installed policy is the one the current specification
-// asked for leaves nothing stale, so the Actor keeps running.
-func TestToolReconcilerKeepsRunningActorWhenItsEgressPolicyIsCurrent(t *testing.T) {
+// An invalid Tool has its egress denied and its Actor stopped. With the
+// template gone the controller cannot tell whether to suspend or delete, so it
+// does neither and keeps retrying, with egress already denied. Repeating the
+// reconcile changes nothing.
+func TestToolReconcilerDeniesEgressAndRetriesTheStopWhenAnInvalidToolsTemplateIsGone(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
 	if err := r.Delete(context.Background(), approvedMCPActorTemplateForTest()); err != nil {
 		t.Fatalf("Delete template: %v", err)
 	}
-	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
-	}
-	got := getEgressTestTool(t, r)
-	if got.Status.Available || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 || !substrateMCPEgressVerified(&got) {
-		t.Fatalf("status=%+v releases=%v deletes=%v, want unavailable with the actor untouched", got.Status, executor.releaseReqs, executor.deleteReqs)
+	for range 2 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+			t.Fatal("Reconcile() error = nil, want the failed stop so the reconcile retries")
+		}
+		got := getEgressTestTool(t, r)
+		condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+		if got.Status.Available || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 ||
+			condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" ||
+			!strings.Contains(got.Status.Error, "could not be stopped") {
+			t.Fatalf("status=%+v releases=%v deletes=%v, want unavailable, egress revoked and the failed stop named", got.Status, executor.releaseReqs, executor.deleteReqs)
+		}
 	}
 }
 
@@ -507,8 +514,15 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read the actor's template") || !strings.Contains(err.Error(), "egress is denied") {
 		t.Fatalf("Reconcile() error = %v, want the unreadable template reported, egress denied, and a retry", err)
 	}
-	if len(applied) != 1 || applied[0].actorID != running.Status.Actor.ActorID || len(applied[0].rules) != 0 {
-		t.Fatalf("applied = %+v, want one deny-all policy for %q", applied, running.Status.Actor.ActorID)
+	// An invalid Tool's egress is revoked and the stop then falls back to
+	// denying it again, so every policy applied must be deny-all.
+	if len(applied) == 0 {
+		t.Fatalf("applied = %+v, want a deny-all policy for %q", applied, running.Status.Actor.ActorID)
+	}
+	for _, application := range applied {
+		if application.actorID != running.Status.Actor.ActorID || len(application.rules) != 0 {
+			t.Fatalf("applied = %+v, want only deny-all policies for %q", applied, running.Status.Actor.ActorID)
+		}
 	}
 	got := getEgressTestTool(t, r)
 	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 || !strings.Contains(got.Status.Error, "could not be stopped") {
@@ -725,6 +739,174 @@ func TestToolReconcilerStopsThePreviousActorWhenItsReplacementHasNoEgressPolicy(
 	for _, req := range executor.releaseReqs {
 		if req.Ref.ID != running.Status.Actor.ActorID {
 			t.Fatalf("release request = %+v, want only the previous actor %q suspended", req, running.Status.Actor.ActorID)
+		}
+	}
+}
+
+// A Tool can hold a replacement Actor while its status still names the one it
+// replaces, for example after the replacement's endpoint check failed. When the
+// Tool then becomes invalid, every Actor it holds has its egress denied, even
+// past one that cannot be reached, and every one is stopped.
+func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T) {
+	second := approvedMCPActorTemplateForTest()
+	second.SetName("mcp-template-next")
+	var denied []string
+	var failFor string
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, running := runningEgressTestTool(t, executor, func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+		if rules != nil {
+			return nil
+		}
+		denied = append(denied, actorID)
+		if actorID == failFor {
+			return errors.New("control API unavailable")
+		}
+		return nil
+	}, second)
+	previous := running.Status.Actor.ActorID
+	replacement := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template-next")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, replacement)); err != nil {
+		t.Fatalf("Create replacement lease: %v", err)
+	}
+	// The replacement was claimed for mcp-template-next; the Tool has since
+	// moved to a third template, whose suspend support must not decide how the
+	// replacement is stopped.
+	executor.describeTemplates = map[string]workspace.TemplateRef{replacement: {Namespace: "ate-demo", Name: "mcp-template-next"}}
+	third := approvedMCPActorTemplateForTest()
+	third.SetName("mcp-template-stateless")
+	if err := r.Create(context.Background(), third); err != nil {
+		t.Fatalf("Create third template: %v", err)
+	}
+	statelessTemplates := map[string]bool{"mcp-template-stateless": true}
+	validate := r.SubstrateTemplateValidator
+	r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		if err := validate(ctx, request); err != nil {
+			return err
+		}
+		request.TemplateSuspendUnsupported = statelessTemplates[request.TemplateName]
+		return nil
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-stateless"
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	// Fail whichever Actor is denied first, so the other is denied only if the
+	// loop goes on past the failure.
+	failFor = min(previous, replacement)
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+		t.Fatal("Reconcile() error = nil, want the failed revocation so the reconcile retries")
+	}
+	slices.Sort(denied)
+	if want := []string{min(previous, replacement), max(previous, replacement)}; !slices.Equal(denied, want) {
+		t.Fatalf("denied = %v, want deny-all attempted for %v", denied, want)
+	}
+	stopped := map[string]bool{}
+	for _, req := range executor.releaseReqs {
+		stopped[req.Ref.ID] = true
+	}
+	// Both run templates that keep data, so both are suspended, not deleted.
+	if !stopped[previous] || !stopped[replacement] || len(executor.deleteReqs) != 0 {
+		t.Fatalf("releases=%v deletes=%v, want both %q and %q suspended", executor.releaseReqs, executor.deleteReqs, previous, replacement)
+	}
+	got := getEgressTestTool(t, r)
+	if condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady); got.Status.Available ||
+		condition == nil || condition.Reason != "EgressRevocationFailed" {
+		t.Fatalf("status = %+v, want an unavailable Tool with a reported revocation failure", got.Status)
+	}
+}
+
+// failingPoolLeaseGetClient fails every Lease read in one namespace, as when
+// the API server cannot serve a pool's lease.
+type failingPoolLeaseGetClient struct {
+	client.Client
+	namespace string
+}
+
+func (c failingPoolLeaseGetClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*coordinationv1.Lease); ok && key.Namespace == c.namespace {
+		return errors.New("lease read unavailable")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// During a pooled-to-dedicated replacement the Tool holds the dedicated Actor
+// while its status still names the pooled one. When the Tool becomes invalid
+// and the pooled Actor's lease cannot be read, the dedicated Actor, whose
+// lease is proven, still has its egress denied and is stopped, and the lookup
+// failure is returned so the reconcile retries.
+func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testing.T) {
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: "pools"},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+			TargetActors: 2,
+		},
+	}
+	var denied []string
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, running := runningEgressTestTool(t, executor, func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+		if rules == nil {
+			denied = append(denied, actorID)
+		}
+		return nil
+	}, pool)
+	if running.Status.Actor.PoolRef == nil || running.Status.Actor.PoolRef.Namespace != "pools" {
+		t.Fatalf("actor status = %+v, want a pooled actor from the pools namespace", running.Status.Actor)
+	}
+	pooled := running.Status.Actor.ActorID
+	dedicated := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, dedicated)); err != nil {
+		t.Fatalf("Create dedicated lease: %v", err)
+	}
+	executor.describeTemplates = map[string]workspace.TemplateRef{dedicated: {Namespace: "ate-demo", Name: "mcp-template"}}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	r.Client = failingPoolLeaseGetClient{Client: r.Client, namespace: "pools"}
+	_, err := r.Reconcile(context.Background(), mcpToolRequest())
+	if err == nil || !strings.Contains(err.Error(), "lease read unavailable") {
+		t.Fatalf("Reconcile() error = %v, want the failed pool lease lookup so the reconcile retries", err)
+	}
+	if !slices.Contains(denied, dedicated) {
+		t.Fatalf("denied = %v, want deny-all for the dedicated actor %q", denied, dedicated)
+	}
+	if slices.Contains(denied, pooled) {
+		t.Fatalf("denied = %v, want no change to the pooled actor %q whose lease was not proven", denied, pooled)
+	}
+	stopped := false
+	for _, req := range executor.releaseReqs {
+		if req.Ref.ID == dedicated {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatalf("releases = %v, want the dedicated actor %q suspended", executor.releaseReqs, dedicated)
+	}
+}
+
+// A held Actor that Substrate no longer has needs no stop: Describe reports it
+// deleted, without a template, and the invalid Tool must not keep retrying.
+func TestToolReconcilerTreatsAnAbsentHeldActorAsStopped(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	gone := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template-gone")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, gone)); err != nil {
+		t.Fatalf("Create lease: %v", err)
+	}
+	executor.describeDeleted = []string{gone}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v, want the absent Actor treated as stopped", err)
+	}
+	for _, req := range executor.releaseReqs {
+		if req.Ref.ID == gone {
+			t.Fatalf("releases = %v, want no stop for the absent Actor", executor.releaseReqs)
 		}
 	}
 }

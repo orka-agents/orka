@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2609,7 +2610,11 @@ type recordingToolWorkspaceExecutor struct {
 	deletedActorIDs                []string
 	deleteReqs                     []workspace.DeleteRequest
 	deleteErrs                     []error
-	describePhase                  workspace.Phase
+	// describeTemplates is the template Describe reports for each Actor ID.
+	describeTemplates map[string]workspace.TemplateRef
+	// describeDeleted lists Actor IDs Describe reports as already deleted.
+	describeDeleted []string
+	describePhase   workspace.Phase
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2682,7 +2687,10 @@ func (e *recordingToolWorkspaceExecutor) Delete(ctx context.Context, req workspa
 }
 
 func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
-	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase}, nil
+	if slices.Contains(e.describeDeleted, req.Ref.ID) {
+		return &workspace.Description{Ref: req.Ref, Phase: workspace.PhaseDeleted}, nil
+	}
+	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase, Template: e.describeTemplates[req.Ref.ID]}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {

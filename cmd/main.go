@@ -350,6 +350,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var acpWorkspaceAllowProviderTokenInSandbox bool
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -649,6 +650,8 @@ func main() {
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
+		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
 		"Enable in-tree Substrate MCP Tool actors and actor pools.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
@@ -689,6 +692,9 @@ func main() {
 			"cache disabled.")
 	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
 		"Default Substrate workspace cleanup policy (delete, retain).")
+	flag.StringVar(&substrateConfig.EgressCredentialProvider, "substrate-egress-credential-provider",
+		substrateConfig.EgressCredentialProvider,
+		"Credential provider class the Substrate egress gateway was installed with (only k8s.io). Enables MCP Tool egress credentials; empty makes Tools that request one fail closed.")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -1843,6 +1849,7 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	runtimePoolReconciler.AllowProviderTokenInSandbox = acpWorkspaceAllowProviderTokenInSandbox
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
 		Namespace:       acpProviderProxyNamespace,

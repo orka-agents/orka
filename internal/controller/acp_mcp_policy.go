@@ -759,7 +759,7 @@ func forwardingPolicySupported(tool *corev1alpha1.Tool, policy *corev1alpha1.Out
 	// Tool whose every request Azure refuses.
 	if output != nil {
 		header := strings.TrimSpace(output.Header)
-		if (header != "" && !strings.EqualFold(header, "Authorization")) || (output.Prefix != nil && *output.Prefix != "Bearer ") {
+		if (header != "" && !strings.EqualFold(header, "Authorization")) || (output.Prefix != nil && *output.Prefix != bearerAuthorizationPrefix) {
 			return fmt.Errorf("forwarding tool %q needs outbound access policy %q to send the credential as \"Authorization: Bearer\"; remove its output header and prefix", tool.Name, policy.Name)
 		}
 	}

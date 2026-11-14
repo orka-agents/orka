@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 // externalProviderRequiresEgressAllowlist reports whether a provider accepts
@@ -41,6 +42,27 @@ func externalRuntimeUsesEgressAllowlist(provider *workspacev1alpha1.ExecutionWor
 	return egress, nil
 }
 
+// externalProviderSupportsEgressCredentialInjection reports whether the
+// provider's backend gateway enforces RuntimeEgressRule.ReplaceHeaders.
+func externalProviderSupportsEgressCredentialInjection(provider *workspacev1alpha1.ExecutionWorkspaceProvider) bool {
+	return provider != nil && slices.Contains(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
+}
+
+// externalProviderTokenInjection names the Secret key the egress gateway
+// injects as the provider-proxy bearer. A nil value means Core delivers the
+// token through the runtime's sealed bootstrap instead.
+type externalProviderTokenInjection struct {
+	namespace, name string
+}
+
+// externalProviderTokenEgressPlaceholder is the public value a runtime whose
+// provider-proxy bearer is gateway-injected sends in Authorization. The
+// gateway discards it and the proxy never accepts it.
+const externalProviderTokenEgressPlaceholder = harnessv2.ProviderTokenEgressInjectionPlaceholder
+
+// bearerAuthorizationPrefix is the scheme prefix of a bearer Authorization value.
+const bearerAuthorizationPrefix = "Bearer "
+
 // externalRuntimeEgress compiles Core's runtime egress intent into the
 // host-name allowlist: the in-cluster provider authentication proxy and the
 // controller artifact/MCP broker API, the destinations Core's NetworkPolicy
@@ -50,36 +72,52 @@ func externalRuntimeUsesEgressAllowlist(provider *workspacev1alpha1.ExecutionWor
 // Cleartext origins become HTTP rules; TLS origins become TLSPassthrough so the
 // runtime still verifies the in-cluster origin's own certificate. Any origin
 // the allowlist cannot express fails admission.
-func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
-	return r.externalRuntimeEgressWithEnv(cfg, os.Getenv)
+//
+// With injection, the provider-proxy origin gets its own HTTP rule that
+// replaces Authorization with "Bearer " plus the token from Core's private
+// provider Secret, so the token never enters the runtime. Injection needs a
+// cleartext proxy origin (the gateway re-originates TLS trusting only public
+// roots) that no other admitted origin shares.
+func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, injection *externalProviderTokenInjection) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
+	return r.externalRuntimeEgressWithEnv(cfg, injection, os.Getenv)
 }
 
-func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConfig, getenv func(string) string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConfig, injection *externalProviderTokenInjection, getenv func(string) string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	type destination struct {
 		host string
 		port int32
 	}
-	type origin struct{ name, flag, raw string }
-	origins := []origin{
-		{name: "provider proxy", flag: "--acp-provider-proxy-base-url", raw: cfg.providerProxy.baseURL},
-		{name: "controller API", flag: "--controller-url", raw: r.ControllerAPIURL},
+	proxyHost, proxyPort, proxyProtocol, err := externalEgressOrigin(cfg.providerProxy.baseURL)
+	if err == nil {
+		err = externalEgressHostResolvable("--acp-provider-proxy-base-url", proxyHost)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("provider proxy origin cannot be admitted to the runtime egress allowlist: %w", err)
+	}
+	if injection != nil && proxyProtocol != workspacev1alpha1.RuntimeEgressHTTP {
+		return nil, fmt.Errorf("provider proxy token injection requires an http provider proxy origin")
+	}
+	type origin struct{ name, flag, raw string }
+	others := []origin{{name: "controller API", flag: "--controller-url", raw: r.ControllerAPIURL}}
 	if r.EnableTelemetry && r.TelemetryCollectorEgress {
 		for _, endpoint := range runtimePoolTelemetryCollectorEndpoints(true, getenv) {
 			if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
 				return nil, fmt.Errorf("telemetry collector origin cannot be admitted to the runtime egress allowlist: %w", err)
 			}
-			origins = append(origins, origin{name: "telemetry collector", flag: "the OTLP collector endpoint", raw: endpoint})
+			others = append(others, origin{name: "telemetry collector", flag: "the OTLP collector endpoint", raw: endpoint})
 		}
 	}
-	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{}
-	for _, origin := range origins {
-		host, port, protocol, err := externalEgressOrigin(origin.raw)
+	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{{host: proxyHost, port: proxyPort}: proxyProtocol}
+	for _, other := range others {
+		host, port, protocol, err := externalEgressOrigin(other.raw)
 		if err == nil {
-			err = externalEgressHostResolvable(origin.flag, host)
+			err = externalEgressHostResolvable(other.flag, host)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%s origin cannot be admitted to the runtime egress allowlist: %w", origin.name, err)
+			return nil, fmt.Errorf("%s origin cannot be admitted to the runtime egress allowlist: %w", other.name, err)
+		}
+		if injection != nil && host == proxyHost {
+			return nil, fmt.Errorf("provider proxy token injection requires a provider proxy host that the %s does not share", other.name)
 		}
 		key := destination{host: host, port: port}
 		if existing, ok := granted[key]; ok && existing != protocol {
@@ -99,7 +137,14 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConf
 	policy := &workspacev1alpha1.RuntimeEgressPolicy{}
 	for key, rulePorts := range ports {
 		slices.Sort(rulePorts)
-		policy.Rules = append(policy.Rules, workspacev1alpha1.RuntimeEgressRule{Protocol: key.protocol, Host: key.host, Ports: rulePorts})
+		rule := workspacev1alpha1.RuntimeEgressRule{Protocol: key.protocol, Host: key.host, Ports: rulePorts}
+		if injection != nil && key.host == proxyHost {
+			rule.ReplaceHeaders = []workspacev1alpha1.RuntimeEgressCredentialHeader{{
+				Header: "Authorization", Prefix: bearerAuthorizationPrefix,
+				SecretKeyRef: workspacev1alpha1.RuntimeEgressSecretKeyReference{Namespace: injection.namespace, Name: injection.name, Key: runtimePoolProviderTokenKey},
+			}}
+		}
+		policy.Rules = append(policy.Rules, rule)
 	}
 	// Revision hashes the request, so the order must be stable.
 	slices.SortFunc(policy.Rules, func(a, b workspacev1alpha1.RuntimeEgressRule) int {
@@ -112,6 +157,26 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConf
 		return nil, err
 	}
 	return policy, nil
+}
+
+// externalRuntimeProviderTokenInjection returns the provider-proxy token
+// injection an admitted request carries, or nil. A request may inject only
+// Core's provider Secret token into Authorization.
+func externalRuntimeProviderTokenInjection(request *workspacev1alpha1.WorkloadRequest) (*externalProviderTokenInjection, error) {
+	if request == nil || request.Runtime == nil || !request.Runtime.Egress.HasCredentialInjection() {
+		return nil, nil
+	}
+	var found *externalProviderTokenInjection
+	for _, rule := range request.Runtime.Egress.Rules {
+		for _, header := range rule.ReplaceHeaders {
+			ref := header.SecretKeyRef
+			if found != nil || !strings.EqualFold(header.Header, "Authorization") || header.Prefix != "Bearer " || ref.Key != runtimePoolProviderTokenKey || ref.Namespace == "" {
+				return nil, fmt.Errorf("runtime egress carries a credential replacement Core did not admit")
+			}
+			found = &externalProviderTokenInjection{namespace: ref.Namespace, name: ref.Name}
+		}
+	}
+	return found, nil
 }
 
 func externalEgressOrigin(raw string) (string, int32, workspacev1alpha1.RuntimeEgressProtocol, error) {
