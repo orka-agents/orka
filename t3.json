@@ -12,8 +12,7 @@
     {
       "name": "Setup Worktree",
       "command": "make ensure-ui-embed",
-      "icon": "configure",
-      "runOnWorktreeCreate": true
+      "icon": "configure"
     },
     {
       "name": "Test",
