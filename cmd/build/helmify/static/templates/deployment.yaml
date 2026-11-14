@@ -86,7 +86,8 @@ spec:
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
-            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+            {{- /* Fully qualified: native workspace runtimes cannot resolve "<service>.<namespace>.svc". */}}
+            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:{{ .Values.service.port }}
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
@@ -129,7 +130,7 @@ spec:
             - --acp-upgrade-drain-marker-namespace={{ .Release.Namespace }}
             {{- end }}
             {{- if .Values.providerProxy.enabled }}
-            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc:8080
+            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:8080
             - --acp-provider-proxy-namespace={{ .Release.Namespace }}
             - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
             - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
@@ -414,6 +415,11 @@ spec:
             - --substrate-mcp-tools-enabled=true
             {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if (.podCertificate | default dict).enabled }}
+            - --substrate-api-cert-file=/run/substrate-client/credential-bundle.pem
+            - --substrate-api-key-file=/run/substrate-client/credential-bundle.pem
+            - --substrate-api-ca-file=/run/substrate-server/trust-bundle.pem
+            {{- end }}
             {{- if $substrateCredentials.existingSecret }}
             {{- if $substrateCredentials.certKey }}
             - --substrate-api-cert-file=/var/run/orka/substrate-api/client.crt
@@ -441,8 +447,7 @@ spec:
             {{- if .apiInsecureSkipVerify }}
             - --substrate-api-insecure-skip-verify=true
             {{- end }}
-            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "http://atenet-router.ate-system.svc") | quote }}
-            - {{ printf "--substrate-actor-dns-suffix=%s" (.actorDnsSuffix | default "actors.resources.substrate.ate.dev") | quote }}
+            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "https://atenet-router.ate-system.svc:443") | quote }}
             {{- if .defaultTemplate }}
             - {{ printf "--substrate-default-template=%s" .defaultTemplate | quote }}
             {{- end }}
@@ -544,6 +549,14 @@ spec:
               mountPath: /var/run/orka/substrate-api
               readOnly: true
             {{- end }}
+            {{- if (.Values.controller.substrate.podCertificate | default dict).enabled }}
+            - name: substrate-client
+              mountPath: /run/substrate-client
+              readOnly: true
+            - name: substrate-server
+              mountPath: /run/substrate-server
+              readOnly: true
+            {{- end }}
             - name: store
               mountPath: /data
             {{- if $storageConfigEnabled }}
@@ -601,6 +614,26 @@ spec:
               - key: {{ $substrateCredentials.caKey | quote }}
                 path: ca.crt
               {{- end }}
+        {{- end }}
+        {{- if (.Values.controller.substrate.podCertificate | default dict).enabled }}
+        # Rotating Substrate pod identity: the router admits only allowlisted
+        # SPIFFE IDs, and ate-api-server authenticates the same certificate.
+        - name: substrate-client
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+        - name: substrate-server
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
         {{- end }}
 
         - name: acp-artifact-capability

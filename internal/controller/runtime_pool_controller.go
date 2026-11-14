@@ -205,6 +205,21 @@ func (c RuntimePoolProviderProxyConfig) Validate() error {
 	return err
 }
 
+// runtimePoolServiceHostInNamespace reports whether host names a Service in
+// namespace: "<service>.<namespace>.svc", optionally followed by the cluster
+// domain, which Core does not know and so accepts as any DNS name.
+func runtimePoolServiceHostInNamespace(host, namespace string) bool {
+	service, clusterDomain, found := strings.Cut(host, "."+namespace+".svc")
+	if !found || service == "" {
+		return false
+	}
+	if clusterDomain == "" {
+		return true
+	}
+	domain, dotted := strings.CutPrefix(clusterDomain, ".")
+	return dotted && len(validation.IsDNS1123Subdomain(domain)) == 0
+}
+
 func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyConfig, error) {
 	baseURL := strings.TrimSpace(c.BaseURL)
 	if baseURL == "" {
@@ -219,9 +234,7 @@ func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyCo
 	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy namespace is required and must be a DNS label")
 	}
-	hostname := strings.ToLower(parsed.Hostname())
-	serviceSuffix := "." + strings.ToLower(namespace) + ".svc"
-	if !strings.HasSuffix(hostname, serviceSuffix) && !strings.HasSuffix(hostname, serviceSuffix+".cluster.local") {
+	if !runtimePoolServiceHostInNamespace(strings.ToLower(parsed.Hostname()), strings.ToLower(namespace)) {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy base URL must address a Service in its configured namespace")
 	}
 	port := int32(80)
@@ -368,8 +381,12 @@ type RuntimePoolReconciler struct {
 
 	SupervisorClient RuntimePoolSupervisorClient
 	HTTPClient       *http.Client
-	Rand             io.Reader
-	Now              func() time.Time
+	// SubstrateRouter reaches routed native runtimes (Agent Substrate v1)
+	// through core's configured router with the controller's pod-certificate
+	// mTLS identity. Without it routed startup evidence fails closed.
+	SubstrateRouter *RuntimePoolSubstrateRouter
+	Rand            io.Reader
+	Now             func() time.Time
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
@@ -3741,11 +3758,18 @@ func (r *RuntimePoolReconciler) supervisorClient() RuntimePoolSupervisorClient {
 }
 
 // supervisorClientForPool selects the transport for the pool's workload
-// backend: Substrate-backed pools reach the exact actor through the provider
-// router with the logical route host preserved; every other pool dials the
-// exact Pod address directly.
-func (r *RuntimePoolReconciler) supervisorClientForPool(_ *corev1alpha1.RuntimePool) RuntimePoolSupervisorClient {
-	return r.supervisorClient()
+// backend: a pool bound to a routed native process reaches it only through
+// core's configured Substrate router with its exact target header; every other
+// pool dials the exact bound endpoint directly.
+func (r *RuntimePoolReconciler) supervisorClientForPool(pool *corev1alpha1.RuntimePool) RuntimePoolSupervisorClient {
+	routed, err := externalRoutedPoolHTTPClient(r.SubstrateRouter, pool, runtimePoolProbeTimeout)
+	if err != nil {
+		return unavailableSupervisorClient{err: err}
+	}
+	if routed == nil || r.SupervisorClient != nil {
+		return r.supervisorClient()
+	}
+	return &runtimePoolHTTPSupervisorClient{client: routed, now: r.now}
 }
 
 // Only Core's exact native-process binding can supply a routed endpoint.

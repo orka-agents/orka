@@ -101,6 +101,8 @@ POST /api/v1/tools | create core.orka.ai:tools
 GET /api/v1/tools/:name | get core.orka.ai:tools protected
 PUT /api/v1/tools/:name | update core.orka.ai:tools protected
 DELETE /api/v1/tools/:name | delete core.orka.ai:tools protected
+POST /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
+DELETE /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
 GET /api/v1/runtime-pools | list core.orka.ai:runtimepools
 GET /api/v1/runtime-pools/:name | get core.orka.ai:runtimepools protected
 GET /api/v1/agent-runtimes | list core.orka.ai:agentruntimes

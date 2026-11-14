@@ -121,6 +121,7 @@ type ACPDispatcher struct {
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
+	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
@@ -4614,6 +4615,12 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
 		}
 	}
+	// A routed native runtime is reachable only through the configured
+	// Substrate router; the harness client keeps its own control deadlines.
+	routedHTTPClient, err := externalRoutedPoolHTTPClient(d.SubstrateRouter, pool, 0)
+	if err != nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool routed transport: %w", err)
+	}
 	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
 		harnessv2.WithControllerBearerToken(controllerToken),
@@ -4624,6 +4631,9 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		}),
 	}
 
+	if routedHTTPClient != nil {
+		options = append(options, harnessv2.WithHTTPClient(routedHTTPClient))
+	}
 	runtimeClient, err := harnessv2.NewClient(endpoint, options...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err

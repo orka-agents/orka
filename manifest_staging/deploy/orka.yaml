@@ -2758,7 +2758,7 @@ spec:
         - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
         - --agent-execution-snapshot-retention=720h
         - --agent-execution-snapshot-retention-interval=1h
-        - --controller-url=http://orka-api.orka-system.svc:8080
+        - --controller-url=http://orka-api.orka-system.svc.cluster.local:8080
         - --controller-mode=harness-v2
         - --watch-namespace=orka-system
         - --enforce-namespace-isolation=true
@@ -2768,7 +2768,7 @@ spec:
         - --acp-upgrade-drain-poll-interval=1s
         - --acp-upgrade-drain-trigger-timeout=5m15s
         - --acp-upgrade-drain-marker-namespace=orka-system
-        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080
+        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080
         - --acp-provider-proxy-namespace=orka-system
         - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
@@ -2785,8 +2785,7 @@ spec:
         - --gateway-delivery-max-attempts=10
         - --substrate-mcp-tools-enabled=false
         - --substrate-api-endpoint=api.ate-system.svc:443
-        - --substrate-router-url=http://atenet-router.ate-system.svc
-        - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+        - --substrate-router-url=https://atenet-router.ate-system.svc:443
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete

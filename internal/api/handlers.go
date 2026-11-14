@@ -39,6 +39,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -127,6 +128,7 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
 }
@@ -156,6 +158,7 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -191,6 +194,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 	}
 }
