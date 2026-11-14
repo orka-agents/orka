@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -171,6 +172,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
+		}
+		if externalEvictionSettlementPending(pool, w) {
+			// An eviction whose outcome was never recorded settles against
+			// this stopped allocation before any cold boot replaces it.
+			return r.externalPoolStopped(ctx, pool, w)
+		}
+		if w.Spec.Workload != nil {
 			rotating, err := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, auth)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -198,6 +206,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
 	pod, err := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup)
+	if eviction := (*externalWorkerEvictionError)(nil); errors.As(err, &eviction) {
+		return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
+	}
 	if err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
@@ -487,6 +498,19 @@ func externalNativeRuntimeHasOpaqueIdentity(request *workspacev1alpha1.WorkloadR
 
 //nolint:gocyclo // Check every accessible Pod and storage identity before credential delivery.
 func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence) (*corev1.Pod, error) {
+	return r.attestExternalWorkspaceStartupFor(ctx, request, evidence, false)
+}
+
+// attestExternalRetiringWorkspaceStartup also accepts the exact native worker
+// while it terminates. Only paths that never admit new work may use it: drain,
+// settlement of already-accepted prompts, and exact retirement. The worker's
+// identity, process and endpoint fences are otherwise unchanged.
+func (r *RuntimePoolReconciler) attestExternalRetiringWorkspaceStartup(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence) (*corev1.Pod, error) {
+	return r.attestExternalWorkspaceStartupFor(ctx, request, evidence, true)
+}
+
+//nolint:gocyclo // Native and Pod materialization fences are checked together, in order.
+func (r *RuntimePoolReconciler) attestExternalWorkspaceStartupFor(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence, allowTerminatingWorker bool) (*corev1.Pod, error) {
 	if request == nil || request.Runtime == nil || evidence == nil {
 		return nil, fmt.Errorf("runtime startup evidence is incomplete")
 	}
@@ -508,8 +532,11 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: process.Worker.Namespace, Name: process.Worker.Name}, worker); err != nil {
 			return nil, err
 		}
-		if worker.UID != process.Worker.UID || !worker.DeletionTimestamp.IsZero() {
+		if worker.UID != process.Worker.UID {
 			return nil, workspaceprovider.ErrStaleIdentity
+		}
+		if signaledAt, deadline, evicting := externalWorkerEvictionSignal(worker, r.now()); evicting && !allowTerminatingWorker {
+			return nil, &externalWorkerEvictionError{signaledAt: signaledAt, deadline: deadline}
 		}
 		runtimeUID, _, err := externalNativeRuntimeIdentity(request, evidence.Identity.InstanceID)
 		if err != nil {
@@ -781,7 +808,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			return r.finalizeExternalWorkspacePool(ctx, pool)
 		}
 		if !deleting {
-			return r.externalPoolStopped(ctx, pool)
+			return r.externalPoolStopped(ctx, pool, w)
 		}
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for provider proof that no allocation exists")
 	}
@@ -803,9 +830,18 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
-		return r.externalPoolStopped(ctx, pool)
+		return r.externalPoolStopped(ctx, pool, w)
 	}
 	if w.Spec.Retirement == nil {
+		if externalRetirementAction(w, deleting) == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
+			// The worker kills the instance when its eviction window ends. A
+			// suspension issued at or after that point could not prove that it
+			// captured settled work, so it is never authorized: the instance is
+			// left to fail through the provider, its last checkpoint stays
+			// retained, and accepted prompts are never replayed.
+			return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
+				"runtime worker eviction window ended before the runtime drained; suspension is not authorized and uncertain work is never replayed")
+		}
 		// Queued demand needs the replacement boot, not the retiring instance.
 		// Terminal deletion and scale-down still wait for queued Tasks to settle.
 		replacing := !deleting && pool.Spec.DesiredReplicas > 0 &&
@@ -831,9 +867,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if a.Startup == nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "provider is unavailable; exact runtime drain remains unverified")
 				}
-				pod, err := r.attestExternalWorkspaceStartup(ctx, w.Spec.Workload, a.Startup)
+				pod, err := r.attestExternalRetiringWorkspaceStartup(ctx, w.Spec.Workload, a.Startup)
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime materialization is unavailable for drain")
+				}
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, externalRetirementAction(w, deleting)); err != nil {
+					return ctrl.Result{}, err
 				}
 				validationPool, cfg, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
 				if err != nil {
@@ -851,8 +890,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil || !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
 				}
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, externalRetirementAction(w, deleting)); err != nil {
+					return ctrl.Result{}, err
+				}
 				if !probe.Status.Drain.Requested {
-					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, "workspace_retirement"); err != nil {
+					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(externalRetirementAction(w, deleting))); err != nil {
 						return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "authenticated runtime drain request is unavailable")
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
@@ -867,20 +909,14 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			}
 		}
 	}
-	// Quarantine is terminal and never reusable, so it never earns the data-preserving
-	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
-	// act on quarantine only through a Stop (or Delete) authorization.
-	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
-	// A failed instance has no new data to capture; its last verified
-	// checkpoint stays with the provider for explicit recovery.
-	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
-	action := workspacev1alpha1.WorkloadRetirementStop
-	if deleting {
-		action = workspacev1alpha1.WorkloadRetirementDelete
-	} else if !quarantined && !failed && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
-		action = workspacev1alpha1.WorkloadRetirementSuspend
-	}
+	action := externalRetirementAction(w, deleting)
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
+	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
+		// Recheck immediately before authorizing: the drain probe above can
+		// outlast a short eviction window.
+		return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
+			"runtime worker eviction window ended before the runtime drained; suspension is not authorized and uncertain work is never replayed")
+	}
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
@@ -895,19 +931,45 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
 }
 
-func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool) (ctrl.Result, error) {
-	if pool.Annotations["orka.ai/external-runtime-retirement-requested"] != "" {
+// externalPoolStopped records a stopped instance. An eviction outcome is
+// persisted before the retirement and eviction markers that hold the pool in
+// retirement are removed: once the status write is confirmed, the outcome is
+// acknowledged in the instance's eviction record, and the markers are cleared
+// only by a later reconcile that observes that acknowledgement, so a status
+// conflict or a controller restart retries the recording instead of letting
+// the allocation cold-boot.
+func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (ctrl.Result, error) {
+	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" || pool.Annotations[externalRuntimeEvictionAnnotation] != "" {
+		if externalEvictionSettlementPending(pool, w) {
+			recorded, err := r.recordRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w))
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !recorded {
+				return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+			}
+			if err := r.acknowledgeExternalEvictionOutcome(ctx, pool, w); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		before := pool.DeepCopy()
-		delete(pool.Annotations, "orka.ai/external-runtime-retirement-requested")
+		delete(pool.Annotations, externalRuntimeRetirementRequestedAnnotation)
+		delete(pool.Annotations, externalRuntimeEvictionAnnotation)
 		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
+	return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w), runtimePoolRequeue)
+}
+
+func (r *RuntimePoolReconciler) externalPoolStoppedStatus(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) corev1alpha1.RuntimePoolStatus {
 	status := r.baseRuntimePoolStatus(pool, 0)
+	r.externalEvictionSettledCondition(pool, &status, w)
 	status.ActiveInstance = nil
 	status.Lifecycle, status.AdmissionState, status.Message = corev1alpha1.RuntimePoolLifecycleStopped, corev1alpha1.RuntimePoolAdmissionClosed, runtimePoolMessageStopped
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	return status
 }
 
 func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Context, pool *corev1alpha1.RuntimePool) (ctrl.Result, error) {
@@ -926,7 +988,7 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	// termination is proved. Attachment credentials are revoked by workspace
 	// finalization, independently of the provider's disposition.
 	if pool.DeletionTimestamp.IsZero() {
-		return r.externalPoolStopped(ctx, pool)
+		return r.externalPoolStopped(ctx, pool, nil)
 	}
 	before := pool.DeepCopy()
 	controllerutil.RemoveFinalizer(pool, runtimePoolFinalizer)
@@ -1177,7 +1239,13 @@ func runtimePoolWorkspaceBoundStartupPod(ctx context.Context, reader client.Read
 	if pinned == nil || *pinned != evidence.Pod || native != evidence.NativeProcess {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
-	pod, err := r.attestExternalWorkspaceStartup(ctx, w.Spec.Workload, a.Startup)
+	// Cleanup never admits work; it must keep reaching a runtime whose worker
+	// is terminating so already-accepted prompts can settle before suspension.
+	attest := r.attestExternalWorkspaceStartup
+	if !requireOpaqueIdentity {
+		attest = r.attestExternalRetiringWorkspaceStartup
+	}
+	pod, err := attest(ctx, w.Spec.Workload, a.Startup)
 	if err != nil {
 		return nil, err
 	}

@@ -196,10 +196,46 @@ absence before deleting the source Actor or reporting suspension. The operator's
 untouched. A snapshot alone is not termination evidence.
 
 Cold resume verifies the retained Tag and frozen ActorTemplate and worker
-specification. Only generated allocation and instance labels may rotate; worker
-image, isolation, scheduling, resources, and operator labels remain exact. It
-starts a fresh Actor and worker, repeats sealed bootstrap, and receives fresh
-core credentials. Durable workspace data survives; process memory does not.
+specification. Generated allocation and instance labels rotate. The worker image
+follows the operator WorkerPool's current image, which must be pinned by digest,
+so a workspace suspended before a Substrate upgrade resumes on the upgraded
+worker. Isolation, the pinned SandboxConfig, scheduling, resources, and operator
+labels remain exact, and the journal records every image transition. It starts a
+fresh Actor and worker, repeats sealed bootstrap, and receives fresh core
+credentials. Durable workspace data survives; process memory does not.
+
+The private pool always names its SandboxConfig: an omitted `configRef` on the
+operator pool is pinned to the config that pool has resolved. Each checkpoint
+records the snapshot's sandbox runtime. If a restore crashes before the
+supervisor boots under a different runtime, the workspace fails with the
+`SandboxRuntimeRestoreFailed` reason instead of `InstanceFailed`, and its
+checkpoint stays available for explicit recovery.
+
+### Worker eviction
+
+A worker Pod can be terminated while it hosts a running workspace: an upgrade
+rolls its WorkerPool, a node drains, or a Spot VM is reclaimed. The worker sends
+`SIGTERM` to the supervisor, which then has 30 minutes to be suspended before it
+is killed. A supervisor that serves a suspendable workspace does not exit. It
+stops admitting sessions and prompts, as it would for a drain, and stays alive
+for that window.
+
+Core sees the eviction either through the worker Pod's termination or through
+the eviction time the supervisor reports in its drain status. The supervisor
+reports it even when a suspension or capacity drain was already running and
+keeps that drain's reason. Core closes admission and records the
+eviction deadline. It then reuses the normal retirement: an authenticated drain,
+settlement of prompts already accepted, and a synchronous data-only suspension.
+After suspension the workspace resumes on a new worker. The RuntimePool's
+`WorkerEviction` condition reports `EvictionDraining`, then `EvictionSuspended`.
+
+Suspension is authorized only after every accepted prompt settles, and never at
+or after the deadline. A prompt that outlives the window is lost with the
+instance and is never replayed. The pool then reports `EvictionDeadlineExceeded`,
+the workspace fails, and its last checkpoint stays retained. Spot reclaims allow
+15 seconds to 2 minutes, so only an idle workspace reliably survives them. A
+workspace class without Suspend reports `EvictionNotSuspendable` and loses the
+instance.
 
 Missing journals, foreign placement, changed storage or infrastructure identities,
 and uncertain native outcomes close admission. A lost Resume response is not
@@ -371,6 +407,20 @@ subjects:
 Tools without `authSecretRef` need no grant.
 
 ## Upgrades and proof limits
+
+Agent Substrate 1.x minor releases upgrade in place by following the upstream
+[upgrade guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/upgrade.md),
+with two Orka-specific rules in its worker step:
+
+- Patch only operator-owned WorkerPools, and pin each new `workerImage` by
+  digest. Do not patch the provider's private `<actor>-workers` pools, which
+  carry the `substrate.workspace.orka.ai` allocation labels. The provider
+  refuses to resume on a changed private pool, and suspended workspaces pick up
+  the new operator image on their next resume.
+- Before upgrading `ate-api-server`, move running workspaces off old workers by
+  deleting their private worker Pods (or draining their nodes). Each one drains
+  and suspends as described in [Worker eviction](#worker-eviction), then resumes
+  on the new image. Wait until no private pool runs the old image.
 
 Agent Substrate cannot upgrade a pre-1.0 installation in place. Before moving to
 v1.0.0, retire every workspace, checkpoint, and MCP Actor created under v0.1.0,
