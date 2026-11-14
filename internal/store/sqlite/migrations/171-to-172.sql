@@ -1,78 +1,15 @@
--- Additive SQLite transition: 171-to-172 (schema version 4 to 5).
--- Source layout: the retry_pending work action dedupe layout (schema version 4).
--- Target definitions: Agent Host Protocol tokens, clients, users, journal, channel states, sessions and backend records, schema version 5.
--- It adds only empty tables and indexes, so a store whose key bootstrap is
--- unfinished can still finish it.
--- Frozen from the target's real schema statements; do not use mutable helpers.
+-- SQLite transition: 171-to-172 (schema version 4 to 5).
+-- Adds the order stamp of the write that stored each result and artifact:
+-- the epoch and sequence of its write envelope. A replacement applies only
+-- when its stamp is greater than the stored one. Existing rows get the stamp
+-- (0, 0), which every enveloped write exceeds. It adds no rows, so a store
+-- whose key bootstrap is unfinished can still finish it.
 -- Transaction and complete-layout validation are owned by the caller.
 
-CREATE TABLE IF NOT EXISTS ahp_tokens (
-			id          TEXT PRIMARY KEY,
-			token_hash  TEXT NOT NULL UNIQUE,
-			user_key    TEXT NOT NULL,
-			issuer      TEXT NOT NULL,
-			subject     TEXT NOT NULL,
-			username    TEXT NOT NULL,
-			namespace   TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			created_at  TIMESTAMP NOT NULL,
-			expires_at  TIMESTAMP NOT NULL,
-			revoked_at  TIMESTAMP
-		);
+ALTER TABLE results ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
 
-CREATE INDEX IF NOT EXISTS idx_ahp_tokens_user
-			ON ahp_tokens(user_key, created_at);
+ALTER TABLE results ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0;
 
-CREATE TABLE IF NOT EXISTS ahp_clients (
-			client_id        TEXT PRIMARY KEY,
-			user_key         TEXT NOT NULL,
-			protocol_version TEXT NOT NULL,
-			dialect          TEXT NOT NULL,
-			created_at       TIMESTAMP NOT NULL,
-			updated_at       TIMESTAMP NOT NULL
-		);
+ALTER TABLE artifacts ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
 
-CREATE TABLE IF NOT EXISTS ahp_users (
-			user_key   TEXT PRIMARY KEY,
-			server_seq INTEGER NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_journal (
-			user_key TEXT NOT NULL,
-			seq      INTEGER NOT NULL,
-			channel  TEXT NOT NULL,
-			envelope BLOB NOT NULL,
-			size     INTEGER NOT NULL,
-			PRIMARY KEY (user_key, seq)
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_channel_states (
-			user_key TEXT NOT NULL,
-			channel  TEXT NOT NULL,
-			state    BLOB NOT NULL,
-			from_seq INTEGER NOT NULL,
-			PRIMARY KEY (user_key, channel)
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_sessions (
-			user_key    TEXT NOT NULL,
-			session     TEXT NOT NULL,
-			backend     TEXT NOT NULL,
-			summary     BLOB NOT NULL,
-			created_at  TIMESTAMP NOT NULL,
-			modified_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, session)
-		);
-
-CREATE INDEX IF NOT EXISTS idx_ahp_sessions_modified
-			ON ahp_sessions(user_key, modified_at);
-
-CREATE TABLE IF NOT EXISTS ahp_records (
-			user_key   TEXT NOT NULL,
-			kind       TEXT NOT NULL,
-			key        TEXT NOT NULL,
-			value      BLOB NOT NULL,
-			updated_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, kind, key)
-		);
+ALTER TABLE artifacts ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0;

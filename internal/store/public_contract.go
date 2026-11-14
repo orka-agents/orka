@@ -267,6 +267,7 @@ const (
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
 	MaxMessageBatch                   = storagev1.MaxMessageBatch
+	MaxResultBytes                    = storagev1.MaxResultBytes
 )
 
 var (
