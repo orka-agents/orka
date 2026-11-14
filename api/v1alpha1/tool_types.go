@@ -258,6 +258,91 @@ type SubstrateMCPActor struct {
 	// Boot asks Substrate to boot this actor from scratch on first resume.
 	// +optional
 	Boot bool `json:"boot,omitempty"`
+
+	// Egress lists the only destinations the actor may reach through the
+	// Substrate egress gateway. The controller compiles it into the actor's
+	// native egress policy before every resume. Empty denies all egress,
+	// including DNS resolution of external names. HTTPS entries are
+	// intercepted by the gateway, so the operator-owned ActorTemplate must
+	// trust the Substrate egress CA bundle; use scheme tls to pass TLS through
+	// without interception.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=atomic
+	// +optional
+	Egress []SubstrateActorEgressRule `json:"egress,omitempty"`
+}
+
+// SubstrateActorEgressScheme selects how the egress gateway authorizes traffic.
+// +kubebuilder:validation:Enum=http;https;tls
+type SubstrateActorEgressScheme string
+
+const (
+	// SubstrateActorEgressSchemeHTTP allows cleartext HTTP to the host.
+	SubstrateActorEgressSchemeHTTP SubstrateActorEgressScheme = "http"
+	// SubstrateActorEgressSchemeHTTPS allows HTTPS intercepted by the gateway.
+	SubstrateActorEgressSchemeHTTPS SubstrateActorEgressScheme = "https"
+	// SubstrateActorEgressSchemeTLS allows TLS passed through without decryption.
+	SubstrateActorEgressSchemeTLS SubstrateActorEgressScheme = "tls"
+)
+
+// SubstrateActorEgressRule allows one host name on explicit ports.
+// +kubebuilder:validation:XValidation:rule="self.scheme != 'tls' || (has(self.ports) && size(self.ports) > 0)",message="tls egress requires explicit ports"
+// +kubebuilder:validation:XValidation:rule="!has(self.credential) || self.scheme != 'tls'",message="egress credentials require scheme http or https"
+// +kubebuilder:validation:XValidation:rule="!has(self.credential) || !self.host.startsWith('*')",message="egress credentials require an exact host"
+type SubstrateActorEgressRule struct {
+	// Scheme is http, https (gateway-intercepted) or tls (passthrough).
+	// +kubebuilder:validation:Required
+	Scheme SubstrateActorEgressScheme `json:"scheme"`
+
+	// Host is a lowercase DNS name, or a DNS name whose leftmost label is "*"
+	// (for example "*.example.com"). Bare "*", IP addresses, CIDRs, ports,
+	// paths and wildcards over a top-level domain are rejected.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^(\*\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$`
+	// +kubebuilder:validation:XValidation:rule="!self.matches('^[0-9.]+$')",message="egress host must be a DNS name, not an IP address"
+	Host string `json:"host"`
+
+	// Ports are destination ports. Defaults to 80 for http and 443 for https;
+	// required for tls.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
+	// +listType=set
+	// +optional
+	Ports []int32 `json:"ports,omitempty"`
+
+	// Credential asks the Substrate egress gateway to replace one request
+	// header with a value from a Secret in the Tool's namespace, so the actor
+	// never holds the credential. The actor sends the header with any
+	// placeholder value; requests without it are forwarded unchanged. Requires
+	// the controller's --substrate-egress-credential-provider and a credential
+	// provider namespace grant for the actor's Atespace. The Tool author must
+	// be allowed to get the Secret. With scheme http the credential leaves the
+	// gateway in cleartext; with https the gateway re-originates TLS trusting
+	// only public roots.
+	// +optional
+	Credential *SubstrateActorEgressCredential `json:"credential,omitempty"`
+}
+
+// SubstrateActorEgressCredential replaces one request header with a Secret value.
+type SubstrateActorEgressCredential struct {
+	// Header is the HTTP request header to replace. Defaults to Authorization.
+	// Hop-by-hop, routing, framing and cookie headers are rejected.
+	// +kubebuilder:default=Authorization
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+.^_|~-]+$`
+	// +optional
+	Header string `json:"header,omitempty"`
+
+	// Prefix is prepended verbatim to the Secret value, for example "Bearer ".
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// SecretRef selects the Secret key in the Tool's namespace.
+	SecretRef SecretKeySelector `json:"secretRef"`
 }
 
 // ToolStatus defines the observed state of Tool
@@ -273,7 +358,9 @@ type ToolStatus struct {
 	// +optional
 	Error string `json:"error,omitempty"`
 
-	// Endpoint is the resolved non-secret endpoint used by workers.
+	// Endpoint is the resolved non-secret endpoint used by workers. For
+	// Substrate MCP actor Tools it is the Orka API MCP proxy path, relative to
+	// the Orka API base URL; the Substrate router is never exposed.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
@@ -318,13 +405,10 @@ type ToolActorStatus struct {
 	// +optional
 	Provider WorkspaceProvider `json:"provider,omitempty"`
 
-	// ActorID is the stable provider actor id.
+	// ActorID is the stable, Atespace-qualified provider actor id
+	// ("name.atespace"). Orka derives the router target only from this field.
 	// +optional
 	ActorID string `json:"actorID,omitempty"`
-
-	// RouteHost is the HTTP Host value used with the provider router.
-	// +optional
-	RouteHost string `json:"routeHost,omitempty"`
 
 	// TemplateRef is the resolved actor template.
 	// +optional

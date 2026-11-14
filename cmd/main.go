@@ -93,6 +93,7 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -227,25 +228,45 @@ func validateDisabledSubstrateRecoveryConfig(
 		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	recoveryState := ""
 	// Only registered cleanup controllers can service these obligations.
-
-	if recoveryState == "" {
-		var err error
-		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
-		if err != nil {
-			return err
-		}
+	recoveryState, routerRequired, err := controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+	if err != nil {
+		return err
 	}
-
 	if recoveryState == "" {
 		return nil
 	}
 	if configErr != nil {
 		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
 	}
-	if err := cfg.ValidateMCPTools(); err != nil {
+	// SubstrateActorPool finalization uses only the control API; MCP Tool
+	// finalization also builds the router client.
+	validate := cfg.ValidateControl
+	if routerRequired {
+		validate = cfg.ValidateMCPTools
+	}
+	if err := validate(); err != nil {
 		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
+	}
+	return nil
+}
+
+// validateSubstrateStartupConfig rejects removed Substrate v0.1.0 settings
+// unconditionally, then validates MCP Tool admission when it is enabled.
+// Disabled-admission recovery is validated separately once existing cleanup
+// obligations can be discovered.
+func validateSubstrateStartupConfig(mcpToolsEnabled bool, cfg controller.SubstrateConfig, configErr error) error {
+	if errors.Is(configErr, controller.ErrRemovedSubstrateSetting) {
+		return configErr
+	}
+	if !mcpToolsEnabled {
+		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("invalid substrate configuration from environment: %w", configErr)
+	}
+	if err := cfg.ValidateMCPTools(); err != nil {
+		return fmt.Errorf("invalid substrate configuration: %w", err)
 	}
 	return nil
 }
@@ -330,6 +351,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var acpWorkspaceAllowProviderTokenInSandbox bool
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -630,6 +652,8 @@ func main() {
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
+		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
 		"Enable in-tree Substrate MCP Tool actors and actor pools.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
@@ -647,8 +671,6 @@ func main() {
 		"Skip Substrate control API certificate verification. Only for local smoke tests.")
 	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
 		"Substrate router base URL for Actor traffic.")
-	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
-		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
 		"Default Substrate ActorTemplate for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
@@ -660,30 +682,21 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
-		substrateConfig.SessionIdentitySecretName,
-		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
-		substrateConfig.SessionIdentitySecretKey,
-		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
-	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
-		substrateConfig.SessionIdentityRequired,
-		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
-	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
-		substrateConfig.SessionIdentityAudience,
-		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
-		substrateConfig.SessionIdentityAppID,
-		"Application ID requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
-		substrateConfig.SessionIdentityUserID,
-		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
 		"Timeout for agent runtime execution inside the Substrate actor.")
+	flag.DurationVar(&substrateConfig.EgressPolicyPropagation, "substrate-egress-policy-propagation",
+		substrateConfig.EgressPolicyPropagation,
+		"How long a Substrate MCP Tool stays unavailable, with its Actor stopped, after the Actor's egress policy is "+
+			"replaced or the Actor is created, because the Substrate egress gateway may still apply earlier rules. Set "+
+			"it to the gateway's --egress-policy-cache-ttl plus 4s. 0 does not wait and is correct only with that "+
+			"cache disabled.")
 	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
 		"Default Substrate workspace cleanup policy (delete, retain).")
+	flag.StringVar(&substrateConfig.EgressCredentialProvider, "substrate-egress-credential-provider",
+		substrateConfig.EgressCredentialProvider,
+		"Credential provider class the Substrate egress gateway was installed with (only k8s.io). Enables MCP Tool egress credentials; empty makes Tools that request one fail closed.")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -1002,13 +1015,23 @@ func main() {
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
 	substrateConfig = substrateConfig.WithDefaults()
+	if err := validateSubstrateStartupConfig(substrateMCPToolsEnabled, substrateConfig, substrateConfigErr); err != nil {
+		setupLog.Error(err, "invalid substrate configuration")
+		os.Exit(1)
+	}
+	// The manager is the only Orka identity on the Substrate router's SPIFFE
+	// allowlist. Substrate MCP Tool calls from workers reach Actors through the
+	// authenticated orka-api proxy, and the ACP broker calls in-process.
+	var substrateMCPRouter *worker.SubstrateMCPRouter
 	if substrateMCPToolsEnabled {
-		if substrateConfigErr != nil {
-			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration")
 			os.Exit(1)
 		}
-		if err := substrateConfig.ValidateMCPTools(); err != nil {
-			setupLog.Error(err, "invalid substrate configuration")
+		substrateMCPRouter, err = worker.NewSubstrateMCPRouter(substrateConfig.RouterURL, routerHTTP)
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router configuration")
 			os.Exit(1)
 		}
 	}
@@ -1617,11 +1640,27 @@ func main() {
 	sessionManager := controller.NewSessionManager(appStorage)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 
+	// Agent Substrate v1 native workspaces are reached only through atenet-router
+	// with the controller's allowlisted pod certificate. Build it from the
+	// configured identity alone, not the admission flags: after new dispatch is
+	// disabled, existing routed runtimes still need authenticated recovery,
+	// drain and cleanup. Without that identity the router stays unset and routed
+	// pools fail closed as Degraded; Pod-backed providers are unaffected.
+	var runtimePoolSubstrateRouter *controller.RuntimePoolSubstrateRouter
+	if strings.TrimSpace(substrateConfig.APICertFile) != "" {
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration for execution workspaces")
+			os.Exit(1)
+		}
+		runtimePoolSubstrateRouter = &controller.RuntimePoolSubstrateRouter{URL: substrateConfig.RouterURL, HTTPClient: routerHTTP}
+	}
+
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
 		Identity: agentIdentityConfig,
 		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
+		Snapshots: agentExecutionSnapshotStore, SubstrateRouter: runtimePoolSubstrateRouter,
 	}
 	controlStoreOptions := []storekube.Option{
 		storekube.WithAPIReader(mgr.GetAPIReader()),
@@ -1790,6 +1829,7 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
+		SubstrateRouter:      runtimePoolSubstrateRouter,
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
@@ -1806,6 +1846,7 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	runtimePoolReconciler.AllowProviderTokenInSandbox = acpWorkspaceAllowProviderTokenInSandbox
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
 		Namespace:       acpProviderProxyNamespace,
@@ -1919,8 +1960,9 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Identity: agentIdentityConfig,
-		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Identity:        agentIdentityConfig,
+		SubstrateRouter: runtimePoolSubstrateRouter,
+		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
 		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
@@ -1954,6 +1996,7 @@ func main() {
 	)
 
 	upgradeDrain.ControllerNamespace = controlNamespace
+	upgradeDrain.SubstrateRouter = runtimePoolSubstrateRouter
 	if err := mgr.Add(upgradeDrain); err != nil {
 		setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 		os.Exit(1)
@@ -2291,6 +2334,7 @@ func main() {
 		connectorToolEffects = kubeControlStore
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
+		SubstrateMCPProxy:         api.SubstrateMCPProxyConfig{Router: substrateMCPRouter},
 		Port:                      apiPort,
 		NativeSessionMaxBytes:     nativeSessionMaxBytes,
 		WatchNamespace:            watchNamespace,
@@ -2358,8 +2402,9 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-		GatewayService: gatewayService,
-		Reader:         mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		GatewayService:     gatewayService,
+		SubstrateMCPRouter: substrateMCPRouter,
+		Reader:             mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
 		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,

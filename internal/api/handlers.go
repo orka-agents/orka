@@ -39,6 +39,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -127,6 +128,7 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
 }
@@ -156,6 +158,7 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -191,6 +194,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 	}
 }
@@ -456,6 +460,20 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
+// jsonObjectHasField reports whether object has a member that encoding/json
+// decodes into a struct field named field. encoding/json matches field names
+// under strings.EqualFold, which also folds non-ASCII spellings such as U+017F
+// (ſ) to "s", so "RequestedBy" and "requeſtedBy" both fill a field tagged
+// "requestedBy". strings.ToLower or an exact lookup misses some of them.
+func jsonObjectHasField(object map[string]json.RawMessage, field string) bool {
+	for key := range object {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
+}
+
 func rejectRequestedByTampering(body []byte) error {
 	if len(body) == 0 {
 		return nil
@@ -466,28 +484,24 @@ func rejectRequestedByTampering(body []byte) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	for key := range topLevel {
-		switch strings.ToLower(key) {
-		case "requestedby":
-			return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
-		case "transaction":
-			return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
-		}
+	if jsonObjectHasField(topLevel, "requestedBy") {
+		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+	}
+	if jsonObjectHasField(topLevel, "transaction") {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
 	}
 
 	for topKey, specRaw := range topLevel {
-		if strings.ToLower(topKey) != "spec" {
+		if !strings.EqualFold(topKey, "spec") {
 			continue
 		}
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
-			for key := range spec {
-				switch strings.ToLower(key) {
-				case "requestedby":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
-				case "transaction":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
-				}
+			if jsonObjectHasField(spec, "requestedBy") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if jsonObjectHasField(spec, "transaction") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}

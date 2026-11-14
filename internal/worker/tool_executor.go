@@ -51,6 +51,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// defaultToolHTTPTimeout bounds a Tool call whose Tool sets no timeout.
+const defaultToolHTTPTimeout = 30 * time.Second
+
 const (
 	mcpJSONRPCVersion                = "2.0"
 	mcpProtocolVersion               = "2025-06-18"
@@ -139,6 +142,12 @@ type ToolExecutor struct {
 	// resolution and immediately before the request leaves the process.
 	sendGate        func(context.Context) error
 	gatewayTaskPass func(context.Context, *corev1alpha1.Tool) (string, error)
+
+	// substrateMCPRouter is set only inside the Orka manager, whose pod
+	// certificate is the router's allowlisted identity. Workers use
+	// substrateMCPProxy instead.
+	substrateMCPRouter *SubstrateMCPRouter
+	substrateMCPProxy  *substrateMCPProxyConfig
 
 	remoteMu               sync.Mutex
 	remoteBindings         map[string][32]byte
@@ -346,7 +355,7 @@ func NewToolExecutor() *ToolExecutor {
 	authorityConstraint := strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret))
 	return &ToolExecutor{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultToolHTTPTimeout,
 		},
 		secretPath:                  "/secrets/tools",
 		namespace:                   namespace,
@@ -355,6 +364,7 @@ func NewToolExecutor() *ToolExecutor {
 		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
+		substrateMCPProxy:           substrateMCPProxyFromEnvironment(),
 		// The controller sets the Task's UID on the worker Pod and overrides
 		// any Task-supplied value, as it does for the namespace above.
 		taskUID: strings.TrimSpace(os.Getenv(workerenv.TaskUID)),
@@ -370,7 +380,7 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 		namespace = "default"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: defaultToolHTTPTimeout}
 	}
 	var resolver outboundaccess.Resolver
 	if len(resolvers) > 0 {
@@ -506,19 +516,26 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
+	baseClient := e.client
+	if prepared.baseClient != nil {
+		baseClient = prepared.baseClient
+	}
 	// An Agent identity credential, like a linked-account one, is bound to
 	// the declared destination, so neither follows any redirect.
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway,
+	httpClient, err := toolHTTPClient(baseClient, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway,
 		prepared.connection || prepared.agentIdentity)
 	if err != nil {
 		return "", err
+	}
+	if prepared.substrateMCP {
+		// The proxy and router never redirect; a redirect would carry the
+		// workload or router credential elsewhere.
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 
 	if prepared.direct && !e.skipDirectPublicValidation {
 		dialContext := tokenexchange.PublicEndpointDialContext
 		switch {
-		case prepared.trustedActorRoute:
-			dialContext = exactEndpointDialContext(prepared.request.URL)
 		case (prepared.connection || prepared.agentIdentity) && allowPrivateConnectionEndpoints.Load():
 			// The fixture allowance relaxes only where a linked-account or
 			// Agent identity request may go; the transport keeps its
@@ -930,9 +947,13 @@ type preparedToolRequest struct {
 	// credential: it is never followed across a redirect.
 	connection bool
 	// agentIdentity marks a request carrying an Agent identity credential.
-	agentIdentity     bool
-	mcp               bool
-	trustedActorRoute bool
+	agentIdentity bool
+	mcp           bool
+	// substrateMCP marks a request to a Substrate MCP actor through the Orka
+	// API proxy or, inside the manager, the router. baseClient overrides the
+	// executor client for the router's mTLS identity.
+	substrateMCP bool
+	baseClient   *http.Client
 	// forward marks a forwarding Tool's request, whose upstream answer is
 	// returned whatever its status.
 	forward bool
@@ -982,11 +1003,13 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 
-	httpConfig, routeHost, err := toolHTTPConfig(tool)
+	if isMCPSubstrateActorTool(tool) {
+		return e.prepareSubstrateMCPRequest(ctx, tool, params)
+	}
+	httpConfig, err := toolHTTPConfig(tool)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
-	isMCP := isMCPSubstrateActorTool(tool)
 
 	var authToken string
 	if httpConfig.GatewayTaskPass {
@@ -1003,11 +1026,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		authToken = token
 	}
 
-	authInject := toolAuthInject(httpConfig)
-	if isMCP && authInject == "body" && authToken != "" {
-		return preparedToolRequest{}, fmt.Errorf("MCP tools do not support authInject=body")
-	}
-	authInject, err = applyToolBodyAuth(params, httpConfig, authToken)
+	authInject, err := applyToolBodyAuth(params, httpConfig, authToken)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
@@ -1017,34 +1036,17 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	if method == "" {
 		method = http.MethodPost
 	}
-	var body []byte
-	if isMCP {
-		method = http.MethodPost
-		body, err = marshalMCPToolCallRequest(tool, params)
-		if err != nil {
-			return preparedToolRequest{}, err
-		}
-	} else {
-		url = interpolateToolURL(url, params)
-		body, err = json.Marshal(params)
-		if err != nil {
-			return preparedToolRequest{}, fmt.Errorf("failed to marshal request body: %w", err)
-		}
+	url = interpolateToolURL(url, params)
+	body, err := json.Marshal(params)
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to create request: %w", err)
 	}
-	if routeHost != "" {
-		req.Host = routeHost
-	}
-
 	req.Header.Set("Content-Type", "application/json")
-	if isMCP {
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
-	}
 	configuredSecrets := []string{}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
@@ -1057,11 +1059,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		if existing := strings.TrimSpace(req.Header.Get(toolIdempotencyKeyHeader)); existing != "" && existing != approvalIdempotencyKey {
 			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", toolIdempotencyKeyHeader)
 		}
-		if isMCP {
-			req.Header.Del(toolIdempotencyKeyHeader)
-		} else {
-			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
-		}
+		req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
 	}
 	if authInject == toolAuthInjectHeader && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -1083,14 +1081,12 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 
 	prepared := preparedToolRequest{
-		httpConfig:        httpConfig,
-		request:           req,
-		authToken:         authToken,
-		transactionToken:  transactionToken,
-		redactionSecrets:  compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
-		mcp:               isMCP,
-		gateway:           httpConfig.GatewayTaskPass,
-		trustedActorRoute: isMCP && routeHost != "",
+		httpConfig:       httpConfig,
+		request:          req,
+		authToken:        authToken,
+		transactionToken: transactionToken,
+		redactionSecrets: compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
+		gateway:          httpConfig.GatewayTaskPass,
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
 		if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
@@ -1245,12 +1241,10 @@ func (e *ToolExecutor) applyGatewayOutboundAccess(
 		return errors.New("gateway outbound access could not resolve request authorities")
 	}
 	if !e.skipDirectPublicValidation {
-		trustedActorRoute := prepared.trustedActorRoute
 		if err := validateGatewayOriginalTarget(
 			ctx,
 			prepared.request.URL,
 			originalAuthority,
-			trustedActorRoute,
 		); err != nil {
 			return err
 		}
@@ -1275,7 +1269,6 @@ func validateGatewayOriginalTarget(
 	ctx context.Context,
 	requestURL *neturl.URL,
 	authority string,
-	trustedActorRoute bool,
 ) error {
 	if requestURL == nil {
 		return errors.New("gateway outbound access requires a prepared Tool request")
@@ -1292,11 +1285,6 @@ func validateGatewayOriginalTarget(
 	}
 	if authorityURL.User != nil {
 		return errors.New("gateway outbound access original Tool authority must not contain embedded credentials")
-	}
-	if trustedActorRoute {
-		// Actor route hosts and router endpoints are controller-resolved Tool status,
-		// not caller-selected public Tool URLs. The trusted gateway owns that route.
-		return nil
 	}
 	if err := tokenexchange.ValidatePublicEndpointHost(ctx, authorityURL.Hostname()); err != nil {
 		return fmt.Errorf("gateway outbound access requires a public original Tool URL: %w", err)
@@ -1338,30 +1326,11 @@ func compactToolSecrets(values ...string) []string {
 	return out
 }
 
-func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, string, error) {
-	var httpConfig corev1alpha1.HTTPExecution
-	if tool != nil && tool.Spec.HTTP != nil {
-		httpConfig = *tool.Spec.HTTP
+func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, error) {
+	if tool == nil || tool.Spec.HTTP == nil {
+		return corev1alpha1.HTTPExecution{}, fmt.Errorf("http tool endpoint is not configured")
 	}
-	if !isMCPSubstrateActorTool(tool) {
-		if tool == nil || tool.Spec.HTTP == nil {
-			return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("http tool endpoint is not configured")
-		}
-		return httpConfig, "", nil
-	}
-
-	httpConfig.URL = strings.TrimSpace(tool.Status.Endpoint)
-	if httpConfig.Method == "" {
-		httpConfig.Method = http.MethodPost
-	}
-	routeHost := ""
-	if tool.Status.Actor != nil {
-		routeHost = strings.TrimSpace(tool.Status.Actor.RouteHost)
-	}
-	if httpConfig.URL == "" || routeHost == "" {
-		return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("MCP tool actor endpoint is not ready")
-	}
-	return httpConfig, routeHost, nil
+	return *tool.Spec.HTTP, nil
 }
 
 func isMCPSubstrateActorTool(tool *corev1alpha1.Tool) bool {

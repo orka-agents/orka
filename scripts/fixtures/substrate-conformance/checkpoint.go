@@ -27,14 +27,22 @@ func exerciseDataRestore(
 	if err != nil {
 		return err
 	}
-	if _, err := api.Control.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: source}); err != nil {
+	if _, err := api.Control.SuspendActor(ctx, &ateapipb.SuspendActorRequest{
+		Actor: source, Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
+	}); err != nil {
 		return err
 	}
+	var suspended *ateapipb.Actor
 	if err := pollNative(ctx, func() (bool, error) {
 		value, err := api.Control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: source})
+		suspended = value
 		return value.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_SUSPENDED, err
 	}); err != nil {
 		return err
+	}
+	captured := latestSnapshot(suspended.GetStatus().GetSnapshots())
+	if suspended.GetMetadata().GetUid() != actor.GetMetadata().GetUid() || !completedDataSnapshot(captured) {
+		return fmt.Errorf("native direct suspension did not capture a completed VOLUMES snapshot of its source")
 	}
 	tagRef := &ateapipb.ObjectRef{Atespace: conformanceAtespace, Name: "orka-direct-data-" + suffix}
 	defer func() {
@@ -54,17 +62,24 @@ func exerciseDataRestore(
 		if err != nil {
 			return false, err
 		}
-		if tag.GetStatus().GetSnapshot() == nil {
+		snapshot := tag.GetStatus().GetSnapshot()
+		if snapshot.GetDurableSnapshot().GetState() != ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
 			return false, nil
 		}
-		if tag.GetStatus().GetSnapshot().GetContentScope() != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA ||
-			tag.GetStatus().GetSourceActorUid() != actor.GetMetadata().GetUid() ||
-			tag.GetStatus().GetActorTemplateUid() != actor.GetStatus().GetCurrentActorTemplateUid() {
+		// v1 Tags keep only the source Actor name; bind the exact lifetime
+		// through its unchanged UID and the captured template identity.
+		if !completedDataSnapshot(snapshot) || tag.GetSourceActor().GetName() != source.GetName() ||
+			tag.GetStatus().GetActorTemplateUid() == "" ||
+			tag.GetStatus().GetActorTemplateUid() != captured.GetActorTemplateUid() {
 			return false, fmt.Errorf("native direct checkpoint provenance differs from its source")
 		}
 		return true, nil
 	}); err != nil {
 		return err
+	}
+	after, err := api.Control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: source})
+	if err != nil || after.GetMetadata().GetUid() != actor.GetMetadata().GetUid() {
+		return fmt.Errorf("native direct checkpoint source changed while tagging")
 	}
 	if _, err := executor.Delete(ctx, workspace.DeleteRequest{
 		Ref: ref, SkipScrub: true, Timeout: 2 * time.Minute,
@@ -116,6 +131,22 @@ func restoreDataFork(
 	}
 	_, err = executor.Delete(ctx, workspace.DeleteRequest{Ref: ref, Timeout: 2 * time.Minute})
 	return err
+}
+
+func latestSnapshot(snapshots []*ateapipb.Snapshot) *ateapipb.Snapshot {
+	var latest *ateapipb.Snapshot
+	for _, snapshot := range snapshots {
+		if snapshot != nil && (latest == nil || snapshot.GetGeneration() > latest.GetGeneration()) {
+			latest = snapshot
+		}
+	}
+	return latest
+}
+
+func completedDataSnapshot(snapshot *ateapipb.Snapshot) bool {
+	return snapshot.GetFidelity() == ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES &&
+		snapshot.GetDurableSnapshot().GetState() == ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED &&
+		snapshot.GetActorTemplateUid() != ""
 }
 
 func pollNative(ctx context.Context, ready func() (bool, error)) error {

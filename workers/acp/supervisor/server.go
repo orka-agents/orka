@@ -157,6 +157,9 @@ type sessionTombstone struct {
 	// Late cancellation records stay separate so explicit deletion replays
 	// continue to return the original immutable wire tombstone.
 	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
+	// drainCleaned marks a session retired by drain cleanup rather than by an
+	// authenticated delete, so a fresh prompt for it is provably unaccepted.
+	drainCleaned bool
 }
 
 // A retired prompt retains proof, never its input, output, or capabilities.
@@ -1691,7 +1694,9 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
-		s.tombstoneSessionLocked(state, deletedAt)
+		tombstone := s.tombstoneSessionLocked(state, deletedAt)
+		tombstone.drainCleaned = true
+		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()
 }
@@ -1830,7 +1835,7 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
-	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}

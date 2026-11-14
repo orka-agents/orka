@@ -522,7 +522,7 @@ immutable images:
 --controller-mode=harness-v2
 --acp-runtime-namespace=orka-runtimes
 --acp-provider-proxy-namespace=orka-system
---acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc:8080
+--acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc.cluster.local:8080
 --acp-codex-runtime-image=<repository>@sha256:<digest>
 --acp-claude-runtime-image=<repository>@sha256:<digest>
 --acp-copilot-runtime-image=<repository>@sha256:<digest>
