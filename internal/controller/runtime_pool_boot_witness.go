@@ -272,7 +272,7 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 }
 
 // runtimePoolBootTopologySpec returns the Pod spec the shared recovery
-// topology check sees. Toolbox init containers are controller-rendered, run to
+// topology check sees. Toolbox and skill init containers are controller-rendered, run to
 // completion before the runtime container starts, and never share its process
 // namespace, so they and their read-only image volumes are removed from the
 // copy. Any other init container, including a restartable sidecar, still
@@ -280,9 +280,9 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
 	topology := *spec.DeepCopy()
 	for _, container := range spec.InitContainers {
-		toolboxInit := container.Name == runtimePoolToolboxHandoffContainer || strings.HasPrefix(container.Name, runtimePoolToolboxCopyPrefix)
+		toolboxInit := container.Name == runtimePoolToolboxHandoffContainer || runtimePoolBoundImageCopyContainer(container.Name)
 		if !toolboxInit || container.RestartPolicy != nil {
-			return corev1.PodSpec{}, errors.New("runtime recovery permits only controller-rendered toolbox init containers")
+			return corev1.PodSpec{}, errors.New("runtime recovery permits only controller-rendered toolbox and skill init containers")
 		}
 		if err := validateRecoveryContainer(container); err != nil {
 			return corev1.PodSpec{}, err
@@ -290,7 +290,7 @@ func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
 	}
 	topology.InitContainers = nil
 	topology.Volumes = slices.DeleteFunc(topology.Volumes, func(volume corev1.Volume) bool {
-		return volume.Image != nil && strings.HasPrefix(volume.Name, runtimePoolToolboxVolumePrefix)
+		return volume.Image != nil && (strings.HasPrefix(volume.Name, runtimePoolToolboxVolumePrefix) || strings.HasPrefix(volume.Name, runtimePoolSkillVolumePrefix))
 	})
 	return topology, nil
 }

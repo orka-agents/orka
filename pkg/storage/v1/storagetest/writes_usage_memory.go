@@ -127,8 +127,11 @@ func init() {
 			observe: observeUsage,
 		},
 		usageCase{
-			method:  "CreateMemory",
-			args:    rebuiltArgs(func() []any { return []any{&storagev1.Memory{Namespace: memoryTenant, Content: "remember this"}} }),
+			method: "CreateMemory",
+			args: rebuiltArgs(func() []any {
+				return []any{&storagev1.Memory{ID: "mem-catalog", Namespace: memoryTenant, Content: "remember this",
+					CreatedAt: writeCaseCreated, UpdatedAt: writeCaseCreated}}
+			}),
 			observe: observeMemories,
 		},
 		usageCase{
@@ -158,8 +161,8 @@ func init() {
 		usageCase{
 			method: "CreateMemoryProposal",
 			args: rebuiltArgs(func() []any {
-				return []any{&storagev1.MemoryProposal{Namespace: memoryTenant, Title: "Retry skill", SkillName: "retry",
-					Content: "Back off exponentially"}}
+				return []any{&storagev1.MemoryProposal{ID: "mprop-catalog", Namespace: memoryTenant, Title: "Retry skill", SkillName: "retry",
+					Content: "Back off exponentially", CreatedAt: writeCaseCreated, UpdatedAt: writeCaseCreated}}
 			}),
 			observe: observeMemoryProposals,
 		},

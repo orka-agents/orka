@@ -1,78 +1,31 @@
--- Additive SQLite transition: 170-to-171 (schema version 3 to 4).
--- Source layout: the dataset installation binding layout (schema version 3).
--- Target definitions: Agent Host Protocol tokens, clients, users, journal, channel states, sessions and backend records, schema version 4.
--- It adds only empty tables and indexes, so a store whose key bootstrap is
--- unfinished can still finish it.
--- Frozen from the target's real schema statements; do not use mutable helpers.
+-- SQLite transition: 170-to-171 (schema version 3 to 4).
+-- A retry_pending work action still owns its dedupe key: command intake
+-- coalesces into it, monitor cancellation stops it, and its MonitorRun
+-- handoff is retried. The unique index now enforces that, as it already did
+-- for queued, leased and running actions.
+--
+-- Earlier layouts let another active action take the key of a retry_pending
+-- one. Such a retry_pending action is redundant, so it is cancelled before
+-- the index is rebuilt, as CancelWorkActions would. Within each key the
+-- queued, leased or running action stays, and otherwise the newest
+-- retry_pending one (by created_at, then id). One ranked pass keeps the cost
+-- to a sort of the active actions. It adds no rows.
 -- Transaction and complete-layout validation are owned by the caller.
 
-CREATE TABLE IF NOT EXISTS ahp_tokens (
-			id          TEXT PRIMARY KEY,
-			token_hash  TEXT NOT NULL UNIQUE,
-			user_key    TEXT NOT NULL,
-			issuer      TEXT NOT NULL,
-			subject     TEXT NOT NULL,
-			username    TEXT NOT NULL,
-			namespace   TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			created_at  TIMESTAMP NOT NULL,
-			expires_at  TIMESTAMP NOT NULL,
-			revoked_at  TIMESTAMP
-		);
+UPDATE work_actions
+SET status = 'cancelled', blocked_reason = 'dedupe_superseded', error = '',
+    completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id, status, ROW_NUMBER() OVER (
+            PARTITION BY monitor_namespace, monitor_name, dedupe_key
+            ORDER BY status = 'retry_pending', created_at DESC, id DESC) AS keep_rank
+        FROM work_actions
+        WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending'))
+    WHERE status = 'retry_pending' AND keep_rank > 1);
 
-CREATE INDEX IF NOT EXISTS idx_ahp_tokens_user
-			ON ahp_tokens(user_key, created_at);
+DROP INDEX idx_work_actions_dedupe;
 
-CREATE TABLE IF NOT EXISTS ahp_clients (
-			client_id        TEXT PRIMARY KEY,
-			user_key         TEXT NOT NULL,
-			protocol_version TEXT NOT NULL,
-			dialect          TEXT NOT NULL,
-			created_at       TIMESTAMP NOT NULL,
-			updated_at       TIMESTAMP NOT NULL
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_users (
-			user_key   TEXT PRIMARY KEY,
-			server_seq INTEGER NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_journal (
-			user_key TEXT NOT NULL,
-			seq      INTEGER NOT NULL,
-			channel  TEXT NOT NULL,
-			envelope BLOB NOT NULL,
-			size     INTEGER NOT NULL,
-			PRIMARY KEY (user_key, seq)
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_channel_states (
-			user_key TEXT NOT NULL,
-			channel  TEXT NOT NULL,
-			state    BLOB NOT NULL,
-			from_seq INTEGER NOT NULL,
-			PRIMARY KEY (user_key, channel)
-		);
-
-CREATE TABLE IF NOT EXISTS ahp_sessions (
-			user_key    TEXT NOT NULL,
-			session     TEXT NOT NULL,
-			backend     TEXT NOT NULL,
-			summary     BLOB NOT NULL,
-			created_at  TIMESTAMP NOT NULL,
-			modified_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, session)
-		);
-
-CREATE INDEX IF NOT EXISTS idx_ahp_sessions_modified
-			ON ahp_sessions(user_key, modified_at);
-
-CREATE TABLE IF NOT EXISTS ahp_records (
-			user_key   TEXT NOT NULL,
-			kind       TEXT NOT NULL,
-			key        TEXT NOT NULL,
-			value      BLOB NOT NULL,
-			updated_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, kind, key)
-		);
+CREATE UNIQUE INDEX idx_work_actions_dedupe
+    ON work_actions(monitor_namespace, monitor_name, dedupe_key)
+    WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending');

@@ -1019,10 +1019,15 @@ func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal
 		}
 		return err
 	}
-	_, err := b.h.requestTaskCancellation(ctx, ahpPrincipalUserInfo(principal), task)
+	ui := ahpPrincipalUserInfo(principal)
+	// Only the person whose turn created the Task cancels it here.
+	if !ahpOwns(ui, task) {
+		return fiber.NewError(fiber.StatusForbidden, "only the Task's requester may cancel it")
+	}
+	_, err := b.h.recordTaskCancellation(ctx, task, string(task.UID), cancelMessage(ui, ""))
 	if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 		switch fiberErr.Code {
-		case fiber.StatusNotFound, fiber.StatusGone, fiber.StatusConflict:
+		case fiber.StatusNotFound, fiber.StatusConflict:
 			return nil
 		}
 	}

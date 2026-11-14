@@ -77,7 +77,7 @@ spec:
 | `agentRef` | `ai`, `agent` | The [Agent](#agent) to use. |
 | `prompt` | `ai`, `agent` | What to do. |
 | `image`, `command`, `args` | `container` | The container to run. See [Container tasks](../guides/container-tasks.md). |
-| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. |
+| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. A container Task's `valueFrom.secretKeyRef` and `valueFrom.configMapKeyRef` follow the `secretRef` policy; see [Container tasks](../guides/container-tasks.md#other-fields). |
 | `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. |
 | `workspace` | `agent`, `container` | The git repository to work in. See [Workspace](#workspace). |
 | `agentRuntime` | `agent` | Per-Task overrides of the Agent's runtime defaults: `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. |
@@ -85,7 +85,7 @@ spec:
 | `timeout` | all | Maximum wall-clock duration. Coding-agent Tasks default to `30m`, measured from Task creation, including queueing and runtime admission. |
 | `priority` | all | Queue priority from 0 to 1000, default `500`. Higher runs first. |
 | `retryPolicy` | all | `maxRetries` (default `0`), `backoffMultiplier` (default `2`), and `initialDelay`. |
-| `webhookURL` | all | URL called when the Task completes. |
+| `webhookURL` | all | Public `http(s)` URL, or a Service in the Task's namespace, that receives a signed notice when the Task reaches a terminal phase. Delivery state is in `status.webhookDelivery`. See [Task webhooks](../guides/task-webhooks.md). |
 | `resources` | `ai`, `container` | CPU and memory requests and limits for the worker Pod. Coding-agent Tasks reject custom resources; their pool profile sets them. |
 | `execution` | `ai`, `container`; `workspace` only for `agent` | Runtime class and placement. See [Execution](#execution). |
 | `secretRef` | `ai`, `container` | A Secret for the Task. Container Tasks do not receive it by default; see [Container tasks](../guides/container-tasks.md#other-fields). |
@@ -345,7 +345,6 @@ spec:
     inline: "You are a senior software engineer."
   runtime:
     type: claude         # or "codex" / "copilot" / "opencode"
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -359,13 +358,14 @@ spec:
 | --- | --- |
 | `model.name` | Required. A model your gateway lists. |
 | `runtime.type` | `codex`, `claude`, `copilot`, or `opencode`. |
-| `runtime.contractVersion` | `orka.harness.v2`. |
+| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value. |
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |
 | `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Runtimes reject values they do not support: `none` is Codex-only and `max` is Claude-only. |
 | `runtime.runtimeRef` | Selects an external [AgentRuntime](../guides/bring-your-own-agent-runtime.md) instead of a built-in type. |
 | `runtime.toolboxes` | Built-in types only. Read-only [toolbox](../guides/toolboxes.md) images whose tool folders are added to the agent's `PATH`. |
+| `runtime.skills` | `codex`, `claude`, and `opencode` only. [Agent Skills](../guides/runtime-skills.md) (`name`, digest-pinned `image`, optional `path` under `/skills`) copied into each session's native skills folder. |
 
 All four built-in harness v2 runtimes support `spec.systemPrompt` and the optional
 [`spec.soul`](../concepts/soul.md) persona source. Copilot and OpenCode receive
@@ -922,6 +922,7 @@ spec:
 | `review.trigger` | string | No | `push` (default) reviews every new head, with a follow-up review of the new changes and open findings when the head builds on the last reviewed one. `open` reviews each pull request once; later heads need a `review` command, except pull requests automatic repair may fix. |
 | `review.blockingPriority` | string | No | Lowest open finding priority (`P0`–`P3`) that makes the verdict `needs_changes`. Defaults to `P1`. Findings outside a follow-up review's changes block only at `P1` or above. |
 | `review.exhaustive` | bool | No | Repeat a full review on the same head until a pass finds nothing new, at most three passes; only the last pass is published. Follow-up reviews run once. |
+| `review.maxRounds` | int | No | Number of pull request heads in a row that may be reviewed without a passed review. A `needs_changes` review of the head that reaches it becomes `needs_human` with a note asking the author to reconsider the approach, which stops automatic repair of review findings. Reviews of the same head count once. Minimum `1`; unset means no limit. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
 | `review.publish.mode` | string | No | `summary_only` or `summary_with_inline_findings`. Inline comments are only attempted for changed RIGHT-side diff lines. |

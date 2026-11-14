@@ -31,6 +31,7 @@ func TestAPICreationRejectsRemovedRuntimeInputs(t *testing.T) {
 		{"task binding", "/tasks", `{"name":"rejected","type":"agent","status":{"agentExecutionBinding":{"contractVersion":"orka.harness.v1"}}}`, "only orka.harness.v2"},
 		{"Agent contract", "/agents", `{"name":"rejected","spec":{"runtime":{"type":"codex","contractVersion":"orka.harness.v1"}}}`, "only orka.harness.v2"},
 		{"Agent credentials", "/agents", `{"name":"rejected","spec":{"runtime":{"type":"codex","secretRef":{"name":"old-auth"}}}}`, "spec.runtime.secretRef is no longer supported"},
+		{"Agent ceiling misspelled limit", "/agents", `{"name":"rejected","spec":{"runtime":{"type":"codex","ceiling":{"allowedTool":["Read"]}}}}`, "spec.runtime.ceiling.allowedTool is not supported"},
 		{"AgentRuntime contract", "/agent-runtimes", `{"metadata":{"name":"rejected"},"spec":{"contractVersion":"orka.harness.v1"}}`, "only orka.harness.v2"},
 		{"AgentRuntime auth", "/agent-runtimes", `{"metadata":{"name":"rejected"},"spec":{"contractVersion":"orka.harness.v2","clientAuth":{"bearerTokenSecretRef":null}}}`, "bearerTokenSecretRef is no longer supported"},
 		{"AgentRuntime capabilities", "/agent-runtimes", `{"metadata":{"name":"rejected"},"spec":{"contractVersion":"orka.harness.v2","capabilities":{"supportsCancel":true}}}`, "supportsCancel is no longer supported"},

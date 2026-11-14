@@ -5,9 +5,9 @@ import { ChatToolCall } from './chat-tool-call'
 import { StatusDot } from '@/components/ui/status-dot'
 import { useTask } from '@/hooks/use-tasks'
 import type { ChatMessage as ChatMessageType } from '@/schemas/chat'
+import { isTaskTerminal } from '@/lib/task-phase'
 
 const TASK_CHIP_POLL_MS = 10_000
-const TERMINAL_TASK_PHASES = new Set(['Succeeded', 'Failed', 'Cancelled'])
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralForm}`
@@ -20,7 +20,7 @@ function TaskChip({ name }: { name: string }) {
   const [polling, setPolling] = useState(true)
   const { data: task } = useTask(name, polling ? TASK_CHIP_POLL_MS : false)
   const phase = task?.status?.phase
-  if (polling && phase && TERMINAL_TASK_PHASES.has(phase)) setPolling(false)
+  if (polling && phase && isTaskTerminal(phase)) setPolling(false)
 
   return (
     <Link

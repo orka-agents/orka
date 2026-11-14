@@ -95,5 +95,5 @@ log "Waiting for orka-controller-manager rollout"
 kubectl -n "${namespace}" rollout status deployment/orka-controller-manager --timeout=300s
 
 log "Cluster up. Next steps (optional):"
-log "  hack/demos/cluster/install-agent-sandbox.sh  # for Demo 60"
-log "  make demo-images                              # for Demo 60's sandbox runtime image"
+log "  hack/demos/cluster/install-agent-sandbox.sh  # agent-sandbox backend"
+log "  make demo-images                              # agent-sandbox runtime image"

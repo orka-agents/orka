@@ -273,6 +273,7 @@ func setupTestHandlersWithAuthzStore(
 	app.Get("/agents", handlers.ListAgents)
 	app.Get("/agents/:name", handlers.GetAgent)
 	app.Put("/agents/:name", handlers.UpdateAgent)
+	app.Put("/agents/:name/spec", handlers.UpdateAgentSpec)
 	app.Delete("/agents/:name", handlers.DeleteAgent)
 	app.Get("/memories", handlers.ListMemories)
 	app.Post("/memories", handlers.CreateMemory)
@@ -2139,6 +2140,51 @@ func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
 	}
 }
 
+// encoding/json decodes any key equal under strings.EqualFold into a tagged
+// field, including non-ASCII folds such as U+017F (ſ) for "s" that
+// strings.ToLower leaves unchanged.
+func TestHandlers_CreateTask_RejectsServerOwnedKeysInAnySpelling(t *testing.T) {
+	spoofed := map[string]any{"subject": "spoofed"}
+	tests := []struct {
+		name    string
+		key     string
+		value   any
+		message string
+	}{
+		{"top-level requestedBy mixed case", "RequestedBy", spoofed, "requestedBy cannot be set by clients"},
+		{"top-level requestedBy unicode fold", "requeſtedBy", spoofed, "requestedBy cannot be set by clients"},
+		{"top-level transaction unicode fold", "tranſaction", map[string]any{"id": "spoofed"}, "transaction cannot be set by clients"},
+		{"spec unicode fold", "ſpec", map[string]any{"requestedBy": spoofed}, "spec.requestedBy cannot be set by clients"},
+		{"spec requestedBy unicode fold", "spec", map[string]any{"requeſtedBy": spoofed}, "spec.requestedBy cannot be set by clients"},
+		{"spec transaction upper case", "spec", map[string]any{"TRANSACTION": map[string]any{"id": "spoofed"}}, "spec.transaction cannot be set by clients"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			body := map[string]any{
+				"name":      "tampered-task",
+				"namespace": "default",
+				"type":      corev1alpha1.TaskTypeContainer,
+				"image":     "busybox",
+				tt.key:      tt.value,
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(raw))
+			require.Contains(t, string(raw), tt.message)
+		})
+	}
+}
+
 func TestHandlers_CreateTask_RejectsReservedLabels(t *testing.T) {
 	for _, labelName := range []string{labels.LabelParentTask, labels.LabelCoordinator} {
 		t.Run(labelName, func(t *testing.T) {
@@ -2943,9 +2989,9 @@ func (s *sessionAccessRecordingStore) GetSessionType(ctx context.Context, namesp
 	return s.typeReader.GetSessionType(ctx, namespace, name)
 }
 
-func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	s.deleteCalls++
-	return s.SessionStore.DeleteSession(ctx, namespace, name)
+	return s.SessionStore.DeleteSession(ctx, namespace, name, now)
 }
 
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *storageclient.Client) {

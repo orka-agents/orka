@@ -193,6 +193,95 @@ func TestRepositoryScanIngestsTerminalPipelineOnRestart(t *testing.T) {
 	require.Equal(t, 2, run.DroppedFindings)
 }
 
+// newUningestedStageRace seeds a run whose threat-model Task, and optionally
+// mapper Task, finished after ingestOwnedTasks listed them. Progression is the
+// first step that sees them terminal, so it must not trust their output before
+// ingesting it.
+func newUningestedStageRace(t *testing.T, runID string, keepMapper bool) (context.Context, *storageclient.Client, client.Client, *RepositoryScanReconciler, *corev1alpha1.RepositoryScan, []*corev1alpha1.Task) {
+	t.Helper()
+	ctx := context.Background()
+	s := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS, UID: "scan-uid"},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/example/repo", ValidationMode: "off",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+		},
+		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: runID},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}, &corev1alpha1.Task{}).
+		WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+	tasks := seedRetainedScanPipeline(t, s, cl, scan, runID, time.Now().UTC(), 2)
+	keep := 1
+	if keepMapper {
+		keep = 2
+	}
+	for _, task := range tasks[keep:] {
+		require.NoError(t, cl.Delete(ctx, task))
+	}
+	for _, task := range tasks[:keep] {
+		finishScanTask(t, cl, task)
+	}
+	run, err := s.GetScanRun(ctx, defaultNS, runID)
+	require.NoError(t, err)
+	run.TaskName = tasks[0].Name
+	require.NoError(t, s.UpdateScanRun(ctx, run))
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: s, ResultStore: s, ArtifactStore: s}
+	return ctx, s, cl, r, scan, tasks[:keep]
+}
+
+func scanStageTasks(t *testing.T, cl client.Client, runID, stage string) []corev1alpha1.Task {
+	t.Helper()
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, cl.List(context.Background(), &tasks, client.InNamespace(defaultNS), client.MatchingLabels{
+		labels.LabelSecurityScanID: runID, labels.LabelSecurityStage: stage,
+	}))
+	return tasks.Items
+}
+
+func TestProgressLatestScanRunFailsUningestedMalformedThreatModelBeforeMapper(t *testing.T) {
+	const runID = "scan_threat_race"
+	ctx, s, cl, r, scan, tasks := newUningestedStageRace(t, runID, false)
+	run, err := s.GetScanRun(ctx, defaultNS, runID)
+	require.NoError(t, err)
+	malformed, err := json.Marshal(security.ThreatModelResultEnvelope{
+		SchemaVersion: security.AgentResultSchemaVersion, Kind: security.AgentResultKindThreatModel,
+		RepositoryScan: scan.Name, ScanID: "scan_other", PolicyDigest: run.PolicyDigest, ThreatModel: "# Wrong run",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.SaveResult(ctx, defaultNS, tasks[0].Name, malformed))
+
+	progressed, err := r.progressLatestScanRun(ctx, scan)
+	require.NoError(t, err)
+	require.False(t, progressed)
+
+	require.Empty(t, scanStageTasks(t, cl, runID, security.StageMapper), "mapper must not start from an unvalidated threat model")
+	run, err = s.GetScanRun(ctx, defaultNS, runID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseFailed, run.Phase)
+	require.Equal(t, "threat model terminal result is missing or invalid: security result scanId does not match task run", run.ErrorMessage)
+	_, err = s.GetLatestThreatModel(ctx, defaultNS, scan.Name)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestProgressLatestScanRunIngestsUningestedMapperBeforeCompleting(t *testing.T) {
+	const runID = "scan_mapper_race"
+	ctx, s, cl, r, scan, _ := newUningestedStageRace(t, runID, true)
+
+	progressed, err := r.progressLatestScanRun(ctx, scan)
+	require.NoError(t, err)
+	require.True(t, progressed)
+
+	run, err := s.GetScanRun(ctx, defaultNS, runID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseRunning, run.Phase, "the run must not complete before the mapper's slices are ingested")
+	require.Equal(t, 2, run.SliceCount)
+	require.Len(t, scanStageTasks(t, cl, runID, security.StageReview), 2)
+}
+
 func seedRetainedScanPipeline(t *testing.T, s *storageclient.Client, cl client.Client, scan *corev1alpha1.RepositoryScan, runID string, started time.Time, sliceCount int) []*corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -403,4 +405,160 @@ func TestDeferredCancellationStopsJobDuringValidationClassificationOutage(t *tes
 			require.Zero(t, reads.Load())
 		})
 	}
+}
+
+// Output above the result limit can never be stored, so it is not staged:
+// cancellation still stops the work during a storage outage, and recovery ends
+// the Task with the reason and releases the staging instead of retrying.
+func TestDeferredStdoutResultAboveTheLimitFinalizesWithoutIt(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	task.Annotations[labels.AnnotationAgentReadOnly] = booleanTrueValue
+	oversized := bytes.Repeat([]byte("r"), store.MaxResultBytes+1)
+	logs := "worker diagnostic\n" + workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(oversized) + "\n"
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
+	results := r.ResultStore
+	r.ResultStore = transientGetResultErrorStore{ResultStore: results, err: store.ErrUnavailable}
+	reads := serveDeferredResultLogs(t, r, logs)
+	cascadeDeferredJobPod(t, r, pod)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)}
+	_, err := r.Reconcile(t.Context(), request)
+	require.ErrorIs(t, err, store.ErrUnavailable)
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})),
+		"output above the limit must not keep cancelled work running")
+	intent, err := r.loadDeferredTaskFinalization(t.Context(), task)
+	require.NoError(t, err)
+	require.NotNil(t, intent)
+	require.True(t, intent.ResultTooLarge)
+	require.Zero(t, intent.ResultChunks)
+	secrets := &corev1.SecretList{}
+	require.NoError(t, r.List(t.Context(), secrets))
+	require.Len(t, secrets.Items, 1, "output that can never be stored is not staged")
+
+	r.ResultStore = results
+	_, err = r.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
+	require.Equal(t, corev1alpha1.TaskPhaseCancelled, current.Status.Phase)
+	require.Equal(t, "stop; task result exceeds the 10485760 byte limit and was not stored", current.Status.Message)
+	require.Nil(t, current.Status.ResultRef)
+	_, err = results.GetResult(t.Context(), task.Namespace, task.Name)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.EqualValues(t, 1, reads.Load())
+	_, err = r.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, r.List(t.Context(), secrets))
+	require.Empty(t, secrets.Items, "terminal cleanup releases the staging")
+}
+
+// A stdout log longer than its read limit is refused, even when the result
+// behind it is small, and the Task says the log, not the result, was too long.
+func TestDeferredStdoutResultLogAboveTheReadLimitFinalizesWithoutIt(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	task.Annotations[labels.AnnotationAgentReadOnly] = booleanTrueValue
+	logs := strings.Repeat("d", int(stdoutResultLogLimitBytes)) + "\n" +
+		workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte("ok")) + "\n"
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
+	results := r.ResultStore
+	r.ResultStore = transientGetResultErrorStore{ResultStore: results, err: store.ErrUnavailable}
+	serveDeferredResultLogs(t, r, logs)
+	cascadeDeferredJobPod(t, r, pod)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)}
+	_, err := r.Reconcile(t.Context(), request)
+	require.ErrorIs(t, err, store.ErrUnavailable)
+	intent, err := r.loadDeferredTaskFinalization(t.Context(), task)
+	require.NoError(t, err)
+	require.NotNil(t, intent)
+	require.True(t, intent.ResultTooLarge)
+	require.True(t, intent.ResultLogTooLarge)
+	require.Zero(t, intent.ResultChunks)
+
+	r.ResultStore = results
+	_, err = r.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
+	require.Equal(t, corev1alpha1.TaskPhaseCancelled, current.Status.Phase)
+	require.Equal(t, fmt.Sprintf("stop; task log exceeds the %d byte stdout result read limit, so the result was not collected", stdoutResultLogLimitBytes), current.Status.Message)
+	require.Nil(t, current.Status.ResultRef)
+}
+
+// A refused stdout log is a refused result, so the narrower flag needs the
+// broader one.
+func TestDeferredFinalizationRejectsALogRefusalWithoutAResultRefusal(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
+	data, err := json.Marshal(deferredTaskFinalization{
+		Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: "stop",
+		ResultLogTooLarge: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, r.createDeferredFinalizationSecret(t.Context(), task, deferredFinalizationName(task), "intent.json", data))
+	_, err = r.loadDeferredTaskFinalization(t.Context(), task)
+	require.ErrorContains(t, err, "intent is invalid")
+}
+
+// An intent that records refused output stages none of it.
+func TestDeferredFinalizationRejectsARefusedResultWithStagedOutput(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
+	data, err := json.Marshal(deferredTaskFinalization{
+		Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: "stop",
+		ResultTooLarge: true, ResultChunks: 1, ResultBytes: 1, ResultDigest: strings.Repeat("0", 64),
+	})
+	require.NoError(t, err)
+	require.NoError(t, r.createDeferredFinalizationSecret(t.Context(), task, deferredFinalizationName(task), "intent.json", data))
+	_, err = r.loadDeferredTaskFinalization(t.Context(), task)
+	require.ErrorContains(t, err, "intent is invalid")
+}
+
+// TestDeferredFinalizationStopsTheJobBeforeItsChildren covers a stop already
+// decided whose Job delete failed: once storage recovers, the reconcile that
+// records it deletes the Job before it cancels the Task's children.
+func TestDeferredFinalizationStopsTheJobBeforeItsChildren(t *testing.T) {
+	task, job, pod, namespace := deferredFinalizationFixture()
+	controller := true
+	owner := []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID, Controller: &controller,
+	}}
+	job.OwnerReferences = owner
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated", Namespace: task.Namespace, OwnerReferences: owner,
+			Labels: map[string]string{labels.LabelParentTask: task.Name},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace, child)
+	serveDeferredResultLogs(t, r, "output")
+	// The stop was decided and saved, but its Job delete never happened.
+	require.NoError(t, r.stageDeferredTaskFinalization(t.Context(), task, deferredTaskFinalization{
+		Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: "stop",
+	}))
+	watched, ok := r.Client.(client.WithWatch)
+	require.True(t, ok)
+	var order []string
+	r.Client = interceptor.NewClient(watched, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isJob := obj.(*batchv1.Job); isJob {
+				order = append(order, "job deleted")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if obj.GetName() == child.Name {
+				order = append(order, "child cancelled")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseCancelled, current.Status.Phase)
+	require.Equal(t, []string{"job deleted", "child cancelled"}, order)
 }

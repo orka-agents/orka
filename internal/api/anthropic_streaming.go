@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -793,12 +794,6 @@ func isTaskStillRunning(result string) bool {
 	if !parsed.Success {
 		return false
 	}
-	// Terminal phases — auto-poll should stop
-	switch parsed.Data.Phase {
-	case "Succeeded", "Failed", "Cancelled":
-		return false
-	default:
-		// Running, Pending, Scheduled — still active
-		return true
-	}
+	// Auto-poll stops once the Task is terminal.
+	return !corev1alpha1.TaskPhase(parsed.Data.Phase).IsTerminal()
 }

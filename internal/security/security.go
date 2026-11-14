@@ -27,10 +27,7 @@ const (
 	ArtifactThreatModel    = "security-threat-model.md"
 	ArtifactValidation     = "security-validation.json"
 	ArtifactValidationText = "security-validation.txt"
-	// ArtifactWorkspaceDir is the repo-root symlink the worker exposes for
-	// writing security artifacts from inside the agent workspace.
-	ArtifactWorkspaceDir = ".orka-artifacts"
-	maxGeneratedTaskName = 63
+	maxGeneratedTaskName   = 63
 )
 
 const (
@@ -618,33 +615,6 @@ func ValidateRepositoryScanSource(spec corev1alpha1.RepositoryScanSpec) error {
 // IsSuspended returns whether scheduled scans are paused.
 func IsSuspended(scan *corev1alpha1.RepositoryScan) bool {
 	return scan.Spec.Suspend != nil && *scan.Spec.Suspend
-}
-
-// ArtifactWorkspacePath returns the relative path from the agent working
-// directory to the repo-root artifacts symlink.
-func ArtifactWorkspacePath(subPath string) string {
-	cleaned := strings.TrimSpace(strings.ReplaceAll(subPath, "\\", "/"))
-	cleaned = strings.Trim(cleaned, "/")
-	if cleaned == "" {
-		return ArtifactWorkspaceDir
-	}
-
-	cleaned = path.Clean(cleaned)
-	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "..") {
-		return ArtifactWorkspaceDir
-	}
-
-	depth := 0
-	for segment := range strings.SplitSeq(cleaned, "/") {
-		if segment == "" || segment == "." {
-			continue
-		}
-		depth++
-	}
-	if depth == 0 {
-		return ArtifactWorkspaceDir
-	}
-	return strings.Repeat("../", depth) + ArtifactWorkspaceDir
 }
 
 // BuildThreatModelResultPrompt returns the harness-v2 prompt whose only output

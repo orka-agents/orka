@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -49,7 +50,7 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 			tool.Annotations = map[string]string{substrateMCPToolActorIDAnno: legacy, substrateMCPToolBootedIDAnno: legacy}
 			tool.Status = corev1alpha1.ToolStatus{Available: true, Endpoint: server.URL + testMCPPath, Actor: &corev1alpha1.ToolActorStatus{
 				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: legacy, TemplateRef: &template,
-				RouteHost: legacy + ".actors.resources.substrate.ate.dev", PoolRef: tool.Spec.MCP.SubstrateActor.PoolRef,
+				PoolRef: tool.Spec.MCP.SubstrateActor.PoolRef,
 			}}
 			lease := newSubstrateMCPToolActorLease(tool, tool.Namespace, legacy)
 			objects := []client.Object{tool}
@@ -75,13 +76,14 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 			executor := &recordingToolWorkspaceExecutor{}
 			newReconciler := func() *ToolReconciler {
 				return &ToolReconciler{
-					Client: c, Scheme: scheme, HTTPClient: server.Client(), SubstrateMCPToolsEnabled: true,
+					Client: c, Scheme: scheme, HTTPClient: server.Client(), SubstrateRouterHTTPClient: server.Client(), SubstrateMCPToolsEnabled: true,
 					SubstrateConfig: SubstrateConfig{RouterURL: server.URL, ClaimTimeout: time.Second},
 					SubstrateTemplateValidator: func(_ context.Context, request *ExecutionWorkspaceRequest) error {
 						request.TemplateUID = "native-template-uid"
 						return nil
 					},
-					SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
+					SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
+					SubstrateExecutorFactory:     func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
 				}
 			}
 			current := &corev1alpha1.Tool{}
@@ -101,7 +103,7 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 			if failPatch || !current.Status.Available || current.Status.Actor.ActorID != qualified || executor.claimName != qualified || len(executor.deletedActorIDs) != 0 {
 				t.Fatalf("migration did not preserve the live Actor: status=%+v claims=%q deletes=%v injected=%t", current.Status, executor.claimName, executor.deletedActorIDs, !failPatch)
 			}
-			if current.Status.Actor.RouteHost != qualified+".actors.resources.substrate.ate.dev" || current.Annotations[substrateMCPToolBootedIDAnno] != qualified {
+			if current.Status.Endpoint != workerexecutor.SubstrateMCPProxyPath(current.Namespace, current.Name) || current.Annotations[substrateMCPToolBootedIDAnno] != qualified {
 				t.Fatal("migration did not qualify the route and boot marker")
 			}
 			for _, booted := range executor.waitReadyBoots {
@@ -243,7 +245,8 @@ func TestSubstrateMCPLegacyFinalizationBeforeActorStatus(t *testing.T) {
 						t.Fatal("finalization tried to validate native template admission")
 						return nil
 					},
-					SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
+					SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
+					SubstrateExecutorFactory:     func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
 				}
 				_, err := r.Reconcile(t.Context(), mcpToolRequest())
 				require.NoError(t, err)

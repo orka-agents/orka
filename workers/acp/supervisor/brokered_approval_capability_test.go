@@ -24,18 +24,33 @@ func TestProviderCapabilitiesDefaultToUnqualifiedBrokeredApprovals(t *testing.T)
 }
 
 func TestSupervisorSessionRequiresBrokeredApprovalCapability(t *testing.T) {
-	for _, supported := range []bool{false, true} {
-		name := "missing capability"
-		if supported {
-			name = "qualified brokered approval"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		supported bool
+		forwarded bool
+	}{
+		{"missing capability", false, false},
+		{"qualified brokered approval", true, false},
+		// A forwarding write tool's approval is waited for by the
+		// supervisor's client forwarder, so any runtime carries it.
+		{"forwarded write without the capability", false, true},
+	} {
+		supported := tc.supported
+		t.Run(tc.name, func(t *testing.T) {
 			cfg, profile := newTestConfigWithUpstream(t, "immediate", "http://127.0.0.1:1", strings.Repeat("p", 32))
 			profile.ProviderKind = providerKindAgentKit
 			profile.AgentConfigurationDigest = testDigest("fixed-agentkit-config")
 			fence := cfg.Fence
 			fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "approval-session", 1
 			authorization, _ := testMCPAuthorization(t, fence, time.Now().UTC(), true)
+			if tc.forwarded {
+				authorization, _ = forwardingTestAuthorizationWith(t, fence, time.Now().UTC(), 1, true)
+				authorization.ApprovalPolicy = harnessv2.MCPApprovalPolicy{RequiredTools: []string{harnessv2.MCPForwardWriteToolName(testForwardTool)}}
+				var err error
+				if authorization.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(authorization.ApprovalPolicy); err != nil {
+					t.Fatal(err)
+				}
+			}
 			profile.ToolPolicyDigest = authorization.ToolPolicyDigest
 			profile.ApprovalPolicyDigest = authorization.ApprovalPolicyDigest
 			profile.MCPConfigurationDigest = authorization.MCPConfigurationDigest
@@ -69,7 +84,7 @@ func TestSupervisorSessionRequiresBrokeredApprovalCapability(t *testing.T) {
 			request.MCPConfiguration = authorization.Configuration()
 			sealRequest(t, &request.Metadata.RequestDigest, request)
 			response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
-			if supported {
+			if supported || tc.forwarded {
 				if response.Code != http.StatusCreated {
 					t.Fatalf("qualified approval session returned %d: %s", response.Code, response.Body.String())
 				}

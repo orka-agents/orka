@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -14,11 +15,32 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 // classifyChatK8sErr returns a ChatToolResult for common K8s API errors.
+// chatTaskCreateTimeout bounds a chat Task's Create, which stopping the chat
+// turn does not cut short. It stays under the time a Session cancel waits
+// for the turn to stop.
+const chatTaskCreateTimeout = 5 * time.Second
+
+// createChatTask creates a Task for a chat turn. A turn already stopped
+// starts no Create. One the turn's stop interrupts runs on to its outcome:
+// a Session cancel stops the turn and then lists its Tasks, and were the
+// Create abandoned mid-flight, the API server could commit the Task after
+// that list, where it would run uncancelled. The turn instead waits for the
+// Create's outcome, so the list sees it.
+func createChatTask(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatTaskCreateTimeout)
+	defer cancel()
+	return c.Create(createCtx, task)
+}
+
 func classifyChatK8sErr(err error) (string, error) {
 	if apierrors.IsNotFound(err) {
 		return ChatToolErrorResult(errTypeNotFound, err.Error(), "Check the resource name and namespace")

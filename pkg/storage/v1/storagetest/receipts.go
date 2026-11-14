@@ -80,7 +80,16 @@ func runOperationReceipts(t *testing.T, newProvider StateFactory) {
 		removed, err := provider.PruneOperationReceipts(ctx, 100)
 		require.NoError(t, err)
 		require.Zero(t, removed, "a fresh receipt survives pruning")
-		require.NoError(t, provider.SaveResult(ctx, "tenant", "task", []byte("newer")))
+		// The newer write comes from the same issuer, so its order stamp is
+		// greater and it replaces the result.
+		newer := NewWriteEnvelope(t, info.DatasetID, suiteFence, "SaveResult", "tenant", "task", []byte("newer"))
+		require.NoError(t, provider.SaveResult(storagev1.WithWriteEnvelope(ctx, newer), "tenant", "task", []byte("newer")))
+		outcome, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
+			DatasetID: info.DatasetID, OperationID: envelope.OperationID, Method: "SaveResult",
+			RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
+		})
+		require.NoError(t, err)
+		require.Equal(t, storagev1.OperationCommitted, outcome.State, "the receipt is still kept")
 		require.NoError(t, provider.SaveResult(envelopeCtx, "tenant", "task", []byte("kept")),
 			"the receipt still answers a retry")
 		data, err := provider.GetResult(ctx, "tenant", "task")

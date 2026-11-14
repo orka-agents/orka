@@ -456,6 +456,9 @@ func runGatewayEvents(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, p.RetryGatewayEvent(t.Context(), event.Namespace, event.ID, "owner-a", "stale", now), storagev1.ErrConflict)
 		_, err = p.FreezeGatewayEventTaskRuntimeAllowedTools(t.Context(), event.Namespace, event.ID, "owner-a", []string{"tool"}, now)
 		require.ErrorIs(t, err, storagev1.ErrConflict)
+		var zero time.Time
+		_, err = p.FreezeGatewayEventTaskRuntimeAllowedTools(t.Context(), event.Namespace, event.ID, "owner-b", []string{"unjudged"}, zero)
+		require.ErrorIs(t, err, storagev1.ErrValidation, "a claim is judged only at the time the request carries")
 		frozen, err := p.FreezeGatewayEventTaskRuntimeAllowedTools(t.Context(), event.Namespace, event.ID, "owner-b", []string{"tool"}, now)
 		require.NoError(t, err)
 		require.True(t, frozen.TaskPolicyFrozen)

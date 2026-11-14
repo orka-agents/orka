@@ -454,6 +454,17 @@ spec:
                       review, or a head that rewrote history) repeat; intermediate passes are
                       not published.
                     type: boolean
+                  maxRounds:
+                    description: |-
+                      MaxRounds bounds how many pull request heads in a row may be reviewed
+                      without a passed review. When the review of the MaxRounds-th such head
+                      would be needs_changes, Orka records needs_human instead and asks the
+                      author to reconsider the approach, which stops automatic repair of
+                      review findings. Reviews of the same head count once. Unset means no
+                      limit.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   publish:
                     description: |-
                       Publish controls deterministic GitHub pull request review publishing after review ingestion.

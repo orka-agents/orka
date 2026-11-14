@@ -19,6 +19,11 @@ const agentRuntimeDefaultsSchema = {
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
   defaultReasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  ceiling: z.object({
+    allowedTools: z.array(z.string()).optional(),
+    allowBash: z.boolean().optional(),
+    maxTurns: z.number().optional(),
+  }).strict().optional(),
 }
 
 export const builtInAgentRuntimeTypes = ['claude', 'codex', 'copilot', 'opencode'] as const
@@ -79,6 +84,10 @@ export const agentSpecSchema = z.object({
     approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
+  // Kept so editing an Agent never drops its identity binding.
+  identity: z.object({
+    entra: z.object({ agentIdentityID: z.string() }).strict().optional(),
+  }).strict().optional(),
 }).superRefine((spec, ctx) => {
   if (spec.soul && spec.runtime && 'runtimeRef' in spec.runtime) {
     ctx.addIssue({ code: 'custom', message: 'Soul is only supported by AI and built-in runtimes', path: ['soul'] })

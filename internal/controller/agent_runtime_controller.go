@@ -2072,7 +2072,7 @@ func agentRuntimeEndpointRequiresPublicDial(endpoint string) bool {
 }
 
 func isLoopbackAgentRuntimeEndpoint(host string) bool {
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+	if host == localhostHost || strings.HasSuffix(host, "."+localhostHost) {
 		return true
 	}
 	address, err := netip.ParseAddr(host)

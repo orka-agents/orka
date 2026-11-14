@@ -3546,7 +3546,7 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
+func TestReadOnlyAgentRuntimeTypeKeepsOpencode(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
@@ -3555,10 +3555,6 @@ func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
 
 	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() = %#v, %v, want no runtime secret keys", keys, err)
 	}
 }
 
@@ -3818,5 +3814,29 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	}
 	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
 		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
+	}
+}
+
+// The AI worker resolves its own ServiceAccount from the Downward API; task
+// env cannot replace it.
+func TestJobBuilder_buildEnvVars_ServiceAccountNameFromDownwardAPI(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Provider: "anthropic", Model: "m", Prompt: "Hello"},
+			Env:  []corev1.EnvVar{{Name: workerenv.ServiceAccountName, Value: "orka"}},
+		},
+	}
+	var found []corev1.EnvVar
+	for _, env := range builder.buildEnvVars(context.Background(), task, nil, nil) {
+		if env.Name == workerenv.ServiceAccountName {
+			found = append(found, env)
+		}
+	}
+	if len(found) != 1 || found[0].Value != "" || found[0].ValueFrom == nil || found[0].ValueFrom.FieldRef == nil ||
+		found[0].ValueFrom.FieldRef.FieldPath != "spec.serviceAccountName" {
+		t.Fatalf("%s env = %#v, want one Downward API spec.serviceAccountName reference", workerenv.ServiceAccountName, found)
 	}
 }

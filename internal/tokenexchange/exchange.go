@@ -81,6 +81,12 @@ var reservedParameters = map[string]struct{}{
 	"client_secret":         {},
 	"client_assertion":      {},
 	"client_assertion_type": {},
+	// Entra agent identity parameters select or impersonate an identity, so a
+	// direct policy author must never set them (ADR 0039).
+	"fmi_path":                           {},
+	"user_id":                            {},
+	"username":                           {},
+	"user_federated_identity_credential": {},
 }
 
 // IsReservedParameter reports whether name is owned by OAuth grant or client

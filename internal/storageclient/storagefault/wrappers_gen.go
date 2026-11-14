@@ -9,13 +9,13 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
+func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 storagev1.AcquireChatTurnRequest) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "AcquireChatTurn", func(ctx context.Context) (err error) {
 		if responseWillBeLost(ctx) {
 			a1 = cloneArgument(a1)
 		}
-		r0, err = p.inner.AcquireChatTurn(ctx, a1, a2, a3)
+		r0, err = p.inner.AcquireChatTurn(ctx, a1)
 		return err
 	})
 	if injected {
@@ -25,9 +25,9 @@ func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 *storagev1.Sessi
 	return r0, err
 }
 
-func (p *stateProvider) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+func (p *stateProvider) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) error {
 	_, err := p.injector.call(ctx, p.contract, "AcquireLock", func(ctx context.Context) error {
-		return p.inner.AcquireLock(ctx, a1, a2, a3, a4)
+		return p.inner.AcquireLock(ctx, a1, a2, a3, a4, a5)
 	})
 	return err
 }
@@ -166,12 +166,12 @@ func (p *stateProvider) AppendMessages(ctx context.Context, a1 string, a2 string
 	return err
 }
 
-func (p *stateProvider) AppendMessagesWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 []storagev1.SessionMessage) error {
+func (p *stateProvider) AppendMessagesWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 []storagev1.SessionMessage) error {
 	_, err := p.injector.call(ctx, p.contract, "AppendMessagesWithLock", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
-			a5 = cloneArgument(a5)
+			a2 = cloneArgument(a2)
 		}
-		return p.inner.AppendMessagesWithLock(ctx, a1, a2, a3, a4, a5)
+		return p.inner.AppendMessagesWithLock(ctx, a1, a2)
 	})
 	return err
 }
@@ -346,13 +346,12 @@ func (p *stateProvider) CommitSealedSessionTurnFinalization(ctx context.Context,
 	return r0, err
 }
 
-func (p *stateProvider) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
+func (p *stateProvider) CommitSessionTurn(ctx context.Context, a1 storagev1.CommitSessionTurnRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "CommitSessionTurn", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
 			a1 = cloneArgument(a1)
-			a4 = cloneArgument(a4)
 		}
-		return p.inner.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
+		return p.inner.CommitSessionTurn(ctx, a1)
 	})
 	return err
 }
@@ -399,6 +398,19 @@ func (p *stateProvider) CompleteSessionCleanup(ctx context.Context, a1 storagev1
 		return p.inner.CompleteSessionCleanup(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) ConsumeMessages(ctx context.Context, a1 storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
+	var r0 []storagev1.Message
+	injected, err := p.injector.call(ctx, p.contract, "ConsumeMessages", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ConsumeMessages(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.Message
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ConsumeSealedConnectorCompletion(ctx context.Context, a1 string) (*storagev1.SealedConnectorCompletion, error) {
@@ -825,9 +837,9 @@ func (p *stateProvider) DeleteResult(ctx context.Context, a1 string, a2 string) 
 	return err
 }
 
-func (p *stateProvider) DeleteSession(ctx context.Context, a1 string, a2 string) error {
+func (p *stateProvider) DeleteSession(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
 	_, err := p.injector.call(ctx, p.contract, "DeleteSession", func(ctx context.Context) error {
-		return p.inner.DeleteSession(ctx, a1, a2)
+		return p.inner.DeleteSession(ctx, a1, a2, a3)
 	})
 	return err
 }
@@ -890,9 +902,9 @@ func (p *stateProvider) EnqueueOutboxProjectionRecord(ctx context.Context, a1 *s
 	return r0, err
 }
 
-func (p *stateProvider) EnsureSessionSoulWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
+func (p *stateProvider) EnsureSessionSoulWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 string) error {
 	_, err := p.injector.call(ctx, p.contract, "EnsureSessionSoulWithLock", func(ctx context.Context) error {
-		return p.inner.EnsureSessionSoulWithLock(ctx, a1, a2, a3, a4, a5)
+		return p.inner.EnsureSessionSoulWithLock(ctx, a1, a2)
 	})
 	return err
 }
@@ -1282,19 +1294,6 @@ func (p *stateProvider) GetMemoryProposal(ctx context.Context, a1 string, a2 str
 	return r0, err
 }
 
-func (p *stateProvider) GetMessages(ctx context.Context, a1 string, a2 string, a3 string, a4 bool) ([]storagev1.Message, error) {
-	var r0 []storagev1.Message
-	injected, err := p.injector.call(ctx, p.contract, "GetMessages", func(ctx context.Context) (err error) {
-		r0, err = p.inner.GetMessages(ctx, a1, a2, a3, a4)
-		return err
-	})
-	if injected {
-		var z0 []storagev1.Message
-		return z0, err
-	}
-	return r0, err
-}
-
 func (p *stateProvider) GetMonitorItem(ctx context.Context, a1 string, a2 string, a3 string, a4 string) (*storagev1.MonitorItem, error) {
 	var r0 *storagev1.MonitorItem
 	injected, err := p.injector.call(ctx, p.contract, "GetMonitorItem", func(ctx context.Context) (err error) {
@@ -1568,6 +1567,19 @@ func (p *stateProvider) GetSessionCleanupIntent(ctx context.Context, a1 string, 
 	return r0, err
 }
 
+func (p *stateProvider) GetSessionCreatedAt(ctx context.Context, a1 string, a2 string) (time.Time, error) {
+	var r0 time.Time
+	injected, err := p.injector.call(ctx, p.contract, "GetSessionCreatedAt", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetSessionCreatedAt(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 time.Time
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetSessionLineage(ctx context.Context, a1 string, a2 string) (*storagev1.SessionLineage, error) {
 	var r0 *storagev1.SessionLineage
 	injected, err := p.injector.call(ctx, p.contract, "GetSessionLineage", func(ctx context.Context) (err error) {
@@ -1679,10 +1691,10 @@ func (p *stateProvider) HealthCheck(ctx context.Context) error {
 	return err
 }
 
-func (p *stateProvider) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string) (bool, error) {
+func (p *stateProvider) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "IsLocked", func(ctx context.Context) (err error) {
-		r0, err = p.inner.IsLocked(ctx, a1, a2, a3, a4)
+		r0, err = p.inner.IsLocked(ctx, a1, a2, a3, a4, a5)
 		return err
 	})
 	if injected {
@@ -2288,6 +2300,19 @@ func (p *stateProvider) ListTaskCounterObservations(ctx context.Context, a1 stri
 	return r0, err
 }
 
+func (p *stateProvider) ListUnreadMessages(ctx context.Context, a1 string, a2 string, a3 string, a4 int) ([]storagev1.Message, error) {
+	var r0 []storagev1.Message
+	injected, err := p.injector.call(ctx, p.contract, "ListUnreadMessages", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListUnreadMessages(ctx, a1, a2, a3, a4)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.Message
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListUsagePullRequestLinks(ctx context.Context, a1 string, a2 string, a3 time.Time, a4 int) ([]storagev1.UsagePRLink, error) {
 	var r0 []storagev1.UsagePRLink
 	injected, err := p.injector.call(ctx, p.contract, "ListUsagePullRequestLinks", func(ctx context.Context) (err error) {
@@ -2420,6 +2445,19 @@ func (p *stateProvider) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 		return p.inner.MarkGatewayEventTaskCreated(ctx, a1, a2, a3, a4, a5, a6)
 	})
 	return err
+}
+
+func (p *stateProvider) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
+	var r0 bool
+	injected, err := p.injector.call(ctx, p.contract, "MarkWorkActionRetryPending", func(ctx context.Context) (err error) {
+		r0, err = p.inner.MarkWorkActionRetryPending(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 bool
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) PrepareSessionCleanup(ctx context.Context, a1 storagev1.SessionCleanupIntent) (*storagev1.SessionCleanupIntent, error) {
@@ -2668,9 +2706,9 @@ func (p *stateProvider) ReleaseLock(ctx context.Context, a1 string, a2 string, a
 	return err
 }
 
-func (p *stateProvider) ReleaseLockWithTokenUsage(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
+func (p *stateProvider) ReleaseLockWithTokenUsage(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
 	_, err := p.injector.call(ctx, p.contract, "ReleaseLockWithTokenUsage", func(ctx context.Context) error {
-		return p.inner.ReleaseLockWithTokenUsage(ctx, a1, a2, a3, a4, a5, a6)
+		return p.inner.ReleaseLockWithTokenUsage(ctx, a1, a2, a3)
 	})
 	return err
 }
@@ -3100,9 +3138,9 @@ func (p *stateProvider) UpdateTokenCounts(ctx context.Context, a1 string, a2 str
 	return err
 }
 
-func (p *stateProvider) UpdateTokenCountsWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
+func (p *stateProvider) UpdateTokenCountsWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateTokenCountsWithLock", func(ctx context.Context) error {
-		return p.inner.UpdateTokenCountsWithLock(ctx, a1, a2, a3, a4, a5, a6)
+		return p.inner.UpdateTokenCountsWithLock(ctx, a1, a2, a3)
 	})
 	return err
 }

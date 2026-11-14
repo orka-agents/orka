@@ -25,7 +25,6 @@ interface ChatState {
   setModel: (model: string) => void
   selectNamespace: (namespace: string) => void
   addMessage: (message: ChatMessage) => void
-  updateLastAssistantMessage: (content: string) => void
   setSessionId: (id: string | null) => void
   setStreaming: (streaming: boolean) => void
   requestStop: () => void
@@ -128,18 +127,6 @@ export const useChatStore = create<ChatState>()(
 
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
-
-  updateLastAssistantMessage: (content) =>
-    set((state) => {
-      const msgs = [...state.messages]
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'assistant') {
-          msgs[i] = { ...msgs[i], content }
-          break
-        }
-      }
-      return { messages: msgs }
-    }),
 
   setSessionId: (id) => set({ currentSessionId: id }),
   setStreaming: (streaming) => set({ isStreaming: streaming, stopRequested: false }),

@@ -116,7 +116,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	}
 	// Accepted current-head commands must revoke earlier success before their
 	// Tasks start. LastVerdict still describes the prior review at that point.
-	for _, phase := range []string{"queued", "leased", "running", store.RepositoryMonitorWorkActionStatusRetryPending} {
+	for _, phase := range store.RepositoryMonitorWorkActionActiveStatuses() {
 		actions, _, err := r.Store.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Status: phase, Limit: 1})
 		if err != nil {
 			return "", "", err

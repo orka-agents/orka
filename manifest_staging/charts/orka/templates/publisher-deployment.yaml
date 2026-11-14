@@ -78,6 +78,20 @@ spec:
             - {name: ORKA_PUBLISHER_GITHUB_REQUEST_TIMEOUT, value: {{ .Values.publisher.githubPR.requestTimeout | quote }}}
             - {name: ORKA_PUBLISHER_GITHUB_MAX_RESPONSE_BYTES, value: {{ printf "%d" (int64 .Values.publisher.githubPR.maxResponseBytes) | quote }}}
             {{- end }}
+            {{- with .Values.publisher.workspaceLimits }}
+            {{- if .maxEntries }}
+            - {name: ORKA_PUBLISHER_WORKSPACE_MAX_ENTRIES, value: {{ printf "%d" (int64 .maxEntries) | quote }}}
+            {{- end }}
+            {{- if .maxFileBytes }}
+            - {name: ORKA_PUBLISHER_WORKSPACE_MAX_FILE_BYTES, value: {{ printf "%d" (int64 .maxFileBytes) | quote }}}
+            {{- end }}
+            {{- if .maxBytes }}
+            - {name: ORKA_PUBLISHER_WORKSPACE_MAX_BYTES, value: {{ printf "%d" (int64 .maxBytes) | quote }}}
+            {{- end }}
+            {{- if .maxArtifactBytes }}
+            - {name: ORKA_PUBLISHER_WORKSPACE_MAX_ARTIFACT_BYTES, value: {{ printf "%d" (int64 .maxArtifactBytes) | quote }}}
+            {{- end }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -98,7 +112,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "orka.publisherName" . }}
         - name: tmp
-          emptyDir: {sizeLimit: 1Gi}
+          emptyDir: {sizeLimit: {{ .Values.publisher.scratchSizeLimit | default "1Gi" | quote }}}
         - name: publisher-auth
           secret:
             secretName: {{ .Values.publisher.auth.existingSecret | default (include "orka.publisherAuthSecretName" .) }}

@@ -9,7 +9,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -88,13 +87,6 @@ func (f *permissionApprovalFixture) status(t *testing.T) string {
 
 func oidcUser(subject string) *UserInfo {
 	return &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: subject, Username: subject}
-}
-
-func requireFiberStatus(t *testing.T, err error, status int) {
-	t.Helper()
-	var fiberErr *fiber.Error
-	require.True(t, errors.As(err, &fiberErr), "error %v is not an HTTP error", err)
-	require.Equal(t, status, fiberErr.Code, fiberErr.Message)
 }
 
 func TestDecideTaskApprovalAsLetsOnlyTheRequesterDecide(t *testing.T) {

@@ -420,7 +420,7 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	targetIdentity := struct {
 		Spec                   corev1alpha1.ToolSpec              `json:"spec"`
 		StatusEndpoint         string                             `json:"statusEndpoint,omitempty"`
-		StatusRouteHost        string                             `json:"statusRouteHost,omitempty"`
+		StatusActorID          string                             `json:"statusActorID,omitempty"`
 		AuthRefUID             string                             `json:"authRefUID,omitempty"`
 		AuthRefResourceVersion string                             `json:"authRefResourceVersion,omitempty"`
 		OutboundPolicy         *approvalOutboundPolicyIdentity    `json:"outboundPolicy,omitempty"`
@@ -434,7 +434,9 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		TxAuthority:            txAuthority,
 	}
 	if customTool.Status.Actor != nil {
-		targetIdentity.StatusRouteHost = strings.TrimSpace(customTool.Status.Actor.RouteHost)
+		// The Atespace-qualified actor ID selects the router target, so an
+		// approval binds to the exact actor behind the Orka MCP proxy.
+		targetIdentity.StatusActorID = strings.TrimSpace(customTool.Status.Actor.ActorID)
 	}
 	digest, err := approvals.TargetSpecDigest(targetIdentity)
 	if err != nil {

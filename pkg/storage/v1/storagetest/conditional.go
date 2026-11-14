@@ -243,8 +243,12 @@ func fencedOperations(at time.Time) []fencedOperation {
 		{"SendMessage", func(ctx context.Context, p storagev1.StateProvider) error {
 			return p.SendMessage(ctx, &storagev1.Message{Namespace: ns, FromTask: "task-fenced", ToTask: "peer", ParentTask: "parent", Content: "hello"})
 		}},
-		{"GetMessages", func(ctx context.Context, p storagev1.StateProvider) error {
-			_, err := p.GetMessages(ctx, ns, "peer", "parent", true)
+		{"ListUnreadMessages", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.ListUnreadMessages(ctx, ns, "peer", "parent", 0)
+			return err
+		}},
+		{"ConsumeMessages", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.ConsumeMessages(ctx, storagev1.ConsumeMessagesRequest{Namespace: ns, TaskName: "peer", ParentTask: "parent"})
 			return err
 		}},
 		{"GetSession", func(ctx context.Context, p storagev1.StateProvider) error {
@@ -321,7 +325,7 @@ func requireNoFencedEffects(t *testing.T, p storagev1.StateProvider) {
 	require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused result write")
 	_, err = p.GetPlan(ctx, conditionalNamespace, "task-fenced")
 	require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused plan write")
-	messages, err := p.GetMessages(ctx, conditionalNamespace, "peer", "parent", false)
+	messages, err := p.ListUnreadMessages(ctx, conditionalNamespace, "peer", "parent", 0)
 	require.NoError(t, err)
 	require.Empty(t, messages, "a refused message")
 	require.Empty(t, listEvents(t, p, storagev1.ExecutionEventFilter{Namespace: conditionalNamespace, StreamID: "task-fenced"}), "refused appends")

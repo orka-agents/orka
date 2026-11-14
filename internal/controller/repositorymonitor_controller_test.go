@@ -6893,6 +6893,177 @@ func TestRepositoryMonitorPermanentCommandRunTerminalizesWorkAction(t *testing.T
 	}
 }
 
+// Command intake can coalesce a command after the controller lists it as
+// accepted. Recovery then finds the coalesced action and must settle the
+// command as intake does, without queuing a run or rewriting the action.
+func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "coalesced-command", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-coalesced", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: "review", HeadSHA: "head-9", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, &command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "review", DependsOnActionID: "wa-active", Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", CreatedAt: completedAt, CompletedAt: &completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v, want the coalesced command handled", handled, reset, err)
+	}
+	if _, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetMonitorRun() error = %v, want no run queued for a coalesced command", err)
+	}
+	persisted, err := monitorStore.GetCommandEvent(ctx, defaultNS, command.ID)
+	if err != nil {
+		t.Fatalf("GetCommandEvent() error = %v", err)
+	}
+	if persisted.Status != repositoryMonitorCommandCompleted || persisted.Error != store.RepositoryMonitorCoalescedCommandError("wa-active") {
+		t.Fatalf("command status=%q error=%q, want the coalesced outcome", persisted.Status, persisted.Error)
+	}
+
+	// A run that started before the coalesced action was created still
+	// cannot rewrite it.
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, &store.MonitorRun{ID: runID}, &command, repositoryMonitorPullRequestKind, 9, "head-9", "", "review", repositoryMonitorWorkActionStatusBlocked, "blocked", "", "issue_closed"); err != nil {
+		t.Fatalf("recordRepositoryMonitorWorkActionState() error = %v", err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusCompleted || action.Phase != "coalesced" || action.DependsOnActionID != "wa-active" || action.BlockedReason != "" {
+		t.Fatalf("action = %#v, want the coalesced action unchanged", action)
+	}
+}
+
+// Intake can coalesce a command after recovery has already queued its run.
+// Execution must then stop as it does for a cancelled action, so the command's
+// work never runs twice.
+func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "coalesced-run", Namespace: defaultNS}}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "45", Number: 45, SnapshotDigest: "sha256:coalesced", WorkflowPhase: repositoryMonitorIssuePhaseDiscovered}
+	command := &store.CommandEvent{ID: "cmd-research-coalesced", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "research")
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "research", DependsOnActionID: "wa-active", Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", CreatedAt: completedAt, CompletedAt: &completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	run := &store.MonitorRun{ID: "run-coalesced", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+
+	created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+	if err != nil || created != 0 {
+		t.Fatalf("processIssueCommandRun() created=%d err=%v, want no work for a coalesced command", created, err)
+	}
+	if item.WorkflowPhase != repositoryMonitorIssuePhaseDiscovered {
+		t.Fatalf("item phase = %q, want the issue left as discovered", item.WorkflowPhase)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != store.RepositoryMonitorWorkActionStatusCompleted || action.Phase != "coalesced" {
+		t.Fatalf("action = %#v err=%v, want the coalesced action unchanged", action, err)
+	}
+}
+
+// A halted issue command must not block the shared issue or emit an event
+// for it, whether the phase is disabled or the transition is not allowed: the
+// issue is driven by the action that still owns the work.
+func TestRepositoryMonitorHaltedIssueCommandLeavesSharedIssue(t *testing.T) {
+	disabled := false
+	cases := map[string]func(*corev1alpha1.RepositoryMonitor) string{
+		"phase disabled": func(monitor *corev1alpha1.RepositoryMonitor) string {
+			monitor.Spec.IssueWorkflow.Research.Enabled = &disabled
+			return repositoryMonitorIssuePhaseDiscovered
+		},
+		"transition not allowed": func(*corev1alpha1.RepositoryMonitor) string {
+			return repositoryMonitorIssuePhaseTriageQueued
+		},
+	}
+	for name, setup := range cases {
+		for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				ctx := context.Background()
+				monitorStore := setupControllerSQLiteStore(t)
+				monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-issue", Namespace: defaultNS}}
+				phase := setup(monitor)
+				item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "46", Number: 46, SnapshotDigest: "sha256:halted", WorkflowPhase: phase}
+				command := &store.CommandEvent{ID: "cmd-research-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+				if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+					t.Fatalf("CreateCommandEvent() error = %v", err)
+				}
+				actionID := store.RepositoryMonitorWorkActionID(command.ID, "research")
+				if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "research", Status: status, CreatedAt: time.Now()}); err != nil {
+					t.Fatalf("CreateWorkAction() error = %v", err)
+				}
+				reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+				run := &store.MonitorRun{ID: "run-halted-issue", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+
+				created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+				if err != nil || created != 0 {
+					t.Fatalf("processIssueCommandRun() created=%d err=%v", created, err)
+				}
+				if item.WorkflowPhase != phase || item.SkipReason != "" {
+					t.Fatalf("item phase=%q skipReason=%q, want %q and no skip reason", item.WorkflowPhase, item.SkipReason, phase)
+				}
+				if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorIssueKind, "46"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+				}
+				events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: defaultNS, MonitorName: monitor.Name, Limit: 10})
+				if err != nil || len(events) != 0 {
+					t.Fatalf("events = %#v err=%v, want none for a halted command", events, err)
+				}
+			})
+		}
+	}
+}
+
+// A halted fix command (cancelled, or coalesced into another action) must not
+// mark the shared PR item failed when the PR carries a blocked label: the item
+// belongs to the action that is still doing the work.
+func TestRepositoryMonitorHaltedRepairCommandLeavesBlockedPullRequestItem(t *testing.T) {
+	for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+		t.Run(status, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-repair", Namespace: defaultNS}}
+			monitor.Spec.Policy.ProtectedLabels = []string{"hold"}
+			pr := repositoryMonitorPullRequest{Number: 12, HeadSHA: "head-12", Labels: []string{"hold"}}
+			item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "12", Number: 12, HeadSHA: "head-12", RepairState: repositoryMonitorRepairPhaseQueued}
+			command := &store.CommandEvent{ID: "cmd-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 12, Intent: repositoryMonitorCommandIntentFix, HeadSHA: "head-12", Status: "accepted", CreatedAt: time.Now()}
+			if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+				t.Fatalf("CreateCommandEvent() error = %v", err)
+			}
+			desiredAction := store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorRepairWorkflowActionKind(command.Intent))
+			actionID := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
+			if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: desiredAction, Status: status, CreatedAt: time.Now()}); err != nil {
+				t.Fatalf("CreateWorkAction() error = %v", err)
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			run := &store.MonitorRun{ID: "run-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 12}
+
+			handled, created, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item)
+			if err != nil || !handled || created != 0 {
+				t.Fatalf("tryProcessPullRequestCommandRun() handled=%v created=%d err=%v", handled, created, err)
+			}
+			if item.RepairState != repositoryMonitorRepairPhaseQueued || item.SkipReason != "" {
+				t.Fatalf("item RepairState=%q SkipReason=%q, want the item left to its active action", item.RepairState, item.SkipReason)
+			}
+			if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "12"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorTransientCommandRunStopsAfterRetryBudget(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

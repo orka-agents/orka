@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
@@ -42,5 +43,5 @@ func errorType(err error) string {
 	if errors.As(err, &pe) && pe.StatusCode > 0 {
 		return fmt.Sprintf("%d", pe.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }

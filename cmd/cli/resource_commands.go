@@ -249,6 +249,7 @@ func newSessionCmd() *cobra.Command {
 		NoUpdate:     true,
 		DescribeRows: sessionDescribeRows,
 	})
+	cmd.AddCommand(newSessionCancelCmd())
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())
 	cmd.AddCommand(newSessionMigrateCmd())

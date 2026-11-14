@@ -65,6 +65,75 @@ spec:
 Startup loading of reviewed memories into the prompt is separate and unchanged; tool
 opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
 
+## Task webhooks are signed and fail closed {#task-webhooks}
+
+`spec.webhookURL` notices are now signed, durable, and bounded. Review receivers before
+upgrading:
+
+- Every request carries an Ed25519-signed `X-Orka-Signature` and a stable
+  `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
+  against `/.well-known/orka/task-webhook-jwks.json`. See
+  [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
+- The signing key lives in a new namespace that holds only that Secret and binds only
+  the controller: `<release namespace>-task-webhook-signing` for Helm (value
+  `controller.taskWebhooks.signingNamespace`), `orka-task-webhook-signing` for kustomize
+  (flag `--task-webhook-signing-namespace`). The chart and the kustomize
+  install create the namespace and a controller Role in it; the controller creates the
+  Secret and mints the key on first use. Installs that grant RBAC some other way must
+  grant the controller `get` and `update` on that Secret and `create` on Secrets there.
+  The controller refuses to start if the signing namespace is its own, the watch, ACP
+  runtime or agent-host namespace. See
+  [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- Builds of `main` from before this change kept the key in the controller namespace,
+  where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+  new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
+  or `orka-task-webhook-signing` in the controller namespace) after upgrading.
+- A new ValidatingAdmissionPolicy, `<fullname>-ai-worker-identity-protection`
+  (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
+  ServiceAccount may create. Before, the default AI worker role could create a
+  ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
+  act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+  RoleBindings. Now it may write only Opaque Secrets, create or delete only `code_exec`'s
+  own `orka-code-exec-*` ServiceAccounts, and create only
+  `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
+  the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
+  labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
+  subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+  ephemeral containers, and non-root, unprivileged containers with
+  `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
+  `RuntimeDefault` or `Localhost` seccomp profile.
+  Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
+  ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+  and cannot move it to its own ServiceAccount, set `workers.ai.identityProtection: false`
+  (Helm) or drop `orka-ai-worker-identity-protection` and its binding from your kustomize
+  build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+  controller again, including reading the webhook signing key.
+- Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
+  and on worker accounts the controller creates. An OutboundAccessPolicy whose
+  `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
+  controller is configured with (labeled or not, for example an externally managed
+  controller account), now reports `ReferenceDenied`, and the controller revokes any
+  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
+  token for itself gives it nothing new. Point other such policies at a dedicated
+  ServiceAccount.
+- Check the release namespace for ServiceAccount-token Secrets
+  (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
+  The default AI worker profile can read them; delete any you do not need, and treat a
+  token for a privileged account as exposed.
+- With signing enabled but no usable key (the Secret cannot be read or holds a malformed
+  key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
+  key is available.
+- With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
+  their deliveries are marked `Failed`; enabling signing later does not retry them.
+- Destinations are checked at connect time. A DNS failure, any non-public resolved
+  address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
+  a private address stops receiving notices. Use a Service in the Task's namespace for
+  in-cluster receivers.
+- Failed deliveries are retried at most 8 times with exponential backoff, not every 30
+  seconds forever. Literal private IPs and other policy violations fail at once.
+- The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
+  fields are unchanged.
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database
@@ -83,10 +152,12 @@ Object counts alone do not establish compatibility.
 | 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata, then add the empty Agent Host Protocol tables. |
 | 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata, then add the empty Agent Host Protocol tables. |
 | 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata, then add the empty Agent Host Protocol tables. |
-| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table, the controller epoch advance and installation columns and the empty Agent Host Protocol tables; keep the dataset identity, records and key bootstrap state. |
+| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns and the empty Agent Host Protocol tables; keep the dataset identity, records and key bootstrap state. |
 | 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns and the empty Agent Host Protocol tables; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
-| 162 objects, schema version 3 | Dataset binding layout | Add the empty Agent Host Protocol tables and indexes; keep the dataset identity, binding, records, receipts and key bootstrap state. |
-| 171 objects (current), schema version 4 | Agent Host Protocol layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+| 162 objects, schema version 3 | Dataset binding layout | Rebuild the work action dedupe index so a `retry_pending` action owns its key, first cancelling any `retry_pending` action whose key another active action shares (reason `dedupe_superseded`), then add the empty Agent Host Protocol tables and indexes; keep the dataset identity, binding, records and key bootstrap state. |
+| 162 objects, schema version 4 | Work action dedupe layout | Add the write stamp columns of results and artifacts, giving existing rows the stamp (0, 0), then add the empty Agent Host Protocol tables and indexes; keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 162 objects, schema version 5 | Write stamp layout | Add the empty Agent Host Protocol tables and indexes; keep the dataset identity, binding, records, write stamps, receipts and key bootstrap state. |
+| 171 objects (current), schema version 6 | Agent Host Protocol layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -95,8 +166,8 @@ lineages. If either table holds records, or a Session lineage uses
 installation.
 
 The five historical source layouts have SQLite `user_version = 0` and upgrade
-to the current layout in one transaction, ending with the schema version 4
-objects. A schema version 1, 2 or 3 store keeps its identity row and upgrades in
+to the current layout in one transaction, ending with the schema version 5
+objects. A schema version 1, 2, 3 or 4 store keeps its identity row and upgrades in
 place through each later version, after the same automatic backup. A nonzero marker on any other layout is
 refused rather than adopted.
 
@@ -104,7 +175,7 @@ refused rather than adopted.
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 4` records this metadata layout; the controller also checks
+`PRAGMA user_version = 5` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 
@@ -234,6 +305,15 @@ Sandbox/Substrate ACP flags are removed. Install the selected provider's own
 config/profile kinds instead. Native MCP Tools remain separate and use
 `--substrate-mcp-tools-enabled`; their control credentials are not external ACP
 provider credentials.
+
+Substrate-native workspaces need fully qualified Service names in
+`--controller-url` and `--acp-provider-proxy-base-url`
+(`<service>.<namespace>.svc.<cluster domain>`). The chart and kustomize
+manifests now render them (chart value `clusterDomain`, default
+`cluster.local`). An installation that sets either flag itself to a short
+`<service>.<namespace>.svc` name must change it before using Substrate-native
+workspaces; Core refuses the short form for them and the RuntimePool reports
+`Degraded`. See [Agent Substrate](../concepts/substrate.md#upgrades-and-proof-limits).
 
 The [local upgrade proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh)
 uses actual API objects and a released stock core image. It covers old-shaped

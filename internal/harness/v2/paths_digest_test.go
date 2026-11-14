@@ -52,6 +52,43 @@ func TestCanonicalJSONNormalizesOrderingWhitespaceAndNumbers(t *testing.T) {
 	}
 }
 
+func TestCanonicalValueWithLimitsMatchesCanonicalValueAndHonorsBounds(t *testing.T) {
+	small := map[string]any{"b": []int{2, 1}, "a": "x<y"}
+	want, err := CanonicalValue(small)
+	if err != nil {
+		t.Fatalf("CanonicalValue() error = %v", err)
+	}
+	got, err := CanonicalValueWithLimits(small, MaxCanonicalJSONBytes, maxCanonicalJSONItems)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("CanonicalValueWithLimits() = %q, %v; want %q", got, err, want)
+	}
+
+	// One item more than the v2 wire cap: CanonicalValue rejects it, an
+	// explicit larger item bound accepts it with the same encoding rules.
+	large := make([]int, maxCanonicalJSONItems)
+	if _, err := CanonicalValue(large); err == nil || !strings.Contains(err.Error(), "maximum item count") {
+		t.Fatalf("CanonicalValue(large) error = %v, want item-count rejection", err)
+	}
+	encoded, err := CanonicalValueWithLimits(large, 4*MaxCanonicalJSONBytes, maxCanonicalJSONItems+1)
+	if err != nil {
+		t.Fatalf("CanonicalValueWithLimits(large) error = %v", err)
+	}
+	if !bytes.HasPrefix(encoded, []byte("[0,0,")) || !bytes.HasSuffix(encoded, []byte(",0]")) {
+		t.Fatalf("CanonicalValueWithLimits(large) has unexpected framing")
+	}
+	if _, err := CanonicalValueWithLimits(large, 4*MaxCanonicalJSONBytes, maxCanonicalJSONItems); err == nil {
+		t.Fatal("CanonicalValueWithLimits accepted more items than its bound")
+	}
+	if _, err := CanonicalValueWithLimits(small, 4, maxCanonicalJSONItems); err == nil {
+		t.Fatal("CanonicalValueWithLimits accepted more bytes than its bound")
+	}
+	for _, limits := range [][2]int{{0, 1}, {1, 0}, {-1, 1}} {
+		if _, err := CanonicalValueWithLimits(small, limits[0], limits[1]); err == nil {
+			t.Fatalf("CanonicalValueWithLimits(%d, %d) accepted a non-positive bound", limits[0], limits[1])
+		}
+	}
+}
+
 func TestCanonicalRequestDigestIsDeterministicAndExcludesDigestField(t *testing.T) {
 	left := []byte(`{
 		"value": 1.0,
