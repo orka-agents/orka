@@ -1,0 +1,172 @@
+name: Agent Substrate ACP E2E
+
+# ACP on Agent Substrate v1.0.0 through the standalone orka-workspace provider,
+# against this Orka checkout: the provider Data proof (capture, checkpoint
+# export, cold import), then the actual-Core proof (ACP Task with gateway
+# credential injection and tracing, then a two-turn Session across a worker
+# eviction with data-only suspension and cold resume). The proof commit is
+# pinned in hack/agent-substrate/orka-workspace-proof.env.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "41 6 * * *" # daily, 06:41 UTC
+  pull_request:
+    paths:
+      - ".github/workflows/agent-substrate-acp-e2e.yml"
+      - ".agents/skills/kindctl/bin/kindctl"
+      - "api/**"
+      - "cmd/main.go"
+      - "cmd/orka-acp-exec-helper/**"
+      - "cmd/orka-acp-runtime/**"
+      - "config/crd/**"
+      - "config/rbac/**"
+      - "go.mod"
+      - "go.sum"
+      - "hack/agent-substrate/**"
+      - "internal/acp/**"
+      - "internal/controller/**"
+      - "internal/harness/**"
+      - "internal/tracing/**"
+      - "internal/workspace/**"
+      - "workers/acp/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agent-substrate-acp-e2e.yml"
+      - ".agents/skills/kindctl/bin/kindctl"
+      - "api/**"
+      - "cmd/main.go"
+      - "cmd/orka-acp-exec-helper/**"
+      - "cmd/orka-acp-runtime/**"
+      - "config/crd/**"
+      - "config/rbac/**"
+      - "go.mod"
+      - "go.sum"
+      - "hack/agent-substrate/**"
+      - "internal/acp/**"
+      - "internal/controller/**"
+      - "internal/harness/**"
+      - "internal/tracing/**"
+      - "internal/workspace/**"
+      - "workers/acp/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-substrate-acp-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-substrate-acp-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      # kindctl derives the cluster name from the checkout basename, and the
+      # proofs accept only kind-orka-workspace-*-external-su-* contexts.
+      ORKA_CORE_SOURCE: ${{ github.workspace }}/orka
+      KINDCTL_BIN: ${{ github.workspace }}/orka/.agents/skills/kindctl/bin/kindctl
+      SUBSTRATE_CLONE: "1"
+    defaults:
+      run:
+        working-directory: orka-workspace
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: orka
+          persist-credentials: false
+
+      - name: Resolve the pinned orka-workspace proofs
+        id: proof
+        working-directory: ${{ github.workspace }}/orka
+        run: |
+          set -Eeuo pipefail
+          source hack/agent-substrate/orka-workspace-proof.env
+          [[ "${ORKA_WORKSPACE_PROOF_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::ORKA_WORKSPACE_PROOF_COMMIT must be a full commit SHA" >&2; exit 1;
+          }
+          {
+            echo "repository=${ORKA_WORKSPACE_PROOF_REPOSITORY}"
+            echo "commit=${ORKA_WORKSPACE_PROOF_COMMIT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Checkout orka-workspace proofs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.proof.outputs.repository }}
+          ref: ${{ steps.proof.outputs.commit }}
+          path: orka-workspace
+          persist-credentials: false
+
+      - name: Free disk space for Docker-heavy E2E
+        uses: ./orka/.github/actions/free-disk-space
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: orka-workspace/go.mod
+          cache-dependency-path: |
+            orka/go.sum
+            orka-workspace/go.sum
+            orka-workspace/providers/go.sum
+            orka-workspace/hack/external-substrate-e2e/go.sum
+
+      - name: Install kind
+        uses: ./orka/.github/actions/setup-kind
+        with:
+          # kindest/node v1.37.0, which the proofs require, needs kind v0.33.0.
+          version: v0.33.0
+          sha256-amd64: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+          sha256-arm64: 20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
+
+      - name: Install prerequisites
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq ripgrep rsync
+          kind version
+          kubectl version --client=true
+          test -x "${KINDCTL_BIN}"
+
+      - name: Host preflight
+        run: bash scripts/external-substrate-e2e.sh preflight-host
+
+      - name: Install Agent Substrate v1.0.0
+        run: bash scripts/external-substrate-e2e.sh install
+
+      - name: Provider Data proof
+        run: bash scripts/external-substrate-e2e.sh proof
+
+      - name: Core proof preflight
+        run: bash scripts/external-substrate-core-e2e.sh preflight
+
+      - name: Core ACP proof
+        env:
+          ORKA_CORE_BUILD_RELEASED: "1"
+        run: bash scripts/external-substrate-core-e2e.sh proof
+
+      - name: Redacted diagnostics
+        if: failure()
+        run: bash scripts/external-substrate-e2e.sh diagnostics || true
+
+      - name: Upload proof evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-substrate-acp-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          # Reports, logs and redacted diagnostics only: never private/
+          # credentials, frozen source snapshots or image build contexts.
+          path: |
+            orka-workspace/bin/external-substrate-*/
+            orka-workspace/bin/diagnostics-*/
+            orka-workspace/bin/external-substrate-proof-namespace
+            !orka-workspace/bin/**/private/
+            !orka-workspace/bin/**/private/**
+            !orka-workspace/bin/external-substrate-core-*/orka/**
+            !orka-workspace/bin/external-substrate-core-*/orka-workspace/**
+            !orka-workspace/bin/**/images/**
+            !orka-workspace/bin/external-substrate-proof-*/native-data-*
