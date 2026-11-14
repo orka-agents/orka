@@ -230,6 +230,68 @@ func TestOperatorFileHelperAppliesTheIntendedModeDespiteUmask(t *testing.T) {
 // its private home between the helper resolving a parent directory and
 // opening or committing the final entry. The operation must fail and nothing
 // outside the workspace may be read or written.
+// substitutingReader replaces the upload's temporary entry with the session's
+// own file once the helper starts reading stdin.
+type substitutingReader struct {
+	t       *testing.T
+	root    string
+	payload io.Reader
+	done    bool
+}
+
+func (r *substitutingReader) Read(p []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		substituteOperatorUpload(r.t, r.root)
+	}
+	return r.payload.Read(p)
+}
+
+func substituteOperatorUpload(t *testing.T, root string) {
+	t.Helper()
+	matches, _ := filepath.Glob(filepath.Join(root, ".orka-cp-*"))
+	if len(matches) != 1 {
+		t.Errorf("temporary upload entries = %v, want one", matches)
+		return
+	}
+	if err := os.Remove(matches[0]); err != nil {
+		t.Error(err)
+	}
+	if err := os.WriteFile(matches[0], []byte("evil"), 0o644); err != nil {
+		t.Error(err)
+	}
+}
+
+// The session can replace the upload's temporary entry while stdin streams,
+// or between the helper's check and its rename. The copy must never report
+// success for an inode it did not write.
+func TestOperatorFileHelperRefusesASubstitutedTemporaryFile(t *testing.T) {
+	t.Run("while streaming", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "notes.txt")
+		if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, "notes.txt", "4"},
+			&substitutingReader{t: t, root: root, payload: strings.NewReader("good")})
+		if status.OK {
+			t.Fatal("an upload whose temporary file was replaced reported success")
+		}
+		if data, _ := os.ReadFile(target); string(data) != "original" {
+			t.Fatalf("a substituted upload replaced the target: %q", data)
+		}
+	})
+	t.Run("before the rename", func(t *testing.T) {
+		root := t.TempDir()
+		operatorFileHelperCommitHook = func() { substituteOperatorUpload(t, root) }
+		t.Cleanup(func() { operatorFileHelperCommitHook = nil })
+		status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, "notes.txt", "4"}, strings.NewReader("good"))
+		if status.OK {
+			t.Fatal("an upload substituted before its rename reported success")
+		}
+	})
+}
+
 func TestOperatorFileHelperRefusesADirectoryMovedOutDuringResolution(t *testing.T) {
 	setup := func(t *testing.T) (root, outside string) {
 		t.Helper()

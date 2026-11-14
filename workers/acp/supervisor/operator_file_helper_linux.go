@@ -55,6 +55,20 @@ func operatorFileHelperResolved() {
 	}
 }
 
+// operatorFileHelperCommitHook runs after an upload's temporary entry was
+// verified and before it is renamed into place. Tests use it to substitute
+// the entry inside that window.
+var operatorFileHelperCommitHook func()
+
+// operatorEntryIsFile reports whether name in dirFD, not followed, is the
+// open file fd. The session can replace a named entry at any time, so a
+// name only proves which inode it held at the instant it is checked.
+func operatorEntryIsFile(dirFD int, name string, fd int) bool {
+	var entry, file unix.Stat_t
+	return unix.Fstatat(dirFD, name, &entry, unix.AT_SYMLINK_NOFOLLOW) == nil &&
+		unix.Fstat(fd, &file) == nil && sameOperatorInode(&entry, &file)
+}
+
 func writeOperatorFileStatus(stdout io.Writer, status operatorFileStatus) {
 	raw, _ := json.Marshal(status)
 	_, _ = stdout.Write(append(raw, '\n'))
@@ -296,10 +310,24 @@ func writeOperatorFile(rootFD int, rel string, size int64, stdin io.Reader, stdo
 	if err := verifyOperatorParent(rootFD, parent, dirFD); err != nil {
 		return mapOperatorOpenError(err)
 	}
+	// The session can also replace the temporary entry with another file or
+	// a symlink while stdin streams. Commit only the inode written here.
+	if !operatorEntryIsFile(dirFD, temporary, fd) {
+		return operatorFileFailure(operatorFileCodeIO, "the upload's temporary file was replaced")
+	}
+	if hook := operatorFileHelperCommitHook; hook != nil {
+		hook()
+	}
 	if err := unix.Renameat(dirFD, temporary, dirFD, name); err != nil {
 		return mapOperatorOpenError(err)
 	}
 	committed = true
+	// A substitution racing the instant between the check and the rename
+	// installs someone else's entry: report the copy as failed. That entry
+	// is the session's own, so it is left in place.
+	if !operatorEntryIsFile(dirFD, name, fd) {
+		return operatorFileFailure(operatorFileCodeIO, "the upload's temporary file was replaced")
+	}
 	// A move racing the instant between the check and the rename is caught
 	// here. The copy is then reported as failed; a newly created entry is
 	// withdrawn. Copy in requires the class exec level, which already lets

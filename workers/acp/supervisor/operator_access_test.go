@@ -1094,6 +1094,9 @@ func TestOperatorUploadCopyEndsBeforeTheHandlerReturns(t *testing.T) {
 // can assign, so a non-root (same-identity development) supervisor must not
 // advertise operator access.
 func TestOperatorAccessIsAdvertisedOnlyByRootBuiltInSupervisors(t *testing.T) {
+	previous := operatorAccessPlatform
+	t.Cleanup(func() { operatorAccessPlatform = previous })
+	operatorAccessPlatform = true
 	if !operatorAccessSupported(providerKindCodex, 0) {
 		t.Fatal("a root built-in supervisor must advertise operator access")
 	}
@@ -1102,5 +1105,17 @@ func TestOperatorAccessIsAdvertisedOnlyByRootBuiltInSupervisors(t *testing.T) {
 	}
 	if operatorAccessSupported(providerKindFoundry, 0) {
 		t.Fatal("external ACP providers must not advertise operator access")
+	}
+}
+
+func TestOperatorAccessIsAdvertisedOnlyOnLinux(t *testing.T) {
+	previous := operatorAccessPlatform
+	t.Cleanup(func() { operatorAccessPlatform = previous })
+	if operatorAccessPlatform != (runtime.GOOS == "linux") {
+		t.Fatalf("operator access platform = %v on %s", operatorAccessPlatform, runtime.GOOS)
+	}
+	operatorAccessPlatform = false
+	if operatorAccessSupported(providerKindCodex, 0) {
+		t.Fatal("a root supervisor without tagged-process containment must not advertise operator access")
 	}
 }
