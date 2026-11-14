@@ -58,6 +58,11 @@ type RuntimeProfile struct {
 	// in declared order. An absent list serializes identically to profiles
 	// that predate toolboxes, so their digests are unchanged.
 	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
+	// Skills lists the Agent Skills bound read-only into the runtime Pod and
+	// projected into each session's native skills folder, in declared order.
+	// An absent list serializes identically to profiles that predate skills,
+	// so their digests are unchanged.
+	Skills []RuntimeSkill `json:"skills,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
@@ -108,7 +113,10 @@ func (p RuntimeProfile) Validate() error {
 	if err := validateBoundedString("resource class", p.ResourceClass, true, 128); err != nil {
 		return err
 	}
-	return ValidateRuntimeToolboxes(p.Toolboxes)
+	if err := ValidateRuntimeToolboxes(p.Toolboxes); err != nil {
+		return err
+	}
+	return ValidateRuntimeSkills(p.Skills)
 }
 
 const (

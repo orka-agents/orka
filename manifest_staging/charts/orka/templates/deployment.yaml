@@ -172,6 +172,12 @@ spec:
             - --acp-toolbox-mount-method={{ .mountMethod | default "copy" }}
             {{- end }}
             {{- end }}
+            {{- if (.Values.controller.acpRuntime.skills).enabled }}
+            {{- if not (.Values.controller.acpRuntime.toolboxes).enabled }}
+            {{- fail "controller.acpRuntime.skills.enabled requires controller.acpRuntime.toolboxes.enabled" }}
+            {{- end }}
+            - --acp-skills-enabled=true
+            {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}

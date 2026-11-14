@@ -111,6 +111,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
 		return err
 	}
+	// A client that answered a Task it resolved earlier never decides a
+	// later Task that reuses the name and an approval ID.
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
 	}

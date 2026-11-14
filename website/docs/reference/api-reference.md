@@ -72,6 +72,12 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
+`DELETE /api/v1/tasks/:id`, `GET /api/v1/tasks/:id/result`, and
+`POST /api/v1/tasks/:id/approvals/:approvalID/decision` accept an optional `uid` query
+parameter. When it is set, a Task with that name but a different UID is reported as
+`404 task not found`, so a client never deletes, reads, or decides an approval of a later
+Task that reused the name.
+
 `POST /api/v1/tasks` takes `name`, `namespace`, and a `spec` with the full set of
 [Task](resources.md#task) fields. As a shorthand, common fields — `type`, `agentRef`,
 `prompt`, `image`, `command`, `args`, `env`, `timeout`, `priority`, `retryPolicy`,

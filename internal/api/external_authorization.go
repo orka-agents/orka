@@ -273,6 +273,10 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /openai/v1/models":            coreAPIPolicy("list", "providers", ""),
 	"POST /anthropic/v1/messages":      coreAPIPolicy("create", "chats", ""),
 	"GET /anthropic/v1/models":         coreAPIPolicy("list", "providers", ""),
+	// MCP messages are authenticated here. Each tool call replays its REST
+	// route in process with the caller's credentials, so it is authorized
+	// by that route's policy and handler checks, never by this entry.
+	"POST /mcp": {identityOnly: true},
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has

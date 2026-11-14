@@ -95,6 +95,9 @@ const (
 	// EnvToolboxMountMethod names how the controller bound the toolboxes
 	// (copy or imageVolume). It is not part of the profile.
 	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
+	// EnvSkills carries the frozen skill list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvSkills = "ORKA_ACP_SKILLS"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -157,6 +160,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	skills, err := skillsFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               harnessv2.ACPProfileV1,
 		ProviderKind:             providerKind,
@@ -171,6 +178,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
 		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -364,6 +372,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		Skills:                        harnessv2.CloneRuntimeSkills(skills),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -384,6 +393,9 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
+
+// claudeSkillToolName is Claude Code's tool that loads a skill's instructions.
+const claudeSkillToolName = "Skill"
 
 // codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
@@ -583,10 +595,27 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	skills := harnessv2.RuntimeSkillNames(request.Profile.Skills)
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
+		if len(skills) > 0 {
+			// The Skill tool only loads the instructions of the skills listed
+			// below; it can't run anything the policy doesn't already allow.
+			// Listing it here only makes it available: the SDK (0.3.293)
+			// turns the skills option into Skill(<name>) allowedTools rules,
+			// so those skills load without a permission callback, which the
+			// frozen policy would reject.
+			allowed = append(allowed, claudeSkillToolName)
+		}
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
+	}
+	if len(skills) > 0 {
+		// Expose exactly the Orka skills: the SDK hides every other skill and
+		// its Skill tool rejects them. Inline shell execution in skills and
+		// slash commands from any source is turned off as well.
+		options["skills"] = skills
+		options["settings"] = map[string]any{"disableSkillShellExecution": true}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -948,6 +977,55 @@ func openCodeSessionConfig(
 			"*.env.example": openCodePermissionAllow,
 		}
 	}
+	if skills := harnessv2.RuntimeSkillNames(request.Profile.Skills); len(skills) > 0 {
+		// OpenCode checks the skill permission with the skill name, so only
+		// the Orka skills are allowed; its built-in skills fall through to the
+		// top-level "*" deny. No nested "*" deny: OpenCode evaluates rules in
+		// JavaScript object order, which lists integer-like keys (a valid
+		// skill name such as "123") before "*", so a nested wildcard would
+		// win the last match and deny that skill.
+		skillPermissions := map[string]string{}
+		for _, name := range skills {
+			skillPermissions[name] = openCodePermissionAllow
+		}
+		permissions["skill"] = skillPermissions
+		// The projected skills live outside the workspace, and a blanket
+		// external_directory deny in the config overrides OpenCode's own
+		// skill-folder allowance, so its read tool could load SKILL.md but
+		// not the skill's supporting files. Allow only each projected Orka
+		// skill folder and keep the wildcard deny. JSON object keys are
+		// sorted, so "*" precedes these absolute paths and OpenCode's
+		// last-match rule picks the narrower allow.
+		dir, err := nativeSkillsDir(providerKindOpencode, paths)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("OpenCode skills folder %q must be absolute", dir)
+		}
+		// OpenCode's apply_patch asks the edit permission only for a move's
+		// source, so the edit rules below cannot stop it from moving a
+		// workspace file onto a projected skill. When that tool can mutate,
+		// keep the skill folders behind the deny: the skill tool still
+		// returns SKILL.md, but the supporting files stay unreadable.
+		if mutationAction != openCodePermissionAllow || intent == harnessv2.WorkspaceIntentRead || !openCodeUsesApplyPatch(model) {
+			externalDirectory := map[string]string{"*": openCodePermissionDeny}
+			for _, name := range skills {
+				externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+			}
+			permissions["external_directory"] = externalDirectory
+		}
+		// external_directory does not tell a read from a write, so that
+		// allowance would also let the edit, write, and apply_patch tools
+		// rewrite a projected skill. Keep them inside the workspace.
+		if mutationAction == openCodePermissionAllow {
+			editRules, err := openCodeSkillEditRules(paths.Workspace, dir, skills)
+			if err != nil {
+				return nil, err
+			}
+			permissions[openCodeToolEdit] = editRules
+		}
+	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
 		permissions[openCodeToolBash] = openCodePermissionDeny
@@ -1025,6 +1103,44 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 		permissions[name] = openCodeToolPolicyAllows(policy, descriptor.Name)
 	}
 	return permissions, nil
+}
+
+// openCodeSkillEditRules allows edits everywhere except the projected skill
+// folders. OpenCode (1.19.0) asks one "edit" permission for its edit, write,
+// and apply_patch tools, with the file path relative to the project worktree:
+// the workspace when it is a Git repository, "/" otherwise. Both spellings of
+// each skill folder are denied, so a workspace file is caught only if its
+// path repeats the session's own absolute path. The rules stop those
+// path-taking tools only; a session that may run shell commands still owns its
+// private copy.
+// openCodeUsesApplyPatch mirrors the OpenCode 1.19.0 tool registry, which
+// replaces the edit and write tools with apply_patch for these model IDs.
+// OpenCode matches the model's API ID; this config sets no ID override, so
+// that is the provider/model key it writes.
+func openCodeUsesApplyPatch(model string) bool {
+	return strings.Contains(model, "gpt-") && !strings.Contains(model, "oss") && !strings.Contains(model, "gpt-4")
+}
+
+func openCodeSkillEditRules(workspace, skillsDir string, skills []string) (map[string]string, error) {
+	rules := map[string]string{"*": openCodePermissionAllow}
+	for _, name := range skills {
+		folder := filepath.Join(skillsDir, name)
+		fromWorkspace, err := filepath.Rel(workspace, folder)
+		if err != nil {
+			return nil, fmt.Errorf("locate OpenCode skill %q from the workspace: %w", name, err)
+		}
+		for _, relative := range []string{fromWorkspace, strings.TrimPrefix(folder, string(filepath.Separator))} {
+			pattern := filepath.ToSlash(filepath.Join(relative, "*"))
+			// OpenCode takes the last matching rule in key order and expands a
+			// leading "~" or "$HOME". JSON keys are sorted, so a deny must sort
+			// after "*" and must not be rewritten, or the allow would win.
+			if pattern <= "*" || strings.HasPrefix(pattern, "~") {
+				return nil, fmt.Errorf("OpenCode skill %q cannot be protected from edits at %q", name, folder)
+			}
+			rules[pattern] = openCodePermissionDeny
+		}
+	}
+	return rules, nil
 }
 
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation
