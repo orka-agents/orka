@@ -8,10 +8,9 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-const (
-	acpToolKindExecute = "execute"
-	acpToolKindEdit    = "edit"
-)
+// acpToolKindEdit is the ACP tool kind of a file edit; acpToolKindExecute
+// is declared with the GenAI tool kinds.
+const acpToolKindEdit = "edit"
 
 // askPermissionCall is the structured part of an ACP permission tool call.
 type askPermissionCall struct {

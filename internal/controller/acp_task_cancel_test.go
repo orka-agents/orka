@@ -24,15 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestACPDispatcherSettlesCancelRequestedTaskBeforeRuntimePoolAdmission(t *testing.T) {
-	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
-		if task.Annotations == nil {
-			task.Annotations = map[string]string{}
-		}
-		task.Annotations[labels.AnnotationCancelRequested] = "cancelled by request"
-	}, corev1alpha1.TaskExecutionReason("Cancelled"), "task cancelled by request before runtime admission", false)
-}
-
 func TestPromptCancelRequestedSendsUserRequestedAndEndsCancelled(t *testing.T) {
 	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
 		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,

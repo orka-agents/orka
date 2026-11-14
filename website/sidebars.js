@@ -22,9 +22,12 @@ const sidebars = {
           items: [
             'guides/agents-skills-and-tools',
             'guides/toolboxes',
+            'guides/runtime-skills',
+            'guides/azure-cli',
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
             'guides/autonomous-tasks',
+            'guides/parking-agent-turns',
             'concepts/memory',
             'concepts/soul',
           ],
@@ -36,6 +39,7 @@ const sidebars = {
           items: [
             'guides/container-tasks',
             'guides/scheduled-tasks',
+            'guides/task-webhooks',
             'guides/codex-session-migration',
           ],
         },
@@ -61,6 +65,7 @@ const sidebars = {
             'reference/anthropic-compat',
             'operations/shared-compatibility-api',
             'operations/agent-host-protocol',
+            'guides/mcp-server',
             'guides/gateways',
           ],
         },
@@ -71,6 +76,7 @@ const sidebars = {
           items: [
             'guides/human-approval-v2',
             'guides/connectors',
+            'guides/agent-identities',
             'concepts/outbound-access',
             'concepts/transaction-tokens',
           ],

@@ -29,7 +29,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -157,6 +156,14 @@ type activeChatRequest struct {
 	done            chan struct{}
 	deleteRequested bool
 	deleteWaiters   int
+	// gate marks a reservation a Session cancel holds on an idle chat to keep
+	// the next message out. It is not a chat request, so another cancel that
+	// finds it reports no running turn.
+	gate bool
+	// keepCreatedSession records that a Session cancel stopped the request:
+	// a Session the request created is kept, empty, rather than deleted as
+	// for a disconnected client, so the cancel's caller can still read it.
+	keepCreatedSession bool
 }
 
 type activeChatHandle struct {
@@ -477,6 +484,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
 	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
 	executor.dashboardEnabled = ch.config.DashboardEnabled
+	executor.chatSessionEpoch = chatSessionEpoch(ctx, ch.sessionStore, namespace, sessionID)
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
@@ -537,8 +545,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
 		return c.JSON(ChatResponse{
@@ -708,13 +715,18 @@ func (ch *ChatHandler) reserveChatTurn(
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(turnDeadline) {
 		turnDeadline = deadline.UTC()
 	}
-	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, &store.SessionRecord{
-		Namespace:   namespace,
-		Name:        sessionID,
-		SessionType: store.SessionTypeChat,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}, turnID, turnDeadline.Add(chatDurabilityTimeout))
+	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{
+		Session: &store.SessionRecord{
+			Namespace:   namespace,
+			Name:        sessionID,
+			SessionType: store.SessionTypeChat,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		TurnID:    turnID,
+		Now:       now,
+		ExpiresAt: turnDeadline.Add(chatDurabilityTimeout),
+	})
 	if errors.Is(err, store.ErrGatewayOwnedSession) {
 		return "", time.Time{}, false, fiber.NewError(fiber.StatusNotFound, "chat session not found")
 	}
@@ -845,8 +857,14 @@ func chatSessionLockError(err error) error {
 }
 
 func (ch *ChatHandler) reserveActiveChat(namespace, sessionID string) (*activeChatReservation, error) {
+	return ch.reserveActiveChatAs(namespace, sessionID, false)
+}
+
+// reserveActiveChatAs reserves the chat for a request, or, with gate, only to
+// keep a request from starting.
+func (ch *ChatHandler) reserveActiveChatAs(namespace, sessionID string, gate bool) (*activeChatReservation, error) {
 	cancelContext, cancel := context.WithCancel(context.Background())
-	request := &activeChatRequest{cancel: cancel, done: make(chan struct{})}
+	request := &activeChatRequest{cancel: cancel, done: make(chan struct{}), gate: gate}
 	reservation := &activeChatReservation{
 		cancelContext: cancelContext,
 		cancel:        cancel,
@@ -903,7 +921,10 @@ func (ch *ChatHandler) activateReservedChat(
 	stopTurnCancellation := context.AfterFunc(turnCancelCtx, reservation.cancel)
 	release := func() {
 		stopTurnCancellation()
-		ch.releaseChatTurn(namespace, sessionID, turnID, created)
+		ch.activeChatsMu.Lock()
+		keep := reservation.request.keepCreatedSession
+		ch.activeChatsMu.Unlock()
+		ch.releaseChatTurn(namespace, sessionID, turnID, created && !keep)
 		ch.finishActiveChatTurn(namespace, sessionID, turnID)
 	}
 	return &activeChatHandle{
@@ -937,7 +958,7 @@ func (ch *ChatHandler) deleteChatSession(ctx context.Context, namespace, session
 	if ch.sessionManager != nil {
 		return ch.sessionManager.DeleteSession(ctx, namespace, sessionID)
 	}
-	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID)
+	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID, time.Now().UTC())
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -985,8 +1006,7 @@ func (ch *ChatHandler) runToolLoop(
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, err
 		default:
@@ -998,8 +1018,7 @@ func (ch *ChatHandler) runToolLoop(
 		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1022,8 +1041,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
@@ -1054,8 +1072,7 @@ func (ch *ChatHandler) runToolLoop(
 			)
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1382,21 +1399,21 @@ func (ch *ChatHandler) saveChatSession(
 	// window added to the chat-turn lease.
 	durabilityCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
 	defer cancel()
-	return ch.sessionTurnCommitter.CommitSessionTurn(
-		durabilityCtx,
-		&store.SessionRecord{
+	return ch.sessionTurnCommitter.CommitSessionTurn(durabilityCtx, store.CommitSessionTurnRequest{
+		Session: &store.SessionRecord{
 			Namespace:   namespace,
 			Name:        sessionID,
 			SessionType: "chat",
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		},
-		turnID,
-		persistedCount,
-		storeMessages,
-		usage.InputTokens,
-		usage.OutputTokens,
-	)
+		TurnID:               turnID,
+		ExpectedMessageCount: persistedCount,
+		Messages:             storeMessages,
+		InputTokens:          usage.InputTokens,
+		OutputTokens:         usage.OutputTokens,
+		Now:                  time.Now().UTC(),
+	})
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
@@ -1538,6 +1555,66 @@ func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace
 	}
 }
 
+// stopActiveChat stops a chat Session's in-flight request, as a client
+// disconnect would, and waits until it has stopped. Until release is called,
+// the Session stays fenced: no next message can start, so the caller can
+// cancel the stopped turn's Tasks without catching a new turn's. The Session
+// is kept and accepts the next message after release. It reports whether a
+// request was running.
+func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, func(), error) {
+	key := activeChatKey(namespace, sessionID)
+	for range 3 {
+		ch.activeChatsMu.Lock()
+		request := ch.activeChats[key]
+		if request != nil {
+			// A gate holds the entry after the request finishes, as a
+			// deletion does, so reserveActiveChat refuses the next message.
+			request.deleteWaiters++
+			request.keepCreatedSession = true
+		}
+		ch.activeChatsMu.Unlock()
+		if request == nil {
+			// Idle: hold the reservation ourselves. A request that started
+			// meanwhile is stopped on the next pass.
+			reservation, err := ch.reserveActiveChatAs(namespace, sessionID, true)
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			if err != nil {
+				return false, nil, err
+			}
+			return false, func() { ch.finishActiveChatReservation(reservation, nil) }, nil
+		}
+		release := func() { ch.abandonChatDeletionWaiter(namespace, sessionID, request) }
+		if request.gate {
+			// Another cancel already holds the idle chat; this one joins its
+			// gate and reports no running turn.
+			return false, release, nil
+		}
+		running := true
+		select {
+		case <-request.done:
+			running = false
+		default:
+			request.cancel()
+		}
+		timer := time.NewTimer(chatDurabilityTimeout)
+		select {
+		case <-request.done:
+			timer.Stop()
+			return running, release, nil
+		case <-timer.C:
+			release()
+			return true, nil, fmt.Errorf("%w: active chat did not stop before the cancellation deadline", store.ErrNotReady)
+		case <-ctx.Done():
+			timer.Stop()
+			release()
+			return true, nil, ctx.Err()
+		}
+	}
+	return false, nil, fmt.Errorf("%w: chat session %s/%s kept starting requests", store.ErrNotReady, namespace, sessionID)
+}
+
 func (ch *ChatHandler) clearChatDeletionGate(namespace, sessionID string) {
 	key := activeChatKey(namespace, sessionID)
 	ch.activeChatsMu.Lock()
@@ -1641,6 +1718,23 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 	return resultProvider, nil
 }
 
+// chatSessionEpoch returns the label value pinning the chat Session's current
+// incarnation, or "" when the store cannot tell, which leaves the chat's
+// Tasks unable to act for their requester through an Agent identity.
+func chatSessionEpoch(ctx context.Context, sessions store.SessionStore, namespace, sessionID string) string {
+	reader, ok := sessions.(store.SessionCreationReader)
+	if !ok {
+		return ""
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, sessionID)
+	if err != nil {
+		logf.FromContext(ctx).Info("chat Session incarnation unavailable; its Tasks cannot act for the requester through an Agent identity",
+			"namespace", namespace, "session", sessionID, "error", err.Error())
+		return ""
+	}
+	return labels.SessionEpoch(createdAt)
+}
+
 // generateChatID returns 8 random hex characters.
 func generateChatID() string {
 	b := make([]byte, 4)
@@ -1675,13 +1769,9 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 		return false
 	}
 	for i := range taskList.Items {
-		switch taskList.Items[i].Status.Phase {
-		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-			continue
-		case corev1alpha1.TaskPhaseScheduled:
-			// A recurring parent stays Scheduled by design and never completes.
-			continue
-		default:
+		phase := taskList.Items[i].Status.Phase
+		// A recurring parent stays Scheduled by design and never completes.
+		if !phase.IsTerminal() && phase != corev1alpha1.TaskPhaseScheduled {
 			return true
 		}
 	}

@@ -144,6 +144,53 @@ type WorkAction struct {
 	CompletedAt          *time.Time `json:"completedAt,omitempty"`
 }
 
+// WorkAction statuses. An active status holds the action's dedupe key: among
+// the actions of one monitor that share a non-empty DedupeKey, at most one is
+// active. Every other status is finished: it holds no key and
+// [RepositoryMonitorStore.MarkWorkActionRetryPending] never reopens it.
+//
+//	queued → (leased →) running → succeeded | failed | blocked | cancelled
+//	retry_pending: a handoff that failed and waits to be retried
+//	completed: an action coalesced into another active action when created
+const (
+	WorkActionStatusQueued       = "queued"
+	WorkActionStatusLeased       = "leased"
+	WorkActionStatusRunning      = "running"
+	WorkActionStatusRetryPending = "retry_pending"
+	WorkActionStatusSucceeded    = "succeeded"
+	WorkActionStatusFailed       = "failed"
+	WorkActionStatusBlocked      = "blocked"
+	WorkActionStatusCancelled    = "cancelled"
+	WorkActionStatusCompleted    = "completed"
+)
+
+// WorkActionActiveStatuses lists the active statuses, in lookup order.
+func WorkActionActiveStatuses() []string {
+	return []string{WorkActionStatusQueued, WorkActionStatusLeased, WorkActionStatusRunning, WorkActionStatusRetryPending}
+}
+
+// IsWorkActionActive reports whether status is an active status.
+func IsWorkActionActive(status string) bool {
+	switch status {
+	case WorkActionStatusQueued, WorkActionStatusLeased, WorkActionStatusRunning, WorkActionStatusRetryPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// MarkWorkActionRetryPendingRequest names the work action to park for a retry
+// and what to record on it.
+type MarkWorkActionRetryPendingRequest struct {
+	Namespace string
+	ID        string
+	// RunID, BlockedReason and Error replace the action's fields of the same
+	// names.
+	RunID         string
+	BlockedReason string
+	Error         string
+}
+
 // WorkActionFilter constrains workflow action list queries.
 type WorkActionFilter struct {
 	Namespace      string

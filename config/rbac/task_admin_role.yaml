@@ -35,5 +35,6 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update

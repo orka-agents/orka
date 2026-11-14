@@ -28,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 )
 
 // ListTaskApprovalsResponse is one read of a Task and the approvals filtered
@@ -111,6 +112,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	}
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
 		return err
+	}
+	// A client that answered a Task it resolved earlier never decides a
+	// later Task that reuses the name and an approval ID.
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
 	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
@@ -256,7 +262,14 @@ func (h *Handlers) decideApproval(
 	if !task.DeletionTimestamp.IsZero() {
 		return approvals.Approval{}, fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if decision == approvalDecisionApprove {
+		if err := requireRequesterApprovesDelegatedWrite(task, ui); err != nil {
+			return approvals.Approval{}, err
+		}
+	}
+	// A parked turn has ended, but its sign-off approval stays decidable
+	// while the wait is active: the decision starts the continuation turn.
+	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return approvals.Approval{}, fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 

@@ -375,6 +375,16 @@ type RepositoryMonitorReviewSpec struct {
 	// +optional
 	Exhaustive bool `json:"exhaustive,omitempty"`
 
+	// MaxRounds bounds how many pull request heads in a row may be reviewed
+	// without a passed review. When the review of the MaxRounds-th such head
+	// would be needs_changes, Orka records needs_human instead and asks the
+	// author to reconsider the approach, which stops automatic repair of
+	// review findings. Reviews of the same head count once. Unset means no
+	// limit.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxRounds *int32 `json:"maxRounds,omitempty"`
+
 	// StaleReviewTTL bounds how long an unchanged head review remains fresh.
 	// +optional
 	StaleReviewTTL *metav1.Duration `json:"staleReviewTTL,omitempty"`

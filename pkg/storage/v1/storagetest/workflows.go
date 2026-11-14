@@ -587,6 +587,49 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 	})
 
+	t.Run("parking a work action for retry", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		park := func(namespace, id string) (bool, error) {
+			return p.MarkWorkActionRetryPending(ctx, storagev1.MarkWorkActionRetryPendingRequest{
+				Namespace: namespace, ID: id, RunID: "run-2", BlockedReason: "run_signal_failed", Error: "signal failed"})
+		}
+		leaseUntil, completed := workflowAt(10), workflowAt(5)
+		statuses := []string{
+			storagev1.WorkActionStatusQueued, storagev1.WorkActionStatusLeased, storagev1.WorkActionStatusRunning,
+			storagev1.WorkActionStatusRetryPending, storagev1.WorkActionStatusSucceeded, storagev1.WorkActionStatusFailed,
+			storagev1.WorkActionStatusBlocked, storagev1.WorkActionStatusCancelled, storagev1.WorkActionStatusCompleted,
+			"not-a-contract-status",
+		}
+		for i, status := range statuses {
+			require.NoError(t, p.CreateWorkAction(ctx, &storagev1.WorkAction{ID: status, MonitorNamespace: workflowNamespace,
+				MonitorName: workflowMonitor, TargetKind: "pull_request", TargetNumber: int64(20 + i), DesiredAction: "review",
+				RunID: "run-1", Status: status, Phase: "phase-1", Attempt: 2, LeaseOwner: "worker-1", LeaseExpiresAt: &leaseUntil,
+				TaskName: "task-1", BlockedReason: "earlier", Error: "earlier error", CompletedAt: &completed}))
+		}
+		for _, status := range statuses {
+			before, err := p.GetWorkAction(ctx, workflowNamespace, status)
+			require.NoError(t, err)
+			parked, err := park(workflowNamespace, status)
+			require.NoError(t, err, status)
+			require.Equal(t, storagev1.IsWorkActionActive(status), parked, status)
+			after, err := p.GetWorkAction(ctx, workflowNamespace, status)
+			require.NoError(t, err)
+			want := *before
+			if parked {
+				// Only these fields change; the lease, attempt and task stay.
+				want.Status, want.Phase = storagev1.WorkActionStatusRetryPending, storagev1.WorkActionStatusRetryPending
+				want.RunID, want.BlockedReason, want.Error, want.CompletedAt = "run-2", "run_signal_failed", "signal failed", nil
+				require.False(t, after.UpdatedAt.Before(before.UpdatedAt), status)
+				want.UpdatedAt = after.UpdatedAt
+			}
+			require.Equal(t, want, *after, "status %q", status)
+		}
+		_, err := park(workflowNamespace, "missing")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+		_, err = park("other-namespace", storagev1.WorkActionStatusRunning)
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "an action is found only in its own namespace")
+	})
+
 	t.Run("work actions and implementation jobs", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		action := func(id, status, dedupe string, number int64) *storagev1.WorkAction {
@@ -602,6 +645,9 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		}
 		require.ErrorIs(t, p.CreateWorkAction(ctx, action("duplicate", "queued", "review-12", 12)),
 			storagev1.ErrConflict, "an active dedupe key admits one action")
+		require.NoError(t, p.CreateWorkAction(ctx, action("parked", "retry_pending", "review-14", 14)))
+		require.ErrorIs(t, p.CreateWorkAction(ctx, action("parked-duplicate", "queued", "review-14", 14)),
+			storagev1.ErrConflict, "a retry_pending action keeps its dedupe key")
 		cancelled, err := p.CancelWorkActions(ctx, workflowNamespace, workflowMonitor, "pull_request", 12, "superseded", "control")
 		require.NoError(t, err)
 		require.Equal(t, 1, cancelled, "terminal actions and the excepted action are kept")

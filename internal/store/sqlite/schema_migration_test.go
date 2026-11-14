@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -431,7 +432,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema171,
+					fingerprint:  schema172,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -492,7 +493,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema172, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -627,7 +628,7 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema171,
+					fingerprint:  schema172,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -720,7 +721,8 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	steps := versionUpgradesFrom(t, 2)
-	steps[0].sql += `; SELECT no_such_function()`
+	// The final step fails, so every step from version 2 rolls back together.
+	steps[len(steps)-1].sql += `; SELECT no_such_function()`
 	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps))
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
@@ -737,7 +739,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema172, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, datasetBinding{installation: "installation-a"}, binding)
@@ -782,7 +784,8 @@ func TestSchemaVersion2StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 
 // version3StoreStates lists every schema version 3 dataset state that
 // production can leave on disk: each version 2 state after its upgrade, and,
-// for a store whose bootstrap completed, one bound by its installation.
+// for a store whose bootstrap completed, one bound by its installation. The
+// version 3 to 4 step leaves the dataset row alone, so version 4 has the same.
 var version3StoreStates = []struct {
 	name         string
 	origin       string
@@ -828,139 +831,188 @@ func schemaVersion3StoreDB(t *testing.T, origin string, complete bool, installat
 	return path, db
 }
 
-// A version 3 store upgrades in place to the Agent Host Protocol layout: it
-// gains only the empty AHP tables and keeps its identity row, records, key
+// schemaVersion4StoreDB returns a schema version 4 store built only from frozen
+// inputs: a version 3 store from schemaVersion3StoreDB, the immutable
+// 170-to-171.sql step and user_version = 4, as the version 3 to 4 step leaves
+// it. It never uses the current schema constructor, so it keeps producing
+// version 4 stores after the layout moves on.
+func schemaVersion4StoreDB(t *testing.T, origin string, complete bool, installation string, bound bool) (string, *sql.DB) {
+	t.Helper()
+	path, db := schemaVersion3StoreDB(t, origin, complete, installation, bound)
+	_, err := db.Exec(migration170To171 + `; PRAGMA user_version = 4`)
+	require.NoError(t, err)
+
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	// A literal digest, independent of schema171, as in historicalSchemaDB.
+	require.Equal(t, "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2", schemaFingerprint(schema))
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	require.Equal(t, 4, version)
+	return path, db
+}
+
+// boundVersionStores are the schema versions whose stores can hold an
+// installation binding, each with the layout it has and the frozen builder of
+// its stores. Each takes every dataset state in version3StoreStates: the
+// version 3 to 4 step leaves the dataset row unchanged.
+var boundVersionStores = []struct {
+	version int
+	layout  string
+	build   func(t *testing.T, origin string, complete bool, installation string, bound bool) (string, *sql.DB)
+}{
+	{3, schema170, schemaVersion3StoreDB},
+	{4, schema171, schemaVersion4StoreDB},
+}
+
+// A version 3 or 4 store upgrades in place to the Agent Host Protocol layout:
+// it gains the empty AHP tables and keeps its identity row, records, key
 // bootstrap state, controller epoch, operation receipts and installation
 // binding. A second open is current and does not back up again.
-func TestSchemaVersion3StoreUpgradesInPlace(t *testing.T) {
-	for _, state := range version3StoreStates {
-		t.Run(state.name, func(t *testing.T) {
-			path, db := schemaVersion3StoreDB(t, state.origin, state.complete, state.installation, state.bound)
-			identity, err := readDataset(db)
+func TestSchemaVersion3And4StoresUpgradeInPlace(t *testing.T) {
+	for _, from := range boundVersionStores {
+		for _, state := range version3StoreStates {
+			t.Run(fmt.Sprintf("version %d/%s", from.version, state.name), func(t *testing.T) {
+				path, db := from.build(t, state.origin, state.complete, state.installation, state.bound)
+				identity, err := readDataset(db)
+				require.NoError(t, err)
+				binding, err := readDatasetBinding(t.Context(), db)
+				require.NoError(t, err)
+				rows := applicationRows(t, db)
+				addAHPTables(t, rows)
+				require.NoError(t, db.Close())
+
+				for attempt := range 2 {
+					s, err := OpenLockedStore(path)
+					require.NoError(t, err)
+					require.Equal(t, version1StoreState{
+						fingerprint:  schema172,
+						version:      SchemaVersion,
+						origin:       state.origin,
+						complete:     state.complete,
+						canBootstrap: state.canBootstrap,
+					}, readVersion1StoreState(t, s.db, path))
+					upgraded, err := readDataset(s.db)
+					require.NoError(t, err)
+					require.Equal(t, identity, upgraded)
+					upgradedBinding, err := readDatasetBinding(t.Context(), s.db)
+					require.NoError(t, err)
+					require.Equal(t, binding, upgradedBinding)
+					require.Equal(t, rows, applicationRows(t, s.db))
+					if state.origin == datasetOriginAdopted || state.complete {
+						assertMigrationRecords(t, s.db, path)
+					}
+					checkSQLiteIntegrity(t, s.db)
+					require.NoError(t, s.close())
+					backups := migrationBackups(t, path)
+					require.Len(t, backups, 1, "attempt %d", attempt)
+					backup := rawMigrationDB(t, backups[0])
+					backupSchema, err := readSchema(backup)
+					require.NoError(t, err)
+					require.Equal(t, from.layout, schemaFingerprint(backupSchema))
+					backupVersion, err := readSchemaVersion(backup)
+					require.NoError(t, err)
+					require.Equal(t, from.version, backupVersion)
+					backupIdentity, err := readDataset(backup)
+					require.NoError(t, err)
+					require.Equal(t, identity, backupIdentity)
+					require.NoError(t, backup.Close())
+				}
+			})
+		}
+	}
+}
+
+// A failed version step leaves the version 3 or 4 store unchanged, including
+// its binding, and the next open upgrades it. The final step fails, so every
+// step from that version rolls back together.
+func TestSchemaVersion3And4UpgradeFailureRollsBack(t *testing.T) {
+	for _, from := range boundVersionStores {
+		t.Run(fmt.Sprintf("version %d", from.version), func(t *testing.T) {
+			path, db := from.build(t, datasetOriginNew, true, "installation-a", true)
+			before, err := readDataset(db)
 			require.NoError(t, err)
-			binding, err := readDatasetBinding(t.Context(), db)
+			beforeBinding, err := readDatasetBinding(t.Context(), db)
 			require.NoError(t, err)
-			rows := applicationRows(t, db)
-			addAHPTables(t, rows)
+			beforeSchema := storedSchemaSQL(t, db)
+			beforeRows := applicationRows(t, db)
+			conn, err := db.Conn(t.Context())
+			require.NoError(t, err)
+			steps := versionUpgradesFrom(t, from.version)
+			steps[len(steps)-1].sql += `; SELECT no_such_function()`
+			require.Error(t, runVersionUpgrades(t.Context(), conn, from.version, from.layout, steps))
+			require.NoError(t, conn.Close())
+			after, err := readDataset(db)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			afterBinding, err := readDatasetBinding(t.Context(), db)
+			require.NoError(t, err)
+			require.Equal(t, beforeBinding, afterBinding)
+			version, err := readSchemaVersion(db)
+			require.NoError(t, err)
+			require.Equal(t, from.version, version)
+			require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
+			require.Equal(t, beforeRows, applicationRows(t, db))
 			require.NoError(t, db.Close())
 
-			for attempt := range 2 {
-				s, err := OpenLockedStore(path)
-				require.NoError(t, err)
-				require.Equal(t, version1StoreState{
-					fingerprint:  schema171,
-					version:      SchemaVersion,
-					origin:       state.origin,
-					complete:     state.complete,
-					canBootstrap: state.canBootstrap,
-				}, readVersion1StoreState(t, s.db, path))
-				upgraded, err := readDataset(s.db)
-				require.NoError(t, err)
-				require.Equal(t, identity, upgraded)
-				upgradedBinding, err := readDatasetBinding(t.Context(), s.db)
-				require.NoError(t, err)
-				require.Equal(t, binding, upgradedBinding)
-				require.Equal(t, rows, applicationRows(t, s.db))
-				if state.origin == datasetOriginAdopted || state.complete {
-					assertMigrationRecords(t, s.db, path)
-				}
-				checkSQLiteIntegrity(t, s.db)
-				require.NoError(t, s.close())
-				backups := migrationBackups(t, path)
-				require.Len(t, backups, 1, "attempt %d", attempt)
-				backup := rawMigrationDB(t, backups[0])
-				backupSchema, err := readSchema(backup)
-				require.NoError(t, err)
-				require.Equal(t, schema170, schemaFingerprint(backupSchema))
-				backupVersion, err := readSchemaVersion(backup)
-				require.NoError(t, err)
-				require.Equal(t, 3, backupVersion)
-				backupIdentity, err := readDataset(backup)
-				require.NoError(t, err)
-				require.Equal(t, identity, backupIdentity)
-				require.NoError(t, backup.Close())
+			s, err := OpenLockedStore(path)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, s.close()) }()
+			require.Equal(t, schema172, readVersion1StoreState(t, s.db, path).fingerprint)
+			assertMigrationRecords(t, s.db, path)
+		})
+	}
+}
+
+// A fixture rebuilt from historical DDL plus every step through 169-to-170.sql
+// or 170-to-171.sql has the version 3 or 4 layout but no identity row. It takes
+// the version 0 path and is adopted, while every real version 3 or 4 store is
+// refused there and takes the version path, as for version 1 and 2 stores.
+func TestSchemaVersion3And4StoresDifferFromRebuiltLayoutFixture(t *testing.T) {
+	for _, from := range boundVersionStores {
+		t.Run(fmt.Sprintf("version %d", from.version), func(t *testing.T) {
+			_, fixture := historicalSchemaDB(t, "abd2c040")
+			chain := migration166To167 + migration167To168 + migration168To169 + migration169To170
+			if from.version == 4 {
+				chain += migration170To171
+			}
+			_, err := fixture.Exec(chain)
+			require.NoError(t, err)
+			schema, err := readSchema(fixture)
+			require.NoError(t, err)
+			require.Equal(t, from.layout, schemaFingerprint(schema))
+			conn, err := fixture.Conn(t.Context())
+			require.NoError(t, err)
+			require.NoError(t, runSchemaMigrations(t.Context(), conn, from.layout, migrationsFrom(t, from.layout)))
+			require.NoError(t, conn.Close())
+
+			for _, state := range version3StoreStates {
+				t.Run(state.name, func(t *testing.T) {
+					_, db := from.build(t, state.origin, state.complete, state.installation, state.bound)
+					before, err := readDataset(db)
+					require.NoError(t, err)
+					beforeRows := applicationRows(t, db)
+					conn, err := db.Conn(t.Context())
+					require.NoError(t, err)
+					require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, from.layout, migrationsFrom(t, from.layout)),
+						fmt.Sprintf("unsupported SQLite schema version %d before upgrade", from.version))
+					require.NoError(t, conn.Close())
+					after, err := readDataset(db)
+					require.NoError(t, err)
+					require.Equal(t, before, after)
+					require.Equal(t, beforeRows, applicationRows(t, db))
+				})
 			}
 		})
 	}
 }
 
-// A failed version step leaves the version 3 store unchanged, including its
-// binding, and the next open upgrades it.
-func TestSchemaVersion3UpgradeFailureRollsBack(t *testing.T) {
-	path, db := schemaVersion3StoreDB(t, datasetOriginNew, true, "installation-a", true)
-	before, err := readDataset(db)
-	require.NoError(t, err)
-	beforeBinding, err := readDatasetBinding(t.Context(), db)
-	require.NoError(t, err)
-	beforeSchema := storedSchemaSQL(t, db)
-	beforeRows := applicationRows(t, db)
-	conn, err := db.Conn(t.Context())
-	require.NoError(t, err)
-	steps := versionUpgradesFrom(t, 3)
-	steps[0].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 3, schema170, steps))
-	require.NoError(t, conn.Close())
-	after, err := readDataset(db)
-	require.NoError(t, err)
-	require.Equal(t, before, after)
-	afterBinding, err := readDatasetBinding(t.Context(), db)
-	require.NoError(t, err)
-	require.Equal(t, beforeBinding, afterBinding)
-	version, err := readSchemaVersion(db)
-	require.NoError(t, err)
-	require.Equal(t, 3, version)
-	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
-	require.Equal(t, beforeRows, applicationRows(t, db))
-	require.NoError(t, db.Close())
-
-	s, err := OpenLockedStore(path)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
-	assertMigrationRecords(t, s.db, path)
-}
-
-// A fixture rebuilt from historical DDL plus every step through 169-to-170.sql
-// has the version 3 layout but no identity row. It takes the version 0 path
-// and is adopted, while every real version 3 store is refused there and takes
-// the version path, as for version 1 and 2 stores.
-func TestSchemaVersion3StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
-	_, fixture := historicalSchemaDB(t, "abd2c040")
-	_, err := fixture.Exec(migration166To167 + migration167To168 + migration168To169 + migration169To170)
-	require.NoError(t, err)
-	schema, err := readSchema(fixture)
-	require.NoError(t, err)
-	require.Equal(t, schema170, schemaFingerprint(schema))
-	conn, err := fixture.Conn(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema170, migrationsFrom(t, schema170)))
-	require.NoError(t, conn.Close())
-
-	for _, state := range version3StoreStates {
-		t.Run(state.name, func(t *testing.T) {
-			_, db := schemaVersion3StoreDB(t, state.origin, state.complete, state.installation, state.bound)
-			before, err := readDataset(db)
-			require.NoError(t, err)
-			beforeRows := applicationRows(t, db)
-			conn, err := db.Conn(t.Context())
-			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema170, migrationsFrom(t, schema170)),
-				"unsupported SQLite schema version 3 before upgrade")
-			require.NoError(t, conn.Close())
-			after, err := readDataset(db)
-			require.NoError(t, err)
-			require.Equal(t, before, after)
-			require.Equal(t, beforeRows, applicationRows(t, db))
-		})
-	}
-}
-
-// ahpTables are the empty tables the version 3 to 4 step adds.
+// ahpTables are the empty tables the version 4 to 5 step adds.
 var ahpTables = []string{
 	"ahp_channel_states", "ahp_clients", "ahp_journal", "ahp_records", "ahp_sessions", "ahp_tokens", "ahp_users",
 }
 
-// addAHPTables records the empty AHP tables an upgrade to version 4 adds to
+// addAHPTables records the empty AHP tables an upgrade to version 5 adds to
 // rows, the application rows of a store before that upgrade.
 func addAHPTables(t *testing.T, rows map[string][]string) {
 	t.Helper()

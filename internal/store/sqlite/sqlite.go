@@ -632,7 +632,7 @@ func currentSchemaStatements() []string {
 			ON work_actions(monitor_namespace, monitor_name, target_kind, target_number, desired_action, status, updated_at DESC)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_actions_dedupe
 			ON work_actions(monitor_namespace, monitor_name, dedupe_key)
-			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running')`,
+			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending')`,
 		`CREATE TABLE IF NOT EXISTS action_records (
 			id                 TEXT PRIMARY KEY,
 			monitor_namespace  TEXT NOT NULL,

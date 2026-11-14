@@ -675,43 +675,6 @@ refresh_orka_token() {
   export ORKA_TOKEN="$(get_orka_token)"
 }
 
-
-
-sandbox_session_claim_name() {
-  local session_name="$1"
-  local claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
-  local task_namespace="${DEMO_NAMESPACE}"
-  local template_namespace="${DEMO_SANDBOX_TEMPLATE_NAMESPACE:-${DEMO_NAMESPACE}}"
-  local template_ref="${DEMO_SANDBOX_TEMPLATE_REF:-orka-live-template}"
-  local digest
-
-  if command -v shasum >/dev/null 2>&1; then
-    digest="$(
-      printf '%s\0%s\0%s\0%s\0%s' \
-        "${claim_namespace}" \
-        "${task_namespace}" \
-        "${template_namespace}" \
-        "${template_ref}" \
-        "${session_name}" \
-        | shasum -a 256 | awk '{print $1}'
-    )"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    digest="$(
-      printf '%s\0%s\0%s\0%s\0%s' \
-        "${claim_namespace}" \
-        "${task_namespace}" \
-        "${template_namespace}" \
-        "${template_ref}" \
-        "${session_name}" \
-        | sha256sum | awk '{print $1}'
-    )"
-  else
-    die "shasum or sha256sum is required to compute the demo SandboxClaim name"
-  fi
-
-  printf 'orka-session-%.32s\n' "${digest}"
-}
-
 demo_anthropic_base_url() {
   printf '%s/anthropic\n' "${ORKA_API_BASE%/}"
 }

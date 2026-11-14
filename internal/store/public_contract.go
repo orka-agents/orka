@@ -73,6 +73,7 @@ type (
 	MonitorItemFilter                         = storagev1.MonitorItemFilter
 	WorkAction                                = storagev1.WorkAction
 	WorkActionFilter                          = storagev1.WorkActionFilter
+	MarkWorkActionRetryPendingRequest         = storagev1.MarkWorkActionRetryPendingRequest
 	ImplementationJob                         = storagev1.ImplementationJob
 	ImplementationJobFilter                   = storagev1.ImplementationJobFilter
 	GitHubMutationRecord                      = storagev1.GitHubMutationRecord
@@ -142,7 +143,11 @@ type (
 	PromptResultReceipt                       = storagev1.PromptResultReceipt
 	PromptResultReceiptStore                  = storagev1.PromptResultReceiptStore
 	SessionStore                              = storagev1.SessionStore
+	SessionCreationReader                     = storagev1.SessionCreationReader
 	SessionTurnCommitter                      = storagev1.SessionTurnCommitter
+	AcquireChatTurnRequest                    = storagev1.AcquireChatTurnRequest
+	CommitSessionTurnRequest                  = storagev1.CommitSessionTurnRequest
+	SessionOwnerWrite                         = storagev1.SessionOwnerWrite
 	FencedSessionWriteStore                   = storagev1.FencedSessionWriteStore
 	GatewayEventStore                         = storagev1.GatewayEventStore
 	GatewayDeliveryStore                      = storagev1.GatewayDeliveryStore
@@ -150,7 +155,7 @@ type (
 	ArtifactStore                             = storagev1.ArtifactStore
 	RepositoryMonitorStore                    = storagev1.RepositoryMonitorStore
 	Message                                   = storagev1.Message
-	MessageStore                              = storagev1.MessageStore
+	ConsumeMessagesRequest                    = storagev1.ConsumeMessagesRequest
 	TaskJobIdentity                           = storagev1.TaskJobIdentity
 	TaskJobAuthorityStore                     = storagev1.TaskJobAuthorityStore
 	SessionRecord                             = storagev1.SessionRecord
@@ -261,6 +266,7 @@ const (
 	MemoryProposalStatusArchived      = storagev1.MemoryProposalStatusArchived
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
+	MaxMessageBatch                   = storagev1.MaxMessageBatch
 )
 
 var (

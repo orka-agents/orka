@@ -318,6 +318,29 @@ func TestOpenCodeBrokeredPermissionsUseDisjointNativeNamespace(t *testing.T) {
 	}
 }
 
+// TestOpenCodeBrokeredPermissionsSkipForwardingTools covers a forwarding Tool
+// whose name normalizes to a built-in's, such as web.fetch beside web_fetch:
+// it is hidden from the model, takes no permission, and so cannot collide.
+func TestOpenCodeBrokeredPermissionsSkipForwardingTools(t *testing.T) {
+	policy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"web_fetch", "web.fetch"},
+		Tools: []harnessv2.MCPToolDescriptor{
+			{Name: "web_fetch", Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly},
+			{
+				Name: "web.fetch", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly,
+				Forward: &harnessv2.MCPToolForward{Protocol: "AzureResourceManager", Origin: "https://management.azure.com"},
+			},
+		},
+	}
+	permissions, err := openCodeBrokeredPermissions(policy)
+	if err != nil {
+		t.Fatalf("openCodeBrokeredPermissions() = %v, want the forwarding Tool skipped", err)
+	}
+	if len(permissions) != 1 || !permissions["orka_web_fetch"] {
+		t.Fatalf("permissions = %#v, want only the built-in", permissions)
+	}
+}
+
 func TestOpenCodeSessionConfigRejectsCollidingBrokeredPermissionNames(t *testing.T) {
 	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}

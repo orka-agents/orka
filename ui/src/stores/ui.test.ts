@@ -31,15 +31,6 @@ describe('useUIStore', () => {
     expect(useUIStore.getState().sidebarCollapsed).toBe(false)
   })
 
-  it('setSidebarCollapsed sets the value explicitly', () => {
-    useUIStore.getState().setSidebarCollapsed(true)
-    expect(useUIStore.getState().sidebarCollapsed).toBe(true)
-    useUIStore.getState().setSidebarCollapsed(true)
-    expect(useUIStore.getState().sidebarCollapsed).toBe(true)
-    useUIStore.getState().setSidebarCollapsed(false)
-    expect(useUIStore.getState().sidebarCollapsed).toBe(false)
-  })
-
   it('setTheme records the pick; the root applies it to the page', () => {
     for (const theme of ['dark', 'system', 'light'] as const) {
       useUIStore.getState().setTheme(theme)

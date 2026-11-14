@@ -277,15 +277,6 @@ describe('structured ACP task status', () => {
 })
 
 describe('resultRefSchema', () => {
-  it('parses valid data', () => {
-    const data = { configMapName: 'result-cm', key: 'output' }
-    expect(resultRefSchema.parse(data)).toEqual(data)
-  })
-
-  it('parses with only required fields', () => {
-    expect(resultRefSchema.parse({ configMapName: 'result-cm' })).toEqual({ configMapName: 'result-cm' })
-  })
-
   it('parses the API result reference shape ({ available })', () => {
     expect(resultRefSchema.parse({ available: true })).toEqual({ available: true })
   })
@@ -378,7 +369,7 @@ describe('taskStatusSchema', () => {
       completionTime: '2024-01-01T01:00:00Z',
       attempts: 2,
       jobName: 'task-xyz-job',
-      resultRef: { configMapName: 'result-cm' },
+      resultRef: { available: true },
       execution: { state: 'Running', runtimePoolName: 'codex-read' },
       delivery: { state: 'Validating' },
       webhookDelivered: true,

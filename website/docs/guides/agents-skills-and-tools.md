@@ -15,7 +15,7 @@ is allowed to do. This page maps the ways to shape one and links to the details.
 | What runs | Orka's AI worker, calling the model in a loop | A coding-agent CLI: Codex, Claude Code, Copilot CLI, or OpenCode |
 | Model access | A [Provider](../reference/resources.md#provider) and its API key Secret | Your model gateway, through the [provider proxy](../operations/provider-proxy.md) |
 | Tools | Orka's [built-in tools](../reference/built-in-tools.md) and your custom Tools | The CLI's own tools, plus Orka tools through a per-session broker |
-| Key fields | `providerRef`, `model`, `systemPrompt`, `tools`, `skills`, `coordination` | `runtime.type`, `model.name`, `runtime.defaultAllowedTools`, `runtime.defaultAllowBash` |
+| Key fields | `providerRef`, `model`, `systemPrompt`, `tools`, `skills`, `coordination` | `runtime.type`, `model.name`, `runtime.defaultAllowedTools`, `runtime.defaultAllowBash`, `runtime.skills` |
 
 The [Agent reference](../reference/resources.md#agent) lists every field, and
 [Agent runtimes](../concepts/agent-runtimes.md) explains how runtime Agents run.
@@ -45,9 +45,11 @@ followed; repository overviews were not useful. In practice:
 ## Add skills
 
 A [Skill](../reference/resources.md#skill) is a reusable block of instructions, in the Agent
-Skills format, that a native Agent or AI Task lists by name. Runtime Agents do not accept
-Skills; put that guidance in their system prompt or the Task prompt. Create a Skill from a
-`SKILL.md` file:
+Skills format, that a native Agent or AI Task lists by name. Runtime Agents don't accept
+`spec.skills`; Codex, Claude, and OpenCode Agents declare Agent Skills from digest-pinned
+images in `runtime.skills` instead, and Orka copies each one into the runtime's native
+skills folder (Copilot is not supported yet). See
+[Runtime skills](runtime-skills.md). Create a Skill from a `SKILL.md` file:
 
 ```bash
 orka skill init ./my-skill --name my-skill --description "My skill"
@@ -55,8 +57,10 @@ orka skill validate ./my-skill/SKILL.md
 orka skill import ./my-skill/SKILL.md --name my-skill
 ```
 
-Skills are added to the system prompt on every model call for every Task that uses the
-Agent, so each one costs tokens on every request:
+Native Agent Skills are added to the system prompt on every model call for every Task that
+uses the Agent, so each one costs tokens on every request. Runtime skills cost less up front
+(the CLI lists each skill's description and loads the rest on demand), but the same advice
+applies:
 
 - Write instructions ("run `make lint-fix` after changes"), not descriptions ("this project
   uses a Makefile-based build system").

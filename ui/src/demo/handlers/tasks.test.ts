@@ -167,6 +167,30 @@ describe('demo task API', () => {
     expect(events.at(-1)).toMatchObject({ type: 'TaskCancelled', summary: 'Cancelled: repository monitor stopped by command' })
   })
 
+  it('cancels running children with their parent', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+    const parent = createDemoTask({ agent: 'coordinator', prompt: 'Prepare the release' })
+    const child = createDemoTask({ agent: 'docs', prompt: 'Draft the release notes', parent })
+    const finished = createDemoTask({ agent: 'triage', prompt: 'List release blockers', parent })
+    cancelDemoTask(finished, 'Cancelled: stopped earlier')
+    // A finished child's own running child is still cancelled.
+    const grandchild = createDemoTask({ agent: 'docs', prompt: 'Summarize the blockers', parent: finished })
+    advanceClock(10_000)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status?.phase).toBe('Running')
+    expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Running')
+
+    expect((await call(`/tasks/${parent}/cancel`, post({ reason: 'wrong branch' }))).ok).toBe(true)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status).toMatchObject({
+      phase: 'Cancelled',
+      message: 'cancelled by demo-user: wrong branch',
+    })
+    expect(taskSchema.parse(await json(`/tasks/${finished}`)).status?.message).toBe('Cancelled: stopped earlier')
+    expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Cancelled')
+
+    // A stale confirmation is refused even once the Task is already cancelled.
+    expect((await call(`/tasks/${parent}/cancel`, post({ uid: 'replaced-uid' }))).status).toBe(409)
+  })
+
   it('forks a finished container task with its own container and keeps its outcome', async () => {
     const source = 'db-migrate-orders-v42-e2l9o'
     const fork = forkTaskResponseSchema.parse(await json(`/tasks/${source}/fork`, post({})))

@@ -82,10 +82,10 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	var eventContent map[string]json.RawMessage
 	usageReport := false
 	if json.Unmarshal(event.Content, &eventContent) == nil {
-		if _, ok := eventContent["harnessV2"]; ok {
+		if jsonObjectHasField(eventContent, "harnessV2") {
 			return fiber.NewError(fiber.StatusForbidden, "harness events must use the controller journal")
 		}
-		if _, ok := eventContent["usage"]; ok {
+		if jsonObjectHasField(eventContent, "usage") {
 			if err := authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask); err != nil {
 				return err
 			}

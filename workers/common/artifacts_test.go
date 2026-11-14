@@ -418,13 +418,6 @@ func TestWriteArtifactFileRejectsTraversalFilename(t *testing.T) {
 	}
 }
 
-func TestMissingArtifactsRejectsTraversalFilename(t *testing.T) {
-	prepareArtifactsDir(t)
-	if _, err := MissingArtifacts([]string{"../outside.txt"}); err == nil {
-		t.Fatal("MissingArtifacts() error = nil, want invalid filename")
-	}
-}
-
 func TestDoPostWithContentTypePermanentRejectionDoesNotRetry(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -158,8 +158,13 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	marker := filepath.Join(bin, "invoked")
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	kubeFixture := newMigrationKubeFixture(t, server.URL)
-	kube := httptest.NewTLSServer(kubeFixture)
+	// Migration must not contact the selected Kubernetes cluster at all.
+	kubeRequests := 0
+	kube := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kubeRequests++
+		t.Errorf("migration contacted the Kubernetes API: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusForbidden)
+	}))
 	defer kube.Close()
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	writeKubeconfig := func(cluster string) {
@@ -186,7 +191,7 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	}
 	require.ErrorContains(t, run(), "explicit --server")
 	require.Zero(t, calls)
-	require.Zero(t, kubeFixture.tunnelCount())
+	require.Zero(t, kubeRequests)
 	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 	require.NoFileExists(t, filepath.Join(journal, "import-receipt.json"))
 	require.NoFileExists(t, marker)

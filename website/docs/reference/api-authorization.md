@@ -16,6 +16,9 @@ non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
 no resource grant. Native chat routes are registered only when chat is enabled.
+`POST /mcp` is registered only with `--mcp-server-enabled`; it also only
+authenticates, and each MCP tool is authorized by the REST route it replays (see
+[MCP tools](#mcp-tools)).
 
 OIDC callers retain the trusted-subject allowlist and namespace policy. Transaction
 tokens retain their `off`, `audit`, and `enforce` scope and `tctx` policies. Neither
@@ -66,7 +69,11 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
 `update` on `tasks/approvals` and `patch` on the parent Task; a permission request a
-built-in runtime holds for the Task's requester can be decided only by that requester. A monitor run or
+built-in runtime holds for the Task's requester can be decided only by that requester.
+Cancelling a Task requires `update` on `tasks/cancel`, not `patch` or `delete` on
+`tasks`, so an on-call role can stop Tasks without editing or deleting them;
+cancelling keeps everything the Task produced. Stopping a Session's turn requires
+`get` on the Session and `update` on `tasks/cancel`. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs
@@ -107,6 +114,28 @@ A Task with `spec.execution.workspace.restoreFrom` also requires `use` on
 checkpoint name and the Task namespace. This includes forks that supply
 `executionCheckpoint`. The workspace-class grant is still required; permission
 to read a checkpoint or create Tasks does not grant checkpoint use.
+
+Agent `use` is an opt-in check, enabled with `--agent-use-authorization-enabled`
+(Helm: `controller.agentUseAuthorization.enabled`). When it is on, every
+authenticated identity, including OIDC and transaction-token callers, needs `use`
+on `agents` in `core.orka.ai`, with the Agent name and the Agent's namespace, to
+create a Task that names the Agent, or to create or edit a RepositoryScan or
+RepositoryMonitor so that it names the Agent. Agents an edited object already
+named are not checked again. Kubernetes-authenticated callers are checked exactly
+as the API server authenticated them. OIDC and transaction-token callers are
+checked as the user `<issuer>#<sub>`, using the token's `iss` and `sub` claims,
+with each OIDC group prefixed the same way, so bind Roles to, for example,
+`https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main`.
+Display claims such as `preferred_username`, `email`, and `name` are not used.
+Permission to read, create, or edit an Agent does not grant `use`.
+
+Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
+`agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
+`agentidentities/entra`), the lowercased identity ID as the name, and the Agent
+namespace. This applies to every authenticated identity, through the API and through
+the always-installed `agent-identity-bind` admission policy for direct writes.
+Removing an identity, or an edit that keeps it, needs no grant. Chat and worker
+tools cannot set an identity.
 
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
@@ -162,6 +191,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
+| `POST` | `/api/v1/tasks/:id/cancel` | `core.orka.ai` | `tasks/cancel` | `update` | `:id` | `Q` | Gateway operate |
 | `GET` | `/api/v1/tasks/:id/logs` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/events` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -182,6 +212,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
 | `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on the named Session; creates a fresh non-Gateway Session only |
 | `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
+| `POST` | `/api/v1/sessions/:id/cancel` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | `update` on `core.orka.ai/tasks/cancel`; Gateway operate per Task |
 | `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
 | `GET` | `/api/v1/gatewayclasses/:name` | `gateway.orka.ai` | `gatewayclasses` | `get` | `:name` | `cluster` | none |
 | `GET` | `/api/v1/gateways` | `gateway.orka.ai` | `gateways` | `list` | empty | `Q` | none |
@@ -228,6 +259,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/agents/:name/system-prompt` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | Named `get` on core `configmaps` for the Agent's `systemPrompt.configMapRef` |
 | `PUT` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/agents/:name/spec` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
 | `DELETE` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `delete` | `:name` | `Q` | none |
 | `POST` | `/api/v1/skills` | `core.orka.ai` | `skills` | `create` | empty | `C` | none |
 | `GET` | `/api/v1/skills` | `core.orka.ai` | `skills` | `list` | empty | `Q` | none |
@@ -303,6 +335,35 @@ otherwise. In the additional-checks column:
 | `GET` | `/openai/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/anthropic/v1/messages` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
 | `GET` | `/anthropic/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
+| `POST` | `/mcp` | none | none | identity only | empty | not applicable | Authenticated identity only; every tool call replays a REST route below with the caller's credentials and is authorized by that route |
+
+## MCP tools
+
+The [MCP server](../guides/mcp-server.md) adds no permissions of its own. Each tool
+call replays the listed REST request in the API server with the caller's original
+credentials, so the full middleware chain runs again: authentication, the route
+policy and its SubjectAccessReviews, OIDC and transaction-token policy, namespace
+resolution and isolation, and every handler check. A denial stops the tool before
+any effect and is returned as a tool error carrying the REST status.
+
+| Tool | REST requests | Permissions (ServiceAccount callers) |
+| --- | --- | --- |
+| `list_agents` | `GET /api/v1/agents` | `list` `agents` |
+| `get_agent` | `GET /api/v1/agents/:name` | `get` `agents`, named |
+| `create_task` | `POST /api/v1/tasks`; `GET /api/v1/agents/:name` when `taskType` is omitted | `create` `tasks` plus its additional checks; `get` on the Agent when looked up |
+| `get_task`, `wait_for_task` | `GET /api/v1/tasks/:id`; `GET /api/v1/tasks/:id/approvals` while the Task runs | `get` `tasks`, named; Gateway read |
+| `list_tasks` | `GET /api/v1/tasks` | `list` `tasks`; Gateway read |
+| `cancel_task` | `POST /api/v1/tasks/:id/cancel` | `update` `tasks/cancel`, named; Gateway operate |
+| `list_pending_approvals` | `GET /api/v1/tasks/:id/approvals` | `get` `tasks`, named; Gateway read |
+| `decide_approval` | `POST /api/v1/tasks/:id/approvals/:approvalID/decision` | `update` `tasks/approvals` and `patch` `tasks`, named; Gateway operate |
+| `get_task_result` | `GET /api/v1/tasks/:id/result` | `get` `tasks`, named; Gateway read |
+| `list_task_artifacts` | `GET /api/v1/tasks/:id/artifacts` | `get` `tasks`, named; Gateway read |
+| `get_task_artifact` | `GET /api/v1/tasks/:id/artifacts/:filename` | `get` `tasks`, named; Gateway read |
+
+MCP Tasks methods use the same routes: `tasks/get` and `tasks/result` read the Task
+and its approvals, `tasks/update` records decisions through the decision route, and
+`tasks/cancel` uses `POST /api/v1/tasks/:id/cancel`. Transaction-token callers need the
+scopes those routes require, such as `orka:tasks:create` for `create_task`.
 
 ## Grant access
 
@@ -330,7 +391,7 @@ read. Other lookup errors still stop discovery, and explicit Secret reads
 remain subject to authorization.
 
 Existing Task helper roles retain session access; Task editor/admin roles also
-grant `update` on `tasks/approvals`. Gateway helper roles include ledger reads;
+grant `update` on `tasks/approvals` and `tasks/cancel`. Gateway helper roles include ledger reads;
 Gateway editor/admin roles also grant delivery retry. GatewayClass reads require
 a cluster-scoped binding, such as the existing `orka-gatewayclass-viewer-role`.
 A namespaced RoleBinding cannot grant those cluster-scoped reads.

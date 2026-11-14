@@ -4,16 +4,13 @@ import { API_BASE_URL } from '@/lib/constants'
 import { apiErrorMessage } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { TaskPhase } from '@/schemas/task'
+import { isTaskInFlight } from '@/lib/task-phase'
 
 const taskLogRequestIdleTimeoutMs = 30_000
 
 interface InFlightLogRequest {
   controller: AbortController
   timeoutId: ReturnType<typeof setTimeout> | null
-}
-
-function isRunningPhase(phase?: TaskPhase): boolean {
-  return phase === 'Running' || phase === 'Finalizing' || phase === 'Pending'
 }
 
 // Blank lines are part of the output; only the empty remainder after a
@@ -47,7 +44,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
     if (inFlightRef.current) return
 
     const token = useAuthStore.getState().token
-    const running = isRunningPhase(taskPhase)
+    const running = isTaskInFlight(taskPhase)
     const controller = new AbortController()
     const request: InFlightLogRequest = { controller, timeoutId: null }
     const armIdleTimeout = () => {
@@ -186,7 +183,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
       pollRef.current = null
     }
 
-    if (enabled && isRunningPhase(taskPhase)) {
+    if (enabled && isTaskInFlight(taskPhase)) {
       pollRef.current = setInterval(fetchLogs, 3000)
     }
 
@@ -209,7 +206,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
 
   // When task completes, stop polling and do a final fetch
   useEffect(() => {
-    if (!isRunningPhase(taskPhase) && isLive) {
+    if (!isTaskInFlight(taskPhase) && isLive) {
       setIsLive(false)
       if (pollRef.current) {
         clearInterval(pollRef.current)

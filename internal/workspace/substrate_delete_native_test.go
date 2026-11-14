@@ -34,19 +34,19 @@ func TestSubstrateNativeDeleteDoesNotRequireSnapshot(t *testing.T) {
 				case ateapipb.Control_SuspendActor_FullMethodName:
 					suspends.Add(1)
 					// Upstream gVisor rejects Data capture without durable mounts.
-					return nil, status.Error(codes.FailedPrecondition, "no durable-dir volumes found for DATA snapshot")
+					return nil, status.Error(codes.FailedPrecondition, "no durable-dir volumes found for VOLUMES snapshot")
 				case ateapipb.Control_DeleteActor_FullMethodName:
 					deletes.Add(1)
 					request := req.(*ateapipb.DeleteActorRequest)
-					if !request.AnyState || request.Actor.Atespace != "tenant" || request.Actor.Name != "stateless" {
-						return nil, status.Error(codes.InvalidArgument, "expected native any-state deletion of the exact Actor")
+					if request.GetOptions().GetUid() != "actor-uid" || request.Actor.Atespace != "tenant" || request.Actor.Name != "stateless" {
+						return nil, status.Error(codes.InvalidArgument, "expected UID-fenced native deletion of the exact Actor")
 					}
 					return &ateapipb.Actor{}, nil
 				default:
 					return handler(ctx, req)
 				}
 			}))
-			cfg.RouterURL, cfg.ActorDNSSuffix = "http://router.test", "actors.test"
+			cfg.RouterURL = "https://router.test"
 			executor, err := NewSubstrateExecutor(cfg)
 			require.NoError(t, err)
 			defer executor.Close() //nolint:errcheck
