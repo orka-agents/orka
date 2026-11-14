@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -365,7 +366,8 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		// A gateway-enforced backend has no Pod network to describe: its
 		// runtime reaches only the allowlisted host names, and Core's routed
 		// supervisor calls enter through the backend router.
-		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider)
+		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider,
+			telemetryCollectorEndpoints(request.Runtime.Template.Spec.Containers[0].Env))
 		if err != nil {
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, err.Error())
 		}
@@ -426,15 +428,17 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
-	const published = "public workload request published; waiting for provider materialization"
-	if telemetryMessage == "" {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, published)
-	}
-	status := r.externalPoolProgressStatus(pool, corev1alpha1.RuntimePoolLifecycleStarting, published)
-	if telemetryFits {
+	status := r.externalPoolProgressStatus(pool, corev1alpha1.RuntimePoolLifecycleStarting,
+		"public workload request published; waiting for provider materialization")
+	switch {
+	case telemetryMessage == "":
+		// This request carries no supervisor telemetry; a condition from an
+		// earlier request would describe a runtime that no longer exists.
+		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
+	case telemetryFits:
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
 			corev1alpha1.RuntimePoolReasonTelemetryProjected, telemetryMessage)
-	} else {
+	default:
 		log.FromContext(ctx).Info("Reduced supervisor telemetry to fit the native environment limit",
 			"runtimePool", pool.Name, "detail", telemetryMessage)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionFalse,
@@ -738,11 +742,11 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 // Core's private provider Secret, so it never enters the sandbox. Otherwise
 // admission fails closed unless the operator explicitly allowed delivering
 // the token into the sandbox through the sealed bootstrap.
-func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret, collectors []string) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
 	// An origin that cannot be admitted at all is a configuration error, not
 	// a reason to consider delivering the token into the sandbox: report it
 	// on its own.
-	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
+	if _, err := r.externalRuntimeEgressForCollectors(cfg, nil, collectors); err != nil {
 		return nil, false, err
 	}
 	reason := "the workspace provider does not advertise " + string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
@@ -750,7 +754,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runti
 		if provider == nil || provider.Namespace == "" || provider.Name == "" {
 			return nil, false, fmt.Errorf("provider proxy token injection requires Core's private provider Secret")
 		}
-		egress, err := r.externalRuntimeEgress(cfg, &externalProviderTokenInjection{namespace: provider.Namespace, name: provider.Name})
+		egress, err := r.externalRuntimeEgressForCollectors(cfg, &externalProviderTokenInjection{namespace: provider.Namespace, name: provider.Name}, collectors)
 		if err == nil {
 			return egress, true, nil
 		}
@@ -759,7 +763,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runti
 	if !r.AllowProviderTokenInSandbox {
 		return nil, false, fmt.Errorf("provider proxy token injection is unavailable (%s); refusing to deliver the provider token into the sandbox without --acp-workspace-allow-provider-token-in-sandbox", reason)
 	}
-	egress, err := r.externalRuntimeEgress(cfg, nil)
+	egress, err := r.externalRuntimeEgressForCollectors(cfg, nil, collectors)
 	return egress, false, err
 }
 

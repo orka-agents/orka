@@ -121,12 +121,14 @@ therefore passes the fewest settings that keep each signal's SDK meaning:
   example separate OTLP/HTTP collectors per signal, supervisor metrics are
   dropped and traces are kept.
 
-A dropped signal never falls back to a generic endpoint. On a native runtime,
-Orka fits telemetry last, into the entries its other settings leave: a runtime
-whose workspace can suspend uses two more, and empty model limits are omitted.
-When traces and metrics do not fit, metrics are dropped; when traces alone do
-not fit, supervisor telemetry is left out rather than publishing a workload the
-provider would reject. The RuntimePool's `TelemetryReady` condition is `True`
+A dropped signal never falls back to a generic endpoint. On a native runtime the
+three-entry budget does not apply: Orka fits telemetry last, from every
+configured signal, into the entries its other settings leave. A runtime whose
+workspace can suspend uses two more, and empty model limits are omitted. When
+traces and metrics do not fit, metrics are dropped; when traces alone do not
+fit, supervisor telemetry is left out rather than publishing a workload the
+provider would reject. With `--runtime-telemetry-collector-egress`, the gateway
+allowlist admits only the collectors the fitted runtime exports to. The RuntimePool's `TelemetryReady` condition is `True`
 with reason `TelemetryProjected` when every signal fits, and `False` with reason
 `NativeEnvironmentLimit` and the entry counts when a signal was left out.
 Headers, certificate paths,

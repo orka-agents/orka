@@ -462,14 +462,15 @@ func TestExternalRuntimePoolSuspendableNativeEnvironmentFitsWithTelemetry(t *tes
 }
 
 func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
-	getenv := func(values map[string]string) func(string) string {
-		return func(name string) string { return values[name] }
+	// Separate OTLP/HTTP collectors need four entries: the Pod projection's
+	// fixed budget of three drops metrics, while a native runtime with room
+	// for four keeps both signals.
+	values := map[string]string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
 	}
-	// Distinct trace and metrics endpoints cost one entry more than traces alone.
-	split := getenv(map[string]string{
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4317",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4317",
-	})
+	split := func(name string) string { return values[name] }
 	base := func(entries int) []corev1.EnvVar {
 		env := make([]corev1.EnvVar, entries)
 		for i := range env {
@@ -477,26 +478,26 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 		}
 		return env
 	}
-	withTelemetry := func(entries int) []corev1.EnvVar {
-		return append(base(entries), runtimePoolTelemetryEnv(true, split)...)
+	pod := runtimePoolTelemetryEnv(true, split)
+	if len(pod) != 3 || slices.ContainsFunc(pod, func(v corev1.EnvVar) bool { return v.Name == "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" }) {
+		t.Fatalf("Pod projection = %v, want trace-only within three entries", pod)
 	}
-	full := len(runtimePoolTelemetryEnv(true, split))
-	if full != 3 {
-		t.Fatalf("fixture projects %d telemetry entries, want 3", full)
-	}
+	both := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL"}
+	traces := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"}
 	for name, test := range map[string]struct {
 		base      int
 		fits      bool
 		entries   int
 		telemetry []string
 	}{
-		"room for all":    {base: nativeRuntimeEnvironmentLimit - 3, fits: true, entries: 32, telemetry: []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"}},
-		"room for traces": {base: nativeRuntimeEnvironmentLimit - 2, entries: 32, telemetry: []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"}},
-		"no room":         {base: nativeRuntimeEnvironmentLimit - 1, entries: 31},
-		"already over":    {base: nativeRuntimeEnvironmentLimit + 1, entries: 33},
+		"room for every signal": {base: nativeRuntimeEnvironmentLimit - 4, fits: true, entries: 32, telemetry: both},
+		"room for traces":       {base: nativeRuntimeEnvironmentLimit - 3, entries: 32, telemetry: traces},
+		"no room":               {base: nativeRuntimeEnvironmentLimit - 2, entries: 30},
+		"already over":          {base: nativeRuntimeEnvironmentLimit + 1, entries: 33},
 	} {
 		t.Run(name, func(t *testing.T) {
-			env, fits, message := fitNativeRuntimeTelemetry(withTelemetry(test.base), true, split)
+			// The runtime template arrives carrying the Pod projection.
+			env, fits, message := fitNativeRuntimeTelemetry(append(base(test.base), pod...), true, split)
 			if fits != test.fits || message == "" || len(env) != test.entries {
 				t.Fatalf("fit = %t %q with %d entries, want %t with %d", fits, message, len(env), test.fits, test.entries)
 			}
@@ -511,9 +512,71 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 			}
 		})
 	}
-	env, fits, message := fitNativeRuntimeTelemetry(base(31), false, split)
+	// Readiness compares against every configured signal: a trace-only Pod
+	// projection is not reported as complete.
+	if _, fits, _ := fitNativeRuntimeTelemetry(append(base(nativeRuntimeEnvironmentLimit-3), pod...), true, split); fits {
+		t.Fatal("trace-only telemetry reported every signal projected")
+	}
+	// An unchanged projection that fits keeps its place in the environment.
+	tracesSignal, metricsSignal, _ := runtimePoolTelemetrySignals(true, split)
+	unchanged := append(append(base(2), encodeRuntimePoolTelemetryEnv(tracesSignal, metricsSignal)...), base(1)...)
+	if env, fits, _ := fitNativeRuntimeTelemetry(unchanged, true, split); !fits || !reflect.DeepEqual(env, unchanged) {
+		t.Fatalf("unchanged projection was rewritten: %v", env)
+	}
+	env, fits, message := fitNativeRuntimeTelemetry(append(base(31), pod...), false, split)
 	if len(env) != 31 || !fits || message != "" {
-		t.Fatalf("disabled telemetry changed the environment or reported %q", message)
+		t.Fatalf("disabled telemetry kept %d entries or reported %q", len(env), message)
+	}
+}
+
+// Native fitting decides which collectors the runtime exports to, so the
+// gateway allowlist admits only those: a dropped metrics collector is not
+// reachable from the sandbox.
+func TestExternalRuntimePoolNativeCollectorEgressFollowsFittedTelemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces.otel.svc.cluster.local:4318/v1/traces")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://metrics.otel.svc.cluster.local:4318/v1/metrics")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	f := newExternalRuntimePoolFixture(t)
+	f.r.EnableTelemetry, f.r.TelemetryCollectorEgress = true, true
+	f.advertiseNativeProcess(t)
+	f.advertiseSubstrateV1Backend(t)
+	w := f.currentWorkspace(t)
+	w.Spec.Lifecycle.AllowedOnDetach = append(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := f.r.Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	workload := f.publish(t).Spec.Workload.Runtime
+	hosts := make([]string, 0, len(workload.Egress.Rules))
+	for _, rule := range workload.Egress.Rules {
+		hosts = append(hosts, rule.Host)
+	}
+	env := workload.Template.Spec.Containers[0].Env
+	if len(env) > nativeRuntimeEnvironmentLimit || !slices.Contains(hosts, "traces.otel.svc.cluster.local") || slices.Contains(hosts, "metrics.otel.svc.cluster.local") ||
+		!slices.Equal(telemetryCollectorEndpoints(env), []string{"http://traces.otel.svc.cluster.local:4318/v1/traces"}) {
+		t.Fatalf("native runtime with %d entries exports to %v and may reach %v", len(env), telemetryCollectorEndpoints(env), hosts)
+	}
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady); condition == nil ||
+		condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit {
+		t.Fatalf("TelemetryReady = %+v, want False/NativeEnvironmentLimit", condition)
+	}
+}
+
+// A request without supervisor telemetry clears readiness left by an earlier
+// request instead of describing a runtime that no longer exists.
+func TestExternalRuntimePoolClearsTelemetryReadyWithoutTelemetry(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	f.r.setRuntimePoolCondition(&pool, &pool.Status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
+		corev1alpha1.RuntimePoolReasonTelemetryProjected, "earlier request")
+	if err := f.r.Status().Update(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	f.publish(t)
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady); condition != nil {
+		t.Fatalf("stale TelemetryReady kept: %+v", condition)
 	}
 }
 

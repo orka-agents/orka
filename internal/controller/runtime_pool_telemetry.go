@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -45,6 +47,9 @@ const runtimePoolTelemetryEnvBudget = 3
 // per-container environment limit. A larger request is refused by the
 // provider and the runtime never starts.
 const nativeRuntimeEnvironmentLimit = 32
+
+// runtimePoolTelemetryEnableEnv turns supervisor telemetry on.
+const runtimePoolTelemetryEnableEnv = "ORKA_ENABLE_TELEMETRY"
 
 // runtimePoolOTLPSignal is one signal's resolved exporter configuration.
 type runtimePoolOTLPSignal struct {
@@ -88,39 +93,64 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	return env
 }
 
+// isRuntimePoolTelemetryEnvName reports an environment name supervisor
+// telemetry projection may use.
+func isRuntimePoolTelemetryEnvName(name string) bool {
+	return name == runtimePoolTelemetryEnableEnv || strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_")
+}
+
 // fitNativeRuntimeTelemetry re-projects supervisor telemetry into the entries
-// the native environment limit leaves after every other runtime setting.
-// Traces take precedence: metrics are dropped first, then all telemetry. It
-// returns the fitted environment and, when telemetry is enabled, whether every
-// projected signal survived with a status message.
+// the native environment limit leaves after every other runtime setting. It
+// starts from every configured signal, not the fixed Pod budget: traces and
+// metrics when they fit, else traces alone, else none. It returns the fitted
+// environment and, when telemetry is enabled, whether every configured signal
+// survived with a status message.
 func fitNativeRuntimeTelemetry(env []corev1.EnvVar, enabled bool, getenv func(string) string) ([]corev1.EnvVar, bool, string) {
-	projected := runtimePoolTelemetryEnv(enabled, getenv)
-	if len(projected) == 0 {
-		return env, true, ""
-	}
-	names := map[string]bool{}
-	for _, variable := range projected {
-		names[variable.Name] = true
-	}
 	base := make([]corev1.EnvVar, 0, len(env))
+	var current []corev1.EnvVar
 	for _, variable := range env {
-		if !names[variable.Name] {
-			base = append(base, variable)
+		if isRuntimePoolTelemetryEnvName(variable.Name) {
+			current = append(current, variable)
+			continue
 		}
+		base = append(base, variable)
+	}
+	traces, metrics, ok := runtimePoolTelemetrySignals(enabled, getenv)
+	if !ok {
+		return base, true, ""
 	}
 	room := nativeRuntimeEnvironmentLimit - len(base)
-	if len(projected) <= room {
-		return env, true, "supervisor telemetry is configured on the native runtime"
+	full := encodeRuntimePoolTelemetryEnv(traces, metrics)
+	if len(full) <= room {
+		if reflect.DeepEqual(current, full) {
+			// Keep an unchanged projection where it is, so the frozen
+			// request does not change order for nothing.
+			return env, true, "supervisor telemetry is configured on the native runtime"
+		}
+		return append(base, full...), true, "supervisor telemetry is configured on the native runtime"
 	}
-	traces, _, _ := runtimePoolTelemetrySignals(enabled, getenv)
-	if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= room {
-		return append(base, traceOnly...), false, fmt.Sprintf(
-			"supervisor metrics are not exported: the native runtime has room for %d of its %d telemetry environment entries (backend limit %d)",
-			max(room, 0), len(projected), nativeRuntimeEnvironmentLimit)
+	if metrics != nil {
+		if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= room {
+			return append(base, traceOnly...), false, fmt.Sprintf(
+				"supervisor metrics are not exported: the native runtime has room for %d of its %d telemetry environment entries (backend limit %d)",
+				max(room, 0), len(full), nativeRuntimeEnvironmentLimit)
+		}
 	}
 	return base, false, fmt.Sprintf(
 		"supervisor telemetry is not exported: the native runtime has room for %d of its %d telemetry environment entries (backend limit %d)",
-		max(room, 0), len(projected), nativeRuntimeEnvironmentLimit)
+		max(room, 0), len(full), nativeRuntimeEnvironmentLimit)
+}
+
+// telemetryCollectorEndpoints returns the collector endpoints an environment
+// hands the supervisor, in order.
+func telemetryCollectorEndpoints(env []corev1.EnvVar) []string {
+	var endpoints []string
+	for _, variable := range env {
+		if isRuntimePoolTelemetryEnvName(variable.Name) && strings.HasSuffix(variable.Name, "_ENDPOINT") {
+			endpoints = append(endpoints, variable.Value)
+		}
+	}
+	return endpoints
 }
 
 // runtimePoolTelemetrySignals resolves the supervisor's trace configuration
@@ -167,7 +197,7 @@ func normalizedOTLPScalar(suffix, value string) string {
 // URLs, so a dropped signal never falls back to it. A scalar both signals
 // agree on is projected once under its generic name.
 func encodeRuntimePoolTelemetryEnv(traces runtimePoolOTLPSignal, metrics *runtimePoolOTLPSignal) []corev1.EnvVar {
-	env := []corev1.EnvVar{{Name: "ORKA_ENABLE_TELEMETRY", Value: strconv.FormatBool(true)}}
+	env := []corev1.EnvVar{{Name: runtimePoolTelemetryEnableEnv, Value: strconv.FormatBool(true)}}
 	switch base, shared := runtimePoolSharedOTLPBase(traces, metrics); {
 	case shared:
 		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryEndpointEnv, Value: base})
@@ -342,10 +372,21 @@ func supervisorAcceptsOTLPSetting(suffix, value string) bool {
 // runtimePoolTelemetryCollectorEndpoints returns the collector endpoints the
 // supervisor environment projection hands to runtimes, in a stable order.
 func runtimePoolTelemetryCollectorEndpoints(enabled bool, getenv func(string) string) []string {
-	var endpoints []string
-	for _, variable := range runtimePoolTelemetryEnv(enabled, getenv) {
-		if strings.HasSuffix(variable.Name, "_ENDPOINT") {
-			endpoints = append(endpoints, variable.Value)
+	return telemetryCollectorEndpoints(runtimePoolTelemetryEnv(enabled, getenv))
+}
+
+// runtimePoolConfiguredCollectorEndpoints returns every collector endpoint a
+// runtime may receive: the Pod projection, or a native runtime with room for
+// every configured signal.
+func runtimePoolConfiguredCollectorEndpoints(getenv func(string) string) []string {
+	traces, metrics, ok := runtimePoolTelemetrySignals(true, getenv)
+	if !ok {
+		return nil
+	}
+	endpoints := runtimePoolTelemetryCollectorEndpoints(true, getenv)
+	for _, endpoint := range telemetryCollectorEndpoints(encodeRuntimePoolTelemetryEnv(traces, metrics)) {
+		if !slices.Contains(endpoints, endpoint) {
+			endpoints = append(endpoints, endpoint)
 		}
 	}
 	return endpoints
@@ -382,7 +423,7 @@ func ValidateRuntimeTelemetryCollectorEgress(telemetryEnabled, collectorEgress b
 	if !telemetryEnabled {
 		return fmt.Errorf("runtime telemetry collector egress requires --enable-telemetry")
 	}
-	endpoints := runtimePoolTelemetryCollectorEndpoints(true, getenv)
+	endpoints := runtimePoolConfiguredCollectorEndpoints(getenv)
 	if len(endpoints) == 0 {
 		return fmt.Errorf("runtime telemetry collector egress requires a runtime-reachable OTLP trace endpoint")
 	}
