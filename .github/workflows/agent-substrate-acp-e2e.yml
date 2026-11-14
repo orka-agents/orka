@@ -84,7 +84,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: orka-agents/orka-workspace
-          ref: 1970659e948560da714202d366b68c31fa332823
+          ref: e13e3b62719018c005fb202d643e3b2a4d5811a6
           path: orka-workspace
           persist-credentials: false
 
@@ -161,4 +161,5 @@ jobs:
             !orka-workspace/bin/external-substrate-core-*/orka/**
             !orka-workspace/bin/external-substrate-core-*/orka-workspace/**
             !orka-workspace/bin/**/images/**
+            !orka-workspace/bin/**/collector.log
             !orka-workspace/bin/external-substrate-proof-*/native-data-*
