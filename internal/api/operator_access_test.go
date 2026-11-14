@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +77,9 @@ type operatorFixture struct {
 	supervisorCalls  []string
 	taintedAtRequest bool
 	noCapability     bool
+	// stallDownload, when set, makes the supervisor send part of a download
+	// and then stall until it is closed.
+	stallDownload chan struct{}
 }
 
 func operatorTestObjects(classAccess string) []client.Object {
@@ -241,6 +245,15 @@ func (f *operatorFixture) serveSupervisor(w http.ResponseWriter, r *http.Request
 		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Length", "7")
+			if f.stallDownload != nil {
+				_, _ = w.Write([]byte("con"))
+				w.(http.Flusher).Flush()
+				select {
+				case <-f.stallDownload:
+				case <-r.Context().Done():
+				}
+				return
+			}
 			_, _ = w.Write([]byte("content"))
 			return
 		}
@@ -782,6 +795,85 @@ func TestOperatorExecOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
 		require.NotContains(t, call, "operator-exec")
 	}
 	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
+}
+
+// A handshake refused by the WebSocket library after the handler handed audit
+// ownership to the hijack callback is still audited.
+func TestOperatorExecRefusedHandshakeIsAudited(t *testing.T) {
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	conn, err := net.DialTimeout("tcp", listener.Addr().String(), 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	_, err = io.WriteString(conn, "GET /api/v1/tasks/t1/exec?namespace=team HTTP/1.1\r\nHost: orka\r\n"+
+		"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"+
+		"Sec-WebSocket-Protocol: "+operatoraccess.WebSocketSubprotocol+"\r\n\r\n")
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	_ = response.Body.Close()
+	require.NotEqual(t, http.StatusSwitchingProtocols, response.StatusCode)
+	require.Eventually(t, func() bool {
+		phases := f.audit.phases()
+		return len(phases) == 1 && phases[0] == OperatorAuditDenied
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, f.audit.snapshot()[0].Outcome, "handshake")
+	require.False(t, f.workspaceTainted(t))
+}
+
+// A client that never sends its exec request is disconnected once the read
+// times out: the cancelled read must close the hijacked socket, not leave the
+// relay and its socket pinned until the client acts.
+func TestOperatorExecSilentClientIsDisconnected(t *testing.T) {
+	previous := operatorExecOptionsReadTimeout
+	operatorExecOptionsReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { operatorExecOptionsReadTimeout = previous })
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+listener.Addr().String()+"/api/v1/tasks/t1/exec?namespace=team",
+		&websocket.DialOptions{Subprotocols: []string{operatoraccess.WebSocketSubprotocol}})
+	require.NoError(t, err)
+	defer conn.CloseNow() //nolint:errcheck
+	for {
+		_, _, err = conn.Read(ctx)
+		if err != nil {
+			break
+		}
+	}
+	require.NoError(t, ctx.Err(), "the relay kept a silent client's socket open")
+	require.Eventually(t, func() bool { return slices.Equal(f.audit.phases(), []string{OperatorAuditDenied}) },
+		5*time.Second, 10*time.Millisecond)
+}
+
+// A supervisor that stalls mid-download cannot hold the transfer past its own
+// deadline: the caller sees a truncated body and the copy is audited as
+// incomplete.
+func TestOperatorCopyOutStalledSupervisorIsBounded(t *testing.T) {
+	previous := operatorFileTransferTimeout
+	operatorFileTransferTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { operatorFileTransferTimeout = previous })
+	f := newOperatorFixture(t, true, "read")
+	f.stallDownload = make(chan struct{})
+	t.Cleanup(func() { close(f.stallDownload) })
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/t1/files?namespace=team&path=/src/main.go", nil)
+	response, err := f.app.Test(request, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err == nil {
+		_, _ = io.ReadAll(response.Body)
+		_ = response.Body.Close()
+	}
+	require.Eventually(t, func() bool {
+		records := f.audit.snapshot()
+		return len(records) == 2 && records[1].Phase == OperatorAuditFinished && records[1].Outcome == "incomplete"
+	}, 5*time.Second, 10*time.Millisecond, "a stalled supervisor transfer was not bounded")
 }
 
 // Every audit sink, log line, and Task Event receives a sanitized record: a

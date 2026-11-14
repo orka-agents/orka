@@ -43,10 +43,16 @@ func (s *Server) handleOperatorExec(c fiber.Ctx, envelope *operatorAuditEnvelope
 	if err != nil {
 		return err
 	}
-	// The relay owns every later record of this request.
+	// The hijack callback owns every later record of this request: the relay
+	// records the outcome, and a refused handshake is recorded as denied.
 	envelope.recorded = true
 	return hijackWebSocket(c, func(conn *websocket.Conn) {
 		s.relayOperatorExec(conn, target)
+	}, func() {
+		denied := target.record
+		denied.Phase = OperatorAuditDenied
+		denied.Outcome = "the WebSocket handshake was refused"
+		s.operatorAudit(context.Background(), denied)
 	})
 }
 
@@ -67,8 +73,9 @@ func headerHasToken(value, token string) bool {
 
 // hijackWebSocket completes the WebSocket handshake on the raw connection
 // after fasthttp hands it over. Authentication and authorization already ran
-// in the route middleware and the handler.
-func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn)) error {
+// in the route middleware and the handler. refused runs when the handshake
+// itself is rejected.
+func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn), refused func()) error {
 	header := http.Header{}
 	for key, value := range c.Request().Header.All() {
 		header.Add(string(key), string(value))
@@ -79,8 +86,9 @@ func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn)) error {
 	}
 	ctx := c.RequestCtx()
 	ctx.HijackSetNoResponse(true)
-	ctx.Hijack(func(conn net.Conn) {
-		_ = conn.SetDeadline(time.Time{})
+	ctx.Hijack(func(hijacked net.Conn) {
+		_ = hijacked.SetDeadline(time.Time{})
+		conn := closableHijackedConn{Conn: hijacked}
 		writer := newHijackResponseWriter(conn)
 		ws, err := websocket.Accept(writer, request.WithContext(context.Background()), &websocket.AcceptOptions{
 			Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
@@ -90,12 +98,29 @@ func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn)) error {
 		})
 		if err != nil {
 			writer.flushError()
+			if refused != nil {
+				refused()
+			}
 			return
 		}
 		ws.SetReadLimit(operatoraccess.MaxFrameBytes + 1)
 		run(ws)
 	})
 	return nil
+}
+
+// closableHijackedConn makes Close effective on a hijacked fasthttp
+// connection. Without KeepHijackedConns fasthttp's Close is a no-op and the
+// socket is closed only after the hijack handler returns, so the WebSocket
+// library's close on a cancelled read or write would leave the blocked I/O,
+// and with it the handler, pinned until the peer acts. An expired deadline
+// interrupts that I/O; fasthttp then closes the socket when the handler
+// returns.
+type closableHijackedConn struct{ net.Conn }
+
+func (c closableHijackedConn) Close() error {
+	_ = c.SetDeadline(time.Now())
+	return c.Conn.Close()
 }
 
 // hijackResponseWriter adapts a hijacked fasthttp connection to the
@@ -519,8 +544,13 @@ func (s *Server) sendOperatorFileRequest(
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusConflict, "runtime session identity is invalid")
 	}
-	httpRequest, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, target.endpoint+path, body)
+	// The transfer outlives the caller's request context, so it carries its
+	// own deadline, held until the response body is closed: the transport's
+	// header timeout covers neither the upload body nor the download body.
+	transferCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operatorFileTransferTimeout)
+	httpRequest, err := http.NewRequestWithContext(transferCtx, method, target.endpoint+path, body)
 	if err != nil {
+		cancel()
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "operator file request could not be built")
 	}
 	if body != nil {
@@ -534,14 +564,29 @@ func (s *Server) sendOperatorFileRequest(
 	httpRequest.Header.Set(harnessv2.OperatorRequestHeader, sealed.header)
 	response, err := s.operatorHTTPClient().Do(httpRequest)
 	if err != nil {
+		cancel()
 		return nil, fiber.NewError(fiber.StatusBadGateway, "runtime supervisor is unreachable")
 	}
 	if response.StatusCode != http.StatusOK {
+		defer cancel()
 		defer response.Body.Close() //nolint:errcheck
 		status, message := supervisorErrorMessage(response)
 		return nil, fiber.NewError(status, message)
 	}
+	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, cancel: cancel}
 	return response, nil
+}
+
+// cancelOnCloseBody releases a transfer's deadline once its body is closed.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 type auditedOperatorBody struct {

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -498,6 +499,42 @@ func TestOperatorExecObservesControlsWhileStdinIsBlocked(t *testing.T) {
 	}
 }
 
+// An EOF that cannot be queued behind a full stdin queue overflows the
+// stream; the stdin writer must still end once the command's stdin unblocks
+// instead of waiting forever on a queue that is never closed.
+func TestOperatorStdinWriterEndsWhenEOFOverflowsTheQueue(t *testing.T) {
+	writers := func() int {
+		buffer := make([]byte, 1<<20)
+		return strings.Count(string(buffer[:runtime.Stack(buffer, true)]), "supervisor.relayOperatorInput.func1")
+	}
+	before := writers()
+	process := newFakeOperatorProcess()
+	_, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
+		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, Stdin: true}),
+		func(ctx context.Context, conn *websocket.Conn) {
+			// The fake never reads stdin: the writer blocks on the first
+			// chunk, and the next 1024 fill the queue exactly.
+			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelStdin, []byte("x")))
+			time.Sleep(100 * time.Millisecond)
+			for range 1024 {
+				_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelStdin, []byte("x")))
+			}
+			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.ControlFrame(operatoraccess.Control{Type: operatoraccess.ControlEOF}))
+		})
+	if result.status.Reason != operatoraccess.ExitReasonStdinOverflow {
+		t.Fatalf("an EOF behind a full queue = %+v, want stdin overflow", result.status)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for writers() > before {
+		if time.Now().After(deadline) {
+			t.Fatal("the stdin writer goroutine leaked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestOperatorTagsAreUniqueAndSkipLiveTags(t *testing.T) {
 	previous := operatorTagInUse
 	t.Cleanup(func() { operatorTagInUse = previous })
@@ -553,9 +590,11 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	if err := supervisor.quiesceOperators(state, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	// The registration is removed inside finishOperation, just before the
+	// goroutine closes lateFinished, so wait briefly instead of probing.
 	select {
 	case <-lateFinished:
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatal("the barrier returned before an in-flight launch finished its cleanup")
 	}
 	if !running.killed.Load() || !late.killed.Load() {

@@ -752,13 +752,15 @@ func relayOperatorInput(
 			}
 			if control.Type == operatoraccess.ControlEOF {
 				if !eof {
-					eof = true
 					select {
 					case queue <- nil:
 					default:
+						// eof stays false so the deferred close ends the
+						// writer once stdin unblocks.
 						setReason(operatoraccess.ExitReasonStdinOverflow)
 						return
 					}
+					eof = true
 					close(queue)
 				}
 				continue

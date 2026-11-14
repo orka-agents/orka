@@ -38,9 +38,17 @@ const (
 	operatorRuntimePoolPort           = 8080
 	operatorSupervisorDialTimeout     = 10 * time.Second
 	operatorSupervisorResponseTimeout = 30 * time.Second
-	operatorExecOptionsReadTimeout    = 30 * time.Second
 	operatorAccessTaskAction          = "operatorAccess"
 	operatorAccessCapabilityHeader    = "X-Orka-Operator-Access-Capability"
+)
+
+// Replaceable in tests.
+var (
+	operatorExecOptionsReadTimeout = 30 * time.Second
+	// operatorFileTransferTimeout bounds a whole supervisor file transfer,
+	// including its bodies. The supervisor bounds the operation itself at
+	// five minutes.
+	operatorFileTransferTimeout = 6 * time.Minute
 )
 
 // OperatorAccessConfig enables `orka task exec` / `orka task cp`. It is
