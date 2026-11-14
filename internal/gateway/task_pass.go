@@ -89,7 +89,7 @@ func LoadTaskPassCredentials(path string) (map[string]TaskPassCredential, error)
 }
 
 func validTaskPass(token string) bool {
-	if len(token) == 0 || len(token) > 4096 {
+	if len(token) == 0 || len(token) > protocol.MaxTaskPassBytes {
 		return false
 	}
 	for _, c := range token {
@@ -151,7 +151,7 @@ func (s *Service) TaskPass(ctx context.Context, task *corev1alpha1.Task, frozen 
 		Tools           []string  `json:"tools"`
 		Deadline        time.Time `json:"deadline"`
 	}{protocol.Version, frozen.GrantRef, frozen.NamespaceUID, frozen.GatewayUID, string(task.UID), frozen.Tools, frozen.Deadline})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, frozen.Endpoint+"/v1/task-passes", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, frozen.Endpoint+protocol.TaskPassPath, bytes.NewReader(body))
 	if err != nil {
 		return "", errTaskPass
 	}
@@ -169,15 +169,15 @@ func (s *Service) TaskPass(ctx context.Context, task *corev1alpha1.Task, frozen 
 	if resp.StatusCode != http.StatusOK {
 		return "", errTaskPass
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, (16<<10)+1))
-	if err != nil || len(data) > 16<<10 {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxTaskPassResponseBytes+1))
+	if err != nil || len(data) > protocol.MaxTaskPassResponseBytes {
 		return "", errTaskPass
 	}
 	var reply struct {
 		Pass      string    `json:"pass"`
 		ExpiresAt time.Time `json:"expiresAt"`
 	}
-	if json.Unmarshal(data, &reply) != nil || !validIssuedTaskPass(reply.Pass) || !reply.ExpiresAt.After(time.Now()) || reply.ExpiresAt.After(time.Now().Add(5*time.Minute)) || reply.ExpiresAt.After(frozen.Deadline) || s.ValidateTaskGrant(ctx, task, frozen, tool) != nil {
+	if json.Unmarshal(data, &reply) != nil || !validIssuedTaskPass(reply.Pass) || !reply.ExpiresAt.After(time.Now()) || reply.ExpiresAt.After(time.Now().Add(protocol.MaxTaskPassTTL)) || reply.ExpiresAt.After(frozen.Deadline) || s.ValidateTaskGrant(ctx, task, frozen, tool) != nil {
 		return "", errTaskPass
 	}
 	return reply.Pass, nil

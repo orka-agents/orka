@@ -8,6 +8,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
@@ -38,7 +39,7 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		if err := workerexecutor.ValidateGatewayTaskPassTool(tool); err != nil {
 			return nil, permanentACPAgentConfiguration(err)
 		}
-		if grant == nil || grant.GrantRef == "" || tool.Spec.HTTP.URL != grant.Endpoint+"/v1/task-tools/"+tool.Name {
+		if grant == nil || grant.GrantRef == "" || tool.Spec.HTTP.URL != protocol.TaskToolURL(grant.Endpoint, tool.Name) {
 			return nil, permanentACPAgentConfiguration(errors.New("gateway task pass requires a bound root and matching gateway endpoint"))
 		}
 		names = append(names, tool.Name)
@@ -87,7 +88,7 @@ func (e RegistryACPMCPToolExecutor) bindGatewayTaskGrant(ctx context.Context, re
 		return err
 	}
 	grant := body.GatewayGrant
-	if grant == nil || tool.Spec.HTTP.URL != grant.Endpoint+"/v1/task-tools/"+tool.Name {
+	if grant == nil || tool.Spec.HTTP.URL != protocol.TaskToolURL(grant.Endpoint, tool.Name) {
 		return errors.New("gateway task pass endpoint is not bound")
 	}
 	httpClient, err := gatewayruntime.NewAdapterHTTPClient(e.HTTPClient, 30*time.Second, grant.ServiceRef, e.GatewayService.Config.AllowInsecureLoopback)

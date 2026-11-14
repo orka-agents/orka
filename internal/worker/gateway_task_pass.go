@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"reflect"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
 // SetGatewayTaskPass installs controller-only per-call authority. Native workers
@@ -16,6 +18,8 @@ func (e *ToolExecutor) SetGatewayTaskPass(source func(context.Context, *corev1al
 	e.client = httpClient
 }
 
+var errGatewayTaskPassTool = errors.New("gateway task pass requires a fixed HTTPS POST endpoint and exclusive header authentication")
+
 // ValidateGatewayTaskPassTool excludes competing credential and routing paths.
 func ValidateGatewayTaskPassTool(tool *corev1alpha1.Tool) error {
 	h := tool.Spec.HTTP
@@ -23,10 +27,26 @@ func ValidateGatewayTaskPassTool(tool *corev1alpha1.Tool) error {
 		return nil
 	}
 	u, err := url.Parse(h.URL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Path != "/v1/task-tools/"+tool.Name ||
-		tool.Spec.MCP != nil || h.Forward != nil || h.AuthSecretRef != nil || h.OutboundAccessPolicyRef != nil || len(h.Headers) != 0 ||
-		(h.Method != "" && h.Method != http.MethodPost) || (h.AuthInject != "" && h.AuthInject != "header") || h.AuthBodyKey != "" {
-		return errors.New("gateway task pass requires a fixed HTTPS POST endpoint and exclusive header authentication")
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Path != protocol.TaskToolPath(tool.Name) ||
+		(h.Method != "" && h.Method != http.MethodPost) || (h.AuthInject != "" && h.AuthInject != "header") ||
+		!onlyGatewayTaskPassFields(tool.Spec) {
+		return errGatewayTaskPassTool
 	}
 	return nil
+}
+
+// onlyGatewayTaskPassFields allows only reviewed fields, so a field added to
+// ToolSpec or HTTPExecution later is refused until it is explicitly permitted.
+func onlyGatewayTaskPassFields(spec corev1alpha1.ToolSpec) bool {
+	h := *spec.HTTP
+	if len(h.Headers) == 0 {
+		h.Headers = nil
+	}
+	permittedHTTP := corev1alpha1.HTTPExecution{
+		GatewayTaskPass: true, URL: h.URL, Method: h.Method, Timeout: h.Timeout, AuthInject: h.AuthInject,
+	}
+	permittedSpec := corev1alpha1.ToolSpec{
+		Description: spec.Description, Parameters: spec.Parameters, BrokeredToolClass: spec.BrokeredToolClass, HTTP: spec.HTTP,
+	}
+	return reflect.DeepEqual(h, permittedHTTP) && reflect.DeepEqual(spec, permittedSpec)
 }
