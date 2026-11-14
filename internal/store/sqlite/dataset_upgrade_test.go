@@ -36,7 +36,9 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			if revision == "abd2c040" || revision == "fdb64ecd" {
 				sealer.stageNativeImport(t, old, nativeImportFixture(t, "native", "retained native history"))
 			}
-			before := applicationRows(t, db)
+			// The upgrade gives existing results and artifacts the write stamp
+			// (0, 0) and changes no other value.
+			before := stampedApplicationRows(t, applicationRows(t, db))
 			require.NoError(t, db.Close())
 			s, err := OpenLockedStore(path)
 			require.NoError(t, err)

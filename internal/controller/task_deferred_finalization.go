@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -38,6 +39,14 @@ type deferredTaskFinalization struct {
 	ResultChunks  int                    `json:"resultChunks"`
 	ResultBytes   int                    `json:"resultBytes"`
 	ResultDigest  string                 `json:"resultDigest,omitempty"`
+	// ResultTooLarge records output above store.MaxResultBytes, which is
+	// refused rather than staged: finalization records why the Task has no
+	// result.
+	ResultTooLarge bool `json:"resultTooLarge,omitempty"`
+	// ResultLogTooLarge narrows ResultTooLarge to a stdout result log longer
+	// than its read limit, so finalization does not report a small result as
+	// too large.
+	ResultLogTooLarge bool `json:"resultLogTooLarge,omitempty"`
 }
 
 // stopTaskAfterUsageRetentionFailure preserves stop decisions while durable
@@ -143,6 +152,8 @@ func (r *TaskReconciler) loadDeferredTaskFinalization(ctx context.Context, task 
 		(intent.Phase != corev1alpha1.TaskPhaseCancelled && intent.Phase != corev1alpha1.TaskPhaseFailed) ||
 		intent.ResultChunks < 0 || intent.ResultChunks > int(stdoutResultLogLimitBytes)/deferredResultChunkBytes+1 ||
 		intent.ResultBytes < 0 || intent.ResultBytes > int(stdoutResultLogLimitBytes) ||
+		(intent.ResultTooLarge && intent.ResultChunks != 0) ||
+		(intent.ResultLogTooLarge && !intent.ResultTooLarge) ||
 		(intent.ResultChunks == 0 && (intent.ResultBytes != 0 || intent.ResultDigest != "")) ||
 		(intent.ResultChunks > 0 && (len(intent.ResultDigest) != sha256.Size*2 || intent.ResultChunks != max(1, (intent.ResultBytes+deferredResultChunkBytes-1)/deferredResultChunkBytes))) {
 		return nil, errors.New("deferred Task finalization intent is invalid")
@@ -188,10 +199,15 @@ func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task
 	if !validationTask && !taskJobIdentityRejected(task) && r.ResultStore != nil &&
 		(task.Status.ResultRef == nil || !task.Status.ResultRef.Available) {
 		result, available, err := r.taskPodResult(ctx, task, true)
-		if err != nil {
+		switch {
+		case errors.Is(err, store.ErrTooLarge):
+			// Output that can never be stored is not staged; stopping the
+			// work must not wait on it.
+			intent.ResultTooLarge = true
+			intent.ResultLogTooLarge = errors.Is(err, errStdoutResultLogTooLarge)
+		case err != nil:
 			return err
-		}
-		if available {
+		case available:
 			digest := sha256.Sum256(result)
 			intent.ResultDigest = hex.EncodeToString(digest[:])
 			intent.ResultBytes = len(result)
@@ -212,6 +228,12 @@ func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task
 }
 
 func (r *TaskReconciler) deferredTaskResult(ctx context.Context, task *corev1alpha1.Task, intent *deferredTaskFinalization) ([]byte, bool, error) {
+	if intent.ResultLogTooLarge {
+		return nil, true, errStdoutResultLogTooLarge
+	}
+	if intent.ResultTooLarge {
+		return nil, true, errTaskResultTooLarge
+	}
 	if intent.ResultChunks == 0 {
 		return nil, false, nil
 	}

@@ -3223,11 +3223,14 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 
 	// Collect available output before cleanup, but stop failed or cancelled work even
 	// when storage finalization must wait for recovery. Keep the Task
-	// nonterminal in Kubernetes so those writes are retried.
+	// nonterminal in Kubernetes so those writes are retried. The staged intent
+	// and the workload outcome keep the decision this completion was given;
+	// collection may change only the Task's phase and message.
+	decidedPhase, decidedMessage := phase, message
 	retryFinalization := func(err error) (ctrl.Result, error) {
-		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
+		if decidedPhase == corev1alpha1.TaskPhaseCancelled || decidedPhase == corev1alpha1.TaskPhaseFailed {
 			cleanupErr := r.stopJobForDeferredFinalization(ctx, task, deferredTaskFinalization{
-				Phase: phase, OutcomePhase: outcomePhase, Message: message, RecordOutcome: recordOutcome,
+				Phase: decidedPhase, OutcomePhase: outcomePhase, Message: decidedMessage, RecordOutcome: recordOutcome,
 			})
 			err = errors.Join(err, cleanupErr)
 		}
@@ -3248,12 +3251,19 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		// A result the store has not accepted yet, or may have saved, is
-		// collected again on the next attempt rather than dropped.
-		if deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
+		switch {
+		case errors.Is(err, store.ErrTooLarge):
+			// No retry can store a result above the limit. Finish without
+			// it and record why, rather than retry for good or report a
+			// success whose result was not stored.
+			phase, message = taskResultTooLargeOutcome(phase, message, err)
+			task.Status.Phase, task.Status.Message = phase, message
+		case deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err):
+			// A result the store has not accepted yet, or may have saved, is
+			// collected again on the next attempt rather than dropped.
 			return retryFinalization(err)
 		}
-		// Continue anyway, result collection is best-effort
+		// Otherwise continue: result collection is best-effort.
 	}
 
 	// Update session if configured
@@ -3321,7 +3331,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 				Attempt:    attempt,
 				ResultRef:  resultRef,
 				RecordedAt: now,
-				Message:    message,
+				Message:    decidedMessage,
 			}
 		}
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
@@ -3599,11 +3609,43 @@ func extractStdoutTaskResult(logs string) ([]byte, bool, error) {
 	if payload == "" {
 		return nil, false, nil
 	}
+	// Refuse a payload too long to decode to the limit before decoding it, so
+	// no more than the limit is decoded, staged or stored. Padding makes
+	// DecodedLen exceed a valid payload's decoded size by at most two bytes.
+	if base64.StdEncoding.DecodedLen(len(payload)) > store.MaxResultBytes+2 {
+		return nil, true, errTaskResultTooLarge
+	}
 	result, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return nil, true, fmt.Errorf("decoding stdout task result: %w", err)
 	}
+	if len(result) > store.MaxResultBytes {
+		return nil, true, errTaskResultTooLarge
+	}
 	return result, true, nil
+}
+
+// errTaskResultTooLarge reports a Task result above store.MaxResultBytes. No
+// retry can store it, so it is permanent.
+var errTaskResultTooLarge = fmt.Errorf("%w: task result exceeds the %d byte limit", store.ErrTooLarge, store.MaxResultBytes)
+
+// taskResultTooLargeOutcome returns the terminal phase and message of a Task
+// whose result exceeds store.MaxResultBytes and is not stored: a Task that
+// would have succeeded fails, a cancelled or failed Task keeps its phase, and
+// the reason follows the message the Task was completed with.
+func taskResultTooLargeOutcome(phase corev1alpha1.TaskPhase, message string, err error) (corev1alpha1.TaskPhase, string) {
+	if phase == corev1alpha1.TaskPhaseSucceeded {
+		phase = corev1alpha1.TaskPhaseFailed
+	}
+	reason := fmt.Sprintf("task result exceeds the %d byte limit and was not stored", store.MaxResultBytes)
+	if errors.Is(err, errStdoutResultLogTooLarge) {
+		// The result itself may be small; the log it is read from is not.
+		reason = fmt.Sprintf("task log exceeds the %d byte stdout result read limit, so the result was not collected", stdoutResultLogLimitBytes)
+	}
+	if strings.TrimSpace(message) == "" {
+		return phase, reason
+	}
+	return phase, message + "; " + reason
 }
 
 // readPodLogs reads logs from the first pod of a task's job.
@@ -3611,9 +3653,34 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 	return r.readPodLogsWithOptions(ctx, task, fullPodLogOptions(), true)
 }
 
+// readStdoutResultPodLogs reads the log a stdout result is extracted from. It
+// reads one byte past stdoutResultLogLimitBytes so a log cut at the limit is
+// refused rather than searched: the cut can fall inside the result line and
+// leave a base64 prefix that still decodes, or drop the result line entirely.
 func (r *TaskReconciler) readStdoutResultPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
-	return r.readPodLogsWithOptions(ctx, task, stdoutResultPodLogOptions(), false)
+	opts := stdoutResultPodLogOptions()
+	limit := *opts.LimitBytes + 1
+	opts.LimitBytes = &limit
+	logs, err := r.readPodLogsWithOptions(ctx, task, opts, false)
+	if err != nil {
+		return "", err
+	}
+	return boundedStdoutResultLog(logs, stdoutResultLogLimitBytes)
 }
+
+// boundedStdoutResultLog refuses a log read past limit, which a reader that
+// requested limit+1 bytes sees as a longer log.
+func boundedStdoutResultLog(logs string, limit int64) (string, error) {
+	if int64(len(logs)) > limit {
+		return "", errStdoutResultLogTooLarge
+	}
+	return logs, nil
+}
+
+// errStdoutResultLogTooLarge reports a stdout result log longer than
+// stdoutResultLogLimitBytes. The log does not shrink on retry, so like an
+// oversized result it is permanent.
+var errStdoutResultLogTooLarge = fmt.Errorf("%w: task log exceeds the %d byte stdout result read limit", store.ErrTooLarge, stdoutResultLogLimitBytes)
 
 func fullPodLogOptions() corev1.PodLogOptions {
 	limit := podLogLimitBytes

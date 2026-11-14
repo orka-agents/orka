@@ -16,8 +16,10 @@ import (
 )
 
 // SaveArtifact inserts or replaces a task artifact. Data larger than
-// store.MaxArtifactBytes is rejected with store.ErrTooLarge. The Task UID is
-// not stored yet; artifacts are keyed by namespace, Task name and filename.
+// store.MaxArtifactBytes is rejected with store.ErrTooLarge, and a write whose
+// order stamp is not greater than the stored file's succeeds without changing
+// it. The Task UID is not stored yet; artifacts are keyed by namespace, Task
+// name and filename.
 func (s *Store) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
 	return writeOperationErr(ctx, s, "SaveArtifact", func(ctx context.Context) error {
 		return s.saveArtifactWrite(ctx, request)
@@ -25,12 +27,16 @@ func (s *Store) SaveArtifact(ctx context.Context, request store.SaveArtifactRequ
 }
 
 func (s *Store) saveArtifactWrite(ctx context.Context, request store.SaveArtifactRequest) error {
+	stamp, err := writeStampFrom(ctx)
+	if err != nil {
+		return err
+	}
 	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
-		return s.saveArtifactUnfenced(ctx, request)
+		return s.saveArtifactUnfenced(ctx, request, stamp)
 	})
 }
 
-func (s *Store) saveArtifactUnfenced(ctx context.Context, request store.SaveArtifactRequest) error {
+func (s *Store) saveArtifactUnfenced(ctx context.Context, request store.SaveArtifactRequest, stamp writeStamp) error {
 	if len(request.Data) > store.MaxArtifactBytes {
 		return store.TooLargeError{
 			What:  fmt.Sprintf("artifact %q", request.Filename),
@@ -39,9 +45,14 @@ func (s *Store) saveArtifactUnfenced(ctx context.Context, request store.SaveArti
 		}
 	}
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-		`INSERT OR REPLACE INTO artifacts (namespace, task_name, filename, content_type, size, data, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		`INSERT INTO artifacts (namespace, task_name, filename, content_type, size, data, created_at, write_epoch, write_seq)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+		 ON CONFLICT(namespace, task_name, filename) DO UPDATE SET
+		   content_type = excluded.content_type, size = excluded.size, data = excluded.data,
+		   created_at = excluded.created_at, write_epoch = excluded.write_epoch, write_seq = excluded.write_seq`+
+			stamp.replaceCondition("artifacts"),
 		request.Owner.Namespace, request.Owner.TaskName, request.Filename, request.ContentType, len(request.Data), request.Data,
+		stamp.epoch, stamp.sequence,
 	)
 	return err
 }

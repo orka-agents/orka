@@ -15,7 +15,7 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 4` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 5` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -25,17 +25,21 @@ process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
 the 170-to-171 transition makes a `retry_pending` work action own its dedupe
-key, and the upgrade records an adopted identity. A store at an earlier schema
-version upgrades through numbered version steps under the same lock, backup and
-transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
-169-to-170 and 170-to-171 objects, a version-2 store gains the 169-to-170
-columns and the 170-to-171 index, a version-3 store gains the 170-to-171 index,
-and all keep their identity row, records and bootstrap state unchanged. Before
-the 170-to-171 index is rebuilt, a `retry_pending` work action that shares its
+key, the 171-to-172 transition adds the write stamp columns of results and
+artifacts, and the upgrade records an adopted identity. A store at an earlier
+schema version upgrades through numbered version steps under the same lock,
+backup and transaction: a version-1 store (the 159-object layout) gains the
+168-to-169, 169-to-170 and 170-to-171 objects and the 171-to-172 columns, a
+version-2 store gains the 169-to-170 columns, the 170-to-171 index and the
+171-to-172 columns, a version-3 store gains the 170-to-171 index and the
+171-to-172 columns, a version-4 store gains the 171-to-172 columns, and all
+keep their identity row, records and bootstrap state unchanged. Before the
+170-to-171 index is rebuilt, a `retry_pending` work action that shares its
 dedupe key with a queued, leased or running action, or with a newer
-`retry_pending` one, is cancelled with reason `dedupe_superseded`. An installation
-a version-2 store's epoch advance recorded stays its owner, at switch
-generation 0 with no record. Missing or malformed
+`retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing
+results and artifacts get the write stamp (0, 0). An installation a version-2
+store's epoch advance recorded stays its owner, at switch generation 0 with no
+record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -299,6 +303,9 @@ the observable parts.
   decision, and the claim check in
   `FreezeGatewayEventTaskRuntimeAllowedTools`, use the time the request
   carries (see "Messages, counters and chat turns" and "Lease clocks").
+  Revision 8 orders the replacement of a whole result or artifact file by
+  write stamp and limits results to `MaxResultBytes` (see "Result and
+  artifact replacement order").
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
@@ -550,14 +557,22 @@ write without one.
   zero timestamp. Finding IDs are already derived from fingerprints. A
   provider still fills a value that a caller bypassing the client leaves
   empty.
-- **Artifact and result identity.** Artifact writes and deletes are bound to
-  the Task UID. A delete leaves a tombstone for that UID, which refuses a
-  delayed save for the deleted Task. A replacement carries the envelope's
-  epoch and sequence, so an older write cannot overwrite a newer one or reach
-  a later Task with the same name. Results follow the same rules and gain a
-  `MaxResultBytes` limit equal to the API's 10 MiB. Files stored before UIDs
-  were recorded belong to the current holder of the Task name until its first
-  delete.
+- **Result and artifact replacement order.** A whole result or artifact file
+  is replaced in issue order, not commit order. A write's order stamp is the
+  `(Fence.Epoch, Sequence)` of its envelope, and `SaveResult` or
+  `SaveArtifact` replaces the stored object only when its stamp is greater.
+  An older write still succeeds and leaves its receipt but changes nothing,
+  so a delayed retry never restores older bytes, such as an unsanitized patch
+  over its sanitized replacement. A delete removes the stored stamp with the
+  object, so a later save stores a new object whatever its stamp; a
+  Task-scoped writer is kept from writing after the Task's cleanup by the
+  Task data fence. Identity is unchanged: a result is keyed by namespace and
+  Task name, and an artifact by namespace, Task name and filename, whatever
+  the Task UID. Results are limited to `MaxResultBytes`, the API's 10 MiB,
+  which a state.v1 provider reports in `ProviderLimits.MaxResultBytes`, and
+  so is the data of a prompt result receipt. SQLite stores the stamp with
+  each result and artifact; rows written before schema version 5 have the
+  stamp (0, 0), which every enveloped write exceeds.
 - **Controller ownership.** Kubernetes decides which controller may act. Each
   dataset holds its own controller epoch, which `AdvanceControllerEpoch`
   moves to the exact record the Kubernetes compare-and-swap produced. The
