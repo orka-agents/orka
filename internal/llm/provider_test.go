@@ -330,3 +330,19 @@ func TestStreamChunk(t *testing.T) {
 		})
 	}
 }
+
+func TestPromptTokensAddsExcludedCache(t *testing.T) {
+	read, write := int64(100), int64(20)
+	exclusive := &CompletionResponse{InputTokens: 5, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true}
+	if got := exclusive.PromptTokens(); got != 125 {
+		t.Errorf("exclusive PromptTokens = %d, want 125", got)
+	}
+	inclusive := &CompletionResponse{InputTokens: 125, CachedInputTokens: &read}
+	if got := inclusive.PromptTokens(); got != 125 {
+		t.Errorf("inclusive PromptTokens = %d, want 125", got)
+	}
+	chunk := &StreamChunk{InputTokens: 5, CachedInputTokens: &read, InputExcludesCache: true}
+	if got := chunk.PromptTokens(); got != 105 {
+		t.Errorf("chunk PromptTokens = %d, want 105", got)
+	}
+}

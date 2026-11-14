@@ -1,7 +1,16 @@
 {{- define "orka.validateSubstrateCredentials" -}}
 {{- $cfg := .Values.controller.substrate -}}
 {{- $auth := $cfg.apiCredentials | default dict -}}
-{{- if $auth.existingSecret -}}
+{{- $podCertificate := ($cfg.podCertificate | default dict).enabled -}}
+{{- if $podCertificate -}}
+{{- if or $auth.existingSecret $auth.certKey $auth.privateKeyKey $auth.bearerTokenKey $auth.caKey $cfg.apiCertFile $cfg.apiKeyFile $cfg.apiBearerTokenFile $cfg.apiCAFile -}}
+{{- fail "controller.substrate.podCertificate cannot be combined with apiCredentials or explicit API file paths" -}}
+{{- end -}}
+{{- else if and $cfg.mcpToolsEnabled (empty $auth.certKey) (empty $cfg.apiCertFile) -}}
+{{- fail "controller.substrate.mcpToolsEnabled requires a pod-certificate client identity for the Substrate router; enable controller.substrate.podCertificate" -}}
+{{- end -}}
+{{- if $podCertificate -}}
+{{- else if $auth.existingSecret -}}
 {{- if or $cfg.apiCertFile $cfg.apiKeyFile $cfg.apiBearerTokenFile $cfg.apiCAFile -}}
 {{- fail "controller.substrate.apiCredentials cannot be combined with explicit API file paths" -}}
 {{- end -}}

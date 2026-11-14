@@ -37,15 +37,6 @@ const (
 	MaxStructuredSummaryChars = 32 * 1024
 )
 
-const (
-	// resultStdoutMarkerFile mirrors the stdout result marker to a file so a
-	// supervising process can recover it when stdout is truncated.
-	resultStdoutMarkerFile  = "/app/orka-result-marker"
-	resultStdoutTokenPrefix = "ORKA_RESULT_TOKEN:"
-)
-
-var resultStdoutMarkerPath = resultStdoutMarkerFile
-
 // retryWait is stubbed by tests to avoid the multi-minute backoff window.
 var retryWait retryWaitFunc = waitForRetry
 
@@ -62,15 +53,7 @@ func SubmitResultContext(ctx context.Context, result []byte) error {
 	}
 
 	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
-		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
-		fileData := marker + "\n"
-		if token := strings.TrimSpace(os.Getenv(workerenv.ResultStdoutToken)); token != "" {
-			fileData = resultStdoutTokenPrefix + token + "\n" + fileData
-		}
-		if err := os.WriteFile(resultStdoutMarkerPath, []byte(fileData), 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to write stdout result marker file: %v\n", err)
-		}
-		fmt.Println(marker)
+		fmt.Println(workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result))
 		// Publishing the marker completes delivery even if the caller cancels during the write.
 		return nil
 	}

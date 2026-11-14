@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -48,13 +49,16 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -2164,6 +2168,9 @@ func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
 	}
+	if got.Labels[labels.LabelPlatformIdentity] != "true" {
+		t.Fatalf("expected the platform identity label to be reconciled, got labels %#v", got.Labels)
+	}
 	if got.Labels["custom"] != "keep" {
 		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
 	}
@@ -4118,6 +4125,10 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{
@@ -5948,14 +5959,24 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.WebhookNotifier = NewWebhookNotifier()
+	notifier := newWebhookNotifier(&taskwebhook.Dialer{
+		Policy: taskwebhook.PublicAddressPolicy,
+		Resolver: webhookTestResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}),
+	})
+	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
+	r.WebhookNotifier = notifier
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should requeue for webhook retry
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s requeue for webhook retry, got %v", result.RequeueAfter)
+	// Should requeue for webhook retry after the first backoff step.
+	if result.RequeueAfter != defaultWebhookInitialBackoff {
+		t.Errorf("expected %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
+	}
+	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
+		t.Errorf("unexpected webhook delivery state %#v", delivery)
 	}
 }
 
@@ -6392,6 +6413,35 @@ func TestCompleteTask_WithPlanStore(t *testing.T) {
 	}
 }
 
+func TestCompleteTask_CancelledKeepsPlan(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cancel-plan", Namespace: "default",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	if err := r.PlanStore.SavePlan(context.Background(), "default", "cancel-plan", &store.PlanState{
+		Summary: "step 2 of 4", ProgressPct: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message, ok := requestedTaskCancellation(task)
+	if !ok {
+		t.Fatal("the cancel request was not recognized")
+	}
+	if _, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseCancelled, message); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	plan, err := r.PlanStore.GetPlan(context.Background(), "default", "cancel-plan")
+	if err != nil || plan.Summary != "step 2 of 4" || plan.ProgressPct != 50 {
+		t.Fatalf("plan = %+v, %v; want the plan kept after cancellation", plan, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleCompleted — webhook success path
 // ---------------------------------------------------------------------------
@@ -6415,9 +6465,7 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
-	r.WebhookNotifier = notifier
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -8771,11 +8819,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", sealedStore(t, persistence))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

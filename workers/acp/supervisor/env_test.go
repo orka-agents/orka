@@ -1086,3 +1086,25 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
 	}
 }
+
+func TestApplyCapacityFromEnvAdoptsRuntimePoolCapacity(t *testing.T) {
+	limits := defaultProtocolLimits()
+	t.Setenv(EnvMaxResidentSessions, "")
+	t.Setenv(EnvMaxConcurrentPrompts, "")
+	if err := applyCapacityFromEnv(&limits); err != nil || limits.MaxResidentSessions != 10 || limits.MaxConcurrentPrompts != 4 {
+		t.Fatalf("unset capacity = %d/%d, %v; want built-in 10/4", limits.MaxResidentSessions, limits.MaxConcurrentPrompts, err)
+	}
+	t.Setenv(EnvMaxResidentSessions, "12")
+	t.Setenv(EnvMaxConcurrentPrompts, "8")
+	if err := applyCapacityFromEnv(&limits); err != nil || limits.MaxResidentSessions != 12 || limits.MaxConcurrentPrompts != 8 {
+		t.Fatalf("pool capacity = %d/%d, %v; want 12/8", limits.MaxResidentSessions, limits.MaxConcurrentPrompts, err)
+	}
+	for _, values := range [][2]string{{"4", "8"}, {"0", "1"}, {"1001", "1"}, {"ten", "1"}} {
+		t.Setenv(EnvMaxResidentSessions, values[0])
+		t.Setenv(EnvMaxConcurrentPrompts, values[1])
+		limits := defaultProtocolLimits()
+		if err := applyCapacityFromEnv(&limits); err == nil {
+			t.Fatalf("capacity %v accepted, want rejection", values)
+		}
+	}
+}

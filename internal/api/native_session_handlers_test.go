@@ -17,6 +17,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
@@ -28,16 +30,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func nativeAPIStore(t *testing.T) *sqlite.Store {
+// nativeAPIStore returns the storage client over an in-memory SQLite store,
+// with the snapshot key active, as production wires the API.
+func nativeAPIStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	s := sqlite.NewStore(db, ":memory:")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-	require.NoError(t, err)
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(cipher))
-	return s
+	return storageclienttest.Client(t, sqlite.NewStore(db, ":memory:"))
 }
 
 func nativeAPIApp(t *testing.T, cfg HandlersConfig, middleware fiber.Handler) *fiber.App {

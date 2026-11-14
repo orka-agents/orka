@@ -186,6 +186,9 @@ func (s *Server) registerStaticFiles(distFS fs.FS, index spaIndexPage) {
 	s.app.Get("/favicon.svg", compressStatic, func(c fiber.Ctx) error {
 		return serveFile(c, "favicon.svg", "image/svg+xml")
 	})
+	s.app.Get("/favicon.png", func(c fiber.Ctx) error {
+		return serveFile(c, "favicon.png", "image/png")
+	})
 
 	// SPA routes: serve index.html for every top-level route under
 	// ui/src/routes (client-side routing), so each gets the compressed page.

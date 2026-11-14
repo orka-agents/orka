@@ -51,3 +51,16 @@ yarn serve --host 127.0.0.1
 `yarn build` validates the site (links, references, and build itself) and writes the static output; `yarn serve` previews that output locally, again under the `/orka/` base path. Stop the server with Ctrl+C.
 
 These commands only preview locally; they do not publish anything. Publishing happens through the repository's website workflow on the `main` branch.
+
+## Logo files
+
+The Orka mark is an orca fin in a ring above three waves. The fin and ring are ink, and the waves are the secondary text grey rather than a brand colour, because in the dashboard colour marks a task's state. The SVG files are copies of the mark in [Orka Bridge](https://github.com/orka-agents/orka-bridge/tree/main/assets) (`bridge-*` there, `orka-*` here; same organisation and MIT licence), so every Orka client shows the same mark. Change it there first, then copy it here, into the dashboard's `ui/public/favicon.svg` and `ui/public/favicon.png` (the same files as here), and into `ui/src/components/ui/orca-mark.tsx`.
+
+| File in `static/img/` | Use |
+| --- | --- |
+| `orka-mark-small.svg`, `orka-mark-small-dark.svg` | Navbar logo. The small mark, for 32 px and smaller, has a heavier ring and two waves. |
+| `orka-mark.svg`, `orka-mark-dark.svg` | Larger uses. The footer uses the dark one in both colour modes. |
+| `favicon.svg` | Favicon: the small mark on a white disc (`bridge-icon-small.svg`). |
+| `favicon.png` | 32 px export of `favicon.svg` (`bridge-icon-32.png`), for browsers without SVG favicons. |
+| `orka-mascot.webp`, `orka-mascot-dark.webp` | Landing-page hero artwork, cut from `orka-logo.png`. |
+| `orka-logo.png` | The mascot logo used by the repository README. |

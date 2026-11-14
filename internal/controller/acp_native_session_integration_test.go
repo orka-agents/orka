@@ -14,7 +14,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,7 +46,7 @@ func TestACPDispatcherFirstNativeCaptureRecoveryPreservesExactEvidence(t *testin
 			defer cancel()
 			snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint interrupted before capture intent")
 			captures, deletes, prompts := 0, 0, 0
-			var persistence *sqlite.Store
+			var persistence *sealedTestStore
 			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-recovery-"+name, "77777777-7777-7777-7777-777777777777",
 				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
 					return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
@@ -66,7 +65,7 @@ func TestACPDispatcherFirstNativeCaptureRecoveryPreservesExactEvidence(t *testin
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "first-native-recovery", Create: true, Append: true}
 				})
 			defer func() { fixture.stop() }()
-			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence = fixture.dispatcher.ResultStore.(*sealedTestStore)
 			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
 			fixture.dispatcher.Store = failure
 			fixture.dispatcher.EventStore = persistence
@@ -172,7 +171,7 @@ func TestACPDispatcherFirstNativeCaptureRecoveryAfterPoolRetirement(t *testing.T
 			snapshot := storetest.NativeSessionSnapshot(t, "native recovery after exact pool retirement")
 			captures, deletes, prompts := 0, 0, 0
 			probeFailure := false
-			var persistence *sqlite.Store
+			var persistence *sealedTestStore
 			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-retired-"+test.name, "77777777-7777-7777-7777-777777777777",
 				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
 					runtimeServer := newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
@@ -198,7 +197,7 @@ func TestACPDispatcherFirstNativeCaptureRecoveryAfterPoolRetirement(t *testing.T
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "retired-native-recovery", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence = fixture.dispatcher.ResultStore.(*sealedTestStore)
 			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
 			fixture.dispatcher.Store, fixture.dispatcher.EventStore = failure, persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
@@ -344,7 +343,7 @@ func TestACPDispatcherPoisonedWorkspaceFailureDoesNotAttemptNativeCapture(t *tes
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "poisoned-workspace", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			fixture.dispatcher.EventStore = persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -422,7 +421,7 @@ func TestACPDispatcherNativeContinuityRetainsUnsupportedTerminalState(t *testing
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-terminal", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			fixture.dispatcher.EventStore = persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -513,7 +512,7 @@ func TestACPDispatcherNonAppendingNativeRuntimeRetirementSurvivesRestart(t *test
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-nonappend", Create: true, Append: false}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: beforeDelete}
 			fixture.dispatcher.Store, fixture.dispatcher.EventStore = failure, persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
@@ -612,7 +611,7 @@ func TestACPDispatcherNonAppendingNativeRetirementSurvivesAcceptedStatusWriteFai
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-status-failure", Create: true, Append: false}
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	fixture.dispatcher.EventStore = persistence
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -642,17 +641,15 @@ func TestACPDispatcherNonAppendingNativeRetirementSurvivesAcceptedStatusWriteFai
 
 func TestNativeCapturePersistsUnderCanonicalSessionOwner(t *testing.T) {
 	ctx := t.Context()
-	persistence, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "native-owner.db"))
+	raw, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "native-owner.db"))
 	defer closeStore()
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher([]byte(strings.Repeat("k", 32)))
-	require.NoError(t, err)
-	require.NoError(t, persistence.SetAgentExecutionSnapshotCipher(cipher))
+	persistence := sealedStore(t, raw)
 	continuity := newACPSessionTestContinuity(t, persistence, ACPBootstrapLimits{})
 	control := ensureACPSessionForTest(t, continuity, fence, "canonical-owner")
 	require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, control.Namespace, control.SessionName, control.SessionUID))
 	taskUID := "77777777-7777-7777-7777-777777777777"
-	turn, attempt := openACPSessionTurnForTest(t, continuity, persistence, fence, control, taskUID, "native-owner-prompt", "remember this")
-	completeACPAttemptExecutionForTest(t, persistence, fence, attempt, false)
+	turn, attempt := openACPSessionTurnForTest(t, continuity, persistence.Store, fence, control, taskUID, "native-owner-prompt", "remember this")
+	completeACPAttemptExecutionForTest(t, persistence.Store, fence, attempt, false)
 	snapshot := storetest.NativeSessionSnapshot(t, "native capture belongs to the canonical turn")
 	snapshot.RuntimeSessionUID = "separate-runtime-incarnation"
 	runtimeFence := harnessv2.Fence{
@@ -736,7 +733,7 @@ func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *t
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "staged-native", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			fixture.dispatcher.EventStore = persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -818,7 +815,7 @@ func TestACPDispatcherNativeContinuityCarriesCheckpointAcrossNonSuccess(t *testi
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-carried", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			fixture.dispatcher.EventStore = persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -881,7 +878,7 @@ func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testin
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint captured after an expired intent")
-			var persistence *sqlite.Store
+			var persistence *sealedTestStore
 			var requests []harnessv2.CaptureNativeSessionRequest
 			failFresh := true
 			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-expired-intent", "79797979-7979-7979-7979-797979797979",
@@ -909,7 +906,7 @@ func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testin
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-expired-intent", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence = fixture.dispatcher.ResultStore.(*sealedTestStore)
 			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
 			fixture.dispatcher.Store = failure
 			fixture.dispatcher.EventStore = persistence
@@ -1011,7 +1008,7 @@ func TestACPDispatcherNativeRestoreHonorsHistoryCutoff(t *testing.T) {
 					}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 			fixture.dispatcher.EventStore = persistence
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,

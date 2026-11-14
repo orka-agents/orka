@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { Outlet } from '@tanstack/react-router'
+import { Outlet, useLocation } from '@tanstack/react-router'
 import { Sidebar } from './sidebar'
 import { Header } from './header'
 import { Toaster } from '@/components/ui/sonner'
@@ -18,6 +18,9 @@ export function RootLayout() {
   // While the mobile navigation drawer overlays the page, the covered content
   // is inert so keyboard and assistive-technology focus cannot reach it.
   const pageInert = isMobile && mobileSidebarOpen
+  // Keyed by top-level section, so moving between sections plays the enter
+  // animation while moving within one (a list to its detail) keeps state.
+  const section = useLocation().pathname.split('/')[1] ?? ''
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
@@ -27,7 +30,9 @@ export function RootLayout() {
             horizontal scrollers) resolve against main instead of escaping
             to the document and widening the page. */}
         <main className="relative min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6">
-          <Outlet />
+          <div key={section} className="h-full animate-page-enter">
+            <Outlet />
+          </div>
         </main>
         {DemoTour && <Suspense fallback={null}><DemoTour slot="bottom" /></Suspense>}
       </div>

@@ -145,8 +145,10 @@ type AnthropicResponse struct {
 
 // AnthropicUsage contains token usage statistics.
 type AnthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // AnthropicStreamEvent is a single SSE event in an Anthropic streaming response.
@@ -601,11 +603,31 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 		Content:    content,
 		Model:      model,
 		StopReason: &stopReason,
-		Usage: AnthropicUsage{
-			InputTokens:  resp.InputTokens,
-			OutputTokens: resp.OutputTokens,
-		},
+		Usage:      anthropicUsage(resp),
 	}
+}
+
+// anthropicUsage is a completion's usage in Anthropic's shape: input_tokens
+// leaves out the cache reads and writes, which come beside it. An inclusive
+// count, as OpenAI's is, has them taken out, as the streaming path does; one
+// smaller than its own breakdown is reported whole, without one.
+func anthropicUsage(resp *llm.CompletionResponse) AnthropicUsage {
+	usage := AnthropicUsage{InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
+	var read, write int
+	if resp.CachedInputTokens != nil {
+		read = int(*resp.CachedInputTokens)
+	}
+	if resp.CacheWriteInputTokens != nil {
+		write = int(*resp.CacheWriteInputTokens)
+	}
+	if !resp.InputExcludesCache {
+		if resp.InputTokens < read+write {
+			return usage
+		}
+		usage.InputTokens -= read + write
+	}
+	usage.CacheReadInputTokens, usage.CacheCreationInputTokens = read, write
+	return usage
 }
 
 // anthropicError returns an error in Anthropic API format.

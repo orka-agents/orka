@@ -3,16 +3,14 @@ import {
   CircleAlert,
   CircleCheck,
   Database,
-  GitBranch,
   Route,
   ShieldAlert,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { Task } from '@/schemas/task'
 import type { Session } from '@/schemas/session'
-import { abbreviateEvidence, words } from './execution-route-format'
+import { abbreviateEvidence } from './execution-route-format'
 
 type LedgerTone = 'neutral' | 'good' | 'warning' | 'danger'
 
@@ -52,19 +50,14 @@ function ExecutionRouteLedger({ title, summary, summaryTone, rows }: LedgerProps
     <Card aria-label={`${title} evidence`}>
       <CardHeader className="border-b pb-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-              Route / evidence / reconciliation
-            </p>
-            <CardTitle>{title}</CardTitle>
-          </div>
+          <CardTitle>{title}</CardTitle>
           <Badge variant="outline" className={cn('border', toneClasses[summaryTone])}>
             {summary}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="pt-5">
-        <ol className="grid gap-0 md:grid-cols-3" aria-label="Execution route evidence">
+        <ol className="grid gap-0 md:grid-cols-3" aria-label={`${title} rows`}>
           {rows.map((row, index) => {
             const Icon = row.icon
             return (
@@ -100,84 +93,6 @@ function ExecutionRouteLedger({ title, summary, summaryTone, rows }: LedgerProps
   )
 }
 
-function bindingRouteTitle(task: Task) {
-  const binding = task.status?.agentExecutionBinding
-  if (!binding) return 'No execution route recorded'
-  const backend = words(binding.backend)
-  return `Harness v2 · ${backend}`
-}
-
-export function TaskExecutionRouteLedger({ task }: { task: Task }) {
-  if (task.spec.type !== 'agent') return null
-
-  const status = task.status
-  const binding = status?.agentExecutionBinding
-  const outcomeUnknown = status?.execution?.outcome === 'OutcomeUnknown'
-    || status?.execution?.state === 'OutcomeUnknown'
-
-  if (!binding) {
-    return (
-      <ExecutionRouteLedger
-        title="Execution route"
-        summary="Awaiting binding"
-        summaryTone="warning"
-        rows={[
-          { label: 'Route', title: 'Not yet bound', icon: Route, tone: 'warning' },
-          { label: 'Evidence', title: 'No binding snapshot recorded', icon: Database },
-          { label: 'Reconciliation', title: 'No conflict recorded', icon: CircleCheck },
-        ]}
-      />
-    )
-  }
-
-  const snapshotDetail = binding.runtimeProfileDigest
-    ? <>Snapshot and runtime profile pinned</>
-    : <>Snapshot retained while this binding is referenced</>
-
-  return (
-    <ExecutionRouteLedger
-      title="Execution route"
-      summary={outcomeUnknown ? 'Outcome unknown' : 'Route locked'}
-      summaryTone={outcomeUnknown ? 'danger' : 'good'}
-      rows={[
-        {
-          label: 'Route',
-          title: bindingRouteTitle(task),
-          detail: (
-            <span>{words(binding.backend)}</span>
-          ),
-          mono: binding.bindingDigest,
-          icon: Route,
-          tone: 'good',
-        },
-        {
-          label: 'Evidence',
-          title: `Snapshot schema v${binding.snapshot.schemaVersion}`,
-          detail: snapshotDetail,
-          mono: binding.snapshot.digest,
-          icon: Database,
-        },
-        outcomeUnknown
-          ? {
-              label: 'Reconciliation',
-              title: 'Human reconciliation required',
-              detail: status?.execution?.reason
-                || status?.execution?.message,
-              icon: ShieldAlert,
-              tone: 'danger',
-            }
-          : {
-              label: 'Admission',
-              title: 'Static namespace route',
-              detail: `Contract ${binding.contractVersion} is fixed by the installation mode`,
-              icon: GitBranch,
-              tone: 'good',
-            },
-      ]}
-    />
-  )
-}
-
 export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const control = session.executionControl
   if (!control) return null
@@ -186,7 +101,7 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const blocked = control.availability === 'ReconciliationBlocked'
   const available = control.availability === 'Available'
   const routeTitle = lineage
-    ? `Harness v2 · lineage ${lineage.generation}`
+    ? `Lineage ${lineage.generation}`
     : 'Lineage not yet established'
 
   return (

@@ -82,8 +82,6 @@ const (
 		"Memory proposals are review-only and are not automatically applied."
 )
 
-var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
-
 const modelLoopEventTimeout = 250 * time.Millisecond
 const maxSessionContextBytes = 96 << 10
 const roleUser = "user"
@@ -253,11 +251,8 @@ func run(transcriptPath string) (err error) {
 		return err
 	}
 
-	// Memory tools use the controller's internal API and are safe to register
-	// independently of coordination mode. Auto-enable them when the controller
-	// context needed to execute them is present.
+	// Registration does not enable tools omitted by the controller.
 	registerMemoryTools()
-	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
 	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
@@ -756,8 +751,12 @@ func buildLLMTools(
 ) []llm.Tool {
 	var llmTools []llm.Tool
 	toolCtx := optionalToolContext(toolContexts)
+	memoryConfigured := memoryControllerConfigPresent()
 
 	for _, name := range enabledTools {
+		if !memoryConfigured && slices.Contains(aitools.MemoryToolNames(), name) {
+			continue
+		}
 		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
 			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
 			continue
@@ -768,8 +767,12 @@ func buildLLMTools(
 			continue
 		}
 
-		// Check if it's a custom tool
+		// Check if it's a custom tool. A forwarding Tool serves a
+		// command-line client in an ACP runtime and is never a function.
 		if tool, ok := customTools[name]; ok {
+			if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
+				continue
+			}
 			var params json.RawMessage
 			if tool.Spec.Parameters != nil {
 				params = tool.Spec.Parameters.Raw
@@ -809,20 +812,6 @@ func memoryControllerConfigPresent() bool {
 	return strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskName)) != ""
-}
-
-func autoEnableMemoryTools(enabled []string) []string {
-	normalized := normalizeEnabledTools(enabled)
-	if !memoryControllerConfigPresent() {
-		return normalized
-	}
-
-	for _, name := range memoryToolNames {
-		if !containsTool(normalized, name) {
-			normalized = append(normalized, name)
-		}
-	}
-	return normalized
 }
 
 func containsTool(enabled []string, name string) bool {
@@ -1333,6 +1322,7 @@ func executeAgentLoopWithEvents(
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
+	deprecatedMemoryTools := workerenv.SplitCSV(os.Getenv(workerenv.AIDeprecatedMemoryTools))
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
 	}
@@ -1394,8 +1384,7 @@ func executeAgentLoopWithEvents(
 		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
-			stepSpan.SetStatus(codes.Error, errType)
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			tracing.RecordSpanErrorType(stepSpan, errType)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
@@ -1434,9 +1423,7 @@ func executeAgentLoopWithEvents(
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
 		if completionErr != nil {
-			stepSpan.RecordError(completionErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(completionErr))
 			stepSpan.End()
 			return "", completionErr
 		}
@@ -1478,9 +1465,7 @@ func executeAgentLoopWithEvents(
 			baseToolCtx,
 		)
 		if approvalErr != nil {
-			stepSpan.RecordError(approvalErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(approvalErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(approvalErr))
 			stepSpan.End()
 			return "", approvalErr
 		}
@@ -1517,7 +1502,7 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
+				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled")
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
 					stepCtx,
@@ -1573,12 +1558,13 @@ func executeAgentLoopWithEvents(
 					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
 						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
 						if execErr != nil {
-							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments")
 						}
 					}
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
+					warnDeprecatedMemoryTool(toolName, deprecatedMemoryTools)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 				}
 			}
@@ -1651,7 +1637,7 @@ func aiWorkerErrorType(err error) string {
 	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
 		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }
 
 func startAgentStepSpan(

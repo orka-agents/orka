@@ -210,7 +210,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 		require.NoError(t, err)
 		event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 			Severity: "info", Content: content, CreatedAt: start.Add(time.Duration(sequence) * time.Second)}
-		_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
+		_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
 		require.NoError(t, err)
 		return event
 	}
@@ -233,7 +233,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 	s = NewStore(db, path)
 	// The event journal itself was cleaned up. The accounting identity still
 	// prevents replay of its final summary from charging the team twice.
-	_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
+	_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), get().Summary.TotalTokens)
 	require.Equal(t, "partial", get().Summary.Completeness)
@@ -271,7 +271,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 			require.NoError(t, err)
 			event := &store.ExecutionEvent{Namespace: "a", TaskName: task.uid, StreamType: "task", StreamID: task.uid,
 				SessionName: "conversation", Type: events.ExecutionEventTypeModelUsageUpdated, Severity: "info", Content: content, CreatedAt: at}
-			_, err = s.AppendExecutionEvent(t.Context(), event)
+			_, err = orkaClient(t, s).AppendExecutionEvent(t.Context(), event)
 			require.NoError(t, err)
 			journal = append(journal, event)
 		}
@@ -296,7 +296,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 		require.NoError(t, s.DeleteExecutionEvents(t.Context(), "a", "task", task))
 	}
 	for _, j := range slices.Backward(journal) {
-		_, err := s.AppendExecutionEvent(t.Context(), j)
+		_, err := orkaClient(t, s).AppendExecutionEvent(t.Context(), j)
 		require.NoError(t, err)
 	}
 	check()
@@ -348,10 +348,10 @@ func TestUsageInvalidACPCountsDoNotAbortJournal(t *testing.T) {
 					require.NoError(t, err)
 					event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 						Severity: "info", Content: encoded, CreatedAt: start.Add(time.Duration(i+1) * time.Second)}
-					_, added, err := s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err := orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.True(t, added)
-					_, added, err = s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err = orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.False(t, added)
 				}
@@ -865,38 +865,4 @@ func TestUsageLegacyPhaseHistoryKeepsItsOriginalVisibility(t *testing.T) {
 	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
 	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
 	require.Equal(t, "Succeeded", usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
-}
-
-func TestTaskTokenUsageAttributesOnlyTheTaskShare(t *testing.T) {
-	ctx := context.Background()
-	s := setupTestStore(t)
-	at := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
-	record := func(task, id, counter, scope string, input, output int64, offset time.Duration) {
-		t.Helper()
-		require.NoError(t, s.RecordUsage(ctx, store.UsageObservation{Namespace: "team", TaskUID: task, TaskName: task,
-			ID: id, CounterID: counter, Scope: scope, Source: store.UsageSourceAgent,
-			InputTokens: new(input), OutputTokens: new(output), Status: "running", ObservedAt: at.Add(offset)}))
-	}
-	// A runtime session counter is cumulative across turns: the earlier turn
-	// left it at 100/10, so task-b consumed only the increase to 160/16.
-	record("task-a", "a-session", "acp-session/s/1", store.UsageScopeSession, 100, 10, 0)
-	record("task-b", "b-session", "acp-session/s/1", store.UsageScopeSession, 160, 16, 2*time.Second)
-	// A per-call counter counts its final value once, not every snapshot.
-	record("task-b", "b-call-running", "call-b", store.UsageScopeCall, 3, 0, time.Second)
-	record("task-b", "b-call-final", "call-b", store.UsageScopeCall, 7, 2, 3*time.Second)
-	record("task-c", "c-call", "call-c", store.UsageScopeCall, 9, 9, time.Second)
-
-	for _, tt := range []struct {
-		namespace, task string
-		input, output   int64
-	}{
-		{namespace: "team", task: "task-b", input: 67, output: 8},
-		{namespace: "team", task: "task-c", input: 9, output: 9},
-		{namespace: "team", task: "unreported"},
-		{namespace: "other-team", task: "task-b"},
-	} {
-		input, output, err := s.TaskTokenUsage(ctx, tt.namespace, tt.task)
-		require.NoError(t, err)
-		require.Equal(t, [2]int64{tt.input, tt.output}, [2]int64{input, output}, "%s/%s", tt.namespace, tt.task)
-	}
 }

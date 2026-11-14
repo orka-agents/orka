@@ -1599,3 +1599,24 @@ func testBeginInferenceRequest(s *providerProxySession) {
 	}
 	s.inflightInference++
 }
+
+func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
+	var state promptState
+	state.appendAssistantText("Reviewing the change.", "", "msg_progress", 1<<20)
+	// codex-acp sends a /review result without a message ID.
+	state.appendAssistantText("Review: ", "", "", 1<<20)
+	state.appendAssistantText("no issues found.", "", "", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Review: no issues found." {
+		t.Fatalf("terminalResultText() = %q, want the untagged review text", got)
+	}
+	state.appendAssistantText("Final.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final." {
+		t.Fatalf("terminalResultText() = %q, want the later named message", got)
+	}
+	// A warning in the middle of a named message does not drop its start.
+	state.appendAssistantText("Warning: slow\n\n", "", "", 1<<20)
+	state.appendAssistantText(" Done.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final. Done." {
+		t.Fatalf("terminalResultText() = %q, want the whole resumed message", got)
+	}
+}

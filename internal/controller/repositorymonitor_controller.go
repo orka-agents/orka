@@ -881,6 +881,10 @@ func repositoryMonitorRunFailureState(err error) string {
 	if _, ok := errors.AsType[*repositoryMonitorPendingMutationProjectionError](err); ok {
 		return repositoryMonitorRunRetryScheduled
 	}
+	// Partial CI results settle on their own; retry rather than terminalize.
+	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
+		return repositoryMonitorRunRetryScheduled
+	}
 	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {
 		if ghErr.StatusCode == http.StatusTooManyRequests || (ghErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(ghErr.Body)) {
 			return "github_rate_limited"

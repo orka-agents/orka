@@ -8,12 +8,13 @@ type ControllerEpochStore interface {
 	CompareAndSwapControllerEpoch(ctx context.Context, change ControllerEpochCAS) (*ControllerEpoch, error)
 }
 
-// ControllerEpochMirror receives the exact epoch acquired from the
-// Kubernetes-authoritative ControllerEpochStore. Mirrors are subordinate
-// fencing records for SQLite payload transactions; they never select or
-// advance controller ownership themselves.
-type ControllerEpochMirror interface {
-	SyncControllerEpochMirror(ctx context.Context, epoch ControllerEpoch) error
+// ControllerEpochInstallationReader identifies the installation that owns
+// the controller epoch: the ID Orka binds each storage dataset to when it
+// advances the dataset's epoch.
+type ControllerEpochInstallationReader interface {
+	// ControllerEpochInstallationID returns the installation ID of the epoch
+	// named name. It is stable for the life of the installation.
+	ControllerEpochInstallationID(ctx context.Context, name string) (string, error)
 }
 
 // PromptAttemptStore persists the full prompt execution and delivery state machines.

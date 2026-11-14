@@ -163,7 +163,7 @@ It confirms durable acceptance, **not provider delivery**, and does not stop the
 
 ACP freezes reply policy/descriptors before session creation. Built-in providers retain their normal native defaults when reply is added. External runtime profiles must explicitly include it and exactly match the registered, conformed policy. An external profile without it remains final-only, and an existing frozen session is not silently upgraded.
 
-The production ACP registry injects a request-bound sender only after broker authorization against that frozen policy. Budget and enqueue each use the existing signed operation capability, active prompt/session guard, exact Task UID checks, and authorized task-data transaction. Live preparation is outside the SQLite writer; durable reads/admission run inside the writer under the mutation fences. ACP never calls the native worker routes or impersonates a Job. Its authority is the broker/prompt context plus durable origin, not Pod authentication.
+The production ACP registry injects a request-bound sender only after broker authorization against that frozen policy. Budget and enqueue each use the existing signed operation capability, active prompt/session guard, exact Task UID checks, and authorized task data access. Live preparation is outside the SQLite writer; durable reads/admission run inside the writer under the mutation fences. ACP never calls the native worker routes or impersonates a Job. Its authority is the broker/prompt context plus durable origin, not Pod authentication.
 
 ## Internal native worker reply endpoints
 

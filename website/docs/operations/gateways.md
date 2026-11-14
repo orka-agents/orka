@@ -98,7 +98,7 @@ Native workers authenticate durable origin through `GET /internal/v1/tasks/{name
 
 Origin is separate from adapter availability: a proven gateway execution retains the tool through readiness/capability withdrawal, but new budget/admission requests still fail the current gate. Missing interim capability returns `interim_delivery_unsupported` (HTTP 409) without enqueueing. An unproven origin never enables the tool. The client retries origin 503 responses within a bounded startup window; a persistent transient origin-service failure omits this optional tool while normal work continues. Invalid identity is still denied. There is no late tool upgrade in that execution.
 
-ACP does not use those native HTTP routes or create a Job. Its sender uses the signed broker call's active prompt/session guard and the authorized task-data transaction, independently for budget and enqueue. Frozen policy, exact Task identity, prompt authority, and durable gateway origin all remain required. Live preparation occurs outside the SQLite writer, with durable admission and mutation fences inside it. No approval or terminal-lifecycle behavior is added.
+ACP does not use those native HTTP routes or create a Job. Its sender uses the signed broker call's active prompt/session guard and the authorized task data access, independently for budget and enqueue. Frozen policy, exact Task identity, prompt authority, and durable gateway origin all remain required. Live preparation occurs outside the SQLite writer, with durable admission and mutation fences inside it. No approval or terminal-lifecycle behavior is added.
 
 ## Task and Session access
 

@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,7 +79,7 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			snapshot := storetest.NativeSessionSnapshot(t, "private completed native conversation")
-			var persistence *sqlite.Store
+			var persistence *sealedTestStore
 			var firstCapture *harnessv2.CaptureNativeSessionRequest
 			captureCalls, deleteCalls := 0, 0
 			var continuationCreate *harnessv2.CreateRuntimeSessionRequest
@@ -127,7 +126,7 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "native-session", Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			persistence = fixture.dispatcher.ResultStore.(*sealedTestStore)
 			failing := &nativeFinalizationFailureStore{DurableControlStore: persistence, fail: failSave}
 			fixture.dispatcher.Store = failing
 			fixture.dispatcher.EventStore = persistence
@@ -245,8 +244,8 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name, Create: true, Append: true}
 				})
 			defer fixture.stop()
-			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
-			warningStore := &nativeWarningFailureStore{Store: persistence, fail: tc.failWarning}
+			persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
+			warningStore := &nativeWarningFailureStore{Store: persistence.Store, fail: tc.failWarning}
 			fixture.dispatcher.EventStore = warningStore
 			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -341,7 +340,7 @@ func TestACPDispatcherUnknownNativeInstallRetainsExactGenerationAndLease(t *test
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "unknown-import", Create: true, Append: true}
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	fixture.dispatcher.EventStore = persistence
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
@@ -413,10 +412,7 @@ func TestLegacyTaskRejectsNativeSessionBeforeLockAndAppend(t *testing.T) {
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "native-legacy.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-	require.NoError(t, err)
-	require.NoError(t, persistence.SetAgentExecutionSnapshotCipher(cipher))
+	persistence := sealedStore(t, sqlite.NewStore(db, ""))
 	snapshot := storetest.NativeSessionSnapshot(t, "staged private history")
 	snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
 	_, err = persistence.StageNativeSessionImport(ctx, store.NativeSessionImport{

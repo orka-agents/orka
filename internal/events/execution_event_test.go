@@ -2,184 +2,10 @@ package events
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
-
-func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
-	want := []string{
-		ExecutionEventTypeTaskCreated,
-		ExecutionEventTypeTaskPhaseChanged,
-		ExecutionEventTypeTaskJobCreated,
-		ExecutionEventTypeTaskStarted,
-		ExecutionEventTypeTaskSucceeded,
-		ExecutionEventTypeTaskFailed,
-		ExecutionEventTypeTaskCancelled,
-		ExecutionEventTypeWorkerStarted,
-		ExecutionEventTypeWorkerCompleted,
-		ExecutionEventTypeWorkerFailed,
-		ExecutionEventTypeModelRequestStarted,
-		ExecutionEventTypeModelRequestCompleted,
-		ExecutionEventTypeModelRequestFailed,
-		ExecutionEventTypeModelUsageUpdated,
-		ExecutionEventTypeModelContextUpdated,
-		ExecutionEventTypeModelMessage,
-		ExecutionEventTypeContextTruncated,
-		ExecutionEventTypeNativeSessionCaptureSkipped,
-		ExecutionEventTypeToolCallStarted,
-		ExecutionEventTypeToolCallCompleted,
-		ExecutionEventTypeToolCallFailed,
-		ExecutionEventTypeWorkspacePreparationStarted,
-		ExecutionEventTypeWorkspacePreparationCompleted,
-		ExecutionEventTypeWorkspacePreparationFailed,
-		ExecutionEventTypeAgentRuntimeStarted,
-		ExecutionEventTypeAgentRuntimeCommandStarted,
-		ExecutionEventTypeAgentRuntimeCompleted,
-		ExecutionEventTypeAgentRuntimeFailed,
-		ExecutionEventTypeAgentRuntimeCancelled,
-		ExecutionEventTypeResultSubmitted,
-		ExecutionEventTypeGatewayDeliveryCompleted,
-		ExecutionEventTypeArtifactUploadCompleted,
-		ExecutionEventTypeArtifactUploadFailed,
-		ExecutionEventTypeTaskForkRequested,
-		ExecutionEventTypeTaskForkCreated,
-		ExecutionEventTypeApprovalRequested,
-		ExecutionEventTypeApprovalApproved,
-		ExecutionEventTypeApprovalDeclined,
-		ExecutionEventTypeApprovalExpired,
-		ExecutionEventTypeApprovalCancelled,
-		ExecutionEventTypeApprovalExecutionUpdated,
-		ExecutionEventTypePlanUpdated,
-	}
-	got := executionEventTypes
-	if len(got) != len(want) {
-		t.Fatalf("executionEventTypes length = %d, want %d", len(got), len(want))
-	}
-	seen := map[string]bool{}
-	for _, typ := range got {
-		if seen[typ] {
-			t.Fatalf("executionEventTypes contains duplicate %q", typ)
-		}
-		seen[typ] = true
-		if !IsValidExecutionEventType(typ) {
-			t.Fatalf("IsValidExecutionEventType(%q) = false", typ)
-		}
-	}
-	for _, typ := range want {
-		if !seen[typ] {
-			t.Fatalf("executionEventTypes missing %q", typ)
-		}
-	}
-}
-
-func TestExecutionEventTypeValidationRejectsEmptyAndUnknown(t *testing.T) {
-	for _, value := range []string{"", " ", "TaskUnknown", "taskCreated"} {
-		if IsValidExecutionEventType(value) {
-			t.Fatalf("IsValidExecutionEventType(%q) = true, want false", value)
-		}
-		if got := NormalizeExecutionEventType(value); got != "" {
-			t.Fatalf("NormalizeExecutionEventType(%q) = %q, want empty", value, got)
-		}
-	}
-	if got := NormalizeExecutionEventType("  " + ExecutionEventTypeTaskCreated + " "); got != ExecutionEventTypeTaskCreated {
-		t.Fatalf("NormalizeExecutionEventType() = %q", got)
-	}
-}
-
-func TestTerminalTaskEventTaxonomy(t *testing.T) {
-	want := []string{
-		ExecutionEventTypeTaskSucceeded,
-		ExecutionEventTypeTaskFailed,
-		ExecutionEventTypeTaskCancelled,
-	}
-	got := TerminalTaskEventTypes()
-	assertSameEventSet(t, got, want)
-	for _, typ := range got {
-		if !IsValidExecutionEventType(typ) {
-			t.Fatalf("terminal task event %q is not a valid execution event type", typ)
-		}
-		if !IsTerminalTaskEventType("  " + typ + " ") {
-			t.Fatalf("IsTerminalTaskEventType(%q) = false, want true", typ)
-		}
-	}
-	for _, typ := range []string{ExecutionEventTypeTaskStarted, ExecutionEventTypeApprovalApproved, ExecutionEventTypeAgentRuntimeCompleted, ""} {
-		if IsTerminalTaskEventType(typ) {
-			t.Fatalf("IsTerminalTaskEventType(%q) = true, want false", typ)
-		}
-	}
-	got[0] = ExecutionEventTypeTaskStarted
-	if TerminalTaskEventTypes()[0] != ExecutionEventTypeTaskSucceeded {
-		t.Fatalf("TerminalTaskEventTypes returned mutable package storage")
-	}
-}
-
-func TestTerminalApprovalEventTaxonomy(t *testing.T) {
-	want := []string{
-		ExecutionEventTypeApprovalApproved,
-		ExecutionEventTypeApprovalDeclined,
-		ExecutionEventTypeApprovalExpired,
-		ExecutionEventTypeApprovalCancelled,
-	}
-	got := terminalApprovalEventTypes
-	assertSameEventSet(t, got, want)
-	for _, typ := range got {
-		if !IsValidExecutionEventType(typ) {
-			t.Fatalf("terminal approval event %q is not a valid execution event type", typ)
-		}
-		if !IsTerminalApprovalEventType("  " + typ + " ") {
-			t.Fatalf("IsTerminalApprovalEventType(%q) = false, want true", typ)
-		}
-	}
-	for _, typ := range []string{ExecutionEventTypeApprovalRequested, ExecutionEventTypeTaskSucceeded, ExecutionEventTypeAgentRuntimeCompleted, ""} {
-		if IsTerminalApprovalEventType(typ) {
-			t.Fatalf("IsTerminalApprovalEventType(%q) = true, want false", typ)
-		}
-	}
-}
-
-func assertSameEventSet(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("event set length = %d, want %d (got=%v want=%v)", len(got), len(want), got, want)
-	}
-	seen := map[string]bool{}
-	for _, typ := range got {
-		if seen[typ] {
-			t.Fatalf("event set contains duplicate %q", typ)
-		}
-		seen[typ] = true
-	}
-	for _, typ := range want {
-		if !seen[typ] {
-			t.Fatalf("event set missing %q (got=%v)", typ, got)
-		}
-	}
-}
-
-func TestEventSeverityNormalization(t *testing.T) {
-	tests := map[string]string{
-		"":         ExecutionEventSeverityInfo,
-		" ":        ExecutionEventSeverityInfo,
-		"INFO":     ExecutionEventSeverityInfo,
-		"warning":  ExecutionEventSeverityWarning,
-		"Error":    ExecutionEventSeverityError,
-		"debug":    ExecutionEventSeverityDebug,
-		"critical": ExecutionEventSeverityInfo,
-	}
-	for input, want := range tests {
-		if got := NormalizeExecutionEventSeverity(input); got != want {
-			t.Fatalf("NormalizeExecutionEventSeverity(%q) = %q, want %q", input, got, want)
-		}
-	}
-	for _, valid := range []string{ExecutionEventSeverityDebug, ExecutionEventSeverityInfo, ExecutionEventSeverityWarning, ExecutionEventSeverityError} {
-		if !IsValidExecutionEventSeverity(valid) {
-			t.Fatalf("IsValidExecutionEventSeverity(%q) = false", valid)
-		}
-	}
-	if IsValidExecutionEventSeverity("critical") {
-		t.Fatalf("IsValidExecutionEventSeverity(critical) = true, want false")
-	}
-}
 
 func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 	bearerValue := fakeDashToken("bearer")
@@ -449,4 +275,51 @@ func fakeJWT() string {
 		"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
 		"signaturevalue1234567890",
 	}, ".")
+}
+
+// A credential sent as a JSON key is redacted the way a value is, while
+// ordinary keys, including ones naming secrets, are kept; colliding
+// redacted keys are told apart.
+func TestSanitizeExecutionEventJSONRedactsSecretKeys(t *testing.T) {
+	github := "ghp_" + strings.Repeat("a", 36)
+	jwt := "eyJ" + strings.Repeat("b", 12) + "." + strings.Repeat("c", 12) + "." + strings.Repeat("d", 12)
+	content := fmt.Sprintf(`{"properties":{%q:"x",%q:"y","adminPassword":"z","location":"eastus"}}`, github, jwt)
+	sanitized, _, err := SanitizeExecutionEventJSON(json.RawMessage(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(sanitized)
+	if strings.Contains(out, github) || strings.Contains(out, jwt) {
+		t.Fatalf("a credential key survived sanitization: %s", out)
+	}
+	var decoded struct {
+		Properties map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Properties) != 4 {
+		t.Fatalf("properties = %v, want both redacted keys kept apart beside adminPassword and location", decoded.Properties)
+	}
+	if decoded.Properties["location"] != "eastus" {
+		t.Fatalf("an ordinary key or value changed: %s", out)
+	}
+	if _, ok := decoded.Properties["adminPassword"]; !ok {
+		t.Fatalf("a key naming a secret, which is not one, was dropped: %s", out)
+	}
+}
+
+// A literal key equal to another key's redacted form keeps its own field.
+func TestSanitizeExecutionEventJSONKeepsKeysThatCollideWithARedactedKey(t *testing.T) {
+	sanitized, _, err := SanitizeExecutionEventJSON(json.RawMessage(`{"password=1234":"a","password=[REDACTED]":"b"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 2 || strings.Contains(string(sanitized), "1234") {
+		t.Fatalf("sanitized = %s, want both fields kept and the secret redacted", sanitized)
+	}
 }

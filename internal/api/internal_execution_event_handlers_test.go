@@ -24,6 +24,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -407,14 +409,17 @@ func TestInternalSubmitExecutionEventRequiresCurrentTaskWorker(t *testing.T) {
 	}
 }
 
-func newInternalExecutionEventStore(t *testing.T) *sqlite.Store {
+// newInternalExecutionEventStore returns the storage client over an
+// in-memory SQLite store, as production wires the API.
+func newInternalExecutionEventStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, ":memory:")
+	storage := storageclienttest.NewEmbedded(t, sqlite.NewStore(db, ":memory:"))
+	return storage
 }
 
 func setupInternalExecutionEventApp(eventStore store.ExecutionEventStore, userInfo *UserInfo) *fiber.App {

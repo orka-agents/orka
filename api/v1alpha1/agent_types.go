@@ -8,6 +8,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,6 +69,14 @@ type AgentSpec struct {
 	// +optional
 	Runtime *AgentCLIRuntime `json:"runtime,omitempty"`
 
+	// Identity binds this Agent to one external identity that its outbound
+	// calls can act as. Setting or changing it requires the `bind` verb on
+	// agentidentities/<issuer> for that identity. An identity-bound Agent must
+	// set runtime.ceiling.allowedTools, and Tasks using it require Agent `use`
+	// authorization on the controller.
+	// +optional
+	Identity *AgentIdentity `json:"identity,omitempty"`
+
 	// TTLAfterLastTask defines how long the agent persists after its last task completes.
 	// When set and no tasks are active, the agent is deleted after this duration.
 	// Zero means the agent is never auto-deleted (permanent). Default is no TTL (permanent).
@@ -92,9 +101,10 @@ func (in AgentSpec) MarshalJSON() ([]byte, error) {
 // Unknown fields reach admission so removed fields are rejected.
 // +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || !has(self.contractVersion) || self.contractVersion == oldSelf.contractVersion",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 // +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
+// +kubebuilder:validation:XValidation:rule="!has(self.skills) || self.skills.size() == 0 || has(self.type)",message="runtime.skills are supported only on built-in runtime types; external runtimeRef runtimes cannot receive skills"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
@@ -102,7 +112,9 @@ type AgentCLIRuntime struct {
 
 	// ContractVersion is the harness protocol selector for built-in runtime
 	// types. Only orka.harness.v2 is supported, so an omitted selector means
-	// orka.harness.v2. Once written, the value never changes. runtime.type
+	// orka.harness.v2. A written value never changes to another contract;
+	// clearing it keeps orka.harness.v2, and the controller writes it back, so
+	// reapplying a manifest that dropped the selector succeeds. runtime.type
 	// alone is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
@@ -132,6 +144,13 @@ type AgentCLIRuntime struct {
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
 
+	// Ceiling is the upper bound of what any Task using this Agent may
+	// request. Unlike the default* fields, which a Task can replace, a Task
+	// that asks for more than the ceiling (directly or through the Agent
+	// defaults) fails before it is bound. Omitted means no ceiling.
+	// +optional
+	Ceiling *AgentRuntimeCeiling `json:"ceiling,omitempty"`
+
 	// Toolboxes lists extra command-line tool images for built-in runtimes.
 	// Each toolbox folder is bound read-only into the runtime Pod at the same
 	// path and its pathEntries are appended, in order, to the agent's PATH.
@@ -140,6 +159,48 @@ type AgentCLIRuntime struct {
 	// +kubebuilder:validation:MaxItems=4
 	// +optional
 	Toolboxes []AgentToolbox `json:"toolboxes,omitempty"`
+
+	// Skills lists Agent Skills for the codex, claude, and opencode runtimes;
+	// copilot can't be limited to Orka-provided skills and is rejected. Each
+	// skill folder is read from a digest-pinned image, bound read-only into the
+	// runtime Pod, validated, and copied into every session's native skills
+	// folder, owned by that session's identity. Skills are untrusted prompt input: nothing
+	// in them runs, and keys or constructs with side effects are rejected.
+	// The feature is off by default and the controller restricts images to
+	// the toolbox registry allowlist.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Skills []AgentRuntimeSkill `json:"skills,omitempty"`
+}
+
+// AgentRuntimeSkill is one Agent Skill folder (SKILL.md plus optional
+// supporting files) delivered from a container image.
+type AgentRuntimeSkill struct {
+	// Name identifies the skill. It must equal the name in the skill's
+	// SKILL.md frontmatter and becomes the skill's folder name in the
+	// runtime's native skills folder.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
+	Name string `json:"name"`
+
+	// Image must be a fully qualified reference pinned by digest:
+	// <registry>/<repository>@sha256:<64 hex>.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// Path is the absolute folder inside the image that holds SKILL.md. It
+	// must be under /skills. Defaults to /skills/<name>.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$`
+	// +optional
+	Path string `json:"path,omitempty"`
 }
 
 // AgentToolbox is a container image whose files are added, read-only, to the
@@ -173,6 +234,55 @@ type AgentToolbox struct {
 	PathEntries []string `json:"pathEntries,omitempty"`
 }
 
+// AgentRuntimeCeiling bounds the tool policy and iteration budget that Tasks
+// using an Agent may run with. Each omitted field leaves that dimension
+// unbounded. Orka-injected coordination messaging tools for delegated children
+// are platform plumbing and are not counted against AllowedTools. Unknown keys
+// are kept until decoding rejects them, so a misspelled limit cannot be pruned
+// into no limit.
+// +kubebuilder:pruning:PreserveUnknownFields
+type AgentRuntimeCeiling struct {
+	// AllowedTools is the largest tool set a Task may run with. Tool names
+	// ignore case. An entry without a scope, such as "Read", also permits
+	// scoped requests such as "Read(/workspace/**)"; a scoped entry permits
+	// only that exact, case-sensitive scope. An explicitly empty list permits
+	// no tools.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=256
+	// +optional
+	AllowedTools []string `json:"allowedTools,omitempty"`
+
+	// AllowBash false forbids shell access for every Task using this Agent.
+	// +optional
+	AllowBash *bool `json:"allowBash,omitempty"`
+
+	// MaxTurns is the largest agent loop iteration budget a Task may use.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	MaxTurns *int32 `json:"maxTurns,omitempty"`
+}
+
+// MarshalJSON preserves an explicitly empty AllowedTools ceiling, which
+// permits no tools, instead of omitting it, which leaves tools unbounded.
+func (in AgentRuntimeCeiling) MarshalJSON() ([]byte, error) {
+	type agentRuntimeCeilingJSON struct {
+		AllowedTools *[]string `json:"allowedTools,omitempty"`
+		AllowBash    *bool     `json:"allowBash,omitempty"`
+		MaxTurns     *int32    `json:"maxTurns,omitempty"`
+	}
+	var allowedTools *[]string
+	if in.AllowedTools != nil {
+		tools := append([]string{}, in.AllowedTools...)
+		allowedTools = &tools
+	}
+	return json.Marshal(agentRuntimeCeilingJSON{
+		AllowedTools: allowedTools,
+		AllowBash:    in.AllowBash,
+		MaxTurns:     in.MaxTurns,
+	})
+}
+
 // MarshalJSON preserves the distinction between an omitted tool allowlist and
 // an explicitly empty deny-all allowlist. The standard omitempty handling for
 // slices would otherwise serialize both states as omission.
@@ -185,7 +295,9 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
 		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
 		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
+		Ceiling                *AgentRuntimeCeiling         `json:"ceiling,omitempty"`
 		Toolboxes              []AgentToolbox               `json:"toolboxes,omitempty"`
+		Skills                 []AgentRuntimeSkill          `json:"skills,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -200,12 +312,58 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
+		Ceiling:                in.Ceiling,
 		Toolboxes:              in.Toolboxes,
+		Skills:                 in.Skills,
 	})
 }
 
 // BuiltInContractVersion returns the Agent's explicit built-in harness
 // protocol, or empty when absent. Callers must reject an absent contract.
+// AgentIdentityIssuerEntra names Microsoft Entra Agent ID identities.
+const AgentIdentityIssuerEntra = "entra"
+
+// AgentIdentity selects exactly one issuer-typed external identity.
+// +kubebuilder:validation:XValidation:rule="has(self.entra)",message="identity must set exactly one issuer"
+type AgentIdentity struct {
+	// Entra binds a Microsoft Entra Agent ID agent identity.
+	// +optional
+	Entra *EntraAgentIdentity `json:"entra,omitempty"`
+}
+
+// EntraAgentIdentity references one Entra agent identity under the blueprint
+// configured on the controller.
+type EntraAgentIdentity struct {
+	// AgentIdentityID is the agent identity's client (application) ID.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	AgentIdentityID string `json:"agentIdentityID"`
+}
+
+// IdentityRef returns the Agent's issuer type and identity ID. Identity IDs
+// compare case-insensitively, so the ID is lowercased.
+func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
+	if in == nil || in.Spec.Identity == nil || in.Spec.Identity.Entra == nil {
+		return "", "", false
+	}
+	id = strings.ToLower(strings.TrimSpace(in.Spec.Identity.Entra.AgentIdentityID))
+	if id == "" {
+		return "", "", false
+	}
+	return AgentIdentityIssuerEntra, id, true
+}
+
+// HoldsIdentity reports whether the Agent declares an external identity or
+// still holds a claim to one. A claim outlives the declaration until the
+// Agent next reconciles, so an identity removed and restored in between is
+// still held throughout.
+func (in *Agent) HoldsIdentity() bool {
+	if _, _, declared := in.IdentityRef(); declared {
+		return true
+	}
+	return in != nil && in.Status.IdentityClaim != nil
+}
+
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""
@@ -398,6 +556,35 @@ type AgentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// IdentityClaim is the external identity this Agent holds. The controller
+	// grants a claim only when no other Agent holds it, and keeps it after the
+	// spec changes until every Task bound to it has finished.
+	// +optional
+	IdentityClaim *AgentIdentityClaim `json:"identityClaim,omitempty"`
+}
+
+// AgentIdentityClaim records an Agent's exclusive hold on one identity.
+type AgentIdentityClaim struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Issuer string `json:"issuer"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+	// Releasing marks a claim the Agent's spec no longer names. New Task
+	// bindings refuse it, and the controller releases it on a later pass once
+	// no unfinished Task is bound to it.
+	// +optional
+	Releasing bool `json:"releasing,omitempty"`
+	// GrantedAt is when the claim was granted, while Agent use authorization
+	// was enforced, by the API server's clock: the latest write time it
+	// recorded on the Agent after the granting write. A claim without it binds
+	// no Task. A Task binds the identity only if it was created strictly after
+	// this time (both have one-second precision), so its creation was checked
+	// for Agent use while the Agent named the identity.
+	// +optional
+	GrantedAt *metav1.Time `json:"grantedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

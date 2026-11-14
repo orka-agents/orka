@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -31,14 +32,14 @@ import (
 // setupTestHandlersWithArtifactStore creates Handlers backed by an in-memory
 // SQLite store that implements ArtifactStore, plus any runtime objects for the
 // fake k8s client.
-func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fiber.App, *sqlite.Store) {
+func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fiber.App, *storageclient.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, ArtifactStore: ss})
 
 	app := fiber.New()
@@ -63,7 +64,7 @@ func TestUploadArtifact(t *testing.T) {
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
 		// Verify data was stored
-		data, ct, err := ss.GetArtifact(context.Background(), "default", "my-task", "output.txt")
+		data, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt"})
 		require.NoError(t, err)
 		require.Equal(t, body, data)
 		require.Equal(t, "text/plain", ct)
@@ -80,7 +81,7 @@ func TestUploadArtifact(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
-		_, ct, err := ss.GetArtifact(context.Background(), "default", "my-task", "data.bin")
+		_, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "data.bin"})
 		require.NoError(t, err)
 		require.Equal(t, "application/octet-stream", ct)
 	})
@@ -184,8 +185,8 @@ func TestListTaskArtifacts(t *testing.T) {
 
 	// Pre-populate artifacts
 	ctx := context.Background()
-	require.NoError(t, ss.SaveArtifact(ctx, "default", "my-task", "output.txt", "text/plain", []byte("hello")))
-	require.NoError(t, ss.SaveArtifact(ctx, "default", "my-task", "report.json", "application/json", []byte(`{"ok":true}`)))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt", ContentType: "text/plain", Data: []byte("hello")}))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "report.json", ContentType: "application/json", Data: []byte(`{"ok":true}`)}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/my-task/artifacts", nil)
 	resp, err := app.Test(req)
@@ -204,6 +205,41 @@ func TestListTaskArtifacts(t *testing.T) {
 	}
 	require.True(t, names["output.txt"])
 	require.True(t, names["report.json"])
+}
+
+// The artifact list keeps the createdAt wire format it had when the field was
+// a string: RFC 3339 in UTC, to the second, as SQLite's CURRENT_TIMESTAMP
+// stores it.
+func TestListTaskArtifactsKeepsCreatedAtFormat(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
+	}
+	h, app, ss := setupTestHandlersWithArtifactStore(task)
+	app.Get("/api/v1/tasks/:id/artifacts", h.ListTaskArtifacts)
+	owner := store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}
+	require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{
+		Owner: owner, Filename: "b.txt", ContentType: "text/plain", Data: []byte("b"),
+	}))
+	require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{
+		Owner: owner, Filename: "a.txt", ContentType: "text/plain", Data: []byte("a"),
+	}))
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/my-task/artifacts", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		Artifacts []struct {
+			Filename  string `json:"filename"`
+			CreatedAt string `json:"createdAt"`
+		} `json:"artifacts"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Artifacts, 2)
+	require.Equal(t, "a.txt", result.Artifacts[0].Filename, "artifacts are listed by filename")
+	require.Equal(t, "b.txt", result.Artifacts[1].Filename)
+	for _, artifact := range result.Artifacts {
+		require.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, artifact.CreatedAt)
+	}
 }
 
 func TestListTaskArtifactsEmpty(t *testing.T) {
@@ -246,7 +282,7 @@ func TestDownloadTaskArtifact(t *testing.T) {
 
 	ctx := context.Background()
 	data := []byte("artifact content here")
-	require.NoError(t, ss.SaveArtifact(ctx, "default", "my-task", "output.txt", "text/plain", data))
+	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt", ContentType: "text/plain", Data: data}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/my-task/artifacts/output.txt", nil)
 	resp, err := app.Test(req)
@@ -293,7 +329,7 @@ func TestDownloadTaskArtifactStoreNotConfigured(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss}) // nil artifact store
 
 	app := fiber.New()

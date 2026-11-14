@@ -678,7 +678,7 @@ func setupGitHubWebhookMonitorStore(t *testing.T) store.RepositoryMonitorStore {
 		t.Fatalf("NewDB() error = %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, secret string, body []byte) *http.Response {

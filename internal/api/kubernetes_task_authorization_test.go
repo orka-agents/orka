@@ -247,7 +247,7 @@ func TestCreateManualSecurityScanRequiresKubernetesRBACForTaskCreate(t *testing.
 		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
 		SecurityStore: securityStore,

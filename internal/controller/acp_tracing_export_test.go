@@ -28,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/orka-agents/orka/workers/acp/supervisor"
 )
 
@@ -139,12 +140,12 @@ func RunACPTraceBoundary(t *testing.T, tasks []*corev1alpha1.Task, agent *corev1
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	persistence := sqlite.NewStore(db, "test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "test"))
 	control, err := kubestore.NewComposite(kc, "orka-system", persistence, kubestore.WithAPIReader(kc))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(control, "trace-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(control, "trace-test").WithStorage(storagev1.StateContract, persistence)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	epochCtx, cancelEpoch := context.WithCancel(ctx)

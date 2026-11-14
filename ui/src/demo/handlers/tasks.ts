@@ -380,14 +380,6 @@ function finishTask(rec: TaskRecord) {
   if (phase === 'Succeeded') emit(rec, { type: 'TaskSucceeded', summary: `Task succeeded in ${took}` }, rec.end)
   else if (phase === 'Failed') emit(rec, { type: 'TaskFailed', severity: 'error', summary: message ?? 'Task failed' }, rec.end)
   else emit(rec, { type: 'TaskCancelled', severity: 'warning', summary: message ?? 'Task cancelled' }, rec.end)
-  if (rec.outcome.pr) {
-    const pr = rec.outcome.pr
-    Object.assign(rec.annotations, {
-      'orka.ai/pr-url': `${REPOS[rec.repo ?? 'checkout'].url}/pull/${pr.number}`,
-      'orka.ai/pr-number': String(pr.number),
-      'orka.ai/pr-status': pr.status,
-    })
-  }
 }
 
 function advance(rec: TaskRecord, now: number) {
@@ -539,6 +531,8 @@ export interface DemoTaskInput {
   repo?: RepoKey
   /** session the task belongs to (e.g. the chat session that created it) */
   session?: string
+  /** delegating parent Task */
+  parent?: string
   createdBy?: 'chat' | 'gateway' | 'monitor'
 }
 
@@ -558,6 +552,7 @@ export function createDemoTask(input: DemoTaskInput): string {
     repo: input.repo,
     prompt: input.prompt,
     session: input.session,
+    parent: input.parent,
     createdBy: input.createdBy ?? 'chat',
   })
   return name
@@ -565,15 +560,29 @@ export function createDemoTask(input: DemoTaskInput): string {
 
 /**
  * Cancels a pending or running task now, the way a controller-side
- * cancellation (such as a repository monitor Stop command) does. Finished and
- * scheduled tasks are left alone.
+ * cancellation (such as a repository monitor Stop command) does, together
+ * with its unfinished delegated descendants. Finished and scheduled tasks
+ * are left alone.
  */
 export function cancelDemoTask(name: string, reason: string) {
   const rec = tasks.get(name)
+  if (rec && cancelDemoRecord(rec, reason)) cancelDemoDescendants(name, reason)
+}
+
+/** Cancels every unfinished, nonscheduled descendant, through finished ones too. */
+function cancelDemoDescendants(name: string, reason: string) {
+  for (const child of children(name)) {
+    if (child.schedule) continue
+    cancelDemoRecord(child, reason)
+    cancelDemoDescendants(child.name, reason)
+  }
+}
+
+/** Cancels one unfinished, nonscheduled task; reports whether it did. */
+function cancelDemoRecord(rec: TaskRecord, reason: string): boolean {
   const now = Date.now()
-  if (!rec) return
   advance(rec, now)
-  if (rec.finished || rec.schedule) return
+  if (rec.finished || rec.schedule) return false
   for (const approval of rec.approvals) {
     if (approval.status !== 'pending') continue
     Object.assign(approval, { status: 'cancelled', decisionTime: iso(now), decisionReason: reason })
@@ -585,6 +594,7 @@ export function cancelDemoTask(name: string, reason: string) {
   rec.end = now
   rec.outcome = { phase: 'Cancelled', message: reason }
   finishTask(rec)
+  return true
 }
 
 // ---- views ------------------------------------------------------------------------
@@ -823,7 +833,8 @@ function deliveryStatus(rec: TaskRecord, phase: TaskPhase): NonNullable<Task['st
       id: `PR_kwDO${digest(`pr:${rec.name}`, 14)}`,
       number: pr.number,
       url: `${repo?.url}/pull/${pr.number}`,
-      state: pr.status === 'merged' ? 'merged' : pr.status,
+      // The controller records the forge state as Open, Closed or Merged.
+      state: pr.status[0].toUpperCase() + pr.status.slice(1),
       baseBranch: 'main',
       headBranch: pr.branch,
       headSHA: head,
@@ -1110,6 +1121,29 @@ export const taskHandlers: RequestHandler[] = [
     const name = nameParam(params)
     if (!tasks.delete(name)) return notFound(`tasks.orka.ai "${name}"`)
     return noContent()
+  }),
+
+  http.post(api('/tasks/:id/cancel'), async ({ request, params }) => {
+    if (!inDemoNamespace(request)) return forbiddenNamespace()
+    const name = nameParam(params)
+    const rec = tasks.get(name)
+    if (!rec) return notFound(`tasks.orka.ai "${name}"`)
+    // As in the API, a stale confirmation is refused before any phase check.
+    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
+    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
+    const now = Date.now()
+    advance(rec, now)
+    const phase = phaseOf(rec, now)
+    if (phase === 'Cancelled') {
+      return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase, requested: false, message: 'cancelled' })
+    }
+    if (TERMINAL.has(phase) || rec.schedule) {
+      return apiError(409, `task cannot be cancelled: the task is ${phase}`)
+    }
+    const reason = body.reason?.trim()
+    const message = reason ? `cancelled by demo-user: ${reason}` : 'cancelled by demo-user'
+    cancelDemoTask(name, message)
+    return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase: 'Cancelled', requested: true, message })
   }),
 
   http.get(api('/tasks/:id/result'), ({ request, params }) => {

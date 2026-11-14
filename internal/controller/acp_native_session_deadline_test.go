@@ -12,8 +12,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/util/retry"
@@ -21,14 +21,20 @@ import (
 )
 
 func TestACPDispatcherNativeRecoveryDeadlineCancellationResumesOriginalCheckpoint(t *testing.T) {
-	testNativeSessionInterruptionResumesCheckpoint(t, false)
+	testNativeSessionInterruptionResumesCheckpoint(t, false, "")
 }
 
 func TestACPDispatcherNativeRecoveryUserCancellationResumesOriginalCheckpoint(t *testing.T) {
-	testNativeSessionInterruptionResumesCheckpoint(t, true)
+	testNativeSessionInterruptionResumesCheckpoint(t, true, "")
 }
 
-func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellation bool) {
+// A cancel request recorded while the prompt stream is open settles through
+// the stream-error path and keeps the request's message.
+func TestACPDispatcherNativeRecoveryRequestedCancellationKeepsItsMessage(t *testing.T) {
+	testNativeSessionInterruptionResumesCheckpoint(t, true, "cancelled by alice: wrong repository")
+}
+
+func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellation bool, cancelRequest string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -135,7 +141,7 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 			})
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	dispatchQueuedTask(ctx, t, fixture.dispatcher, fixture.task)
 	first := fixture.currentTask(t, ctx)
 	require.Equal(t, corev1alpha1.TaskPhaseSucceeded, first.Status.Phase)
@@ -160,7 +166,10 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 	if userCancellation {
 		fixture.dispatcher.runtimeContextFactory = nil
 		wantReason, wantMessage, wantCancel = "Cancelled", "prompt cancellation settled", harnessv2.CancelReasonControllerShutdown
-		cancelAfterRunning = cancelNativeTaskAfterPromptRunning(ctx, fixture, persistence, timedOut, attemptID, accepted)
+		if cancelRequest != "" {
+			wantMessage = cancelRequest
+		}
+		cancelAfterRunning = cancelNativeTaskAfterPromptRunning(ctx, fixture, persistence, timedOut, attemptID, accepted, cancelRequest)
 	} else {
 		cancelAfterRunning = cancelRuntimeContextAfterPromptRunning(ctx, persistence, attemptID, accepted, deadlineCancels)
 	}
@@ -293,10 +302,11 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 func cancelNativeTaskAfterPromptRunning(
 	ctx context.Context,
 	fixture *taskScopedCreateConflictFixture,
-	persistence *sqlite.Store,
+	persistence *sealedTestStore,
 	timedOut *corev1alpha1.Task,
 	attemptID string,
 	accepted <-chan struct{},
+	cancelRequest string,
 ) <-chan error {
 	cancelled := make(chan error, 1)
 	go func() {
@@ -321,6 +331,20 @@ func cancelNativeTaskAfterPromptRunning(
 					target := &corev1alpha1.Task{}
 					if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(timedOut), target); err != nil {
 						return err
+					}
+					if cancelRequest != "" && target.Annotations[labels.AnnotationCancelRequested] != cancelRequest {
+						// The request is recorded first; the controller then
+						// writes the Cancelled phase with its message.
+						if target.Annotations == nil {
+							target.Annotations = map[string]string{}
+						}
+						target.Annotations[labels.AnnotationCancelRequested] = cancelRequest
+						if err := fixture.kubeClient.Update(ctx, target); err != nil {
+							return err
+						}
+					}
+					if cancelRequest != "" {
+						target.Status.Message = cancelRequest
 					}
 					target.Status.Phase = corev1alpha1.TaskPhaseCancelled
 					return fixture.kubeClient.Status().Update(ctx, target)
