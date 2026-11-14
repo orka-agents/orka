@@ -76,6 +76,14 @@ Choosing a class is authorized: the caller needs Kubernetes `use` on that
 [Workspace providers](../reference/configuration.md#workspace-providers) covers the flags,
 admission webhooks, the class resources, detach behavior, and expiry.
 
+## Debug a running workspace
+
+Administrators can opt a class in to audited operator access with the
+`acp.workspace.orka.ai/operator-access` annotation. Operators then use
+`orka task exec` and `orka task cp` on that class's running Tasks. Exec and
+copies in taint the session, so it is never published, reused, checkpointed,
+or continued. See [Operator workspace access](../guides/operator-workspace-access.md).
+
 ## Read next
 
 - [Agent Sandbox workspaces](agent-sandbox.md) — installation, startup ownership, suspension, and deletion.

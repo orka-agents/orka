@@ -176,6 +176,18 @@ otherwise. In the additional-checks column:
   bound namespace and name, when the Task is Gateway-owned. Task collection
   responses filter out Gateway-owned records the caller cannot read.
 - `Gateway operate` requires that same `get` plus `update` on the bound Gateway.
+- `Operator access` means the
+  [operator workspace access](../guides/operator-workspace-access.md) rules:
+  - `--operator-workspace-access-enabled` is set.
+  - The Task's ExecutionWorkspaceClass carries the
+    `acp.workspace.orka.ai/operator-access` opt-in (`read` for `GET .../files`,
+    `exec` for exec and `PUT .../files`).
+  - The RuntimeSession is owned by the Task.
+  - Context-token callers need `orka:tasks:exec`, `orka:tasks:files:read`, or
+    `orka:tasks:files:write` and a namespace-bound transaction context, in every
+    authorization mode.
+  - Identities without a Kubernetes identity, such as direct OIDC, are refused.
+  - No built-in role grants `tasks/exec` or `tasks/files`.
 - `Class use` means the conditional workspace-class check described above, using
   the final Task or Tool configuration.
 - `Checkpoint use` means the additional named checkpoint check described above
@@ -203,6 +215,9 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts/:filename` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/exec` | `core.orka.ai` | `tasks/exec` | `create` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
+| `GET` | `/api/v1/tasks/:id/files` | `core.orka.ai` | `tasks/files` | `get` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
+| `PUT` | `/api/v1/tasks/:id/files` | `core.orka.ai` | `tasks/files` | `update` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
 | `GET` | `/api/v1/sessions` | `core.orka.ai` | `sessions` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |

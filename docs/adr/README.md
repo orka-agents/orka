@@ -67,6 +67,7 @@ not do with a running agent's memory. See
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
 | [0049](0049-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
 | [0041](0041-data-only-parked-turns.md) | Release runtime capacity while an agent waits: data-only parked turns | Accepted |
+| [0044](0044-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
 | [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
 | [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
 

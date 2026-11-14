@@ -167,6 +167,18 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 	return nil
 }
 
+// validateOperatorAccessSecurityConfig fails operator workspace access closed
+// without Task provenance admission. The durable operator taint and the
+// workspace link it is read through are reserved acp.workspace.orka.ai/ Task
+// metadata; without the webhook any direct Task writer could strip them and
+// release a tainted workspace for publication or continuation.
+func validateOperatorAccessSecurityConfig(enabled, provenanceProtected bool) error {
+	if enabled && !provenanceProtected {
+		return fmt.Errorf("--operator-workspace-access-enabled requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the operator taint")
+	}
+	return nil
+}
+
 func validateStaticTrustedServiceReferences(
 	watchNamespace string,
 	trust outboundaccess.TrustConfig,
@@ -367,6 +379,7 @@ func main() {
 	var acpToolboxMountMethod string
 	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
+	var operatorWorkspaceAccessEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
@@ -656,6 +669,11 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&operatorWorkspaceAccessEnabled, "operator-workspace-access-enabled", false,
+		"Serve the operator workspace debugging API (orka task exec / orka task cp). Each call additionally "+
+			"requires the ExecutionWorkspaceClass acp.workspace.orka.ai/operator-access opt-in and the dedicated "+
+			"tasks/exec or tasks/files permission. Write-capable access taints the session so it is never published, "+
+			"reused, checkpointed, or continued.")
 	flag.BoolVar(&acpSkillsEnabled, "acp-skills-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_SKILLS_ENABLED"), "true"),
 		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
@@ -1143,6 +1161,10 @@ func main() {
 		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+	if err := validateOperatorAccessSecurityConfig(operatorWorkspaceAccessEnabled, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "operator workspace access fails closed without Task provenance admission")
 		os.Exit(1)
 	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
@@ -2415,6 +2437,7 @@ func main() {
 		},
 		DashboardEnabled:      dashboardEnabled,
 		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		OperatorAccess:        api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
 		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
 		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{

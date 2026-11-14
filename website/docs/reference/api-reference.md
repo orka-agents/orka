@@ -66,6 +66,9 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/result` | GET | Get task result |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
 | `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
+| `/api/v1/tasks/:id/exec` | GET (WebSocket) | Run an operator command in the Task's execution workspace ([operator workspace access](../guides/operator-workspace-access.md)) |
+| `/api/v1/tasks/:id/files?path=` | GET | Copy one file out of the Task's execution workspace |
+| `/api/v1/tasks/:id/files?path=&size=` | PUT | Copy one file into the Task's execution workspace (taints the session) |
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 

@@ -4708,11 +4708,13 @@ Available Commands:
   artifacts   List artifacts for a task
   cancel      Stop a running task and keep its history
   children    List child tasks
+  cp          Copy one file out of or into a Task's execution workspace (operator debugging)
   create      Create a new task
   decline     Decline a pending task approval
   delete      Delete a task
   download    Download task artifacts
   events      List task execution events
+  exec        Run a command in a running Task's execution workspace (operator debugging)
   follow      Follow task execution events
   fork        Fork a task from an execution event checkpoint
   get         Get task details
@@ -4850,6 +4852,40 @@ Usage:
 Flags:
   -h, --help            help for children
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task cp`
+
+```text
+Copy a single regular file between the local machine and the execution
+workspace of a running or retained ACP Task. Workspace paths are relative to the
+workspace root (the agent's working directory); a leading "/" names that root.
+Use "-" as the local path for stdout or stdin.
+
+Copying out requires the class opt-in "read" or "exec" and the "get" permission
+on tasks/files; it does not taint the session. Copying in requires the class
+opt-in "exec" and the "update" permission on tasks/files, and taints the session:
+it will never be published, reused, checkpointed, or continued.
+
+Usage:
+  orka task cp <task>:<path> <local> | <local> <task>:<path> [flags]
+
+Examples:
+  orka task cp my-task:src/main.go ./main.go
+  orka task cp ./fix.patch my-task:/tmp-fix.patch
+
+Flags:
+  -h, --help            help for cp
+      --max-bytes int   Refuse files larger than this when copying out (default 67108864, at most 268435456)
+  -q, --quiet           Do not print the session taint notice
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -5058,6 +5094,43 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task exec`
+
+```text
+Run one command inside the execution workspace of a running or retained ACP Task.
+
+The command runs as the Task session's own unprivileged child identity, never as
+the supervisor, and is bounded by --timeout and an output limit. It requires the
+--operator-workspace-access-enabled controller flag, an ExecutionWorkspaceClass
+opted in with the acp.workspace.orka.ai/operator-access=exec annotation, and the
+"create" permission on the tasks/exec subresource.
+
+Every exec taints the Task's session: it will never be published, reused,
+checkpointed for forks, or continued. Every exec is audited.
+
+Usage:
+  orka task exec <task> [-i] [-t] -- <command> [args...] [flags]
+
+Examples:
+  orka task exec my-task -- git status
+  orka task exec my-task -it -- bash
+
+Flags:
+  -h, --help               help for exec
+  -q, --quiet              Do not print the session taint notice
+  -i, --stdin              Pass stdin to the command
+      --timeout duration   Maximum command duration (at most 1h0m0s) (default 15m0s)
+      --token string       Bearer token for authentication
+  -t, --tty                Allocate a terminal for the command (implies -i)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
