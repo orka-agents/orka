@@ -391,13 +391,13 @@ func holdExternalPolicyPrompt(t *testing.T, f *externalACPDispatchFixture) *held
 	return held
 }
 
-func startExternalPolicyTask(t *testing.T, f *externalACPDispatchFixture, held *heldExternalPolicyPrompt, name string, namedSession bool) (*corev1alpha1.Task, <-chan struct{}) {
+func startExternalPolicyTask(t *testing.T, f *externalACPDispatchFixture, held *heldExternalPolicyPrompt, name string, namedSession bool, mutate ...func(*corev1alpha1.Task)) (*corev1alpha1.Task, <-chan struct{}) {
 	t.Helper()
 	var session *corev1alpha1.SessionReference
 	if namedSession {
 		session = &corev1alpha1.SessionReference{Name: name + "-session", Create: true, Append: true, MaxMessages: 50}
 	}
-	queued := f.queueTask(t, name, types.UID(name+"-uid"), name+" prompt", session)
+	queued := f.queueTask(t, name, types.UID(name+"-uid"), name+" prompt", session, mutate...)
 	ctx, cancel := context.WithCancel(f.ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); dispatchQueuedTask(ctx, t, f.dispatcher, queued.DeepCopy()) }()

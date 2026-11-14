@@ -53,6 +53,11 @@ type ToolSpec struct {
 
 // HTTPExecution defines how to execute the tool via HTTP
 type HTTPExecution struct {
+	// GatewayTaskPass requires controller-only, per-call gateway authority.
+	// It cannot coexist with other authentication, headers, MCP or forwarding.
+	// +optional
+	GatewayTaskPass bool `json:"gatewayTaskPass,omitempty"`
+
 	// URL is the endpoint to call when the tool is invoked
 	// Required for plain HTTP tools. MCP actor-backed tools may omit it when
 	// HTTP is present only for transport auth settings.

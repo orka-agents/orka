@@ -348,6 +348,7 @@ func main() {
 	var storageFlags storageconfig.Flags
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
+	var gatewayTaskPassCredentialsFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
 	var taskWebhookSigningNamespace string
@@ -601,6 +602,8 @@ func main() {
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
+	flag.StringVar(&gatewayTaskPassCredentialsFile, "gateway-task-pass-credentials-file", "",
+		"Controller-only mounted JSON map of Gateway UID to {endpoint,token} for task passes. Endpoint pins the trusted HTTPS origin. Never mount in workers or use delivery bearers.")
 	storageFlags.AddFlags(flag.CommandLine)
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
@@ -1791,6 +1794,11 @@ func main() {
 		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), appStorage, appStorage, appStorage, gatewayConfig)
+	gatewayService.TaskPassCredentials, err = gatewayruntime.LoadTaskPassCredentials(gatewayTaskPassCredentialsFile)
+	if err != nil {
+		setupLog.Error(err, "unable to load gateway task pass credentials")
+		os.Exit(1)
+	}
 	gatewayService.APIReader = mgr.GetAPIReader()
 	if kubeControlStore != nil {
 		gatewayService.SessionCleanup = kubeControlStore
@@ -2457,6 +2465,7 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
+		GatewayService:     gatewayService,
 		SubstrateMCPRouter: substrateMCPRouter,
 		Reader:             mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
