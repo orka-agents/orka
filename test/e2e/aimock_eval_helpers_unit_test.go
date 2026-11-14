@@ -264,3 +264,19 @@ func TestAimockEvalCaptureFinalFlushDeadline(t *testing.T) {
 	require.Equal(t, 1, exit.ExitCode())
 	require.NoError(t, ctx.Err(), "the remote deadline, not the local test deadline, must stop the reader")
 }
+
+func TestAimockEvalCaptureInFlight(t *testing.T) {
+	before := mockLLMEvalSnapshot{instanceID: "i", requestIDs: map[string]bool{"old": true}}
+	state := mockLLMCaptureState{InstanceID: "i", Entries: []mockLLMCaptureEntry{
+		{RequestID: "old"},
+		{RequestID: "done", Complete: true},
+		{RequestID: "failed", Error: "request canceled"},
+	}}
+	if mockLLMCaptureInFlight(before, state) {
+		t.Fatal("settled or earlier requests were reported in flight")
+	}
+	state.Entries = append(state.Entries, mockLLMCaptureEntry{RequestID: "active"})
+	if !mockLLMCaptureInFlight(before, state) {
+		t.Fatal("an active request was not reported in flight")
+	}
+}
