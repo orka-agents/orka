@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN } from '@/lib/secret-like'
 import { cn } from '@/lib/utils'
+import { abbreviateEvidence } from '@/components/execution/execution-route-format'
 import type { Task } from '@/schemas/task'
 
 interface TaskStatusDetailsProps {
@@ -39,23 +40,22 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 
 /**
  * The Task resource's status beyond its phase: conditions, the execution
- * workspace it was placed in, session and result references, and its labels and
- * annotations, with secret-looking ones filtered out.
+ * binding and workspace it was placed in, session and result references, and
+ * its labels and annotations, with secret-looking ones filtered out.
  */
 export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
   const { status, spec, metadata } = task
   const conditions = status?.conditions ?? []
   const ws = status?.executionWorkspace
   const sessionName = spec.sessionRef?.name
+  const binding = status?.agentExecutionBinding
   const resultRef = status?.resultRef
-  const legacyResultAvailable = resultRef?.available === undefined && Boolean(resultRef?.configMapName || resultRef?.key)
-  const resultAvailable = resultRef?.available === true || legacyResultAvailable
   const labels = nonSecretEntries(metadata.labels)
   const annotations = nonSecretEntries(metadata.annotations)
   const wsPlacement = ws?.placement
   const wsDensity = ws?.density
   const hasLabels = labels.length > 0 || annotations.length > 0
-  if (!conditions.length && !ws && !sessionName && !resultRef && !hasLabels) return null
+  if (!conditions.length && !binding && !ws && !sessionName && !resultRef && !hasLabels) return null
 
   return (
     <Card>
@@ -79,6 +79,18 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
                 </li>
               ))}
             </ul>
+          </Section>
+        )}
+
+        {/* Digests stay abbreviated, as everywhere else on the dashboard. */}
+        {binding && (
+          <Section title="Execution binding">
+            <Field label="Backend" value={binding.backend} />
+            {(binding.runtimeRef?.name || binding.runtimeType) && (
+              <Field label="Runtime" value={binding.runtimeRef?.name ?? binding.runtimeType} />
+            )}
+            <Field label="Binding digest" value={abbreviateEvidence(binding.bindingDigest)} />
+            <Field label="Snapshot digest" value={abbreviateEvidence(binding.snapshot.digest)} />
           </Section>
         )}
 
@@ -108,9 +120,7 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
 
         {resultRef && (
           <Section title="Result">
-            <Field label="Available" value={resultAvailable ? 'Yes' : 'No'} />
-            {resultRef.configMapName && <Field label="ConfigMap" value={resultRef.configMapName} />}
-            {resultRef.key && <Field label="Key" value={resultRef.key} />}
+            <Field label="Available" value={resultRef.available ? 'Yes' : 'No'} />
           </Section>
         )}
 

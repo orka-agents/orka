@@ -130,14 +130,14 @@ func (b *SystemPromptBuilder) renderNumbered(parts []promptPart, label func(int)
 	return strings.Join(items, sep)
 }
 
-// promptSections returns every guidance part list, for tests that check the
-// declared requirements.
-func promptSections() map[string][]promptPart {
-	return map[string][]promptPart{
-		"behavior": behaviorParts(), "tool_call_style": toolCallStyleParts(), "task_types": taskTypeParts(),
-		"validation": validationParts(), "coordination": coordinationParts(), "coordination fallback": coordinationFallbackParts(),
-		"scheduling": schedulingParts(), "rules": ruleParts(), "examples": exampleParts(),
-	}
+// chatCatalogStart opens the cluster catalog, the first part of the chat
+// system prompt that changes with the cluster.
+const chatCatalogStart = "<available_agents>\n"
+
+// chatPromptStable is how many leading bytes of a chat system prompt are the
+// fixed sections, which stay the same while the cluster changes.
+func chatPromptStable(systemPrompt string) int {
+	return max(strings.Index(systemPrompt, chatCatalogStart), 0)
 }
 
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
@@ -165,8 +165,14 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString(b.availableChatToolsSection())
 	}
 
-	// Dynamic context
-	sb.WriteString("<available_agents>\n")
+	sb.WriteString(b.rulesSection())
+	sb.WriteString(b.examplesSection())
+
+	// The cluster catalog comes after every fixed section, so a new Agent or
+	// Tool leaves the instructions before it cached: a provider that caches
+	// prefixes itself reuses them up to the first changed byte, and
+	// chatPromptStable tells one that needs breakpoints where they end.
+	sb.WriteString(chatCatalogStart)
 	sb.WriteString("Skills are loaded on-demand. Read skill content only when relevant to the current task.\n")
 	sb.WriteString(agentsSection)
 	sb.WriteString("</available_agents>\n\n")
@@ -186,9 +192,6 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString(skillsSection)
 		sb.WriteString("</available_skills>\n\n")
 	}
-
-	sb.WriteString(b.rulesSection())
-	sb.WriteString(b.examplesSection())
 
 	if userSystemPrompt != "" {
 		sb.WriteString("\n<user_instructions>\n")
@@ -262,10 +265,6 @@ has completed or failed. After completion, call fetch_task_output to get the res
 	}
 }
 
-func buildBehaviorSection() string {
-	return (&SystemPromptBuilder{}).behaviorSection()
-}
-
 // behaviorSection keeps the behavior guidance whose tools are offered.
 func (b *SystemPromptBuilder) behaviorSection() string {
 	return b.render(behaviorParts())
@@ -283,10 +282,6 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 	}
 }
 
-func buildToolCallStyleSection() string {
-	return (&SystemPromptBuilder{}).render(toolCallStyleParts())
-}
-
 // taskTypeParts describes each task type separately, and splits out sentences
 // that point to another task tool, so a caller offered only some task tools
 // still gets guidance for the ones it has.
@@ -302,7 +297,7 @@ func taskTypeParts() []promptPart {
     • curl: "cgr.dev/chainguard/curl:latest"
     • git: "cgr.dev/chainguard/git:latest-dev"
   All containers run as non-root with read-only root filesystem.
-  Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
+  Writable paths: /tmp always; /workspace and /home/worker only with a workspace. Do NOT assume root access.
 `, requires: []string{promptToolContainerTask}},
 		{text: `- ai: Run an LLM-powered task. Use create_ai_task; omit providerRef unless the user explicitly requests another provider.
   Use for: reasoning, analysis, content generation, code review, summarization,
@@ -322,7 +317,7 @@ func taskTypeParts() []promptPart {
 		{text: `  When the task involves a git repository, ALWAYS include workspace.gitRepo so
   the repository workspace is prepared for the runtime:
     create_agent_task({"agentRef": "coder", "prompt": "...", "workspace": {"gitRepo": "https://github.com/org/repo"}, "timeout": "15m"})
-  When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
+  When creating new agents for coding tasks, check the agent_runtimes in the Runtime line.
   OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured. It requires
   model.name plus reviewed model.contextWindow and model.maxTokens ceilings, uses the controller provider proxy,
   and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
@@ -340,10 +335,6 @@ func taskTypeParts() []promptPart {
 		{text: `  Do NOT use create_agent_task for non-runtime agents.
 `, requires: []string{promptToolAgentTask}},
 	}
-}
-
-func buildTaskTypesSection() string {
-	return (&SystemPromptBuilder{}).taskTypesSection()
 }
 
 // taskTypesSection describes the task types whose tools are offered.
@@ -373,10 +364,6 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 
 `, requires: []string{promptToolContainerTask}},
 	}
-}
-
-func buildValidationSection() string {
-	return (&SystemPromptBuilder{}).render(validationParts())
 }
 
 // coordinationParts splits the coordination guidance by the chat tools each
@@ -443,10 +430,6 @@ func coordinationFallbackParts() []promptPart {
 	}
 }
 
-func buildCoordinationSection() string {
-	return (&SystemPromptBuilder{}).coordinationSection()
-}
-
 // coordinationSection keeps the coordination guidance whose tools are offered.
 func (b *SystemPromptBuilder) coordinationSection() string {
 	parts := b.render(coordinationParts())
@@ -476,10 +459,6 @@ set the schedule parameter on the task.
 
 `, anyOf: promptTaskCreators},
 	}
-}
-
-func buildSchedulingSection() string {
-	return (&SystemPromptBuilder{}).render(schedulingParts())
 }
 
 // ruleParts lists the orchestration rules. General rules have no
@@ -550,10 +529,6 @@ func ruleParts() []promptPart {
 	}
 }
 
-func buildRulesSection() string {
-	return (&SystemPromptBuilder{}).rulesSection()
-}
-
 // rulesSection numbers the rules whose tools are offered.
 func (b *SystemPromptBuilder) rulesSection() string {
 	rules := b.renderNumbered(ruleParts(), func(n int) string { return fmt.Sprintf("%d. ", n) }, "")
@@ -608,10 +583,6 @@ func exampleParts() []promptPart {
 	}
 }
 
-func buildExamplesSection() string {
-	return (&SystemPromptBuilder{}).examplesSection()
-}
-
 // examplesSection numbers the examples whose tools are offered.
 func (b *SystemPromptBuilder) examplesSection() string {
 	examples := b.renderNumbered(exampleParts(), func(n int) string { return fmt.Sprintf("Example %d: ", n) }, "\n")
@@ -622,12 +593,16 @@ func (b *SystemPromptBuilder) examplesSection() string {
 }
 
 // buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.
+// Each list is sorted by name: a cached client lists in no fixed order, and the
+// system prompt must not change between requests while the cluster does not, or
+// every request misses the provider's prompt cache.
 func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection, skillsSection string, err error) {
 	// Fetch agents
 	var agentList corev1alpha1.AgentList
 	if err := b.client.List(ctx, &agentList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing agents: %w", err)
 	}
+	slices.SortFunc(agentList.Items, func(a, b corev1alpha1.Agent) int { return strings.Compare(a.Name, b.Name) })
 
 	agentLines := make([]string, 0, len(agentList.Items))
 	for i := range agentList.Items {
@@ -647,6 +622,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &toolList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing tools: %w", err)
 	}
+	slices.SortFunc(toolList.Items, func(a, b corev1alpha1.Tool) int { return strings.Compare(a.Name, b.Name) })
 
 	toolLines := make([]string, 0, len(toolList.Items)+5)
 	// Built-in tools
@@ -670,6 +646,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &providerList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing providers: %w", err)
 	}
+	slices.SortFunc(providerList.Items, func(a, b corev1alpha1.Provider) int { return strings.Compare(a.Name, b.Name) })
 
 	providerNames := make([]string, 0, len(providerList.Items))
 	for i := range providerList.Items {
@@ -707,6 +684,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing skills: %w", err)
 	}
+	slices.SortFunc(skillList.Items, func(a, b corev1alpha1.Skill) int { return strings.Compare(a.Name, b.Name) })
 	if len(skillList.Items) > 0 {
 		skillLines := make([]string, 0, len(skillList.Items))
 		for i := range skillList.Items {

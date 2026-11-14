@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +44,7 @@ import (
 	"github.com/orka-agents/orka/internal/tasktrace"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -153,7 +153,7 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-event-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-event-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -176,7 +176,7 @@ func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-plan-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-plan-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -367,7 +367,7 @@ func prepareBoundACPDispatcherTaskForTest(
 	ctx context.Context,
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
-	controlStore *sqlite.Store,
+	controlStore *sealedTestStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
@@ -383,20 +383,13 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
 	controlStore store.DurableControlStore,
-	persistence *sqlite.Store,
+	persistence store.AgentExecutionSnapshotStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
 	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
 	binder := &TaskReconciler{
 		Client:                  kubeClient,
 		APIReader:               kubeClient,
@@ -1695,7 +1688,7 @@ func TestACPDispatcherExplicitRuntimeRPCFailureIsPromptFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "rpc-failure")
 	defer stopEpoch()
 	fence, err := epochs.CurrentFence(ctx)
@@ -1862,12 +1855,12 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	persistence := sqlite.NewStore(db, "test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", persistence, kubestore.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -2383,7 +2376,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			controlStore := sqlite.NewStore(db, "frozen-dispatch-test")
+			controlStore := sealedStore(t, sqlite.NewStore(db, "frozen-dispatch-test"))
 			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "frozen-"+test.name)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
@@ -2529,7 +2522,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
-	var persistence *sqlite.Store
+	var persistence *sealedTestStore
 	var nativeSnapshot *harnessv2.NativeSessionSnapshot
 	if nativeCapture {
 		snapshot := storetest.NativeSessionSnapshot(t, "completed write-session native conversation")
@@ -2608,7 +2601,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	persistence = controlStore
 	epochs := NewControllerEpochManager(controlStore, "controller-write-session")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
@@ -2992,7 +2985,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-timeout-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -3261,7 +3254,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -3294,7 +3287,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt = completeACPAttemptExecutionForTest(t, controlStore, fence, attempt, false)
+	attempt = completeACPAttemptExecutionForTest(t, controlStore.Store, fence, attempt, false)
 	transitionDigest := testControlDigestForDispatcher("delivery-validating")
 	_, err = controlStore.TransitionPromptAttemptDelivery(ctx, store.PromptAttemptDeliveryTransition{
 		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptDeliveryNotRequested,
@@ -4545,6 +4538,23 @@ func TestACPDispatcherSettlesDeletingTaskBeforeClosedAdmissionAndWorkerCapacity(
 	}, corev1alpha1.TaskExecutionReason("Cancelled"), "task cancelled before runtime admission", true)
 }
 
+func TestACPDispatcherSettlesCancelledTaskBeforeRuntimePoolAdmissionWithItsRequest(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", false)
+}
+
+// A cancel request recorded before the controller writes the Cancelled phase
+// already stops runtime admission: the queued Task is settled, not started.
+func TestACPDispatcherSettlesCancelRequestedTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	for _, throughDispatch := range []bool{false, true} {
+		runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+			task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", throughDispatch)
+	}
+}
+
 func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	timeout := metav1.Duration{Duration: time.Minute}
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
@@ -4737,7 +4747,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4816,7 +4826,7 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4885,6 +4895,108 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// promptAdmissionWorkspacePool turns the reservation fixture's pool into a
+// dedicated execution-workspace pool in the given lifecycle and admission.
+func promptAdmissionWorkspacePool(
+	t *testing.T, kubeClient client.Client, pool *corev1alpha1.RuntimePool, workspace bool,
+	lifecycle corev1alpha1.RuntimePoolLifecycle, admission corev1alpha1.RuntimePoolAdmissionState, annotations map[string]string,
+) *corev1alpha1.RuntimePool {
+	t.Helper()
+	ctx := context.Background()
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if workspace {
+		current.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: "workspace", UID: "workspace-uid"},
+			Workload:     &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{},
+		}
+	}
+	current.Annotations = annotations
+	if err := kubeClient.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Lifecycle, current.Status.AdmissionState = lifecycle, admission
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	return current.DeepCopy()
+}
+
+// A rate-limited prompt that was never accepted is requeued, not held for
+// capacity on the same exact instance, only when that instance is being
+// replaced: always for external runtimes, and for a dedicated
+// execution-workspace pool only while its current state shows a drain,
+// retirement, or eviction. A Serving and Accepting workspace pool, whose 429
+// means its prompt slot is busy, waits for capacity like a shared pool.
+func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
+	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
+	for _, test := range []struct {
+		name        string
+		external    bool
+		workspace   bool
+		lifecycle   corev1alpha1.RuntimePoolLifecycle
+		admission   corev1alpha1.RuntimePoolAdmissionState
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "shared pool serving", lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "shared pool draining", lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+		{name: "external runtime", external: true, want: true},
+		{name: "workspace pool serving and accepting", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "workspace pool accepting with stale eviction marker", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting, annotations: evicted},
+		{name: "workspace pool draining", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed, want: true},
+		{name: "workspace pool evicted before lifecycle update", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionClosed, annotations: evicted, want: true},
+		{name: "workspace pool closed for another reason", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleStarting, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, _, _ := newRuntimePoolReservationTestFixture(t)
+			target := acpDispatchTarget{external: &corev1alpha1.AgentRuntime{}}
+			if !test.external {
+				target = acpDispatchTarget{pool: promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, test.lifecycle, test.admission, test.annotations)}
+			}
+			if got := dispatcher.promptAdmissionRejectionRequeues(context.Background(), target); got != test.want {
+				t.Fatalf("promptAdmissionRejectionRequeues = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+// A prompt waiting for capacity after a 429 stops waiting once its
+// execution-workspace instance starts retiring, so it can be requeued for the
+// replacement instead of failing when the instance changes. A shared pool
+// keeps waiting.
+func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace bool
+		admission corev1alpha1.RuntimePoolAdmissionState
+		instance  harnessv2.RuntimeInstanceID
+		want      error
+	}{
+		{name: "workspace pool draining", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "workspace pool replaced", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionAccepting, instance: "evicted-pod.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "shared pool draining", admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+			dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+			lifecycle := corev1alpha1.RuntimePoolLifecycleDraining
+			if test.admission == corev1alpha1.RuntimePoolAdmissionAccepting {
+				lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+			}
+			current := promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, lifecycle, test.admission, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, test.instance)
+			if lease != nil || !errors.Is(err, test.want) {
+				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
+			}
+		})
 	}
 }
 
@@ -4974,7 +5086,7 @@ func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *test
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "session-rollback-test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "session-rollback-test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
 	if err != nil {
 		t.Fatal(err)

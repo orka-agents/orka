@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -177,6 +178,70 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Execution == nil || task.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown {
 		t.Fatalf("recovered task status = %#v", task.Status)
+	}
+}
+
+// A cancel request recorded just before the controller restarted does not
+// prove the in-flight prompt stopped: recovery keeps the outcome unknown and
+// carries the request in the terminal message, whether or not the controller
+// already wrote the Cancelled phase.
+func TestACPDispatcherRecoveryKeepsACancelRequestedBeforeRestart(t *testing.T) {
+	const request = "cancelled by alice: wrong repository"
+	const wantMessage = request + "; controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+	for _, test := range []struct {
+		name           string
+		state          store.PromptExecutionState
+		phaseCancelled bool
+	}{
+		{name: "accepted", state: store.PromptExecutionAccepted},
+		{name: "running", state: store.PromptExecutionRunning},
+		{name: "running-already-cancelled", state: store.PromptExecutionRunning, phaseCancelled: true},
+		{name: "settling", state: store.PromptExecutionSettling},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, test.state)
+			defer fixture.close(t)
+			key := types.NamespacedName{Namespace: "default", Name: "task"}
+			task := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Annotations == nil {
+				task.Annotations = map[string]string{}
+			}
+			task.Annotations[labels.AnnotationCancelRequested] = request
+			if err := fixture.kubeClient.Update(fixture.ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			if test.phaseCancelled {
+				task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+				task.Status.Message = request
+				if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.OutcomeMarker != wantMessage {
+				t.Fatalf("attempt = %s %q, want OutcomeUnknown carrying the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
+			}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			execution := task.Status.Execution
+			if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Message != wantMessage || execution == nil ||
+				execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+				execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown ||
+				execution.Reason != "RuntimeLost" || execution.Message != wantMessage {
+				t.Fatalf("task status = %#v, want Failed with OutcomeUnknown carrying the cancel request", task.Status)
+			}
+		})
 	}
 }
 
@@ -475,6 +540,77 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 			if updated.Status.Execution == nil || updated.Status.Execution.ControllerEpoch != 2 ||
 				updated.Status.Execution.Reason != test.wantReason || updated.Status.Execution.Message != test.wantMessage {
 				t.Fatalf("recovered terminal execution = %#v, want epoch 2 reason %q message %q", updated.Status.Execution, test.wantReason, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestACPDispatcherPatchRecoveredTerminalExecutionClassifiesDeliveryPhase(t *testing.T) {
+	tests := []struct {
+		name      string
+		delivery  store.PromptDeliveryState
+		taskState corev1alpha1.TaskDeliveryState
+		outcome   corev1alpha1.TaskDeliveryOutcome
+		wantPhase corev1alpha1.TaskPhase
+	}{
+		{
+			name: "cancelled before publish settles as cancelled", delivery: store.PromptDeliveryCancelledBeforePublish,
+			taskState: corev1alpha1.TaskDeliveryStateCancelledBeforePublish, outcome: corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish,
+			wantPhase: corev1alpha1.TaskPhaseCancelled,
+		},
+		{
+			name: "verified publication settles as succeeded", delivery: store.PromptDeliveryVerifiedExact,
+			taskState: corev1alpha1.TaskDeliveryStateVerifiedExact, outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded,
+		},
+		{
+			name: "delivery conflict settles as failed", delivery: store.PromptDeliveryConflict,
+			taskState: corev1alpha1.TaskDeliveryStateDeliveryConflict, outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
+			wantPhase: corev1alpha1.TaskPhaseFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			storeValue, _, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "recovered-delivery-phase.db"))
+			defer closeStore()
+			// A session-bound Task skips the standalone projection, and without a
+			// durable publication the recovered delivery status comes from the Task.
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recovered-delivery-phase", UID: types.UID("recovered-delivery-phase-uid")},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: "session"}},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseRunning,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						Attempt: 1, PromptID: "prompt-1", State: corev1alpha1.TaskExecutionStateSucceeded,
+						Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+					},
+					Delivery: &corev1alpha1.TaskDeliveryStatus{State: test.taskState, Outcome: test.outcome},
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+			if err := kubeClient.Get(ctx, clientObjectKey(task), task); err != nil {
+				t.Fatal(err)
+			}
+			dispatcher := &ACPDispatcher{Client: kubeClient, Store: storeValue}
+			attempt := &store.PromptAttempt{
+				ExecutionState: store.PromptExecutionSucceeded, DeliveryState: test.delivery,
+				SessionUID: "session-uid", SessionLeaseGeneration: 1,
+			}
+			if err := dispatcher.patchRecoveredTerminalExecution(ctx, task, attempt, 2); err != nil {
+				t.Fatal(err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := kubeClient.Get(ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != test.wantPhase {
+				t.Fatalf("recovered phase = %s, want %s", updated.Status.Phase, test.wantPhase)
+			}
+			if updated.Status.Delivery == nil || updated.Status.Delivery.Outcome != test.outcome {
+				t.Fatalf("recovered delivery = %#v, want outcome %s", updated.Status.Delivery, test.outcome)
 			}
 		})
 	}
@@ -1630,12 +1766,12 @@ func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			persistence := sqlite.NewStore(db, "restored-finalizer")
+			persistence := sealedStore(t, sqlite.NewStore(db, "restored-finalizer"))
 			controlStore, err := kubestore.NewComposite(intercepted, "default", persistence, kubestore.WithAPIReader(intercepted))
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1))
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1), persistence)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {
@@ -2906,7 +3042,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "test"))
 
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -2947,7 +3083,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old")
+	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old", sqliteStore)
 	oldFence, err := oldEpochs.CurrentFence(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -3059,7 +3195,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new")
+	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new", sqliteStore)
 	defer stopNewEpoch()
 	newContinuity := newACPRecoveryContinuity(t, restartedStore, sqliteStore, control.SessionUID)
 	dispatcher := &ACPDispatcher{
@@ -3451,9 +3587,14 @@ func newACPRecoveryContinuity(t *testing.T, controls store.DurableControlStore, 
 	return continuity
 }
 
-func startACPRecoveryEpochManager(t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string) (*ControllerEpochManager, func()) {
+func startACPRecoveryEpochManager(
+	t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string, datasets ...EpochDataset,
+) (*ControllerEpochManager, func()) {
 	t.Helper()
 	manager := NewControllerEpochManager(epochStore, holder)
+	for _, dataset := range datasets {
+		manager.WithStorage(storagev1.StateContract, dataset)
+	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(epochCtx) }()
@@ -3483,6 +3624,13 @@ type recoveryFixture struct {
 }
 
 func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *recoveryFixture {
+	t.Helper()
+	return newACPRecoveryFixtureWithBinding(t, target, nil)
+}
+
+// newACPRecoveryFixtureWithBinding binds the old-epoch attempt to binding when
+// it enters Planned, as standalone dispatch does before RuntimeSession creation.
+func newACPRecoveryFixtureWithBinding(t *testing.T, target store.PromptExecutionState, binding *attemptRuntimeBinding) *recoveryFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
@@ -3532,10 +3680,16 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 		if attempt.ExecutionState == target {
 			break
 		}
-		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		transition := store.PromptAttemptExecutionTransition{
 			ID: attempt.ID, Fence: oldFence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState, NewState: next,
 			OperationID: "recover-" + string(next), OperationDigest: testControlDigestForDispatcher("recover-" + string(next)), UpdatedAt: time.Now().UTC(),
-		})
+		}
+		if binding != nil && next == store.PromptExecutionPlanned {
+			transition.RuntimeInstanceID = binding.RuntimeInstanceID
+			transition.SessionUID = binding.SessionUID
+			transition.SessionLeaseGeneration = binding.SessionGeneration
+		}
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, transition)
 		if err != nil {
 			t.Fatal(err)
 		}

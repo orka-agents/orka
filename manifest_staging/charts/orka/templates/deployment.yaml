@@ -1,9 +1,14 @@
+{{- $aiWorkerRBACProfile := include "orka.aiWorkerRBACProfile" . -}}
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
+{{- include "orka.validateStorage" . }}
+{{- $storageConfigEnabled := include "orka.storageConfigEnabled" . -}}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
+{{- include "orka.validateAgentHosts" . }}
+{{- include "orka.validateTaskWebhooks" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -53,13 +58,17 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
         orka.ai/network-role: controller
-      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce }}
+      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce $storageConfigEnabled }}
       annotations:
         {{- with .Values.annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- with .Values.publisher.auth.rolloutNonce }}
         orka.ai/publisher-auth-rollout-nonce: {{ . | quote }}
+        {{- end }}
+        {{- if $storageConfigEnabled }}
+        {{- /* The controller reads the storage configuration once at startup, so a change rolls it. */}}
+        orka.ai/storage-config-checksum: {{ include "orka.storageConfig" . | sha256sum | quote }}
         {{- end }}
       {{- end }}
     spec:
@@ -77,7 +86,8 @@ spec:
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
-            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+            {{- /* Fully qualified: native workspace runtimes cannot resolve "<service>.<namespace>.svc". */}}
+            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:{{ .Values.service.port }}
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
@@ -102,10 +112,15 @@ spec:
             - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
             - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
             {{- end }}
+            - {{ printf "--task-webhook-signing-secret=%s" (include "orka.taskWebhookSigningSecretName" .) | quote }}
+            - {{ printf "--task-webhook-signing-namespace=%s" (include "orka.taskWebhookSigningNamespace" .) | quote }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
 
             - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
+            - --acp-runtime-pool-max-running-prompts={{ dig "pool" "maxRunningPrompts" 4 .Values.controller.acpRuntime }}
+            - --acp-runtime-pool-max-resident-sessions={{ dig "pool" "maxResidentSessions" 10 .Values.controller.acpRuntime }}
+            - --acp-dispatch-max-concurrent-tasks={{ dig "dispatch" "maxConcurrentTasks" 4 .Values.controller.acpRuntime }}
 
             {{- if .Values.controller.acpRuntime.upgradeDrain.enabled }}
             - --acp-upgrade-drain-bind-address=127.0.0.1:{{ .Values.controller.acpRuntime.upgradeDrain.port }}
@@ -115,7 +130,7 @@ spec:
             - --acp-upgrade-drain-marker-namespace={{ .Release.Namespace }}
             {{- end }}
             {{- if .Values.providerProxy.enabled }}
-            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc:8080
+            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}:8080
             - --acp-provider-proxy-namespace={{ .Release.Namespace }}
             - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
             - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
@@ -179,8 +194,31 @@ spec:
             - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- if dig "agentUseAuthorization" "enabled" false .Values.controller }}
+            - --agent-use-authorization-enabled=true
+            {{- end }}
+            {{- $entraTenant := dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+            {{- $entraBlueprint := dig "agentIdentity" "entra" "blueprintClientID" "" .Values.controller }}
+            {{- if or $entraTenant $entraBlueprint }}
+            {{- if not (and $entraTenant $entraBlueprint) }}
+            {{- fail "controller.agentIdentity.entra.tenantID and controller.agentIdentity.entra.blueprintClientID must be set together" }}
+            {{- end }}
+            - {{ printf "--agent-identity-entra-tenant-id=%s" $entraTenant | quote }}
+            - {{ printf "--agent-identity-entra-blueprint-client-id=%s" $entraBlueprint | quote }}
+            {{- with dig "agentIdentity" "entra" "authority" "" .Values.controller }}
+            - {{ printf "--agent-identity-entra-authority=%s" . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
+            {{- end }}
+            {{- if include "orka.agentHostsEnabled" . }}
+            - --enable-agent-hosts=true
+            - {{ printf "--agent-host-namespace=%s" (include "orka.agentHostNamespace" .) | quote }}
+            - {{ printf "--agent-host-agent-image=%s" (include "orka.agentHostAgentImage" .) | quote }}
+            # Matches this template's Pod label; each host's NetworkPolicy
+            # admits only these Pods from the release namespace.
+            - --agent-host-controller-pod-labels=orka.ai/network-role=controller
             {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
@@ -199,6 +237,9 @@ spec:
             - {{ printf "--oidc-namespace=%s" .namespace | quote }}
             {{- end }}
             {{- end }}
+            {{- if eq $aiWorkerRBACProfile "restricted" }}
+            - "--context-token-authz-mode=enforce"
+            {{- end }}
             {{- with .Values.controller.contextToken }}
             {{- if .profile }}
             - {{ printf "--context-token-profile=%s" .profile | quote }}
@@ -215,7 +256,7 @@ spec:
             {{- if .headers }}
             - {{ printf "--context-token-headers=%s" .headers | quote }}
             {{- end }}
-            {{- if .authzMode }}
+            {{- if and .authzMode (ne $aiWorkerRBACProfile "restricted") }}
             - {{ printf "--context-token-authz-mode=%s" .authzMode | quote }}
             {{- end }}
             {{- with .scopes }}
@@ -339,10 +380,21 @@ spec:
             - {{ printf "--outbound-access-trusted-token-endpoint-services=%s" (join "," .trustedTokenEndpointServices) | quote }}
             {{- end }}
             {{- end }}
+            {{- if $storageConfigEnabled }}
+            - --storage-config=/etc/orka/storage/storage.yaml
+            {{- if include "orka.storageUsesSQLite" . }}
+            - --store-path={{ .Values.store.path }}
+            {{- end }}
+            {{- else }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
+            {{- end }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
+            {{- with .Values.workers.sessionLoader }}
+            {{- $_ := required "workers.sessionLoader.image.digest is required" .image.digest }}
+            - --session-loader-image={{ include "orka.imageRef" .image }}
+            {{- end }}
             - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
             - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
             - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}
@@ -358,11 +410,22 @@ spec:
             - --enable-workspace-provider-api=true
             - --acp-workspace-dispatch-enabled=true
             {{- end }}
+            {{- if .Values.controller.executionWorkspace.allowProviderTokenInSandbox }}
+            - --acp-workspace-allow-provider-token-in-sandbox=true
+            {{- end }}
             {{- with .Values.controller.substrate }}
             {{- if .mcpToolsEnabled }}
             - --substrate-mcp-tools-enabled=true
             {{- end }}
+            {{- if .egressCredentialProvider }}
+            - {{ printf "--substrate-egress-credential-provider=%s" .egressCredentialProvider | quote }}
+            {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if (.podCertificate | default dict).enabled }}
+            - --substrate-api-cert-file=/run/substrate-client/credential-bundle.pem
+            - --substrate-api-key-file=/run/substrate-client/credential-bundle.pem
+            - --substrate-api-ca-file=/run/substrate-server/trust-bundle.pem
+            {{- end }}
             {{- if $substrateCredentials.existingSecret }}
             {{- if $substrateCredentials.certKey }}
             - --substrate-api-cert-file=/var/run/orka/substrate-api/client.crt
@@ -390,8 +453,7 @@ spec:
             {{- if .apiInsecureSkipVerify }}
             - --substrate-api-insecure-skip-verify=true
             {{- end }}
-            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "http://atenet-router.ate-system.svc") | quote }}
-            - {{ printf "--substrate-actor-dns-suffix=%s" (.actorDnsSuffix | default "actors.resources.substrate.ate.dev") | quote }}
+            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "https://atenet-router.ate-system.svc:443") | quote }}
             {{- if .defaultTemplate }}
             - {{ printf "--substrate-default-template=%s" .defaultTemplate | quote }}
             {{- end }}
@@ -493,8 +555,21 @@ spec:
               mountPath: /var/run/orka/substrate-api
               readOnly: true
             {{- end }}
+            {{- if (.Values.controller.substrate.podCertificate | default dict).enabled }}
+            - name: substrate-client
+              mountPath: /run/substrate-client
+              readOnly: true
+            - name: substrate-server
+              mountPath: /run/substrate-server
+              readOnly: true
+            {{- end }}
             - name: store
               mountPath: /data
+            {{- if $storageConfigEnabled }}
+            - name: storage-config
+              mountPath: /etc/orka/storage
+              readOnly: true
+            {{- end }}
 
             - name: acp-artifact-capability
               mountPath: /var/run/orka/acp-artifacts
@@ -513,6 +588,12 @@ spec:
             - name: agent-execution-snapshot-key
               mountPath: /var/run/orka/agent-execution-snapshot
               readOnly: true
+            {{- if dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+            # The blueprint's federated credential trusts this token's subject.
+            - name: agent-identity-token
+              mountPath: /var/run/secrets/orka.ai/agent-identity
+              readOnly: true
+            {{- end }}
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
               readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
@@ -540,6 +621,26 @@ spec:
                 path: ca.crt
               {{- end }}
         {{- end }}
+        {{- if (.Values.controller.substrate.podCertificate | default dict).enabled }}
+        # Rotating Substrate pod identity: the router admits only allowlisted
+        # SPIFFE IDs, and ate-api-server authenticates the same certificate.
+        - name: substrate-client
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+        - name: substrate-server
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
+        {{- end }}
 
         - name: acp-artifact-capability
           secret:
@@ -556,6 +657,14 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if $storageConfigEnabled }}
+        - name: storage-config
+          configMap:
+            name: {{ include "orka.storageConfigName" . }}
+            items:
+              - key: storage.yaml
+                path: storage.yaml
+        {{- end }}
         {{- if .Values.publisher.enabled }}
         - name: workspace-publisher-auth
           secret:
@@ -575,6 +684,15 @@ spec:
             items:
               - key: {{ .Values.providerProxy.auth.tokenKey | default "token" }}
                 path: token
+        {{- end }}
+        {{- if dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
+        - name: agent-identity-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: token
         {{- end }}
         - name: agent-execution-snapshot-key
           secret:

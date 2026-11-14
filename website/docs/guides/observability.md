@@ -6,9 +6,10 @@ description: "OpenTelemetry traces, GenAI metrics, and how to follow one task th
 # Observability
 
 Orka emits OpenTelemetry traces and metrics for controller, chat, tool, native AI
-worker, and Orka harness v2 controller/supervisor paths when telemetry is enabled. ACP runtime
-internals remain observable primarily through durable Task execution/delivery
-status, RuntimePool status, bounded events, and structured logs. The GenAI
+worker, Orka harness v2 controller/supervisor, ACP runtime GenAI, and Agent
+Substrate client paths when telemetry is enabled. ACP runtime internals remain
+observable primarily through durable Task execution/delivery status, RuntimePool
+status, bounded events, and structured logs. The GenAI
 signals are backend instrumentation: they are exported over OTLP to your
 collector/backend and are separate from the Orka React UI.
 
@@ -96,11 +97,38 @@ scale-to-zero metrics on the Prometheus metrics endpoint.
 
 With controller telemetry enabled and a worker-reachable trace endpoint,
 managed supervisors receive `ORKA_ENABLE_TELEMETRY=true` and non-secret OTLP
-endpoint, protocol, insecure and compression settings. Generic and trace-specific
-endpoints retain their normal SDK semantics; trace-specific settings take precedence.
+endpoint, protocol, insecure and compression settings for traces and for
+[ACP GenAI metrics](#genai-telemetry-for-acp-runtimes). Generic and signal-specific
+endpoints retain their normal SDK semantics; signal-specific settings take precedence.
 A missing or invalid trace endpoint disables supervisor export. Metrics-only
-configuration does not enable supervisor tracing. Headers, certificate paths,
-resource attributes and content-capture settings are never copied.
+configuration enables neither supervisor tracing nor supervisor metrics. A
+metrics-specific endpoint that is not worker-reachable drops supervisor metrics
+rather than falling back to the generic collector; so does a metrics setting the
+supervisor would reject.
+
+Substrate native runtimes accept 32 environment entries per container and Orka's
+own settings use most of them, leaving three for supervisor telemetry. Orka
+therefore passes the fewest settings that keep each signal's SDK meaning:
+
+- One generic endpoint when it resolves to both signals' URLs, otherwise one
+  signal-specific endpoint per exported signal. A generic OTLP/HTTP base URL
+  becomes the signal URL the SDK would derive from it (`/v1/traces` or
+  `/v1/metrics` appended).
+- A protocol, insecure or compression value that both signals share, once, under
+  its generic name. An explicit `grpc` protocol is the supervisor's default and
+  is not passed.
+- When traces and metrics together would need more than three entries, for
+  example separate OTLP/HTTP collectors per signal, supervisor metrics are
+  dropped and traces are kept.
+
+A dropped signal never falls back to a generic endpoint. Trace settings that
+exceed three entries on their own, such as an OTLP/HTTP endpoint with an
+insecure or compression setting, or telemetry on a native runtime whose
+workspace can suspend, exceed the limit and the provider rejects the workload.
+Headers, certificate paths,
+resource attributes and content-capture settings are never copied. Adding metrics
+settings changes the supervisor Pod template, so existing RuntimePools roll through
+their normal drained replacement the first time a controller with these settings runs.
 
 The v2 mutation client sends W3C `traceparent`/`tracestate` HTTP headers outside canonical
 request bodies and operation capabilities. Authenticated supervisor operations
@@ -119,6 +147,8 @@ narrowly selected collector route/policy before expecting exports. Pod-level
 collector access also permits provider children to reach that collector, because
 they share the Pod network. Choose a collector and authorization boundary
 accordingly. This feature does not install a collector or alter managed policies.
+Agent Substrate runtimes have no Pod network policy to extend; they can opt in to
+an explicit [collector egress rule](#collector-egress-for-agent-substrate-runtimes).
 External supervisors can opt in with the same environment settings. Supervisor
 exporters require `http://` or `https://` endpoint URLs and the scalar settings
 listed above. Unsupported ambient SDK settings (including OTLP headers, certificate
@@ -206,10 +236,19 @@ An Orka harness v2 Task continues the same Task-carried trace across controller 
   ├─ acp.session.create / acp.session.continue
   │   └─ acp.supervisor.session.create  # when a runtime session is created
   ├─ acp.prompt
+  │   ├─ substrate.router POST          # Substrate-routed runtimes only
   │   ├─ acp.supervisor.prompt
+  │   │   └─ invoke_agent {runtime}
+  │   │       ├─ chat {model}           # one per model call through the provider proxy
+  │   │       └─ execute_tool {tool}    # one per ACP tool call
   │   └─ acp.publication.reconcile  # live write-workspace delivery
   └─ acp.publication.reconcile      # recovery after the prompt span is gone
 ```
+
+For Substrate-routed runtimes, `substrate.router` carries the Task trace into
+`atenet-router`, so Substrate's routing spans, including a resume the router
+triggers for a suspended Actor, join the Task trace when Substrate exports
+traces. See [Agent Substrate](#agent-substrate).
 
 Model client spans measure provider-call latency only. Tool spans are siblings
 of the model client span under the same agent/chat step, not children of the
@@ -237,6 +276,9 @@ wins.
 | `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
 | `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
 | `orka.acp.supervisor` | `acp.supervisor.*` authenticated runtime operations | Task UID/attempt, prompt/operation IDs and runtime pool/session identity; no request content |
+| `orka.gen_ai` (ACP supervisor) | `invoke_agent {runtime}`, `chat {model}`, `execute_tool {tool}` | `gen_ai.*` agent/provider/model/usage/tool metadata, `orka.task.uid`, `orka.acp.prompt.id`; see [GenAI telemetry for ACP runtimes](#genai-telemetry-for-acp-runtimes) |
+| `orka.substrate` | `substrate.router {method}` | Router method, authority and response status only |
+| `go.opentelemetry.io/contrib/.../otelgrpc` | `substrate.ateapi.v1.Control/{Method}` client spans | gRPC method and status; no metadata or message events |
 | `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
 | `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
 | `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
@@ -304,6 +346,193 @@ Tool calls executed through the built-in registry are emitted as spans named
 a duration metric. External HTTP/MCP tools use the same span name and
 `orka.tool.kind=http`. OpenAI-compatible and Anthropic-compatible API requests
 emit the same GenAI model-call spans as native Orka chat and AI worker calls.
+
+## GenAI telemetry for ACP runtimes
+
+Built-in ACP runtimes (`codex`, `claude`, `copilot`, `opencode`) run provider CLIs
+that Orka does not instrument. The supervisor derives GenAI spans and metrics
+from what it already observes: the ACP session update stream and the
+supervisor's provider proxy, which every model call passes through. Telemetry
+needs the supervisor trace endpoint described above; metrics also need a metrics
+endpoint (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or the generic endpoint).
+
+| Span | Kind | Derived from | Key attributes |
+|---|---|---|---|
+| `invoke_agent {runtime}` | client | One authenticated prompt, from admission to settlement | `gen_ai.agent.name` (runtime), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (RuntimeSession ID), `gen_ai.response.finish_reasons` (ACP stop reason), `gen_ai.usage.*` when the agent reports ACP turn usage, `orka.task.uid`, `orka.acp.prompt.id`, `error.type` |
+| `chat {model}` | client | One admitted inference request relayed by the provider proxy | `gen_ai.provider.name`, `gen_ai.request.model`, `error.type` (upstream HTTP status, `cancelled`, or `_OTHER`) |
+| `execute_tool {tool}` | internal | ACP `tool_call` / `tool_call_update` until `completed` or `failed` | `gen_ai.tool.name`, `gen_ai.tool.call.id` (canonical ACP call ID), `gen_ai.tool.type`, `orka.tool.name`, `orka.acp.tool.kind`, `error.type` (`tool_error`, `incomplete`, `cancelled`) |
+
+`invoke_agent` is a child of `acp.supervisor.prompt`; `chat` and `execute_tool` are
+its children, so model calls and tool calls appear as siblings, as they do for
+native workers. Spans are written when their outcome is known, with the observed
+start time. `gen_ai.provider.name` names the model API the runtime speaks through
+the proxy: `anthropic` for Claude and `openai` for Codex, Copilot and OpenCode.
+OpenCode pins `provider/model` but always speaks OpenAI chat completions, so its
+prefix does not change the label and `gen_ai.request.model` is the model part.
+With a gateway such as Vekil in front, that is the wire API, not the gateway's
+upstream.
+
+Tool names come only from the adapter's structured tool identity when it is a
+plain identifier (letters, digits, `_ . : / -`, up to 128 characters); otherwise
+the span uses the closed ACP tool kind (`read`, `edit`, `execute`, ...) or
+`other`. Tool titles are free text and never become names. A tool call still open
+when its prompt settles is recorded with `error.type=incomplete`, or `cancelled`
+for cancelled prompts.
+
+Per-call token counts are not available: provider responses stream through the
+proxy unparsed. Token usage is recorded once per prompt on `invoke_agent` and in
+`gen_ai.client.token.usage` with `gen_ai.operation.name=invoke_agent`, and only
+when the ACP agent includes `usage` in its `session/prompt` response. A malformed
+usage report is ignored and never fails a prompt.
+
+ACP runtime metrics:
+
+| Metric | Unit | Datapoints |
+|---|---|---|
+| `gen_ai.client.operation.duration` | `s` | One per `chat` model call (`gen_ai.operation.name=chat`) |
+| `gen_ai.client.token.usage` | `{token}` | Input and output tokens per prompt, when reported (`gen_ai.operation.name=invoke_agent`) |
+| `gen_ai.execute_tool.duration` | `s` | One per ACP tool call |
+| `gen_ai.invoke_agent.duration` | `s` | One per prompt |
+
+Metric attributes are limited to operation, agent/runtime name, provider, model,
+token type, tool name/type and `error.type`. Task, prompt and session identities
+stay on spans. Supervisor metrics use the supervisor's fixed `service.name`
+resource (`orka-acp-supervisor`), like its spans, plus a `service.instance.id`:
+a random UUID drawn each time a supervisor starts. It keeps supervisors that
+report the same runtime and model as separate series, names no Task, user or
+Pod, and changes on every supervisor restart, so aggregate across it for
+fleet-wide totals.
+
+**Content capture stays off for ACP runtimes.** The supervisor never records
+prompts, completions, tool titles, tool arguments, tool results, or provider
+error bodies in span attributes, events or metrics, and ignores
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`.
+
+## Collector egress for Agent Substrate runtimes
+
+Agent Substrate v1 Actors have no direct network egress: the egress gateway
+refuses any destination the runtime's allowlist does not name. By default core's
+allowlist names only the provider proxy and controller API origins, so a
+supervisor configured to export OTLP cannot reach the collector. Opt in
+explicitly:
+
+```bash
+orka-controller --enable-telemetry --runtime-telemetry-collector-egress
+# or ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS=true
+```
+
+When both are set, core adds the origin of each OTLP endpoint it projects into
+the supervisor (the trace endpoint, and the metrics endpoint when it differs) to
+the allowlist of every new Substrate runtime workload request:
+
+- `http://` endpoints become `HTTP` rules, which admit cleartext HTTP/1.1 and
+  h2c, so both OTLP/HTTP and insecure OTLP/gRPC work.
+- `https://` endpoints become `TLSPassthrough` rules, so the supervisor verifies
+  the collector's own certificate.
+- The rule names exactly the endpoint host and port (default `80`/`443`).
+
+Validation fails closed. The controller refuses to start, and admission reports
+the pool `Degraded`, when an endpoint is not an absolute `http(s)` URL, names an
+IP address, a single-label or wildcard host, or conflicts with a core origin on
+the same host and port. Native runtimes cannot resolve a short
+`<service>.<namespace>.svc` Service name, so admission also reports the pool
+`Degraded` for one. Use a fully qualified in-cluster name such as
+`http://otel-collector.otel.svc.cluster.local:4317`, substituting your cluster
+domain if it is not `cluster.local`. Scheme-less gRPC targets
+(`collector:4317`) are rejected because their transport cannot be determined.
+
+The flag does not change Kubernetes NetworkPolicies for Pod-backed runtimes, and
+it is fixed per workload request: a running workload keeps its admitted
+allowlist until its next request. The collector sees connections from the
+Substrate egress gateway, not the Actor, so collector-side `k8sattributes`
+enrichment labels supervisor telemetry with the gateway Pod; rely on the
+supervisor's `service.name` and the Orka span attributes instead. Every process
+in the Actor, including provider CLIs, can reach the allowlisted collector, so
+treat its OTLP ports as reachable by agent code. MCP Tool Actors keep their
+explicit `spec.mcp.substrateActor.egress` and are not changed by this flag.
+
+## Agent Substrate
+
+With `--enable-telemetry`, Orka's Agent Substrate clients propagate W3C trace
+context (`traceparent`/`tracestate`, never baggage) and record client spans for
+calls made inside an existing trace. Calls outside a trace pass through
+unchanged, so background reconciles do not start one trace per Substrate call.
+
+- **Router (HTTPS):** each traced request through `atenet-router` records a
+  `substrate.router {method}` client span (time to response headers) and carries
+  its context to the routed runtime or MCP Actor. This covers ACP harness v2
+  calls to Substrate-routed supervisors (under the Task's `acp.*` spans) and MCP
+  Tool calls proxied by `orka-api` (under the worker's `execute_tool` span).
+- **Control API (gRPC):** `substrate.ateapi.v1.Control` calls record an
+  `otelgrpc` client span and carry the active trace, which `ateapi` extracts for
+  its lifecycle spans and the `atelet`/`ateworker` spans beneath them. In core
+  these calls come from the MCP Tool, SubstrateActorPool and template-validation
+  reconcilers, which do not start traces today, so they produce spans only when
+  invoked from a traced context.
+
+ACP execution workspace lifecycle operations (Actor resume, suspend, delete and
+checkpoint) are performed by the separately deployed `orka-workspace` provider,
+not by core. Core's instrumentation does not cover those calls; correlate them
+by time, Actor and template as described below.
+
+Substrate samples with parent-based samplers, so a sampled Orka trace is sampled
+end to end; its default ratios (10% control plane, 1% router) only apply to
+requests Orka does not trace. Client spans contain no request paths, queries,
+headers, gRPC metadata, bearer tokens or message bodies; a failed gRPC call's
+span status carries Substrate's status message. Disabled telemetry adds no
+instrumentation.
+
+### Substrate metrics relevant to Orka operators
+
+Substrate exports these instruments over OTLP from its own components (see the
+upstream Agent Substrate observability guide and metric registry for all
+labels). They explain latency and failures that surface in Orka as slow or
+`Degraded` RuntimePools, slow cold resumes, or failed MCP Tool calls:
+
+| Substrate metric | What it tells an Orka operator |
+|---|---|
+| `ate.actor.lifecycle.operation.duration` (ateapi) | Duration and failure (`error.type`) of Actor create/resume/suspend/delete. Resume with `error.type=ResourceExhausted` means no worker capacity, the usual cause of a workspace that cannot start or resume. Already-running resumes are excluded. |
+| `ate.scheduler.assignment.duration` (ateapi) | Worker assignment outcome (`assigned`, `no_capacity`, `error`) per pool and sandbox class. |
+| `ate.actor.restore.duration` / `ate.actor.checkpoint.duration` (atelet) | Per-phase cold-resume and checkpoint latency, by snapshot kind/fidelity and template. Orka's data-only suspension uses volume-fidelity snapshots. |
+| `atelet.snapshot.upload.duration`, `atelet.snapshot.undurable.age.max`, `atelet.snapshot.upload.overdue.actors` (atelet) | Whether suspended workspace data has reached durable storage; a growing undurable age puts later cold resumes at risk. |
+| `ate.workerpool.desired_workers` / `ate.workerpool.ready_workers` / `ate.workerpool.workers` (atecontroller, ateapi) | Capacity of the private single-replica WorkerPools the provider creates per allocation. |
+| `atenet.router.route.duration` (atenet-router) | Router outcome and whether a request woke a suspended Actor (`ate.router.resume`); covers Orka's routed supervisor and MCP Tool calls. |
+| `ate.actor.crashes` (ateapi) | Actors that crashed, for example a supervisor that exited. |
+| `rpc.server.call.duration` (all gRPC servers) | Per-method availability and latency of the control API Orka calls. |
+
+Substrate's SLO guide suggests alerting on resume capacity (the
+`ResourceExhausted` share of `ate.actor.lifecycle.operation.duration` resumes,
+with multi-window burn-rate alerts), on `ateapi` RPC availability (5xx-equivalent
+gRPC codes from `rpc.server.call.duration`), and on WorkerPools whose
+`ate.workerpool.workers` stays below `ate.workerpool.desired_workers`. Its
+example Prometheus rules (`docs/examples/gmp-alerting-rules.yaml`) implement
+these as `AteResumeActorCapacityBurnPage`/`Ticket`, `AteApiRpcErrorBudgetBurnPage`/`Ticket`
+and `SubstrateWorkerPoolCapacityNotDelivered`. For Orka, pair them with the
+RuntimePool metrics on the controller's Prometheus endpoint: rising
+`ResourceExhausted` resumes alongside Orka queued Tasks or a closed RuntimePool
+admission state indicates Substrate capacity, not Orka, is the bottleneck.
+
+### Correlating Substrate with Orka Tasks
+
+1. Find the Task trace by `orka.task.id` (controller) or `orka.task.uid`
+   (supervisor and GenAI spans).
+2. Under `acp.prompt` (or a worker's `execute_tool` for MCP Tools), open the
+   `substrate.router` client span. Substrate's router spans beneath it show
+   routing time and any resume of a suspended Actor before the supervisor's
+   `acp.supervisor.*` spans continue the trace.
+3. Substrate component logs and Actor lifecycle records carry top-level
+   `trace_id`/`span_id`, so the same trace ID finds router-driven resume log
+   lines in your log backend.
+4. Substrate metrics carry template and pool labels, not Task identity. Use the
+   time window and the workspace's Actor, template and pool (from the
+   ExecutionWorkspace and provider status) to slice
+   `ate.actor.lifecycle.operation.duration`, `ate.actor.restore.duration` and
+   `atenet.router.route.duration`, including provider-driven resume, suspend and
+   checkpoint operations that are not in the Task trace.
+
+Substrate components export to their own configured collector (`ate-otel-config`);
+point both installations at the same backend to see one trace. Spans are only
+joined when both sides sample the trace.
 
 ## GenAI metrics
 

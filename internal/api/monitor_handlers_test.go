@@ -45,7 +45,7 @@ func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenCon
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	monitorStore := sqlite.NewStore(db, ":memory:")
+	monitorStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
 	require.NoError(t, err)
 
@@ -421,7 +421,7 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 		want    string
 	}{
 		{name: "unsupported event", publish: `{"event":"APPROVE"}`, want: "only supports COMMENT"},
-		{name: "unsupported same head policy", publish: `{"sameHeadPolicy":"replace"}`, want: "sameHeadPolicy only supports skip"},
+		{name: "unsupported same head policy", publish: `{"sameHeadPolicy":"replace"}`, want: "sameHeadPolicy must be skip or update"},
 		{name: "invalid min priority", publish: `{"inline":{"minPriority":"P4"}}`, want: "minPriority must be one of"},
 		{name: "negative max comments", publish: `{"inline":{"maxComments":-1}}`, want: "maxComments must be between 0 and 50"},
 		{name: "too many max comments", publish: `{"inline":{"maxComments":51}}`, want: "maxComments must be between 0 and 50"},
@@ -1019,7 +1019,7 @@ func TestGetRepositoryMonitorImplementationPatchPreview(t *testing.T) {
 		PatchArtifactID:  "orka-issue-42-summary.json",
 	}))
 	artifact := []byte(`{"schemaVersion":"orka.patch.v1","patchArtifactID":"orka-issue-42.diff","changedFiles":["internal/x.go"]}`)
-	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), "demo", "impl-task", "orka-issue-42-summary.json", "application/json", artifact))
+	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: artifact}))
 
 	req := httptest.NewRequest(http.MethodGet, "/monitors/implementation-jobs/impl-preview/patch-preview?namespace=demo", nil)
 	resp, err := app.Test(req)

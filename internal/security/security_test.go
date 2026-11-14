@@ -15,28 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestArtifactWorkspacePath(t *testing.T) {
-	tests := []struct {
-		name    string
-		subPath string
-		want    string
-	}{
-		{name: "root", subPath: "", want: ArtifactWorkspaceDir},
-		{name: "single level", subPath: "services", want: "../" + ArtifactWorkspaceDir},
-		{name: "nested", subPath: "services/api", want: "../../" + ArtifactWorkspaceDir},
-		{name: "normalizes slashes", subPath: "/services/api/", want: "../../" + ArtifactWorkspaceDir},
-		{name: "ignores traversal", subPath: "../services", want: ArtifactWorkspaceDir},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ArtifactWorkspacePath(tt.subPath); got != tt.want {
-				t.Fatalf("ArtifactWorkspacePath(%q) = %q, want %q", tt.subPath, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseGitHubRepositoryURL(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -365,7 +343,7 @@ func TestBuildValidationResultPromptIncludesFindingQualityPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	finding := &store.Finding{ID: "fnd_1", Title: "Finding", Severity: "high", Confidence: "high"}
 	got := BuildValidationResultPrompt(scan, finding, testResultBinding())
-	for _, want := range []string{"FINDING QUALITY POLICY", "theoretical, stale, docs-only, test-only, client-only", "status=failed"} {
+	for _, want := range []string{"FINDING QUALITY POLICY", "stale, docs-only, test-only, client-only", "status=failed"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("BuildValidationResultPrompt() missing %q:\n%s", want, got)
 		}

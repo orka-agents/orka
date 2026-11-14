@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +40,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -669,8 +672,18 @@ func validScopeToken(scope string) bool {
 
 func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
 	tools := provider.Spec.Tools
-	if len(tools) == 0 {
-		return invalid("tools requires at least one entry")
+	if len(tools) == 0 && provider.Spec.AgentHost == nil {
+		return invalid("tools requires at least one entry unless the provider serves agent hosts")
+	}
+	if host := provider.Spec.AgentHost; host != nil {
+		if strings.TrimSpace(host.TemplateRef.Name) == "" {
+			return invalid("agentHost.templateRef.name is required")
+		}
+		// Orka asks api.github.com whose a host's token is, so the token
+		// must come from github.com, and never goes anywhere else.
+		if endpoint, err := url.Parse(provider.Spec.OAuth.TokenURL); err != nil || endpoint.Host != "github.com" {
+			return invalid("agentHost requires a github.com provider: oauth.tokenURL must be on github.com")
+		}
 	}
 	if len(tools) > maxToolCount {
 		return invalid("tools has too many entries")
@@ -734,9 +747,39 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 			if issue := validateHTTPTool(tool.Name, *tool.HTTP); issue != nil {
 				return issue
 			}
+			if issue := validateForwardingTool(tool); issue != nil {
+				return issue
+			}
 		default:
 			return invalid(fmt.Sprintf("tool %q source must be Builtin or HTTP", tool.Name))
 		}
+	}
+	return nil
+}
+
+// validateForwardingTool keeps a forwarding tool to one origin: its
+// arguments are the runtime's fixed request shape, so it declares none. It is
+// class read; writes, which a linked account makes only through a
+// readWrite link, need its forward.writes as well as the Tool's.
+func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
+	forward := tool.HTTP.Forward
+	if forward == nil {
+		return nil
+	}
+	if forward.Protocol != corev1alpha1.HTTPForwardProtocolAzureResourceManager {
+		return invalid(fmt.Sprintf("HTTP tool %q names an unsupported forwarding protocol", tool.Name))
+	}
+	if tool.Class != corev1alpha1.ConnectorToolClassRead {
+		return invalid(fmt.Sprintf("forwarding tool %q must be class read", tool.Name))
+	}
+	if tool.Parameters != nil && len(tool.Parameters.Raw) > 0 {
+		return invalid(fmt.Sprintf("forwarding tool %q declares no parameters", tool.Name))
+	}
+	if len(tool.HTTP.Headers) > 0 {
+		return invalid(fmt.Sprintf("forwarding tool %q sets no headers", tool.Name))
+	}
+	if _, err := harnessv2.ForwardOrigin(tool.HTTP.URL); err != nil {
+		return invalid(fmt.Sprintf("forwarding tool %q url must be an https origin with no path", tool.Name))
 	}
 	return nil
 }
@@ -857,6 +900,25 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 	if value, ok := secret.Data[ref.Key]; !ok || len(strings.TrimSpace(string(value))) == 0 {
 		return unresolved(ReasonReferenceInvalid, "client secret Secret key was not found or is empty"), nil
 	}
+	// A provider that serves agent hosts is ready only once their template
+	// exists and reaches each host only through its owner's account.
+	if host := provider.Spec.AgentHost; host != nil {
+		template := &corev1alpha1.AgentHostTemplate{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: provider.Namespace, Name: host.TemplateRef.Name}, template); err != nil {
+			if apierrors.IsNotFound(err) {
+				return unresolved(ReasonReferenceNotFound, "agentHost template was not found"), nil
+			}
+			return nil, fmt.Errorf("resolve agent host template: %w", err)
+		}
+		if template.Spec.Access != corev1alpha1.AgentHostAccessRelay {
+			return unresolved(ReasonReferenceInvalid, "agentHost template must use access: Relay"), nil
+		}
+		// A template the AgentHost reconciler would refuse leaves every host
+		// it provisions failed, so the provider is not offered meanwhile.
+		if err := agenthost.ValidateTemplate(template); err != nil {
+			return unresolved(ReasonReferenceInvalid, fmt.Sprintf("agentHost template is invalid: %v", err)), nil
+		}
+	}
 	return nil, nil
 }
 
@@ -973,6 +1035,15 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range tools {
 		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method, "parameters", canonicalSchema(tool.Parameters))
+		// A forwarding tool may reach any read path on its origin, not one
+		// endpoint, so turning a tool into one needs renewed consent, and so
+		// does letting it write. Tools without either keep their digest.
+		if tool.HTTP.Forward != nil {
+			parts = append(parts, "forward", string(tool.HTTP.Forward.Protocol))
+			if tool.HTTP.Forward.Writes != nil {
+				parts = append(parts, "forward-writes")
+			}
+		}
 		headerNames := make([]string, 0, len(tool.HTTP.Headers))
 		for name := range tool.HTTP.Headers {
 			headerNames = append(headerNames, name)
@@ -995,6 +1066,12 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(builtins, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range builtins {
 		parts = append(parts, "builtin", tool.Name, string(tool.Class), BuiltinConnectorToolAudience)
+	}
+	// Serving agent hosts hands the person's access tokens to their host,
+	// where its code can read them: a consent that never disclosed that does
+	// not cover it.
+	if host := provider.Spec.AgentHost; host != nil {
+		parts = append(parts, "agentHost", host.TemplateRef.Name)
 	}
 	return lengthPrefixedDigest(parts)
 }

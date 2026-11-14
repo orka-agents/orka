@@ -39,6 +39,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -127,6 +128,9 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
+	// chatTurns stops a chat Session's in-flight request on session cancel.
+	chatTurns chatTurnStopper
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -154,6 +158,7 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -189,6 +194,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 	}
 }
@@ -454,6 +460,20 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
+// jsonObjectHasField reports whether object has a member that encoding/json
+// decodes into a struct field named field. encoding/json matches field names
+// under strings.EqualFold, which also folds non-ASCII spellings such as U+017F
+// (ſ) to "s", so "RequestedBy" and "requeſtedBy" both fill a field tagged
+// "requestedBy". strings.ToLower or an exact lookup misses some of them.
+func jsonObjectHasField(object map[string]json.RawMessage, field string) bool {
+	for key := range object {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
+}
+
 func rejectRequestedByTampering(body []byte) error {
 	if len(body) == 0 {
 		return nil
@@ -464,28 +484,24 @@ func rejectRequestedByTampering(body []byte) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	for key := range topLevel {
-		switch strings.ToLower(key) {
-		case "requestedby":
-			return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
-		case "transaction":
-			return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
-		}
+	if jsonObjectHasField(topLevel, "requestedBy") {
+		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+	}
+	if jsonObjectHasField(topLevel, "transaction") {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
 	}
 
 	for topKey, specRaw := range topLevel {
-		if strings.ToLower(topKey) != "spec" {
+		if !strings.EqualFold(topKey, "spec") {
 			continue
 		}
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
-			for key := range spec {
-				switch strings.ToLower(key) {
-				case "requestedby":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
-				case "transaction":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
-				}
+			if jsonObjectHasField(spec, "requestedBy") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if jsonObjectHasField(spec, "transaction") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}
@@ -627,7 +643,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 }
 
 func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
-	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
+	return authorizeKubernetesTaskCreate(ctx, h.uncachedReader(), h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks
@@ -1590,6 +1606,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentSpec(c.Context(), h.uncachedReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
 		return err
 	}
+	if err := authorizeAgentIdentityBind(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1648,6 +1667,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+			return err
+		}
+		if err := authorizeAgentIdentityBind(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -2047,7 +2069,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2056,7 +2078,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"artifacts": []any{}})
 	}
 
-	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	artifacts, err := h.artifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
 	}
@@ -2077,7 +2099,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2086,7 +2108,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
 	}
 
-	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	data, contentType, err := h.artifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)}, Filename: filename})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "artifact not found")

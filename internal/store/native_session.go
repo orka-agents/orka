@@ -6,6 +6,7 @@ import (
 	"time"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // NativeSessionRecord is private provider continuity state. SessionUID is the
@@ -25,7 +26,8 @@ type NativeSessionRecord struct {
 // NativeSessionStore persists encrypted native state independently of public
 // Task artifacts and Session projections. Reads require the exact canonical
 // Session UID and transcript boundary. Empty UID reads expose only a staged,
-// not-yet-bound import to the authorized migration export API.
+// not-yet-bound import to the authorized migration export API. The storage
+// client implements it and seals records before a provider sees them.
 type NativeSessionStore interface {
 	SaveNativeSession(ctx context.Context, record NativeSessionRecord) error
 	GetNativeSession(ctx context.Context, namespace, sessionName, sessionUID string) (*NativeSessionRecord, error)
@@ -39,16 +41,6 @@ type NativeSessionImport struct {
 	OperationID   string
 	RequestDigest string
 	Snapshot      harnessv2.NativeSessionSnapshot
-}
-
-type NativeSessionImportReceipt struct {
-	Namespace         string    `json:"namespace"`
-	SessionName       string    `json:"sessionName"`
-	OperationID       string    `json:"operationID"`
-	RequestDigest     string    `json:"requestDigest"`
-	DataDigest        string    `json:"dataDigest"`
-	ProviderSessionID string    `json:"providerSessionID"`
-	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type NativeSessionImportStore interface {
@@ -66,8 +58,8 @@ func NativeSessionImportDigest(namespace, name, dataDigest string) string {
 	return CanonicalBytesDigest(body)
 }
 
-// NativeSessionCaptureDigest binds immutable finalization input. SQLite derives
-// the canonical transcript boundary after appending the terminal messages.
+// NativeSessionCaptureDigest binds immutable finalization input. It excludes
+// the transcript boundary, which the finalization itself produces.
 func NativeSessionCaptureDigest(record *NativeSessionRecord) string {
 	if record == nil {
 		return ""
@@ -78,4 +70,31 @@ func NativeSessionCaptureDigest(record *NativeSessionRecord) string {
 	canonical.ThroughMessageID = ""
 	body, _ := json.Marshal(canonical)
 	return CanonicalBytesDigest(body)
+}
+
+// NativeSessionFinalizationSeal asks the storage client to seal a turn
+// finalization's native state against the transcript boundary the
+// finalization produces.
+type NativeSessionFinalizationSeal struct {
+	// Native is the plaintext capture, or the checkpoint carried across a
+	// non-success outcome marker.
+	Native  NativeSessionRecord
+	Carried bool
+	// Stored is the Session's stored native record. A carried checkpoint
+	// requires it and must match it.
+	Stored *storagev1.SealedNativeSession
+	// MessageCount and ThroughMessageID are the transcript boundary after the
+	// finalization appends its messages.
+	MessageCount     int
+	ThroughMessageID string
+}
+
+// NativeSessionFinalizationSealer seals the native state of a turn
+// finalization. The storage client implements it and uses it for every
+// production finalization. SQLite's duplicate SQL control implementation,
+// which tests use in place of the Kubernetes control store, calls it inside
+// its own transaction because it finalizes turns itself. The result leaves
+// the expected transcript boundary for the caller to set.
+type NativeSessionFinalizationSealer interface {
+	SealNativeSessionFinalization(ctx context.Context, request NativeSessionFinalizationSeal) (*storagev1.SealedNativeSessionFinalization, error)
 }

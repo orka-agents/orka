@@ -31,7 +31,7 @@ type nativeSessionCapture struct {
 type nativeCaptureUnsupportedError struct{}
 
 func (*nativeCaptureUnsupportedError) Error() string {
-	return "native Codex context is unsupported or exceeds the transport budget; stopped private home retained"
+	return "native Codex context is unsupported, unavailable, or exceeds the transport budget; stopped private home retained"
 }
 
 // A retry is safe only after the writer and all descendants are proven gone.
@@ -144,7 +144,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		state.nativeCaptureReceipts = make(map[harnessv2.OperationID]*nativeSessionCapture)
 	}
 	state.nativeCaptureReceipts[request.Metadata.OperationID] = capture
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = now
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.mu.Unlock()
@@ -288,7 +288,7 @@ func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.C
 	}
 	state.profile = request.Profile
 	state.creating = false
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = now
 	replay := &failedCreateReplay{
 		operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,

@@ -55,9 +55,7 @@ func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
-	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-	default:
+	if !task.Status.Phase.IsTerminal() {
 		return false
 	}
 	binding := executionBinding(task)
@@ -672,29 +670,64 @@ func (d *ACPDispatcher) readRecoverableTask(
 		return nil, false, nil
 	}
 	if !latest.DeletionTimestamp.IsZero() && !acpTaskHasUnvalidatedSourceIdentity(latest) {
-		// A deleting standalone Task may still need its terminal projection after
-		// publication failed. Recover only an already settled attempt with exact
-		// runtime cleanup proof; deleting prompts must never be replayed.
-		if !taskDispatchableByACP(latest) || latest.Spec.SessionRef != nil || latest.Status.Execution == nil ||
-			acpTaskHasRestoredSourceIdentityBinding(latest) || !taskScopedRuntimeSessionCleanupComplete(latest) {
-			return nil, false, nil
-		}
-		attemptID, idErr := promptAttemptIDFromTask(latest)
-		if idErr != nil {
-			return nil, false, idErr
-		}
-		attempt, getErr := d.Store.GetPromptAttempt(ctx, attemptID)
-		if errors.Is(getErr, store.ErrNotFound) {
-			return nil, false, nil
-		}
-		if getErr != nil {
-			return nil, false, getErr
-		}
-		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return nil, false, nil
+		recoverable, err := d.deletingTaskRecoverable(ctx, latest)
+		if err != nil || !recoverable {
+			return nil, false, err
 		}
 	}
 	return latest, true, nil
+}
+
+// deletingTaskRecoverable reports whether stale recovery may re-fence a
+// deleting Task. Deleting prompts are never replayed, and recovery must not
+// drop runtime cleanup authority the Task finalizer still waits on. Two cases
+// qualify:
+//   - The attempt and the Task's own execution status are still before prompt
+//     submission, and the attempt holds no RuntimeSession binding. Recovery
+//     only moves the Task to the current epoch, where admission settlement
+//     cancels the deleting Task before any runtime contact.
+//   - A standalone attempt already settled. Recovery may still need to finish
+//     its terminal projection, for example after publication failed.
+func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 ||
+		acpTaskHasRestoredSourceIdentityBinding(task) || !taskScopedRuntimeSessionCleanupComplete(task) {
+		return false, nil
+	}
+	attemptID, err := promptAttemptIDFromTask(task)
+	if err != nil {
+		return false, err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionQueued, store.PromptExecutionReserved,
+		store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
+		if !acpTaskExecutionBeforeSubmission(task.Status.Execution.State) {
+			return false, nil
+		}
+		bound, err := promptAttemptSessionBound(attempt)
+		return err == nil && !bound, err
+	}
+	return task.Spec.SessionRef == nil && store.IsTerminalPromptExecutionState(attempt.ExecutionState) &&
+		store.IsTerminalPromptDeliveryState(attempt.DeliveryState), nil
+}
+
+// acpTaskExecutionBeforeSubmission reports whether a Task's own execution
+// status is still before prompt submission. Re-fencing rewrites that state, so
+// a Task that already records a terminal or later state must keep it.
+func acpTaskExecutionBeforeSubmission(state corev1alpha1.TaskExecutionState) bool {
+	switch state {
+	case corev1alpha1.TaskExecutionStateQueued, corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStateSessionStarting, corev1alpha1.TaskExecutionStatePlanned:
+		return true
+	default:
+		return false
+	}
 }
 
 //nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.
@@ -787,7 +820,13 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 			return nil
 		}
 		const reason = "RuntimeLost"
-		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		message := "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			// A recorded cancel request does not prove the prompt stopped
+			// before leadership changed, so the outcome stays unknown; the
+			// request is carried in the message so it is not lost.
+			message = requested + "; " + message
+		}
 		recoveredAt := time.Now().UTC()
 		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
 			return err
@@ -2091,7 +2130,7 @@ func recoveredTerminalExecutionReasonMessage(
 	case store.PromptExecutionCancelled:
 		state = corev1alpha1.TaskExecutionStateCancelled
 		outcome = corev1alpha1.TaskExecutionOutcomeCancelled
-		defaultReason = "Cancelled"
+		defaultReason = acpCancelledReason
 		defaultMessage = "prompt cancelled"
 	case store.PromptExecutionOutcomeUnknown:
 		state = corev1alpha1.TaskExecutionStateOutcomeUnknown
@@ -2528,6 +2567,10 @@ func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, tas
 		case store.PromptDeliveryNotRequested, store.PromptDeliveryReadValidated, store.PromptDeliveryNoChange,
 			store.PromptDeliveryVerifiedExact, store.PromptDeliveryDeliveredSuperseded:
 			return d.completeSuccessWithDelivery(ctx, task, *status, "ACP task settled from the durable attempt record after the live settlement was interrupted")
+		case store.PromptDeliveryCancelledBeforePublish:
+			// Match the live settlement and restoredTaskPhase: a publication
+			// cancelled before push settles the Task as Cancelled, not Failed.
+			return d.cancelTaskAfterExecution(ctx, task, *status, "publication cancelled before push during recovery")
 		default:
 			// The authoritative attempt settles the Task; it may reach this
 			// path after a controller restart or when the live settlement

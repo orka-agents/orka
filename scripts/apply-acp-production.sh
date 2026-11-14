@@ -53,6 +53,7 @@ namespace_resource="${work_dir}/namespace.json"
 namespace_metadata_patch="${work_dir}/namespace-metadata-patch.json"
 existing_namespace="${work_dir}/existing-namespace.json"
 existing_controller="${work_dir}/existing-controller.json"
+existing_controller_pods="${work_dir}/existing-controller-pods.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
 admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
@@ -294,6 +295,42 @@ validate_existing_controller_identity() {
   fi
 }
 
+# The controller Deployment uses the Recreate strategy, so its replacement Pod
+# starts only after every old Pod exits, and an old Pod's preStop upgrade drain
+# may use its whole termination grace period. Wait for the longest grace period
+# among the applied Deployment, the live Deployment captured by
+# validate_existing_controller_identity, and the existing controller Pods
+# (including any still terminating from an earlier rollout), plus a 3m startup
+# margin, and never less than 5m.
+controller_rollout_timeout() {
+  local selector
+  if ! selector="$(jq -er '
+    .items[0].spec.selector.matchLabels // {}
+    | select(length > 0)
+    | to_entries | map("\(.key)=\(.value)") | join(",")
+  ' "${controller_manifest}")"; then
+    echo "controller Deployment must select its Pods with matchLabels" >&2
+    return 1
+  fi
+  if ! "${kubectl}" -n orka-system get pods -l "${selector}" -o json >"${existing_controller_pods}"; then
+    echo "unable to inspect the existing orka-system/orka-controller-manager Pods" >&2
+    return 1
+  fi
+  if ! jq -enr \
+    --slurpfile applied "${controller_manifest}" \
+    --slurpfile live "${existing_controller}" \
+    --slurpfile pods "${existing_controller_pods}" '
+      [(($applied[0].items[0], $live[]) | .spec.template.spec.terminationGracePeriodSeconds),
+       ($pods[0].items[]? | .spec.terminationGracePeriodSeconds)]
+      | map(if . == null then 30 else . end)
+      | select(all(type == "number" and . >= 0 and . == floor))
+      | "\([max + 180, 300] | max)s"
+    '; then
+    echo "controller terminationGracePeriodSeconds must be a non-negative integer" >&2
+    return 1
+  fi
+}
+
 validate_snapshot_secret() {
   if ! jq -er '.data["snapshot-key"] | select(type == "string" and length > 0)' "${snapshot_secret}" \
     | base64 -d >"${snapshot_key_data}" 2>/dev/null; then
@@ -428,8 +465,8 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 8 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 8 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
@@ -441,6 +478,10 @@ render_admission_webhooks() {
        (.clientConfig.service.path | type == "string" and length > 0))] | all)
     and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "agenthost.core.orka.ai" and
+             .clientConfig.service.path == "/validate-core-orka-ai-v1alpha1-agenthost" and
+             .rules == [{"operations":["CREATE","UPDATE"],"apiGroups":["core.orka.ai"],"apiVersions":["v1alpha1"],"resources":["agenthosts"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "checkpointsourceuse.workspace.orka.ai" and
              .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
              .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
@@ -450,7 +491,7 @@ render_admission_webhooks() {
              .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
              .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission wave must contain exactly eight unique, fail-closed, CA-pinned orka-admission webhooks, including checkpoint source authorization and attachment Secret protection, with namespace-mode claims and ACP workspace coordination Leases enforced by admission policies in the workload wave and no legacy coexistence policies" >&2
+    echo "admission wave must contain exactly nine unique, fail-closed, CA-pinned orka-admission webhooks, including AgentHost selection, checkpoint source authorization and attachment Secret protection, with namespace-mode claims and ACP workspace coordination Leases enforced by admission policies in the workload wave and no legacy coexistence policies" >&2
     return 1
   }
 }
@@ -592,6 +633,7 @@ smoke_admission_handlers() {
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-core-orka-ai-v1alpha1-agenthost|core.orka.ai|v1alpha1|AgentHost|agenthosts
 /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use|workspace.orka.ai|v1alpha1|ExecutionWorkspaceCheckpoint|executionworkspacecheckpoints
 /validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
 /validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
@@ -606,6 +648,7 @@ EOF_ADMISSION_HANDLERS
 # desired generation without rotating an existing snapshot key.
 bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
+controller_rollout_wait="$(controller_rollout_timeout)"
 # Preserve the immutable mode claim as an atomic precondition while converging
 # the remaining platform labels. This cannot relabel or adopt a namespace that
 # changes identity after the preflight.
@@ -624,4 +667,5 @@ render_admission_webhooks
 "${kubectl}" apply -f "${workload_prerequisite_manifest}"
 wait_for_workload_dependencies
 "${kubectl}" apply -f "${controller_manifest}"
-"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager --timeout=2m >/dev/null
+"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager \
+  --timeout="${controller_rollout_wait}" >/dev/null

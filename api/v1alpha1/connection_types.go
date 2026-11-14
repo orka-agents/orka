@@ -25,6 +25,11 @@ const (
 	ConnectionModeReadOnly  = "readOnly"
 	ConnectionModeReadWrite = "readWrite"
 
+	// ConnectionAnnotationAgentHost set to ConnectionAgentHostDeclined keeps
+	// a link to an agent-host provider from getting a host.
+	ConnectionAnnotationAgentHost = "orka.ai/agent-host"
+	ConnectionAgentHostDeclined   = "declined"
+
 	// ConnectionStatePending means consent has not completed.
 	ConnectionStatePending = "Pending"
 	// ConnectionStateReady means token material is held and not known to be expired.

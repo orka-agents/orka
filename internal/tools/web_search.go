@@ -25,12 +25,11 @@ import (
 
 // WebSearchTool implements web search functionality
 type WebSearchTool struct {
-	apiKey          string
-	baseURL         string
-	client          *http.Client
-	useMockFallback bool
-	maxQueryChars   int
-	maxResults      int
+	apiKey        string
+	baseURL       string
+	client        *http.Client
+	maxQueryChars int
+	maxResults    int
 }
 
 // WebSearchArgs are the arguments for the web search tool
@@ -49,9 +48,8 @@ type WebSearchResult struct {
 // NewWebSearchTool creates a new web search tool
 func NewWebSearchTool() *WebSearchTool {
 	return &WebSearchTool{
-		apiKey:          os.Getenv(workerenv.SearchAPIKey),
-		baseURL:         os.Getenv(workerenv.SearchAPIURL),
-		useMockFallback: true,
+		apiKey:  os.Getenv(workerenv.SearchAPIKey),
+		baseURL: os.Getenv(workerenv.SearchAPIURL),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -189,29 +187,6 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	return string(body), nil
 }
 
-// mockSearch returns a mock search response when no API is configured
-func (t *WebSearchTool) mockSearch(args WebSearchArgs) (string, error) {
-	results := []WebSearchResult{
-		{
-			Title:   "Search Result 1",
-			URL:     "https://example.com/result1",
-			Snippet: fmt.Sprintf("This is a mock search result for query: %s", args.Query),
-		},
-		{
-			Title:   "Search Result 2",
-			URL:     "https://example.com/result2",
-			Snippet: "Web search API not configured. Set SEARCH_API_URL and SEARCH_API_KEY environment variables.",
-		},
-	}
-
-	output, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(output), nil
-}
-
 var (
 	ddgLinkRe    = regexp.MustCompile(`<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>`)
 	ddgSnippetRe = regexp.MustCompile(`<a[^>]+class="result__snippet"[^>]*>(.*?)</a>`)
@@ -219,32 +194,35 @@ var (
 	ddgTagRe     = regexp.MustCompile(`<[^>]+>`)
 )
 
-// duckDuckGoSearch performs a search via DuckDuckGo HTML
+// duckDuckGoSearch performs a search via DuckDuckGo HTML. Failures are
+// returned as errors so callers never mistake placeholder data for results.
 func (t *WebSearchTool) duckDuckGoSearch(ctx context.Context, args WebSearchArgs) (string, error) {
 	ddgURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(args.Query))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ddgURL, nil)
 	if err != nil {
-		return t.handleDuckDuckGoFailure(args, fmt.Errorf("create DuckDuckGo request: %w", err))
+		return "", fmt.Errorf("create DuckDuckGo request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return t.handleDuckDuckGoFailure(args, fmt.Errorf("DuckDuckGo request failed: %w", err))
+		return "", fmt.Errorf("DuckDuckGo request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return t.handleDuckDuckGoFailure(args, fmt.Errorf("DuckDuckGo returned HTTP %d", resp.StatusCode))
+	// DuckDuckGo answers some clients with HTTP 202 and a challenge page, so
+	// report any status other than 200 rather than parsing it.
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("DuckDuckGo returned HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return t.handleDuckDuckGoFailure(args, fmt.Errorf("read DuckDuckGo response: %w", err))
+		return "", fmt.Errorf("read DuckDuckGo response: %w", err)
 	}
 
 	results := parseDDGResults(string(body), args.Limit)
 	if len(results) == 0 {
-		return t.handleDuckDuckGoFailure(args, fmt.Errorf("DuckDuckGo returned no parseable results"))
+		return "", fmt.Errorf("DuckDuckGo returned no parseable results")
 	}
 
 	output, err := json.MarshalIndent(results, "", "  ")
@@ -252,13 +230,6 @@ func (t *WebSearchTool) duckDuckGoSearch(ctx context.Context, args WebSearchArgs
 		return "", err
 	}
 	return string(output), nil
-}
-
-func (t *WebSearchTool) handleDuckDuckGoFailure(args WebSearchArgs, err error) (string, error) {
-	if t.useMockFallback {
-		return t.mockSearch(args)
-	}
-	return "", err
 }
 
 // parseDDGResults extracts search results from DuckDuckGo HTML

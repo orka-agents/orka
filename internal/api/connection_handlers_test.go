@@ -37,6 +37,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -53,7 +55,7 @@ type connectorTestHarness struct {
 	// handlers lets a test replace the uncached reader to model informer lag.
 	handlers *Handlers
 	client   client.Client
-	store    *sqlite.Store
+	store    *storageclient.Client
 	identity *UserInfo
 	oauth    *httptest.Server
 	tokens   int
@@ -188,14 +190,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sqliteStore := sqlite.NewStore(db, ":memory:")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqliteStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	sqliteStore := storageclienttest.Client(t, sqlite.NewStore(db, ":memory:"))
 
 	h := harness
 	h.client, h.store = fakeClient, sqliteStore
@@ -774,7 +769,7 @@ func TestConnectionHandlersDisabled(t *testing.T) {
 }
 
 func TestValidateConnectorConfig(t *testing.T) {
-	sqliteStore := sqlite.NewStore(nil, "")
+	sqliteStore := &storageclient.Client{}
 	oauth := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	valid := ConnectorConfig{Enabled: true, CallbackBaseURL: "https://orka.example.test", StateKey: bytes.Repeat([]byte{1}, 32), Credentials: sqliteStore, Consents: sqliteStore, OAuth: oauth}
 	if err := ValidateConnectorConfig(valid); err != nil {
@@ -2009,5 +2004,40 @@ func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil || got.Ready || !strings.Contains(got.Message, "several links") {
 			t.Fatalf("get %s = %d %s, want unready as a duplicate", name, resp.StatusCode, raw)
 		}
+	}
+}
+
+// A link whose person declined an agent host gets none, so relinking it
+// neither discloses one nor has clients wait for one.
+func TestConnectionPromisesAHostOnlyToALinkThatGetsOne(t *testing.T) {
+	provider := acceptedTestProvider()
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	h := newConnectorTestHarness(t, provider)
+	first := h.create("readOnly")
+	if !first.AgentHost {
+		t.Fatal("linking a provider that serves hosts must promise one")
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: first.Connection.Name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if again := h.create("readOnly"); again.AgentHost {
+		t.Fatal("a link whose person declined a host must not be promised one")
+	}
+}
+
+// Clients disclose an agent host before consent from the provider view.
+func TestConnectorProviderResponseSaysWhenItServesAgentHosts(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}}
+	if connectorProviderResponse(provider).AgentHost {
+		t.Fatal("a provider without agentHost serves no hosts")
+	}
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	if !connectorProviderResponse(provider).AgentHost {
+		t.Fatal("the provider view must say it serves agent hosts")
 	}
 }

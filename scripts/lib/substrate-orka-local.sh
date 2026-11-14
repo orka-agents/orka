@@ -71,9 +71,10 @@ deploy_orka() {
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
   log "Deploying the dedicated fail-closed admission runtime"
   orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"
-  # Substrate actor traffic originates from its single-workload WorkerPool Pod
-  # in ate-demo rather than a native orka-runtimes Pod. Keep the same
-  # authenticated proxy boundary while allowing only that provider namespace.
+  # Substrate v1 Actor egress leaves through the atenet-egress gateway Pods in
+  # ate-system, never directly from worker Pods, and only to hosts an Actor
+  # EgressPolicy allows. Keep the same authenticated proxy boundary while
+  # admitting only those gateway Pods.
   kubectl -n orka-system patch networkpolicy orka-provider-auth-proxy --type=json -p '[
     {
       "op": "add",
@@ -83,7 +84,12 @@ deploy_orka() {
           {
             "namespaceSelector": {
               "matchLabels": {
-                "kubernetes.io/metadata.name": "ate-demo"
+                "kubernetes.io/metadata.name": "ate-system"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "app": "atenet-egress"
               }
             }
           }
@@ -143,7 +149,7 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
-                  "--controller-url=http://orka-api.orka-system.svc:8080",
+                  "--controller-url=http://orka-api.orka-system.svc.cluster.local:8080",
                   "--controller-mode=harness-v2",
                   "--watch-namespace=orka-system",
                   "--enforce-namespace-isolation=true",
@@ -153,8 +159,7 @@ deploy_orka() {
                   "--substrate-api-ca-file=/run/substrate-server/trust-bundle.pem",
                   "--substrate-api-cert-file=/run/substrate-client/credential-bundle.pem",
                   "--substrate-api-key-file=/run/substrate-client/credential-bundle.pem",
-                  "--substrate-router-url=http://atenet-router.ate-system.svc",
-                  "--substrate-actor-dns-suffix=actors.resources.substrate.ate.dev",
+                  "--substrate-router-url=https://atenet-router.ate-system.svc:443",
                   "--substrate-default-template=orka-mcp",
                   "--substrate-default-template-namespace=orka-system",
                   "--substrate-bootstrap-token-secret-name=" + $bootstrap_secret_name,
@@ -166,7 +171,7 @@ deploy_orka() {
                   # RuntimePool reconciliation and prompt execution use the
                   # authenticated provider-proxy boundary deployed above; the
                   # token Secret is created above and mounted by the base manifest.
-                  "--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080",
+                  "--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080",
                   "--acp-provider-proxy-namespace=orka-system",
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
                   "--acp-provider-proxy-token-file=/var/run/orka/provider-auth/token"

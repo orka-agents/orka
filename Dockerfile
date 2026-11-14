@@ -9,7 +9,7 @@ COPY ui/ .
 RUN bun run build
 
 # Build the manager binary
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -37,7 +37,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-admission ./cmd/orka-admission \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o scm-egress-proxy ./cmd/orka-scm-egress-proxy \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o compat-router ./cmd/orka-compat-router
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o compat-router ./cmd/orka-compat-router \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-host-agent ./cmd/orka-host-agent
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -48,6 +49,7 @@ COPY --from=builder /workspace/orka-admission .
 COPY --from=builder /workspace/provider-auth-proxy .
 COPY --from=builder /workspace/scm-egress-proxy .
 COPY --from=builder /workspace/compat-router .
+COPY --from=builder /workspace/orka-host-agent .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

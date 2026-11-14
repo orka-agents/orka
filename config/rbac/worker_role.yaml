@@ -2,18 +2,30 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: ai-worker
   namespace: system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: vendor-worker
   namespace: system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: container-worker
   namespace: system
 ---
@@ -52,7 +64,8 @@ rules:
   verbs:
   - get
   - list
-# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent)
+# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent;
+# use lets delegated child Tasks name Agents under --agent-use-authorization-enabled)
 - apiGroups:
   - core.orka.ai
   resources:
@@ -62,6 +75,7 @@ rules:
   - create
   - update
   - delete
+  - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:
   - core.orka.ai
@@ -253,7 +267,8 @@ rules:
   verbs:
   - get
   - list
-# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent)
+# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent;
+# use lets delegated child Tasks name Agents under --agent-use-authorization-enabled)
 - apiGroups:
   - core.orka.ai
   resources:
@@ -263,6 +278,7 @@ rules:
   - create
   - update
   - delete
+  - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:
   - core.orka.ai

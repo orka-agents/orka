@@ -88,6 +88,7 @@ type ToolContext struct {
 	TaskUID                   string
 	ParentTaskID              string
 	AgentName                 string
+	AgentUID                  string
 	ToolCallID                string
 	OperationID               string
 	Tenant                    string
@@ -539,6 +540,11 @@ func registryToolSpanAttributes(ctx context.Context, toolTelemetryName string, t
 		}
 		if tc.ToolCallID != "" {
 			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+		}
+		// The Agent UID a Task's execution binding froze, not its reusable
+		// name, joins tool spans with identity records (ADR 0039).
+		if tc.AgentUID != "" {
+			attrs = append(attrs, attribute.String(genai.AttrAgentID, tc.AgentUID))
 		}
 	}
 	if ok {

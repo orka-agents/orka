@@ -72,8 +72,8 @@ What the picture is telling you:
 
 | Component | Can reach | Cannot reach |
 | --- | --- | --- |
-| ACP runtime Pod | the provider auth proxy, and the controller's loopback MCP broker | the Kubernetes API, Git remotes, any other host — egress is default-deny |
-| Workspace/Publisher | DNS, the controller API, the SCM egress proxy | LLM providers, the MCP broker, arbitrary internet hosts |
+| ACP runtime Pod | DNS, the provider auth proxy, the controller API (prompt MCP and artifact brokers) | the Kubernetes API, Git remotes, any other host — egress is default-deny |
+| Workspace/Publisher | DNS, the controller API, the SCM egress proxy | LLM providers, arbitrary internet hosts — its identity has no MCP broker access |
 | Controller | everything above, plus the Kubernetes API | — it is the trusted core, so protect it accordingly |
 
 The runtime Pod never holds a Git credential, and the Publisher never holds a model credential.
@@ -96,13 +96,21 @@ These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
 `orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
 auditing Kubernetes access.
 
+Container Tasks are untrusted compute. A Task's `spec.secretRef` is mounted only when an
+operator sets `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; without it the mount is omitted and the
+Task still runs. A `spec.env` entry that reads a Secret or ConfigMap through `valueFrom` is
+refused outright: without the opt-in the Task fails before its Pod is created. Task `env`
+never reaches the workspace preparation init container, which holds the clone credential;
+only `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` pass through to it. See
+[Container tasks](../guides/container-tasks.md#other-fields).
+
 ### ACP RuntimePool Pods
 
 Built-in `type: agent` Tasks run as private RuntimeSessions inside one controller-owned ACP RuntimePool Pod per trust domain/profile. The Pod:
 
 - uses a digest-pinned immutable runtime image and profile digest;
 - disables service-account token automount and has no Kubernetes RBAC;
-- uses a read-only root filesystem and default-deny egress;
+- uses a read-only root filesystem and default-deny egress that allows only cluster DNS (UDP and TCP 53 to `k8s-app=kube-dns` Pods in `kube-system`), the provider auth proxy (TCP to `--acp-provider-proxy-pod-labels` Pods in `--acp-provider-proxy-namespace`, on the `--acp-provider-proxy-base-url` port, or 80 for `http` and 443 for `https` when the URL has no port), and the controller API (TCP to `orka.ai/network-role=controller` Pods in the controller namespace, on `--api-port`);
 - runs the supervisor as root with only the documented process/identity capabilities;
 - launches ACP children with no capabilities, private `HOME`/`TMPDIR`/XDG/workspace paths, and distinct non-reused UIDs/GIDs;
 - tracks, terminates, and reaps the full process tree; cleanup uncertainty poisons and recycles the pool;
@@ -114,7 +122,7 @@ ACP Tasks reject per-Task container settings and custom resource requests. Runti
 and resources come from the reviewed RuntimePool profile. For built-in runtimes,
 `spec.execution.workspace` can bind a dedicated RuntimePool through a sandbox provider when
 the operator enables the workspace provider API and `--acp-workspace-dispatch-enabled`,
-with required admission webhooks and an admitted external provider and class. External `runtimeRef` dispatch rejects execution workspaces. Other
+with required admission webhooks and an admitted external provider and class. That runtime gets the same egress rules. For Pod-backed providers, Core's NetworkPolicies select the runtime Pod, and Core does not admit the runtime if another NetworkPolicy in its namespace widens them. Native-process providers such as [Agent Substrate](substrate.md) receive the rules in the workload request and are responsible for enforcing them; Core does not verify that enforcement. External `runtimeRef` dispatch rejects execution workspaces. Other
 per-Task execution placement fields fail closed.
 
 ### Workspace/Publisher
@@ -225,6 +233,96 @@ bindings, transaction-token scope modes, workspace-class `use` checks, and Gatew
 identity checks retain their existing policies. See [API authorization](../reference/api-authorization.md)
 for every route's permissions, namespace precedence, and grant examples.
 
+### Agent use
+
+Creating a Task authorizes the Task, not the Agent it runs as. With
+`--agent-use-authorization-enabled` (Helm: `controller.agentUseAuthorization.enabled`),
+running work as an Agent also needs the `use` verb on that Agent, the way
+workspace classes already need it. The API checks its caller, and
+ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
+RepositoryMonitors, and GatewayBindings that newly name an Agent. The Helm value
+installs those policies; without Helm, also apply `config/agent-use-policy`, or
+direct Kubernetes writes go unchecked. Its bindings match every namespace, so on
+a cluster with more than one installation, first scope them to this
+installation's namespace as that directory's README describes. Orka's own components (the controller,
+API, gateways, monitors, and workers) hold `use` broadly. Callers are checked
+only when a request newly names an Agent: a RepositoryMonitor run starts with
+no Agent `use` check, and Agent references an object already names, including
+ones set before the check was enabled, are not checked again on edit. Review
+existing configurations and who may `patch` RepositoryMonitors before you
+enable the check.
+Delegation is the exception: a worker creates a child Task for any Agent the
+parent Agent's owner listed in `spec.coordination.allowedAgents`, without
+checking the root caller's `use` on the child Agent. Whoever may use a parent
+Agent can therefore run the Agents its owner listed, so list only Agents its
+callers may run. The check is off by default, because turning it on denies
+every caller without a `use` grant.
+
+### Agent identities
+
+An Agent can name one external identity in `spec.identity`, starting with a
+Microsoft Entra agent identity (ADR 0039). Binding it requires `bind` on
+`agentidentities/<issuer>` for that exact ID, granted with a Role that lists
+`resourceNames`, so an Agent editor cannot claim another team's identity. One
+identity belongs to one Agent: the first Agent the controller grants it to
+records it in `status.identityClaim`, and any other Agent naming it is not Ready.
+An Agent that stops naming an identity keeps the claim until every Task bound to
+it has finished, and a deleted Agent's identity stays taken by its bound Tasks
+until they finish. A claim records when it was granted, by the API server's
+clock, is granted only while `--agent-use-authorization-enabled` is set, and
+binds only Tasks created after that second. A Task Orka creates from a scheduled Task, RepositoryScan, or
+RepositoryMonitor also needs that object created after it, and GatewayBinding
+Tasks cannot use an identity-bound Agent. Create Tasks and these objects once
+the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
+`config/agent-use-policy` policies installed (the Helm value does both; the
+controller trusts the flag and does not detect a missing policy) and a
+`runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
+it is the parent's own Agent. Task bindings freeze the identity and the issuer
+instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
+`IdentityVerified` condition turns `True` once the controller has obtained a token
+for the identity from its issuer, and the controller asks again at least hourly; a
+refusal sets it `False`, makes the Agent not Ready, and stops its identity-backed calls; an issuer that cannot answer sets it `Unknown` instead. Tokens for the identity are
+issued only by the controller, through `agentIdentity`-mode outbound access
+policies, and never reach the runtime. In `Delegated` mode the Agent acts for the
+Task's requester with their own linked grant: only the provider's curated tools,
+only on built-in RuntimePools, only within `maxDelegationAge` of the requester's
+last action, and every write needs the requester's own approval.
+
+The controller's blueprint credential is a projected token on the node that
+runs it. AI workers can create Jobs in the release namespace, and a privileged
+Pod, or one with a `hostPath` volume, can read any token on its node, this one
+included, whichever ServiceAccount it runs as. Before you turn on agent
+identities, enforce at least the `baseline` Pod Security profile on the release
+namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
+admission control; the chart does not label a namespace it does not create.
+Admission checks only new Pods and evicts none, so also delete any running Pod
+that breaks the profile before you turn identities on. A server-side dry run of
+the label lists them:
+`kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline`.
+
+The release namespace's profile covers only Pods admitted there. A privileged
+or `hostPath` Pod from any other namespace that lands on the controller's node
+can read the credential too, and a taint does not keep one off: its author can
+add the toleration, or set `spec.nodeName` and skip the scheduler. So either
+every namespace whose Pods can run on that node enforces at least `baseline`
+as well, or admission control stops every Pod but the controller from
+tolerating the controller nodes' taint or binding to them by name. Only then do
+the chart's `nodeSelector` and `tolerations`, which apply to the controller
+Deployment, give it nodes of its own.
+
+The controller ServiceAccount's own policy admits Pods running as that
+ServiceAccount only for the controller Deployment's own ReplicaSets, which are
+named after it, so no other ReplicaSet running as it can create Pods, even
+when scaled up, and none can be created or given a new template. It evicts nothing, though, so before you turn
+identities on, delete any Pod already running as that ServiceAccount that the
+controller Deployment did not create, since it keeps the identity:
+`kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
+lists them. Also delete, or move to another ServiceAccount, any other
+Deployment or ReplicaSet whose Pod template runs as it, which the policy now
+leaves unable to run:
+`kubectl get deployments,replicasets -n <namespace> -o jsonpath='{range .items[?(@.spec.template.spec.serviceAccountName=="<controller ServiceAccount>")]}{.kind}/{.metadata.name}{"\n"}{end}'`
+lists them.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,
@@ -310,6 +408,13 @@ Security-relevant events are logged at the API layer:
 - Authentication failures (missing/invalid tokens)
 - Namespace access denials (isolation violations, watch-namespace mismatches)
 - Cross-namespace worker access attempts
+- Every call made with an Agent identity, issued or refused, on the
+  `agent-identity-audit` logger: the Agent, identity, issuer instance, mode,
+  Task, policy, Tool, a digest of the arguments, the outcome, and for a refusal
+  a reason category. Records hold no tokens, request bodies, or error text, and
+  a Delegated call's requester appears only as a keyed pseudonym. The
+  controller's log level does not filter this logger. Route and retain it in
+  your log pipeline.
 
 ## Generic gateway trust boundary
 

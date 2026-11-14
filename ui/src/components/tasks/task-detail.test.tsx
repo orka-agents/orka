@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@/test/test-utils'
+import { act, render, screen, waitFor, within } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
@@ -216,6 +216,44 @@ describe('TaskDetail', () => {
     const back = screen.getByRole('link', { name: /back to tasks/i })
     expect(back).toHaveAttribute('href', '/tasks')
     expect(back.querySelector('button')).toBeNull()
+  })
+
+  it('closes and resets the cancel dialog when the task is recreated under the same name', async () => {
+    let uid = 'uid-first'
+    let cancelled: unknown = null
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'rerun', namespace: 'default', uid },
+          spec: { type: 'container', image: 'alpine' },
+          status: { phase: 'Running' },
+        }),
+      ),
+      http.post('/api/v1/tasks/:id/cancel', async ({ request }) => {
+        cancelled = await request.json()
+        return HttpResponse.json({ namespace: 'default', name: 'rerun', phase: 'Running', requested: true, message: 'cancelled' })
+      }),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    const user = userEvent.setup()
+    renderRaw(
+      <QueryClientProvider client={queryClient}>
+        <TaskDetail taskId="rerun" />
+      </QueryClientProvider>,
+    )
+    await user.click(await screen.findByRole('button', { name: /Cancel task/ }))
+    await user.type(within(await screen.findByRole('dialog')).getByRole('textbox'), 'wrong repository')
+
+    uid = 'uid-second'
+    await act(() => queryClient.refetchQueries({ queryKey: ['task', 'rerun'] }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: /Cancel task/ }))
+    const dialog = await screen.findByRole('dialog')
+    // The reason typed for the replaced Task is not carried over.
+    expect(within(dialog).getByRole('textbox')).toHaveValue('')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel task' }))
+    await waitFor(() => expect(cancelled).toEqual({ uid: 'uid-second' }))
   })
 
   it('renders not-found once a loaded task 404s on refetch, ignoring the cached copy', async () => {
@@ -518,6 +556,28 @@ describe('TaskDetail', () => {
     })
     await waitFor(() => expect(artifactRequests).toBe(2))
   })
+
+  it('keeps polling artifacts while the task is Finalizing', async () => {
+    // Finalizing is when the run publishes its PR and artifacts.
+    mockSearch.current = { tab: 'overview' }
+    const hits = { artifacts: 0 }
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'publishing', namespace: 'default', uid: 'uid-pub' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Finalizing' },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/artifacts', () => {
+        hits.artifacts += 1
+        return HttpResponse.json({ artifacts: [] })
+      }),
+    )
+    render(<TaskDetail taskId="publishing" />)
+    await waitFor(() => expect(hits.artifacts).toBe(1))
+    await waitFor(() => expect(hits.artifacts).toBeGreaterThanOrEqual(2), { timeout: 7000 })
+  }, 10000)
 
   it('shows activity as a trace or as raw events', async () => {
     const user = userEvent.setup()

@@ -106,14 +106,15 @@ func TestMCPApprovalDecisionMetricsRecoveryCommitsAtomically(t *testing.T) {
 			_, _, err = f.broker.blockApproval(f.ctx, call, credentials, code)
 			require.NoError(t, err)
 			require.Empty(t, gatherMCPApprovalDecisionMetrics(t), "an execution receipt alone is not a decision")
-			outage := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			outage := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			outage.unavailable.Store(true)
 			f.dispatcher.EventStore = outage
 			err = f.dispatcher.projectMCPApprovalExecution(f.ctx, f.task, expected, effect.Identity)
-			require.Error(t, err)
+			require.ErrorContains(t, err, "injected terminal approval projection outage")
+			require.EqualValues(t, 1, outage.attempts.Load(), "the decision and outcome were refused as one group")
 			actual, _ := f.approval(t)
-			require.Equal(t, approvals.StatusPending, actual.Status, "the decision/outcome transaction rolled back")
-			require.Empty(t, gatherMCPApprovalDecisionMetrics(t), "rolled-back decisions must not count")
+			require.Equal(t, approvals.StatusPending, actual.Status, "the decision/outcome append was refused together")
+			require.Empty(t, gatherMCPApprovalDecisionMetrics(t), "refused decisions must not count")
 			outage.unavailable.Store(false)
 			require.NoError(t, f.dispatcher.projectMCPApprovalExecution(f.ctx, f.task, expected, effect.Identity))
 			outcome := "cancelled"

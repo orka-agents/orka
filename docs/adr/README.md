@@ -18,6 +18,7 @@ that way, read here.
 | **Accepted** | The decision is in force. The code should match it. |
 | **Superseded** | A later ADR replaced this one. Kept for the reasoning it records. |
 | **Deferred** | The decision was made but the work has not landed, usually because it depends on something outside Orka. |
+| **Proposed** | The decision is under review and has not been implemented. |
 
 ## The records
 
@@ -62,8 +63,11 @@ not do with a running agent's memory. See
 | [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted |
 | [0028](0028-agent-sandbox-pvc-cold-resume.md) | Agent Sandbox PVC-backed cold suspension and resume | Accepted |
 | [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted |
-| [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted |
+| [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted, partly superseded by 0039 |
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
+| [0039](0039-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
+| [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
+| [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
 
 ### The Substrate control plane
 
@@ -109,6 +113,29 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
+| [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
+| [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
+| [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted |
+| [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
+
+### Agent hosts and the Agent Host Protocol
+
+Long-lived, per-user agent hosts that clients such as the Copilot desktop app connect to,
+and serving the Agent Host Protocol from Orka itself.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+| [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
+| [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
+
+### Repository monitors
+
+How monitors review and repair pull requests.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
 
 ## Writing a new one
 

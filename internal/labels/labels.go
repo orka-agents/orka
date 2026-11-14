@@ -9,7 +9,9 @@ package labels
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,6 +25,8 @@ const (
 	// Labels
 	LabelTask              = "orka.ai/task"
 	LabelTaskType          = "orka.ai/task-type"
+	LabelAgentName         = "orka.ai/agent-name"
+	LabelAgentUID          = "orka.ai/agent-uid"
 	LabelParentTask        = "orka.ai/parent-task"
 	LabelScheduledRun      = "orka.ai/scheduled-run"
 	LabelCreatedBy         = "orka.ai/created-by"
@@ -41,6 +45,13 @@ const (
 	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecuritySliceID   = "orka.ai/security-slice-id"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
+	// LabelPlatformIdentity marks Orka's own ServiceAccounts. Their tokens
+	// carry platform authority, so OutboundAccessPolicies may not hand them to
+	// workers.
+	LabelPlatformIdentity = "orka.ai/platform-identity"
+	// PlatformIdentityValue is the LabelPlatformIdentity value that marks an
+	// Orka ServiceAccount.
+	PlatformIdentityValue  = "true"
 	LabelGitHubEvent       = "orka.ai/github-event"
 	LabelGitHubAction      = "orka.ai/github-action"
 	LabelGitHubRepository  = "orka.ai/github-repository"
@@ -70,6 +81,10 @@ const (
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	// AnnotationParentTaskNamespace records the namespace of the Task a
+	// brokered child was delegated from, beside its UID, so a child in
+	// another namespace can still find the Task it was delegated from.
+	AnnotationParentTaskNamespace = "orka.ai/parent-task-namespace"
 	// AnnotationCancelRequested records a verified parent's cancel_task
 	// request; its value is the Task's terminal message. Only controller
 	// identities may set it, and the Task controller completes the
@@ -242,3 +257,19 @@ func isAlphaNum(r rune) bool {
 // RequestedBySourceAPI is the AnnotationRequestedBySource value for Tasks whose
 // requester was verified by the API server.
 const RequestedBySourceAPI = "api"
+
+// LabelChatSessionEpoch pins the incarnation of the chat Session named by
+// LabelChatSession: its creation time as SessionEpoch formats it. A chat
+// deleted and recreated under its name gets another epoch.
+const LabelChatSessionEpoch = "orka.ai/chat-session-epoch"
+
+// LabelChatSessionNamespace names the namespace of the chat Session named by
+// LabelChatSession, which a chat may create Tasks outside of. A chat Task
+// without it belongs to a chat in its own namespace.
+const LabelChatSessionNamespace = "orka.ai/chat-session-namespace"
+
+// SessionEpoch formats a Session's creation time as the label value that
+// identifies that incarnation of the Session.
+func SessionEpoch(createdAt time.Time) string {
+	return strconv.FormatInt(createdAt.UTC().UnixNano(), 10)
+}

@@ -134,8 +134,8 @@ jobs:
             /^  namespace: / { namespace = $2; next }
             END {
               finish_resource()
-              if (count != 14) {
-                printf "Expected 14 admission policies and bindings, found %d\n", count > "/dev/stderr"
+              if (count != 20) {
+                printf "Expected 20 admission policies and bindings, found %d\n", count > "/dev/stderr"
                 invalid = 1
               }
               exit invalid
@@ -262,8 +262,8 @@ jobs:
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/controller-validating-webhook.yaml > "${long_controller_webhook}"
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/controller-webhook-service.yaml > "${long_controller_webhook_service}"
 
-          grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
-          grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
+          grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc.cluster.local:8080" "${default_render}"
+          grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc.cluster.local:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
           grep -Fq -- "--upstream-base-url=http://model-gateway.models.svc:8080" "${default_render}"
           if grep -Eq -- 'namespace: (models|vekil-system)$' "${default_render}"; then
@@ -344,6 +344,8 @@ jobs:
           chart_package=${chart_packages[0]}
 
           expected_crds=$(cat <<'CRDS'
+          agenthosts.core.orka.ai
+          agenthosttemplates.core.orka.ai
           agentruntimes.core.orka.ai
           agents.core.orka.ai
           branchclaims.core.orka.ai

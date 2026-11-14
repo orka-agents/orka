@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,12 +24,12 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
 )
 
-func seedUsageAPIWork(t *testing.T, backend *sqlite.Store, namespace string, tokens int64) string {
+func seedUsageAPIWork(t *testing.T, backend *storageclient.Client, namespace string, tokens int64) string {
 	t.Helper()
 	at := time.Now().UTC().Add(-time.Hour)
 	namespaceUID := "namespace-uid"
@@ -41,6 +44,35 @@ func seedUsageAPIWork(t *testing.T, backend *sqlite.Store, namespace string, tok
 	require.NoError(t, backend.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: namespace, WorkID: work, Repository: "org/repo", Number: 2, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: at}))
 	require.NoError(t, backend.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: namespace, NamespaceUID: namespaceUID, Repository: "org/repo", Number: 2, URL: "https://github.com/org/repo/pull/2", GitHubID: "PR_2", State: "merged", MergedAt: &at, ObservedAt: at}))
 	return work
+}
+
+// usageReportHasNumber reports whether any JSON number in a usage response
+// equals want. Matching decoded numbers rather than raw text keeps nanosecond
+// timestamps, which can contain the same digits, from deciding the result.
+func usageReportHasNumber(t *testing.T, body string, want int64) bool {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var document any
+	require.NoError(t, decoder.Decode(&document))
+	target := json.Number(strconv.FormatInt(want, 10))
+	var contains func(any) bool
+	contains = func(value any) bool {
+		switch typed := value.(type) {
+		case json.Number:
+			return typed == target
+		case map[string]any:
+			for _, child := range typed {
+				if contains(child) {
+					return true
+				}
+			}
+		case []any:
+			return slices.ContainsFunc(typed, contains)
+		}
+		return false
+	}
+	return contains(document)
 }
 
 func TestUsageAPIReportAndDetailUseSameCohort(t *testing.T) {
@@ -149,16 +181,23 @@ func TestUsageAPIRejectsOversizedReportsAndLoadsRequestedWork(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	work := seedUsageAPIWork(t, f.store, "default", 100)
 	at := time.Now().UTC().Add(-time.Minute)
-	require.NoError(t, f.store.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
-		for i := range usageMaxRecords {
-			id := fmt.Sprint("chat-", i)
-			if err := f.store.RecordUsage(ctx, store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid", ID: id,
-				CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: at}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	// Seed the observations in one SQLite transaction, as RecordUsage would
+	// store them, so the oversized report needs no 20,000 separate commits.
+	tx, err := f.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range usageMaxRecords {
+		id := fmt.Sprint("chat-", i)
+		observation := store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid", ID: id,
+			CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: at}
+		require.NoError(t, store.ValidateUsageObservation(observation))
+		data, err := json.Marshal(observation)
+		require.NoError(t, err)
+		_, err = tx.ExecContext(t.Context(), `INSERT INTO usage_observations(namespace, id, task_uid, counter_id, observed_at, data)
+			VALUES (?, ?, ?, ?, ?, ?)`, observation.Namespace, observation.ID, observation.TaskUID, observation.CounterID,
+			observation.ObservedAt.UnixNano(), string(data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
 	f.allowRoute(t, "GET /api/v1/usage")
 	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01&limit=1", "")
 	require.Equal(t, http.StatusUnprocessableEntity, status, body)
@@ -342,11 +381,11 @@ func TestUsageAPIGatewayAccessSurvivesTaskCleanup(t *testing.T) {
 	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.NotContains(t, body, "private-task")
-	require.NotContains(t, body, "7654")
+	require.False(t, usageReportHasNumber(t, body, 7654), body)
 	f.allowRoute(t, "GET /api/v1/usage", authorizationv1.ResourceAttributes{Namespace: "default", Group: gatewayv1alpha1.GroupVersion.Group, Resource: "gateways", Verb: "get", Name: "private"})
 	status, body = f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
-	require.Contains(t, body, "7654")
+	require.True(t, usageReportHasNumber(t, body, 7654), body)
 }
 
 func TestUsageAPIHidesEveryWorkSharingAnInaccessiblePRTask(t *testing.T) {
@@ -388,7 +427,7 @@ func TestUsageAPIHidesEveryWorkSharingAnInaccessiblePRTask(t *testing.T) {
 	require.Len(t, report.Works, 1)
 	require.Equal(t, works[4], report.Works[0].ID)
 	require.EqualValues(t, 100, report.Summary.TotalTokens)
-	require.NotContains(t, body, "7654")
+	require.False(t, usageReportHasNumber(t, body, 7654), body)
 	f.allowRoute(t, "GET /api/v1/usage/work/:id")
 	for _, work := range []string{first, works[3]} {
 		status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work, "")
@@ -519,6 +558,71 @@ func TestUsageWorkerAuthorityRejectsUntrustedExecution(t *testing.T) {
 			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
 			require.NoError(t, err)
 			require.Empty(t, data.Observations)
+		})
+	}
+}
+
+// encoding/json decodes any key equal under strings.EqualFold into a tagged
+// field, including non-ASCII folds such as U+017F (ſ) for "s". The handler
+// must recognize the reserved content keys in every such spelling.
+func TestUsageWorkerReservedContentKeysMatchAnySpelling(t *testing.T) {
+	harness := map[string]any{"taskUID": "other-task-uid", "taskAttempt": 1, "promptID": "prompt-1", "sequence": 1}
+	harnessContent := func(key string) map[string]any {
+		return map[string]any{key: harness, "inputTokens": 100, "outputTokens": 20, "usageReported": true, "usageComplete": true}
+	}
+	observation := store.UsageObservation{ID: "call", CounterID: "call", Status: store.UsageStatusCompleted,
+		InputTokens: new(int64(100)), OutputTokens: new(int64(20)), Complete: true}
+	for _, tc := range []struct {
+		name     string
+		taskType corev1alpha1.TaskType
+		content  map[string]any
+		status   int
+		recorded bool
+	}{
+		{"harness mixed case", corev1alpha1.TaskTypeAI, harnessContent("HarnessV2"), http.StatusForbidden, false},
+		{"harness upper case", corev1alpha1.TaskTypeAI, harnessContent("HARNESSV2"), http.StatusForbidden, false},
+		{"harness unicode fold", corev1alpha1.TaskTypeAI, harnessContent("harneſsV2"), http.StatusForbidden, false},
+		{"usage upper case without usage authority", corev1alpha1.TaskTypeContainer, map[string]any{"USAGE": observation}, http.StatusForbidden, false},
+		{"usage unicode fold without usage authority", corev1alpha1.TaskTypeContainer, map[string]any{"uſage": observation}, http.StatusForbidden, false},
+		{"usage upper case from usage writer", corev1alpha1.TaskTypeAI, map[string]any{"USAGE": observation}, http.StatusCreated, true},
+		{"similar keys are ordinary content", corev1alpha1.TaskTypeContainer,
+			map[string]any{"harnessV2Note": "note", "usages": 1, "usageScope": "call"}, http.StatusCreated, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newInternalExecutionEventStore(t)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+			task.Spec.Type = tc.taskType
+			pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+			for _, registered := range []store.UsageTask{
+				{Namespace: task.Namespace, NamespaceUID: "namespace-uid", TaskUID: string(task.UID), TaskName: task.Name, Phase: "Running"},
+				{Namespace: task.Namespace, NamespaceUID: "namespace-uid", TaskUID: "other-task-uid", TaskName: "other-task", Phase: "Running"},
+			} {
+				require.NoError(t, backend.RegisterUsageTask(t.Context(), registered))
+			}
+			app := setupInternalExecutionEventAppWithClient(backend, testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name))
+			body := map[string]any{"type": events.ExecutionEventTypeModelUsageUpdated, "content": tc.content}
+			response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
+			require.Equal(t, tc.status, response.StatusCode)
+			require.NoError(t, response.Body.Close())
+
+			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			journal, err := backend.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamType: "task", StreamID: "owned-task"})
+			require.NoError(t, err)
+			if tc.status != http.StatusCreated {
+				require.Empty(t, data.Observations)
+				require.Empty(t, journal)
+				return
+			}
+			require.Len(t, journal, 1)
+			if !tc.recorded {
+				require.Empty(t, data.Observations)
+				return
+			}
+			require.Len(t, data.Observations, 1)
+			require.Equal(t, string(task.UID), data.Observations[0].TaskUID)
+			require.Equal(t, store.UsageScopeCall, data.Observations[0].Scope)
+			require.Equal(t, store.UsageSourceProvider, data.Observations[0].Source)
 		})
 	}
 }

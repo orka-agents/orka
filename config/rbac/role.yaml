@@ -34,6 +34,15 @@ rules:
   - ""
   resources:
   - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumes
   - pods/status
   verbs:
@@ -119,8 +128,8 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
@@ -147,6 +156,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/finalizers
   - agentruntimes/finalizers
   - agents/finalizers
   - branchclaims/finalizers
@@ -171,6 +181,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/status
   - agentruntimes/status
   - agents/status
   - branchclaims/status
@@ -197,20 +208,40 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosttemplates
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connectorproviders
   verbs:
   - get
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - outboundaccesspolicies
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - core.orka.ai

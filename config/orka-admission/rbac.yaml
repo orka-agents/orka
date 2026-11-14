@@ -19,6 +19,14 @@ rules:
   - apiGroups: [core.orka.ai]
     resources: [tasks]
     verbs: [get]
+  # A worker's parentless Task may not name an identity-bound Agent.
+  - apiGroups: [core.orka.ai]
+    resources: [agents]
+    verbs: [get]
+  # An AgentHost fed by a Connection must use the template its provider names.
+  - apiGroups: [core.orka.ai]
+    resources: [connections, connectorproviders]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

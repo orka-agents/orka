@@ -36,7 +36,7 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	metrics := testutil.NewMetricHarness(t)
 	registry := NewRegistry()
 	registry.Register(tracingTestTool{})
-	ctx := WithToolContext(context.Background(), &ToolContext{ToolCallID: "call-1"})
+	ctx := WithToolContext(context.Background(), &ToolContext{ToolCallID: "call-1", AgentUID: "reviewer-uid"})
 	if _, err := registry.Execute(ctx, tracingToolName, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -57,6 +57,9 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	}
 	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-1" {
 		t.Fatalf("tool call id attr = %q", got)
+	}
+	if got := attrs[genai.AttrAgentID].AsString(); got != "reviewer-uid" {
+		t.Fatalf("agent id attr = %q, want the frozen Agent UID", got)
 	}
 	if got := attrs[tracing.AttrToolName].AsString(); got != tracingToolName {
 		t.Fatalf("orka tool name attr = %q", got)

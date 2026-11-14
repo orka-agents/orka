@@ -9,6 +9,8 @@ package connectors
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -367,6 +370,18 @@ func TestValidateProviderSpec(t *testing.T) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"prompt": "a\nb"}
 		}, want: "without control bytes"},
 		{name: "no tools", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools = nil }, want: "at least one"},
+		{name: "no tools for an agent-host provider", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools = nil
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		}},
+		{name: "agent host without a template", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{}
+		}, want: "agentHost.templateRef.name is required"},
+		{name: "agent host from another token endpoint", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.ghe.com/login/oauth/authorize"
+			p.Spec.OAuth.TokenURL = "https://example.ghe.com/login/oauth/access_token"
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		}, want: "agentHost requires a github.com provider"},
 		{name: "bad tool name", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[0].Name = "List-PRs" }, want: "snake_case"},
 		{name: "duplicate tool", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[1].Name = p.Spec.Tools[0].Name }, want: "more than once"},
 		{name: "bad class", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[0].Class = "coordination" }, want: "class must be read or write"},
@@ -677,6 +692,9 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		"client auth": func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.ClientAuthentication = corev1alpha1.ConnectorClientAuthSecretPost
 		},
+		"serving agent hosts": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		},
 	} {
 		changed := provider.DeepCopy()
 		mutate(changed)
@@ -774,5 +792,145 @@ func TestValidScopeTokenRefusesCommas(t *testing.T) {
 		if got := validScopeToken(scope); got != want {
 			t.Fatalf("validScopeToken(%q) = %t, want %t", scope, got, want)
 		}
+	}
+}
+
+// A provider that serves agent hosts resolves only with a Relay template.
+func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	provider := validProvider()
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "oauth", Namespace: "tenant"},
+		Data:       map[string][]byte{"clientSecret": []byte("s3cret")},
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "core_v1alpha1_agenthosttemplate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := func(change func(*corev1alpha1.AgentHostTemplateSpec)) *corev1alpha1.AgentHostTemplate {
+		sample := &corev1alpha1.AgentHostTemplate{}
+		if err := yaml.Unmarshal(raw, sample); err != nil {
+			t.Fatal(err)
+		}
+		sample.ObjectMeta = metav1.ObjectMeta{Name: "copilotd", Namespace: "tenant"}
+		change(&sample.Spec)
+		return sample
+	}
+	for name, test := range map[string]struct {
+		objects []runtime.Object
+		want    string
+	}{
+		"no template": {objects: []runtime.Object{secret}, want: ReasonReferenceNotFound},
+		"a Standalone template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.Access = corev1alpha1.AgentHostAccessStandalone
+		})}, want: ReasonReferenceInvalid},
+		// A template the AgentHost reconciler would refuse.
+		"an invalid template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.RuntimeClassName = new("Bad_Name")
+		})}, want: ReasonReferenceInvalid},
+		"a Relay template": {objects: []runtime.Object{secret, template(func(*corev1alpha1.AgentHostTemplateSpec) {})}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(test.objects...).Build()
+			issue, err := ResolveProviderReferences(context.Background(), reader, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (issue == nil) != (test.want == "") || (issue != nil && issue.Reason != test.want) {
+				t.Fatalf("issue = %v, want reason %q", issue, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateProviderSpecForwardingTools(t *testing.T) {
+	forwarding := func(mutate func(*corev1alpha1.ConnectorTool)) *corev1alpha1.ConnectorProvider {
+		provider := validProvider()
+		tool := corev1alpha1.ConnectorTool{
+			Name: "azure_arm", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
+			Description: "Azure Resource Manager",
+			HTTP: &corev1alpha1.ConnectorHTTPTool{
+				URL: "https://management.azure.com", Method: "GET",
+				Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+			},
+		}
+		if mutate != nil {
+			mutate(&tool)
+		}
+		provider.Spec.Tools = append(provider.Spec.Tools, tool)
+		return provider
+	}
+	if issue := ValidateProviderSpec(forwarding(nil), nil); issue != nil {
+		t.Fatalf("valid forwarding tool refused: %v", issue)
+	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	}), nil); issue != nil {
+		t.Fatalf("a forwarding tool that grants writes was refused: %v", issue)
+	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.URL = "https://management.azure.com:443"
+	}), nil); issue != nil {
+		t.Fatalf("the default HTTPS port was refused: %v", issue)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1alpha1.ConnectorTool)
+		want   string
+	}{
+		"write":    {func(tool *corev1alpha1.ConnectorTool) { tool.Class = corev1alpha1.ConnectorToolClassWrite }, "must be class read"},
+		"path":     {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.URL = "https://management.azure.com/subscriptions" }, "origin with no path"},
+		"headers":  {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Headers = map[string]string{"Accept": "x"} }, "sets no headers"},
+		"protocol": {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Forward.Protocol = "Other" }, "unsupported forwarding protocol"},
+		"parameters": {func(tool *corev1alpha1.ConnectorTool) {
+			tool.Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
+		}, "declares no parameters"},
+	} {
+		issue := ValidateProviderSpec(forwarding(tc.mutate), nil)
+		if issue == nil || !strings.Contains(issue.Message, tc.want) {
+			t.Errorf("%s: issue = %v, want %q", name, issue, tc.want)
+		}
+	}
+}
+
+func TestProviderAuthorityDigestRenewsConsentForForwarding(t *testing.T) {
+	provider := validProvider()
+	provider.UID = "provider-uid"
+	before := ProviderAuthorityDigest(provider)
+	connection := &corev1alpha1.Connection{Status: corev1alpha1.ConnectionStatus{Consent: &corev1alpha1.ConnectionConsent{
+		ProviderUID: string(provider.UID), AuthorityDigest: before,
+	}}}
+	if !ConsentMatchesProvider(connection, provider) {
+		t.Fatal("consent must match the provider it was given for")
+	}
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.URL = "https://api.github.com"
+		}
+	}
+	plain := ProviderAuthorityDigest(provider)
+	connection.Status.Consent.AuthorityDigest = plain
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward = &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == plain || ConsentMatchesProvider(connection, provider) {
+		t.Fatal("turning a tool into a forwarding tool must need renewed consent")
+	}
+	reads := ProviderAuthorityDigest(provider)
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == reads {
+		t.Fatal("letting a forwarding tool write must need renewed consent")
 	}
 }

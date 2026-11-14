@@ -62,6 +62,19 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state := s.sessions[sessionID]
+	if state == nil {
+		unaccepted, mismatch := s.drainCleanedPromptUnacceptedLocked(sessionID, request.Metadata)
+		if mismatch != harnessv2.FenceMatch {
+			s.mu.Unlock()
+			writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+			return
+		}
+		if unaccepted {
+			s.mu.Unlock()
+			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+			return
+		}
+	}
 	if state == nil || state.creating {
 		s.mu.Unlock()
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -155,6 +168,13 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	prompt.genai = s.startInvokeAgent(r.Context(), state, request, now)
+	// Settlement records the span first; this only closes a prompt that never
+	// settled, such as one rejected before the agent accepted it.
+	defer prompt.genai.abandon()
+	if providerProxy != nil {
+		providerProxy.setPromptTelemetry(string(request.Metadata.PromptID), prompt.genai)
+	}
 	// Resume an adapter that exited while idle before this prompt gets any
 	// provider or MCP access. Some agents call the model during
 	// session/resume; with the prompt not yet active the provider proxy
@@ -316,6 +336,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result := <-run.Result
+	prompt.genai.setUsage(result.Usage)
 	if result.Err != nil {
 		stage, rpcCode, rpcService, rpcErrorName := promptExecutionDiagnostic(result.Err)
 		slog.Error(
@@ -1230,7 +1251,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 			return
 		}
-		state.descriptor.State = harnessv2.RuntimeSessionStateFinalizing
+		setSessionState(state, harnessv2.RuntimeSessionStateFinalizing)
 		state.publicationFinalization = &receipt
 	}
 	state.descriptor.LastTransitionAt = now
@@ -1397,7 +1418,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if providerCleanupErr != nil || deleteErr != nil || !cleanup.Proven {
 		s.poisonPool("descendant_cleanup_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
@@ -1407,7 +1428,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
 		s.poisonPool("session_root_ownership_reclaim_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(
@@ -1419,7 +1440,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.removeSessionPrivateFiles(state); err != nil {
 		s.poisonPool("session_root_cleanup_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(
@@ -1492,14 +1513,47 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	promptSettled := state.prompt == nil || state.prompt.settlement != nil
 	if state.creating || state.runtime == nil || !promptSettled || nextState != harnessv2.RuntimeSessionStateDeleting {
 		if !state.creating && nextState == harnessv2.RuntimeSessionStateCancelling && state.descriptor.State != nextState {
-			state.descriptor.State = nextState
+			setSessionState(state, nextState)
 			state.descriptor.LastTransitionAt = now
 		}
 		return false, nil
 	}
-	state.descriptor.State = nextState
+	setSessionState(state, nextState)
 	state.descriptor.LastTransitionAt = now
 	return true, nil
+}
+
+// drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
+// that drain cleanup already retired is provably unaccepted: the pool is still
+// draining, the request carries this supervisor's exact fence for that retired
+// session (runtime instance, supervisor boot, controller epoch, pool identity,
+// session UID and generation, and profile), and neither the operation nor the
+// prompt was ever admitted on it. Such a prompt is rejected as retryable, like
+// any prompt that reaches a draining pool, so the controller can requeue it.
+// A request for that retired session with any other fence gets the
+// non-retryable stale-fence refusal through the returned mismatch, never a
+// retry. Replays of admitted work keep their existing classification. The
+// caller must hold s.mu.
+func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (bool, harnessv2.FenceMismatch) {
+	if !s.drain.Requested {
+		return false, harnessv2.FenceMatch
+	}
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID {
+		return false, harnessv2.FenceMatch
+	}
+	expected := s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration)
+	expected.RuntimeProfileDigest = tombstone.RuntimeProfileDigest
+	if mismatch := harnessv2.CompareFence(expected, metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		return false, mismatch
+	}
+	if tombstoneOperation(tombstone.RuntimeSessionTombstone, metadata.OperationID) != nil {
+		return false, harnessv2.FenceMatch
+	}
+	if _, ok := tombstone.cancellationOperations[metadata.OperationID]; ok {
+		return false, harnessv2.FenceMatch
+	}
+	return tombstone.prompt == nil || tombstone.prompt.metadata.PromptID != metadata.PromptID, harnessv2.FenceMatch
 }
 
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {
@@ -2060,13 +2114,13 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	nextMCPState := harnessv2.RuntimeSessionStatePoisoned
 	switch descriptor.State {
 	case harnessv2.WorkspaceDeltaNoChange:
-		state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+		setSessionState(state, harnessv2.RuntimeSessionStateIdle)
 		nextMCPState = harnessv2.RuntimeSessionStateIdle
 	case harnessv2.WorkspaceDeltaPrepared:
-		state.descriptor.State = harnessv2.RuntimeSessionStatePublicationPrepared
+		setSessionState(state, harnessv2.RuntimeSessionStatePublicationPrepared)
 		nextMCPState = harnessv2.RuntimeSessionStatePublicationPrepared
 	case harnessv2.WorkspaceDeltaReadOnlyModified:
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	}
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	mcpProxy := state.mcpProxy
@@ -2097,7 +2151,7 @@ func (s *Server) poisonSession(state *sessionState, _ string) {
 		state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
 	}
 	s.mu.Lock()
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	cleanup := !state.creating && state.runtime != nil && !state.drainCleanupScheduled
 	if cleanup {
@@ -2122,7 +2176,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		prompt.acceptedAt = event.Timestamp
 		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
 		recordPromptAdmissionLocked(state, prompt)
-		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
+		setSessionState(state, harnessv2.RuntimeSessionStatePromptRunning)
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
@@ -2138,8 +2192,15 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, err
 		}
+		if update != nil && update.ToolCall != nil {
+			prompt.genai.observeTool(update.ToolCall, prompt.toolCallNames[update.ToolCall.ToolCallID], event.Timestamp)
+		}
 		if text != "" {
-			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
+			messageID := ""
+			if state.profile.ProviderKind == providerKindCodex {
+				messageID = acpAssistantMessageID(event.Update)
+			}
+			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), messageID, s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
 		}
 		if !ok {
 			prompt.sequence--
@@ -2320,8 +2381,23 @@ func (s *Server) buildTerminalEventLocked(
 	return event
 }
 
-func (p *promptState) appendAssistantText(text, phase string, limit int) {
+func (p *promptState) appendAssistantText(text, phase, messageID string, limit int) {
 	appendBoundedPromptText(&p.assistant, &p.assistantOverflow, text, limit)
+	switch {
+	case messageID != "":
+		if messageID != p.lastMessageID {
+			p.lastMessage.Reset()
+			p.lastMessageOverflow = false
+			p.lastMessageID = messageID
+		}
+		appendBoundedPromptText(&p.lastMessage, &p.lastMessageOverflow, text, limit)
+		// A named message supersedes untagged text before it, and resuming
+		// the same message after a warning keeps its earlier chunks.
+		p.untagged.Reset()
+		p.untaggedOverflow = false
+	case p.lastMessageID != "":
+		appendBoundedPromptText(&p.untagged, &p.untaggedOverflow, text, limit)
+	}
 	if phase != acpAssistantPhaseFinalAnswer {
 		return
 	}
@@ -2329,9 +2405,18 @@ func (p *promptState) appendAssistantText(text, phase string, limit int) {
 	appendBoundedPromptText(&p.finalAnswer, &p.finalAnswerOverflow, text, limit)
 }
 
+// terminalResultText prefers the final answer, then untagged text that
+// followed the last named message (codex-acp sends a /review result that
+// way), then the last named message, then all assistant text.
 func (p *promptState) terminalResultText() (string, bool) {
 	if p.finalAnswerSeen {
 		return p.finalAnswer.String(), p.finalAnswerOverflow
+	}
+	if p.untagged.Len() > 0 || p.untaggedOverflow {
+		return p.untagged.String(), p.untaggedOverflow
+	}
+	if p.lastMessageID != "" {
+		return p.lastMessage.String(), p.lastMessageOverflow
 	}
 	return p.assistant.String(), p.assistantOverflow
 }
@@ -2498,6 +2583,13 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	// A finisher can run before the stream handler records the agent's usage
+	// (remote-renewal compensation does), and telemetry ends only once, so
+	// keep any usage this result carries first.
+	prompt.genai.setUsage(result.Usage)
+	// Cancellation can settle the prompt first; telemetry follows the
+	// canonical settlement, not this finisher's result.
+	prompt.genai.finishSettlement(settlement)
 	next := state.descriptor.State
 	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
 	if sessionCleanup {
@@ -2532,10 +2624,11 @@ func recordPromptSettlementLocked(state *sessionState, prompt *promptState, sett
 	default:
 		return settlement
 	}
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	next := harnessv2.RuntimeSessionStatePoisoned
 	if settlement.TerminalEvent == harnessv2.EventCompleted {
-		state.descriptor.State = harnessv2.RuntimeSessionStateValidating
+		next = harnessv2.RuntimeSessionStateValidating
 	}
+	setSessionState(state, next)
 	state.descriptor.LastTransitionAt = settlement.SettledAt
 	return settlement
 }
@@ -2667,7 +2760,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
 		if terminalAdmissionFailure && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
-			state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+			setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 			state.descriptor.LastTransitionAt = time.Now().UTC()
 		}
 		next := state.descriptor.State

@@ -1,4 +1,30 @@
 {{/*
+Select AI worker grants and keep delegated context-token calls scope-enforced.
+*/}}
+{{- define "orka.aiWorkerRBACProfile" -}}
+{{- $profile := "default" -}}
+{{- if hasKey .Values.workers.ai "rbacProfile" -}}
+{{- $profile = .Values.workers.ai.rbacProfile -}}
+{{- end -}}
+{{- if not (kindIs "string" $profile) -}}
+{{- fail "workers.ai.rbacProfile must be default or restricted" -}}
+{{- end -}}
+{{- if not (has $profile (list "default" "restricted")) -}}
+{{- fail "workers.ai.rbacProfile must be default or restricted" -}}
+{{- end -}}
+{{- if eq $profile "restricted" -}}
+{{- if not .Values.rbac.create -}}
+{{- fail "workers.ai.rbacProfile=restricted requires rbac.create=true" -}}
+{{- end -}}
+{{- $context := .Values.controller.contextToken | default dict -}}
+{{- if and $context.authzMode (ne $context.authzMode "enforce") -}}
+{{- fail "restricted AI workers require controller-wide context-token enforcement; controller.contextToken.authzMode cannot be off or audit" -}}
+{{- end -}}
+{{- end -}}
+{{- $profile -}}
+{{- end -}}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "orka.name" -}}
@@ -96,7 +122,9 @@ suffix so long release names cannot collapse all trust tiers to one name.
 {{- end -}}
 {{- end }}
 
-{{/* Read the exact chart fullname from the live controller's in-cluster URL. */}}
+{{/* Read the exact chart fullname from the live controller's in-cluster URL:
+<fullname>.<namespace>.svc, optionally followed by the cluster domain, which
+earlier releases omitted. */}}
 {{- define "orka.existingControllerFullname" -}}
 {{- $fullnames := list -}}
 {{- $namespaceSuffix := printf ".%s.svc" .namespace -}}
@@ -108,9 +136,12 @@ suffix so long release names cannot collapse all trust tiers to one name.
 {{- $endpoint := trimPrefix "--controller-url=http://" $arg -}}
 {{- $hostPort := first (splitList "/" $endpoint) -}}
 {{- $host := first (splitList ":" $hostPort) -}}
-{{- if hasSuffix $namespaceSuffix $host -}}
-{{- $fullname := trimSuffix $namespaceSuffix $host -}}
-{{- if and $fullname (not (contains "." $fullname)) -}}
+{{- /* Split only at the first suffix: the cluster domain may repeat it. */ -}}
+{{- $parts := splitn $namespaceSuffix 2 $host -}}
+{{- if eq (len $parts) 2 -}}
+{{- $fullname := $parts._0 -}}
+{{- $clusterDomain := $parts._1 -}}
+{{- if and $fullname (not (contains "." $fullname)) (or (eq $clusterDomain "") (and (hasPrefix "." $clusterDomain) (gt (len $clusterDomain) 1))) -}}
 {{- $fullnames = append $fullnames $fullname -}}
 {{- end -}}
 {{- end -}}
@@ -372,6 +403,124 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 {{- end }}
 
 {{/*
+Storage bindings. Each contract is served by embedded SQLite ("sqlite") or by
+an adapter named under storage.adapters. A missing storage block, as left by
+helm upgrade --reuse-values from an older chart, binds both contracts to
+SQLite. orka.storageBindings validates the shape of the storage block and
+returns the resolved bindings as JSON. Only a missing or null value takes a
+default; any other value of the wrong type fails, so it cannot silently leave
+a contract on SQLite.
+*/}}
+{{- define "orka.storageBindings" -}}
+{{- $storage := .Values.storage -}}
+{{- if kindIs "invalid" $storage -}}
+{{- $storage = dict -}}
+{{- end -}}
+{{- if not (kindIs "map" $storage) -}}
+{{- fail "storage must be a map with bindings and adapters" -}}
+{{- end -}}
+{{- range $key, $_ := $storage -}}
+{{- if not (has $key (list "bindings" "adapters")) -}}
+{{- fail (printf "storage.%s is not a storage setting; use storage.bindings and storage.adapters" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- $adapters := $storage.adapters -}}
+{{- if not (or (kindIs "invalid" $adapters) (kindIs "map" $adapters)) -}}
+{{- fail "storage.adapters must be a map of adapter names to adapter settings" -}}
+{{- end -}}
+{{- $bindings := $storage.bindings -}}
+{{- if kindIs "invalid" $bindings -}}
+{{- $bindings = dict -}}
+{{- end -}}
+{{- if not (kindIs "map" $bindings) -}}
+{{- fail "storage.bindings must be a map with state and artifacts" -}}
+{{- end -}}
+{{- /* A misspelled contract must fail rather than leave that contract on SQLite. */ -}}
+{{- range $key, $_ := $bindings -}}
+{{- if not (has $key (list "state" "artifacts")) -}}
+{{- fail (printf "storage.bindings.%s is not a storage contract; use state or artifacts" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- $resolved := dict -}}
+{{- range $contract := list "state" "artifacts" -}}
+{{- $backend := "sqlite" -}}
+{{- if hasKey $bindings $contract -}}
+{{- $backend = get $bindings $contract -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $backend)) (empty $backend) -}}
+{{- fail (printf "storage.bindings.%s must be \"sqlite\" or the name of an adapter in storage.adapters" $contract) -}}
+{{- end -}}
+{{- $_ := set $resolved $contract $backend -}}
+{{- end -}}
+{{- $resolved | toJson -}}
+{{- end }}
+
+{{/*
+Non-empty when the controller needs a storage configuration file: a contract
+is bound to an adapter, or adapters are configured. With both contracts on
+SQLite and no adapters, the controller keeps its default flags.
+*/}}
+{{- define "orka.storageConfigEnabled" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- if or (ne $bindings.state "sqlite") (ne $bindings.artifacts "sqlite") (not (empty $storage.adapters)) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Non-empty when a contract is bound to embedded SQLite.
+*/}}
+{{- define "orka.storageUsesSQLite" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- if or (eq $bindings.state "sqlite") (eq $bindings.artifacts "sqlite") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Chart-side checks that give early feedback; the controller validates every
+field again when it loads the file.
+*/}}
+{{- define "orka.validateStorage" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- $adapters := $storage.adapters | default dict -}}
+{{- range $contract := list "state" "artifacts" -}}
+{{- $backend := get $bindings $contract -}}
+{{- if and (ne $backend "sqlite") (not (hasKey $adapters $backend)) -}}
+{{- fail (printf "storage.bindings.%s names %q, which is not in storage.adapters" $contract $backend) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name := keys $adapters | sortAlpha -}}
+{{- if eq $name "sqlite" -}}
+{{- fail "storage.adapters.sqlite is reserved for embedded SQLite; choose another adapter name" -}}
+{{- end -}}
+{{- if and (ne $bindings.state $name) (ne $bindings.artifacts $name) -}}
+{{- fail (printf "storage.adapters.%s is not bound to any contract in storage.bindings" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The storage configuration file the controller reads with --storage-config.
+It holds bindings and Secret references, never Secret values.
+*/}}
+{{- define "orka.storageConfig" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- $config := dict "bindings" $bindings -}}
+{{- with $storage.adapters -}}
+{{- $_ := set $config "adapters" . -}}
+{{- end -}}
+{{- toYaml $config -}}
+{{- end }}
+
+{{- define "orka.storageConfigName" -}}
+{{- printf "%s-storage" (include "orka.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Default the tenant namespace to the Helm release namespace.
 */}}
 {{- define "orka.watchNamespace" -}}
@@ -627,4 +776,169 @@ Create release-scoped static worker RoleBinding names.
 {{- end -}}
 {{ printf "%s:%s" $repository $tag }}
 {{- end -}}
+{{- end }}
+
+{{/*
+Agent hosts are opt-in. Their Pods, volumes and Secrets
+live in a namespace the controller never shares with its watch or ACP runtime
+namespaces, and the orka-host-agent sidecar image must be immutable.
+*/}}
+{{- define "orka.agentHostsEnabled" -}}
+{{- if dig "agentHosts" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostNamespace" -}}
+{{- trim (toString (dig "agentHosts" "namespace" "" .Values.controller)) -}}
+{{- end }}
+
+{{/* Match the digest pin required by agenthost.ValidateTemplate. */}}
+{{- define "orka.validateAgentHostImage" -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (toString .ref)) -}}
+{{- fail (printf "%s must be pinned by digest: <repository>@sha256:<digest>" .name) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostAgentImage" -}}
+{{- $image := trim (toString (dig "agentHosts" "agentImage" "" .Values.controller)) -}}
+{{- if not $image -}}
+{{- if not .Values.controller.image.digest -}}
+{{- fail "controller.agentHosts.agentImage must name a digest-pinned image, or controller.image.digest must pin the controller image it defaults to" -}}
+{{- end -}}
+{{- $image = include "orka.imageRef" .Values.controller.image -}}
+{{- end -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" "controller.agentHosts.agentImage" "ref" $image) -}}
+{{- $image -}}
+{{- end }}
+
+{{/* Whether to install the AI worker identity policy. Absent (for example under
+--reuse-values from an older release) means enabled. */}}
+{{- define "orka.aiWorkerIdentityProtection" -}}
+{{- $value := dig "ai" "identityProtection" true .Values.workers -}}
+{{- if not (kindIs "bool" $value) -}}
+{{- fail "workers.ai.identityProtection must be true or false" -}}
+{{- end -}}
+{{- if $value }}true{{ end -}}
+{{- end }}
+
+{{/* Secret holding the Ed25519 keys that sign Task webhook deliveries. */}}
+{{- define "orka.taskWebhookSigningSecretName" -}}
+{{- default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (toString (dig "taskWebhooks" "signingSecretName" "" .Values.controller))) -}}
+{{- end }}
+
+{{/*
+Namespace holding only the Task webhook signing Secret. Task and Agent
+secretRefs mount any Secret in the Task namespace and worker roles are bound
+there, so the key must live where no Task, runtime or agent host runs. The
+default is derived from the release namespace so that each release owns its
+own signing namespace.
+*/}}
+{{- define "orka.taskWebhookSigningNamespace" -}}
+{{- $namespace := trim (toString (dig "taskWebhooks" "signingNamespace" "" .Values.controller)) -}}
+{{- if not $namespace -}}
+{{- $namespace = printf "%s-task-webhook-signing" .Release.Namespace -}}
+{{- if gt (len $namespace) 63 -}}
+{{- $namespace = printf "%s-%s-task-webhook-signing" (.Release.Namespace | trunc 30 | trimSuffix "-") (sha256sum .Release.Namespace | trunc 8) -}}
+{{- end -}}
+{{- end -}}
+{{- $namespace -}}
+{{- end }}
+
+{{- define "orka.validateTaskWebhooks" -}}
+{{- $secret := include "orka.taskWebhookSigningSecretName" . -}}
+{{- if or (gt (len $secret) 253) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` $secret)) -}}
+{{- fail (printf "controller.taskWebhooks.signingSecretName %q must be a Secret name" $secret) -}}
+{{- end -}}
+{{- $namespace := include "orka.taskWebhookSigningNamespace" . -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.taskWebhooks.signingNamespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
+{{- $reserved := list .Release.Namespace (include "orka.watchNamespace" .) (include "orka.clientNamespace" .) .Values.controller.acpRuntime.namespace (include "orka.agentHostNamespace" .) -}}
+{{- if has $namespace $reserved -}}
+{{- fail (printf "controller.taskWebhooks.signingNamespace %q must differ from the Helm release, client, ACP runtime and agent-host namespaces: Tasks there can mount its Secrets" $namespace) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.validateAgentHosts" -}}
+{{- if include "orka.agentHostsEnabled" . -}}
+{{- $namespace := include "orka.agentHostNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.agentHosts.namespace is required when controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- $_ := include "orka.agentHostAgentImage" . -}}
+{{- end -}}
+{{- if include "orka.agentHostGitHubEnabled" . -}}
+{{- $github := include "orka.agentHostGitHub" . | fromYaml -}}
+{{- if not (include "orka.agentHostsEnabled" .) -}}
+{{- fail "controller.agentHosts.github.enabled requires controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if not (dig "connectors" "enabled" false .Values.controller) -}}
+{{- fail "controller.agentHosts.github.enabled requires controller.connectors.enabled=true: hosts are fed by people's GitHub links" -}}
+{{- end -}}
+{{- if not (trim (toString $github.clientID)) -}}
+{{- fail "controller.agentHosts.github.clientID is required: the GitHub App's client ID" -}}
+{{- end -}}
+{{- if eq (empty $github.clientSecret.existingSecret) (empty $github.clientSecret.value) -}}
+{{- fail "set exactly one of controller.agentHosts.github.clientSecret.existingSecret and .value" -}}
+{{- end -}}
+{{- $secret := toString $github.clientSecret.existingSecret -}}
+{{- if and $secret (not (regexMatch `^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$` $secret)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.existingSecret must be a Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch `^[-._a-zA-Z0-9]{1,253}$` (toString $github.clientSecret.key)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.key must be a Secret data key" -}}
+{{- end -}}
+{{- if not (regexMatch `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$` (toString $github.providerName)) -}}
+{{- fail "controller.agentHosts.github.providerName must be a lowercase name of at most 63 characters" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Without agent hosts the controller stops reconciling AgentHosts: their
+Pods keep running and their deletion never finishes. The CRD is checked
+first, so an upgrade from a release without it does not fail on the kind. */ -}}
+{{- if and .Release.IsUpgrade (not (include "orka.agentHostsEnabled" .)) -}}
+{{- if lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "agenthosts.core.orka.ai" -}}
+{{- $hosts := dig "items" list (lookup "core.orka.ai/v1alpha1" "AgentHost" .Release.Namespace "") -}}
+{{- if $hosts -}}
+{{- fail (printf "controller.agentHosts.enabled=false would leave %d AgentHost(s) in %s that nothing stops or cleans up; delete them, wait until they are gone, then upgrade" (len $hosts) .Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostGitHubEnabled" -}}
+{{- if dig "agentHosts" "github" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostGitHubSecretName" -}}
+{{- $github := include "orka.agentHostGitHub" . | fromYaml -}}
+{{- default (printf "%s-github-app" (include "orka.fullname" .)) $github.clientSecret.existingSecret -}}
+{{- end }}
+
+{{/*
+The agent-host GitHub settings and template with the chart's defaults under
+them: an upgrade that reuses an older release's values has none of these
+maps, and must render as a fresh install would. The defaults match values.yaml.
+*/}}
+{{- define "orka.agentHostGitHub" -}}
+{{- $defaults := dict "providerName" "github" "displayName" "GitHub" "clientID" "" "clientSecret" (dict "existingSecret" "" "key" "clientSecret" "value" "") -}}
+{{- $set := dig "agentHosts" "github" dict .Values.controller -}}
+{{- toYaml (mergeOverwrite $defaults (deepCopy $set)) -}}
+{{- end }}
+
+{{- define "orka.agentHostTemplate" -}}
+{{- $resources := dict "requests" (dict "cpu" "250m" "memory" "1Gi") "limits" (dict "cpu" "4" "memory" "8Gi") -}}
+{{- $defaults := dict "name" "copilotd" "storage" "20Gi" "resources" $resources
+  "copilotdImage" "ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f"
+  "hostImage" "mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770" -}}
+{{- $set := dig "agentHosts" "template" dict .Values.controller -}}
+{{- $template := mergeOverwrite $defaults (deepCopy $set) -}}
+{{- range $name := list "copilotdImage" "hostImage" -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" (printf "controller.agentHosts.template.%s" $name) "ref" (get $template $name)) -}}
+{{- end -}}
+{{- toYaml $template -}}
 {{- end }}

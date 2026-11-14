@@ -24,6 +24,18 @@ metadata:
   name: orka-system
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/component: task-webhook-signing
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+  name: orka-task-webhook-signing
+---
+apiVersion: v1
 automountServiceAccountToken: true
 kind: ServiceAccount
 metadata:
@@ -31,18 +43,27 @@ metadata:
     app.kubernetes.io/component: admission
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-admission
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-ai-worker
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-container-worker
   namespace: orka-system
 ---
@@ -52,6 +73,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-controller-manager
   namespace: orka-system
 ---
@@ -62,6 +84,7 @@ metadata:
   labels:
     app.kubernetes.io/component: provider-auth-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-provider-auth-proxy
   namespace: orka-system
 ---
@@ -72,12 +95,17 @@ metadata:
   labels:
     app.kubernetes.io/component: scm-egress-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-scm-egress-proxy
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-vendor-worker
   namespace: orka-system
 ---
@@ -88,6 +116,7 @@ metadata:
   labels:
     app.kubernetes.io/component: workspace-publisher
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-workspace-publisher
   namespace: orka-system
 ---
@@ -202,6 +231,31 @@ rules:
   - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-webhook-signing-controller-role
+  namespace: orka-task-webhook-signing
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-task-webhook-signing
+  resources:
+  - secrets
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
@@ -233,6 +287,19 @@ rules:
   - core.orka.ai
   resources:
   - tasks
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - connections
+  - connectorproviders
   verbs:
   - get
 ---
@@ -392,6 +459,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -575,6 +643,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 - apiGroups:
@@ -976,6 +1045,15 @@ rules:
   - ""
   resources:
   - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumes
   - pods/status
   verbs:
@@ -1061,8 +1139,8 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
@@ -1089,6 +1167,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/finalizers
   - agentruntimes/finalizers
   - agents/finalizers
   - branchclaims/finalizers
@@ -1113,6 +1192,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosts/status
   - agentruntimes/status
   - agents/status
   - branchclaims/status
@@ -1139,20 +1219,40 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agenthosttemplates
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connectorproviders
   verbs:
   - get
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - outboundaccesspolicies
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - core.orka.ai
@@ -1441,6 +1541,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1482,6 +1583,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1749,6 +1851,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -2257,6 +2360,23 @@ subjects:
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-webhook-signing-controller-rolebinding
+  namespace: orka-task-webhook-signing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orka-task-webhook-signing-controller-role
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
@@ -2530,6 +2650,7 @@ spec:
         - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
+        - --worker-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
         command:
         - /orka-admission
         image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -2637,7 +2758,7 @@ spec:
         - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
         - --agent-execution-snapshot-retention=720h
         - --agent-execution-snapshot-retention-interval=1h
-        - --controller-url=http://orka-api.orka-system.svc:8080
+        - --controller-url=http://orka-api.orka-system.svc.cluster.local:8080
         - --controller-mode=harness-v2
         - --watch-namespace=orka-system
         - --enforce-namespace-isolation=true
@@ -2647,12 +2768,13 @@ spec:
         - --acp-upgrade-drain-poll-interval=1s
         - --acp-upgrade-drain-trigger-timeout=5m15s
         - --acp-upgrade-drain-marker-namespace=orka-system
-        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080
+        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080
         - --acp-provider-proxy-namespace=orka-system
         - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
         - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
         - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+        - --session-loader-image=docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
         - --gateway-enabled=true
         - --gateway-pending-per-session=100
         - --gateway-max-records-per-gateway=1000
@@ -2663,8 +2785,7 @@ spec:
         - --gateway-delivery-max-attempts=10
         - --substrate-mcp-tools-enabled=false
         - --substrate-api-endpoint=api.ate-system.svc:443
-        - --substrate-router-url=http://atenet-router.ate-system.svc
-        - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+        - --substrate-router-url=https://atenet-router.ate-system.svc:443
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete
@@ -3146,8 +3267,9 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConditions:
-  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
-      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+  - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
@@ -3186,6 +3308,193 @@ spec:
         'system:serviceaccount:kube-system:namespace-controller',
         'system:kube-controller-manager']
     name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agents
+  validations:
+  - expression: |-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) || (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) && oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) || authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agenthost-template-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agenthosts
+  validations:
+  - expression: |-
+      request.operation != 'CREATE' || has(object.spec.githubTokenFrom) || authorizer.group('core.orka.ai')
+
+        .resource('agenthosttemplates')
+        .namespace(request.namespace)
+        .name(object.spec.templateRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected AgentHostTemplate
+    reason: Forbidden
+  - expression: '!has(object.spec.githubTokenFrom) || request.operation != ''CREATE''
+      || request.userInfo.username == ''system:serviceaccount:orka-system:orka-controller-manager'''
+    message: only the Orka controller may create an AgentHost that takes its token
+      from a Connection
+    reason: Forbidden
+  - expression: |-
+      !has(object.spec.githubTokenSecretRef) || (request.operation == 'UPDATE' &&
+
+        has(oldObject.spec.githubTokenSecretRef) &&
+        oldObject.spec.githubTokenSecretRef.name == object.spec.githubTokenSecretRef.name &&
+        oldObject.spec.githubTokenSecretRef.?key.orValue('token') ==
+        object.spec.githubTokenSecretRef.?key.orValue('token')) ||
+      authorizer.group('')
+
+        .resource('secrets')
+        .namespace(request.namespace)
+        .name(object.spec.githubTokenSecretRef.name)
+        .check('get').allowed()
+    message: caller is not authorized to read the selected GitHub token Secret
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:' + 'orka-system'
+      + ':' + 'orka-ai-worker'
+    name: ai-worker
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - secrets
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - serviceaccounts
+    - apiGroups:
+      - batch
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - jobs
+  validations:
+  - expression: request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'
+    message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret
+      would hand it another identity
+  - expression: |-
+      request.resource.resource != 'serviceaccounts' || (
+
+        request.name.startsWith('orka-code-exec-') &&
+        (request.operation == 'CREATE' ||
+          oldObject.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true') &&
+        (request.operation == 'DELETE' ||
+          object.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true'))
+    message: the AI worker may only create or delete code_exec ServiceAccounts (orka-code-exec-*)
+      and never an Orka platform ServiceAccount; replacing another ServiceAccount
+      would inherit its RoleBindings
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        object.metadata.name.startsWith('orka-code-exec-') &&
+        variables.pod.?serviceAccountName.orValue('') == object.metadata.name &&
+        variables.pod.?automountServiceAccountToken.orValue(true) == false &&
+        variables.pod.?volumes.orValue([]).all(v, has(v.emptyDir) || has(v.secret)))
+    message: 'AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as
+      the ServiceAccount of the same name with automountServiceAccountToken false,
+      and use only emptyDir and Secret volumes'
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        variables.podLabels.all(k, k in [
+          'app.kubernetes.io/name', 'orka.ai/tool', 'orka.ai/code-exec-job',
+          'batch.kubernetes.io/job-name', 'job-name',
+          'batch.kubernetes.io/controller-uid', 'controller-uid']) &&
+        variables.podLabels[?'app.kubernetes.io/name'].orValue('orka') == 'orka' &&
+        variables.podLabels[?'orka.ai/tool'].orValue('code_exec') == 'code_exec' &&
+        ['orka.ai/code-exec-job', 'batch.kubernetes.io/job-name', 'job-name'].all(k,
+          variables.podLabels[?k].orValue(object.metadata.name) == object.metadata.name) &&
+        !has(variables.pod.subdomain))
+    message: AI worker Job Pods may carry only code_exec labels (app.kubernetes.io/name=orka,
+      orka.ai/tool=code_exec, and the Job name) and no subdomain, so they cannot join
+      another component's Service or NetworkPolicy allowance
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        !variables.pod.?hostNetwork.orValue(false) &&
+        !variables.pod.?hostPID.orValue(false) &&
+        !variables.pod.?hostIPC.orValue(false) &&
+        !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.pod.?initContainers.orValue([]).size() == 0 &&
+        variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
+        variables.pod.containers.all(c,
+          !c.?securityContext.privileged.orValue(false) &&
+          c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
+          c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          'ALL' in c.?securityContext.capabilities.drop.orValue([]) &&
+          c.?securityContext.seccompProfile.type.orValue(
+            variables.podSecurity.?seccompProfile.type.orValue('')) in ['RuntimeDefault', 'Localhost'] &&
+          !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
+          c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
+          c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
+    message: 'AI worker Jobs get no host access or privilege: no host namespaces or
+      ports, no init or ephemeral containers, and every container non-root, unprivileged,
+      with allowPrivilegeEscalation false, all capabilities dropped and none added,
+      and a RuntimeDefault or Localhost seccomp profile'
+  variables:
+  - expression: object.spec.template.spec
+    name: pod
+  - expression: variables.pod.?securityContext.orValue({})
+    name: podSecurity
+  - expression: object.spec.template.?metadata.?labels.orValue({})
+    name: podLabels
+  - expression: '''orka.ai/platform-identity'''
+    name: platformIdentity
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3538,6 +3847,18 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.substrateActor) || !has(object.spec.mcp.substrateActor.egress) || object.spec.mcp.substrateActor.egress.all(rule,
+
+        !has(rule.credential) ||
+        authorizer.group('')
+          .resource('secrets')
+          .namespace(request.namespace)
+          .name(rule.credential.secretRef.name)
+          .check('get').allowed())
+    message: caller is not authorized to get a Secret referenced by an MCP actor egress
+      credential
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -3545,6 +3866,33 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  policyName: orka-agent-identity-bind.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agenthost-template-use.orka.ai
+spec:
+  policyName: orka-agenthost-template-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  policyName: orka-ai-worker-identity-protection
   validationActions:
   - Deny
 ---

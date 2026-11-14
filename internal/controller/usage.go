@@ -41,7 +41,7 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 	}
 	// Deleting an unfinished Task cancels its retained accounting lifecycle.
 	// Otherwise a snapshot can pin its cohort forever after the Task disappears.
-	if !task.DeletionTimestamp.IsZero() && phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed && phase != corev1alpha1.TaskPhaseCancelled {
+	if !task.DeletionTimestamp.IsZero() && !phase.IsTerminal() {
 		result.Phase = string(corev1alpha1.TaskPhaseCancelled)
 		result.PhaseObservedAt = task.DeletionTimestamp.Time
 		if outcome := task.Status.ExecutionOutcome; outcome != nil {
@@ -87,7 +87,8 @@ type taskTokenUsageReader interface {
 // sessionTokenUsage returns a Job-backed Task's final usage to add to the
 // Session whose transcript it appended; the caller adds it while releasing
 // the Session lock. Agent Tasks run as ACP Session turns, whose finalization
-// adds the turn's usage in the same transaction, so they report none here.
+// adds the usage the storage client attributes to the turn's prompt attempt,
+// so they report none here.
 // Chat Sessions count only their chat turns: Tasks a chat creates have no
 // spec.sessionRef, so chat tokens are never double counted.
 func (r *TaskReconciler) sessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) (int64, int64, error) {

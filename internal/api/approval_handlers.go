@@ -158,7 +158,12 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if decision == approvalDecisionApprove {
+		if err := requireRequesterApprovesDelegatedWrite(task, GetUserInfo(c)); err != nil {
+			return err
+		}
+	}
+	if task.Status.Phase.IsTerminal() {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 

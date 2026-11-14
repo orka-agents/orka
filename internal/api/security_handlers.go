@@ -787,6 +787,10 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositoryscan", name,
+		repositoryScanSpecAgentRefs(scan.Spec), nil); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenRepositoryScanCredentialRefs(
 		c,
 		"createRepositoryScanCredential",
@@ -858,6 +862,10 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	updated := scan.DeepCopy()
 	updated.Spec = req.Spec
 	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositoryscan", scan.Name,
+		repositoryScanSpecAgentRefs(updated.Spec), repositoryScanSpecAgentRefs(scan.Spec)); err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenRepositoryScanCredentialRefs(

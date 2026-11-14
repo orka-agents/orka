@@ -397,19 +397,6 @@ func (r *ExecutionWorkspaceClassReconciler) resolvedClassProfileHash(
 		}
 		return externalACPClassProfileHash(class, provider, config, parameters)
 	}
-	requiredContracts := append([]string(nil), provider.Spec.RequiredContracts...)
-	slices.Sort(requiredContracts)
-	providerIdentity := struct {
-		UID               types.UID                              `json:"uid"`
-		ControllerName    string                                 `json:"controllerName"`
-		ParametersRef     workspacev1alpha1.TypedObjectReference `json:"parametersRef"`
-		RequiredContracts []string                               `json:"requiredContracts"`
-	}{
-		UID:               provider.UID,
-		ControllerName:    provider.Spec.ControllerName,
-		ParametersRef:     provider.Spec.ParametersRef,
-		RequiredContracts: requiredContracts,
-	}
 	if class.Spec.ProviderRef != nil {
 		parameters, _, _, err := r.resolveDirectParameters(ctx, class)
 		if err != nil {
@@ -418,20 +405,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolvedClassProfileHash(
 		if parameters == nil {
 			return "", fmt.Errorf("direct provider parameters are not ready")
 		}
-		resolved := struct {
-			APIVersion string    `json:"apiVersion"`
-			Kind       string    `json:"kind"`
-			UID        types.UID `json:"uid"`
-			Generation int64     `json:"generation"`
-			Spec       any       `json:"spec,omitempty"`
-		}{
-			APIVersion: parameters.GetAPIVersion(),
-			Kind:       parameters.GetKind(),
-			UID:        parameters.GetUID(),
-			Generation: parameters.GetGeneration(),
-			Spec:       parameters.Object["spec"],
-		}
-		return workspaceprovider.ClassProfileHash(class.Spec, providerIdentity, resolved)
+		return acpWorkspaceClassProfileHash(class, provider, parameters)
 	}
 	pool := &workspacev1alpha1.ExecutionWorkspacePool{}
 	key := types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.PoolRef.Name}
@@ -460,7 +434,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolvedClassProfileHash(
 		Generation:    parameters.GetGeneration(),
 		Spec:          parameters.Object["spec"],
 	}
-	return workspaceprovider.ClassProfileHash(class.Spec, providerIdentity, resolved)
+	return workspaceprovider.ClassProfileHash(class.Spec, newWorkspaceProviderProfileIdentity(provider), resolved)
 }
 
 func (r *ExecutionWorkspaceClassReconciler) namespaceAllowedByProvider(

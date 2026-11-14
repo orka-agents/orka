@@ -15,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -845,13 +846,25 @@ func legacyBranchClaimRequestDigest(
 	})
 }
 
+// taskPublicationCommitMessage returns the commit message for task's
+// publication: the Task-authored message, ending in exactly one newline as the
+// publisher requires, or the default title.
+func taskPublicationCommitMessage(task *corev1alpha1.Task) string {
+	if task.Spec.Workspace != nil {
+		if message := strings.TrimRight(task.Spec.Workspace.CommitMessage, "\n"); strings.TrimSpace(message) != "" {
+			return message + "\n"
+		}
+	}
+	return "orka: apply agent task " + task.Name + "\n"
+}
+
 func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, sessionUID string, source publisher.Repository, sourceRef string, target publisher.Repository, targetRef string, claim store.BranchClaim, delta harnessv2.WorkspaceDeltaDescriptor) (*store.Publication, error) {
 	id := publicationID(task)
 	commitAt := task.CreationTimestamp.Time.UTC().Truncate(time.Second)
 	if commitAt.IsZero() {
 		commitAt = time.Now().UTC().Truncate(time.Second)
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	requestDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": id, attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
@@ -898,7 +911,7 @@ func publicationMatchesCreation(
 			return false
 		}
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	expectedDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": publicationIDForTask(task), attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
@@ -946,7 +959,10 @@ func (d *ACPDispatcher) taskCancellationRequested(ctx context.Context, task *cor
 	if err := d.APIReader.Get(ctx, clientObjectKey(task), latest); err != nil {
 		return false, err
 	}
-	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled, nil
+	// A recorded cancel request stops publication at once; the Cancelled
+	// phase follows only when the Task is next reconciled.
+	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
+	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled || requested, nil
 }
 
 //nolint:gocyclo // Reclamation deliberately verifies every durable publication, attempt, effect, owner, and baseline fence together.
@@ -1476,6 +1492,11 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
+	// A requested cancellation ends with the request, which names who
+	// cancelled and why.
+	if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+		message = requested
+	}
 	// Execution succeeded before the cancellation settled the publication, so
 	// the projection carries the frozen successful execution identity with the
 	// cancelled Phase.

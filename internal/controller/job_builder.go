@@ -67,8 +67,8 @@ const (
 	// DefaultGeneralWorkerImage is the default image for container tasks
 	DefaultGeneralWorkerImage = "ghcr.io/orka-agents/orka/general-worker:latest"
 
-	// DefaultInitImage is the default image for init containers
-	DefaultInitImage = "busybox:1.37"
+	// DefaultInitImage pins the multi-platform BusyBox index used to fetch session transcripts.
+	DefaultInitImage = "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 
 	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
 	AIWorkerServiceAccount = "orka-ai-worker"
@@ -495,6 +495,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
+	if err := b.validateContainerTaskEnvSources(task); err != nil {
+		return nil, err
+	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
 			return nil, err
@@ -545,6 +548,19 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				},
 			},
 		},
+	}
+
+	if task.Spec.Type == corev1alpha1.TaskTypeAI && !validationTask && agent != nil {
+		// Name selectors can be installed before the Agent exists; restrict them
+		// to same-namespace Agents so the policy namespace supplies the scope.
+		if agent.Name != "" && agent.Namespace == task.Namespace {
+			job.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+			job.Spec.Template.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+		}
+		if agent.UID != "" {
+			job.Labels[labels.LabelAgentUID] = string(agent.UID)
+			job.Spec.Template.Labels[labels.LabelAgentUID] = string(agent.UID)
+		}
 	}
 
 	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
@@ -840,6 +856,12 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
 	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	envVars = append(removeControllerEnv(envVars, workerenv.ServiceAccountName), corev1.EnvVar{
+		Name: workerenv.ServiceAccountName,
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.serviceAccountName"},
+		},
+	})
 	if agent != nil {
 		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
 	}
@@ -910,7 +932,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
 	if taskRequestsReadOnlyAgent(task) {
-		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
@@ -980,6 +1001,42 @@ func otlpSignalFromEnvName(name string) string {
 		}
 	}
 	return ""
+}
+
+// validateContainerTaskEnvSources applies the direct Secret mount policy to
+// spec.env. The kubelet resolves secretKeyRef and configMapKeyRef with node
+// credentials, so passing them through would hand a container Task any Secret
+// in its namespace that the controller refuses to mount from spec.secretRef.
+// Only sources that read the Pod's own metadata are always allowed; any other
+// source, including ones added to the API later, needs the operator opt-in.
+func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) error {
+	if !isUntrustedComputeTask(task) || b.directSecretMountsAllowed(task) {
+		return nil
+	}
+	for i, envVar := range task.Spec.Env {
+		source := envVar.ValueFrom
+		if source == nil {
+			continue
+		}
+		var field string
+		switch {
+		case source.SecretKeyRef != nil:
+			field = "valueFrom.secretKeyRef"
+		case source.ConfigMapKeyRef != nil:
+			field = "valueFrom.configMapKeyRef"
+		case source.FileKeyRef != nil:
+			field = "valueFrom.fileKeyRef"
+		case source.FieldRef != nil || source.ResourceFieldRef != nil:
+			continue
+		default:
+			field = "an unrecognized valueFrom source"
+		}
+		return fmt.Errorf(
+			"container Task spec.env[%d] (%s) uses %s, which container Tasks receive only when the operator enables direct Secret mounts (%s=true); valueFrom.fieldRef and valueFrom.resourceFieldRef are always allowed",
+			i, envVar.Name, field, directSecretMountsEnvVar,
+		)
+	}
+	return nil
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
@@ -1260,6 +1317,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// The tool list is always controller-owned, even when empty, so Task env
 	// and Agent Secret EnvFrom cannot supply it.
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	// Deprecation metadata is controller-owned too, including when empty, so
+	// Task env and Agent Secret EnvFrom cannot suppress compatibility warnings.
+	envVars = setControllerEnvValue(envVars, workerenv.AIDeprecatedMemoryTools,
+		workerenv.JoinCSV(aitools.DeprecatedMemoryToolNames(task, agent)))
 	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
 		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
 	}
@@ -1324,20 +1385,6 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
 			envVars = setControllerEnvValue(envVars, deploymentKey, fallbackEnv.AzureDeploymentName)
 		}
-	}
-
-	// AllowBash: task override > agent default > true
-	allowBash := true
-	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
-		allowBash = *agent.Spec.Runtime.DefaultAllowBash
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
-		allowBash = *task.Spec.AgentRuntime.AllowBash
-	}
-	if allowBash {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowBash, Value: scheduledRunLabelValue,
-		})
 	}
 
 	return envVars, nil
@@ -1704,31 +1751,6 @@ func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKe
 	}
 }
 
-func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {
-	switch readOnlyAgentRuntimeType(agent) {
-	case corev1alpha1.AgentRuntimeCodex:
-		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, nil
-	case corev1alpha1.AgentRuntimeClaude:
-		return []string{
-			workerenv.AnthropicAPIKey,
-			workerenv.AnthropicBaseURL,
-			"CLAUDE_CODE_USE_FOUNDRY",
-			"ANTHROPIC_FOUNDRY_API_KEY",
-			workerenv.AnthropicFoundryBaseURL,
-			"ANTHROPIC_FOUNDRY_RESOURCE",
-			"ANTHROPIC_DEFAULT_SONNET_MODEL",
-			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-			"ANTHROPIC_DEFAULT_OPUS_MODEL",
-		}, nil
-	case corev1alpha1.AgentRuntimeCopilot:
-		return nil, fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
-	case corev1alpha1.AgentRuntimeOpencode:
-		return nil, nil
-	default:
-		return nil, nil
-	}
-}
-
 func readOnlyAgentRuntimeType(agent *corev1alpha1.Agent) corev1alpha1.AgentRuntimeType {
 	if agent == nil || agent.Spec.Runtime == nil {
 		return corev1alpha1.AgentRuntimeClaude
@@ -1888,7 +1910,7 @@ func isWorkerReachableOTLPEndpoint(value string) bool {
 	if host == "" {
 		return false
 	}
-	if host == "localhost" {
+	if host == localhostHost {
 		return false
 	}
 	hostWithoutZone, _, _ := strings.Cut(host, "%")
@@ -2416,7 +2438,7 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 		{Name: TaskNamespaceEnvVar, Value: task.Namespace},
 		{Name: ControllerURLEnvVar, Value: b.ControllerURL},
 	}
-	envVars = append(envVars, task.Spec.Env...)
+	envVars = append(envVars, workspaceInitPassthroughEnv(task.Spec.Env)...)
 	if task.Spec.PriorTaskRef != nil {
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTask, Value: task.Spec.PriorTaskRef.Name})
 		priorNS := task.Spec.PriorTaskRef.Namespace
@@ -2430,6 +2452,28 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.GitRefShallow, Value: scheduledRunLabelValue})
 	}
 	return envVars
+}
+
+// workspaceInitPassthroughEnv is the part of a Task's env that reaches the
+// workspace preparation init container. That container holds the clone
+// credential, and Git honours variables such as GIT_CONFIG_PARAMETERS,
+// GIT_ASKPASS, and GIT_SSH_COMMAND that would run a caller-chosen command
+// with it, so only the HTTP proxy variables a clone may need pass through,
+// plus the prior-Task patch digest that a repository mutation Task pins so
+// preparation can refuse a changed patch.
+func workspaceInitPassthroughEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	var out []corev1.EnvVar
+	for _, envVar := range env {
+		if envVar.Name == workerenv.PriorTaskDiffSHA256 {
+			out = append(out, envVar)
+			continue
+		}
+		switch strings.ToUpper(envVar.Name) {
+		case "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY":
+			out = append(out, envVar)
+		}
+	}
+	return out
 }
 
 func workspaceWorkingDir(task *corev1alpha1.Task) string {

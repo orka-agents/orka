@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package credential
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -28,6 +27,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -75,7 +76,7 @@ func (f *fakeRefresher) Refresh(_ context.Context, cfg connectors.OAuthProviderC
 type harness struct {
 	t          *testing.T
 	client     client.Client
-	store      *sqlite.Store
+	store      *storageclient.Client
 	refresher  *fakeRefresher
 	source     *Source
 	connection *corev1alpha1.Connection
@@ -125,14 +126,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	s := sqlite.NewStore(db, dbPath)
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{1}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	s := storageclienttest.Client(t, sqlite.NewStore(db, dbPath))
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	refresher := &fakeRefresher{response: connectors.TokenResponse{AccessToken: "gho_new", RefreshToken: "ghr_new", ExpiresAt: now.Add(time.Hour)}}
 	source := &Source{Client: c, APIReader: c, Credentials: s, OAuth: refresher, Now: func() time.Time { return now }}
@@ -286,8 +280,12 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	}
 	// The link is now not Ready, so the next call fails before any refresh.
 	calls := h.refresher.calls.Load()
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "not ready") {
+	_, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("err after revocation = %v", err)
+	}
+	if _, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok {
+		t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
 	}
 	if h.refresher.calls.Load() != calls {
 		t.Fatal("a revoked connection must not be refreshed again")
@@ -298,8 +296,8 @@ func TestResolveExpiredWithoutRefreshTokenMarksExpired(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", ExpiresAt: h.now.Add(-time.Minute)})
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
-	if err == nil || !strings.Contains(err.Error(), "cannot be refreshed") {
-		t.Fatalf("err = %v", err)
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok || refusal.Kind != outboundaccess.ConnectionExpired {
+		t.Fatalf("err = %v, want an expired-link refusal", err)
 	}
 	if h.refresher.calls.Load() != 0 {
 		t.Fatal("no refresh token means no refresh call")
@@ -412,7 +410,7 @@ func TestRefreshFlightLeavesAnotherGrantAlone(t *testing.T) {
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
 	req := h.request()
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
-	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+	h.source.Credentials = &disconnectingCustody{Client: h.store, onRead: func() {
 		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(-time.Second)})
 	}}
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil || !strings.Contains(err.Error(), "re-linked") {
@@ -479,7 +477,7 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	// Either fence may refuse first: the re-consent changed the grant and
 	// the mode change bumped the generation.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil ||
-		!strings.Contains(err.Error(), "changed since the task was dispatched") && !strings.Contains(err.Error(), "re-linked") {
+		!strings.Contains(err.Error(), "changed after this Task started") && !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("generation change during refresh err = %v", err)
 	}
 	h.refresher.onRefresh = reconsent
@@ -794,9 +792,7 @@ func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -880,9 +876,7 @@ func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("refresh after disconnect err = %v", err)
-	}
+	requireDisconnectedDuringRefresh(t, h)
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -1011,7 +1005,7 @@ func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
 // flakyCustody fails the next replace or the next few retirements, as a
 // transient store error would.
 type flakyCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	failReplace bool
 	failRetire  int
 	blockRetire bool
@@ -1023,7 +1017,7 @@ func (f *flakyCustody) ReplaceConnectorCredential(ctx context.Context, ref store
 		f.failReplace = false
 		return errors.New("database is locked")
 	}
-	return f.Store.ReplaceConnectorCredential(ctx, ref, credential, expectedVersion)
+	return f.Client.ReplaceConnectorCredential(ctx, ref, credential, expectedVersion)
 }
 
 func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
@@ -1036,7 +1030,7 @@ func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.
 		f.failRetire--
 		return errors.New("database is locked")
 	}
-	return f.Store.RetireConnectorCredential(ctx, ref, credential)
+	return f.Client.RetireConnectorCredential(ctx, ref, credential)
 }
 
 // TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails covers a refresh the
@@ -1049,7 +1043,7 @@ func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 	t.Cleanup(func() { refreshRetireBackoff = previous })
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	flaky := &flakyCustody{Store: h.store, failReplace: true, failRetire: 1}
+	flaky := &flakyCustody{Client: h.store, failReplace: true, failRetire: 1}
 	h.source.Credentials = flaky
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil {
 		t.Fatal("a refresh custody could not store must fail the call")
@@ -1077,7 +1071,7 @@ func TestRefreshRetirementIsBounded(t *testing.T) {
 	t.Cleanup(func() { refreshRetireTimeout, refreshRetireBackoff = previousTimeout, previousBackoff })
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	flaky := &flakyCustody{Store: h.store, failReplace: true, blockRetire: true}
+	flaky := &flakyCustody{Client: h.store, failReplace: true, blockRetire: true}
 	h.source.Credentials = flaky
 	done := make(chan error, 1)
 	go func() {
@@ -1100,12 +1094,12 @@ func TestRefreshRetirementIsBounded(t *testing.T) {
 // disconnectingCustody starts a disconnect the moment custody is read, as a
 // finalizer racing a resolution would.
 type disconnectingCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	onRead func()
 }
 
 func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
-	credential, err := d.Store.GetConnectorCredential(ctx, ref)
+	credential, err := d.Client.GetConnectorCredential(ctx, ref)
 	if d.onRead != nil {
 		d.onRead()
 		d.onRead = nil
@@ -1119,7 +1113,7 @@ func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref s
 func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
-	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+	h.source.Credentials = &disconnectingCustody{Client: h.store, onRead: func() {
 		live := h.reload()
 		live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
 		if err := h.client.Update(context.Background(), live); err != nil {
@@ -1134,15 +1128,97 @@ func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	}
 }
 
+// TestRequireLiveConnectionRechecksTheFrozenLink covers the Delegated
+// post-exchange re-check: it passes for the frozen, Ready link and refuses
+// once the link is being deleted, without reading custody.
+func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	custody := &countingCustody{Client: h.store}
+	h.source.Credentials = custody
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("live link: %v", err)
+	}
+	relinked := request
+	relinked.Frozen.GrantSequence++
+	if err := h.source.RequireLiveConnection(context.Background(), relinked); err == nil {
+		t.Fatal("a link re-consented since dispatch must be refused")
+	}
+	if custody.reads == 0 {
+		t.Fatal("a live link is checked against the grant custody holds")
+	}
+	live := h.reload()
+	live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
+	if err := h.client.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	before := custody.reads
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("unlinked: err = %v, want refusal", err)
+	}
+	if custody.reads != before {
+		t.Fatalf("custody reads for a link being deleted = %d, want none", custody.reads-before)
+	}
+}
+
+// TestRequireLiveConnectionTrustsCustodyOverLaggingStatus covers a
+// re-consent that commits in custody while a delegated exchange runs and
+// before the Connection's status shows it: the status still names the
+// frozen grant, but the credential the exchange used is no longer the
+// person's current grant, so the re-check refuses it.
+func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	used, err := h.source.ResolveConnectionCredential(context.Background(), request)
+	if err != nil || used.AccessToken != "gho_old" {
+		t.Fatalf("credential = %+v, %v", used, err)
+	}
+	// The re-consent commits custody only; its status write is still pending.
+	ref, err := connectors.CredentialRef(h.reload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_new", TokenType: "bearer"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.reload().Status.GrantSequence != request.Frozen.GrantSequence {
+		t.Fatal("the status must still show the frozen grant")
+	}
+	err = h.source.RequireLiveConnection(context.Background(), request)
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok ||
+		refusal.Kind != outboundaccess.ConnectionRelinked || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the stale grant refused as a re-linked Connection", err)
+	}
+
+	// Custody that cannot report its grant fails closed.
+	h.source.Credentials = grantlessCustody{h.store}
+	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err == nil {
+		t.Fatal("custody without a grant read must fail closed")
+	}
+}
+
+// grantlessCustody hides the grant read.
+type grantlessCustody struct{ store.ConnectorCredentialStore }
+
 // countingCustody counts custody reads.
 type countingCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	reads int
 }
 
 func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	c.reads++
-	return c.Store.GetConnectorCredential(ctx, ref)
+	return c.Client.GetConnectorCredential(ctx, ref)
+}
+
+func (c *countingCustody) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	c.reads++
+	return c.Client.GetConnectorCredentialGrant(ctx, ref)
 }
 
 // TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody covers a write tool
@@ -1151,7 +1227,7 @@ func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.
 func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	counting := &countingCustody{Store: h.store}
+	counting := &countingCustody{Client: h.store}
 	h.source.Credentials = counting
 	req := h.request()
 	req.Tool.Class = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
@@ -1160,5 +1236,162 @@ func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 	}
 	if counting.reads != 0 || h.refresher.calls.Load() != 0 {
 		t.Fatalf("custody reads = %d refreshes = %d, want none", counting.reads, h.refresher.calls.Load())
+	}
+}
+
+// TestRequireLiveConnectionRechecksTheProvider covers a provider that changes
+// during a Delegated exchange, before the Connection's status catches up: a
+// provider that no longer declares the Tool, or is deleted, refuses the
+// credential the exchange produced.
+func TestRequireLiveConnectionRechecksTheProvider(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("unchanged provider: %v", err)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.Tools = nil
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
+		t.Fatal("a provider that no longer declares the Tool must refuse the exchanged credential")
+	}
+	if err := h.client.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("deleted provider: err = %v", err)
+	}
+}
+
+// TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant covers a
+// provider that starts requiring a scope during the exchange, which the
+// consent fence does not cover: the credential is refused until the person
+// consents again.
+func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = append(provider.Spec.OAuth.Scopes.Read, "read:org")
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
+		t.Fatalf("a newly required scope: err = %v, want a refusal", err)
+	}
+	// The person consents again: custody and the status both hold the scope.
+	h.put(store.ConnectorCredential{AccessToken: "gho_regranted", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour), Scopes: []string{"read:org"}})
+	live := h.reload()
+	live.Status.GrantedScopes = append(live.Status.GrantedScopes, "read:org")
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err != nil {
+		t.Fatalf("a granted scope: %v", err)
+	}
+}
+
+// TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes covers a refresh
+// that commits narrower scopes under the same grant while the Connection's
+// status still shows the old ones: custody's scopes no longer cover the mode,
+// so the exchanged credential is refused.
+func TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes(t *testing.T) {
+	h := newHarness(t)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = []string{"repo"}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_wide", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour), Scopes: []string{"repo"}})
+	live := h.reload()
+	live.Status.GrantedScopes = []string{"repo"}
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("covering scopes: %v", err)
+	}
+	ref, err := connectors.CredentialRef(h.reload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrowed := held
+	narrowed.AccessToken, narrowed.Scopes = "gho_narrow", []string{"public_repo"}
+	if err := h.store.ReplaceConnectorCredential(context.Background(), ref, narrowed, held.Version); err != nil {
+		t.Fatal(err)
+	}
+	if current := h.reload(); current.Status.GrantSequence != request.Frozen.GrantSequence || len(current.Status.GrantedScopes) != 1 {
+		t.Fatal("the status must still show the frozen grant and its old scopes")
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
+		t.Fatalf("err = %v, want the narrowed credential refused", err)
+	}
+}
+
+// grantReadHook runs a change while custody answers a grant read.
+type grantReadHook struct {
+	*storageclient.Client
+	during func()
+}
+
+func (h grantReadHook) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	grant, err := h.Client.GetConnectorCredentialGrant(ctx, ref)
+	if h.during != nil {
+		h.during()
+	}
+	return grant, err
+}
+
+// TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead covers a
+// person disconnecting while custody reports the grant it held: the grant
+// still matches, but the Connection is no longer Ready, so the exchanged
+// credential is refused.
+func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	h.source.Credentials = grantReadHook{Client: h.store, during: func() {
+		live := h.reload()
+		live.Status.State = corev1alpha1.ConnectionStateRevoked
+		for i := range live.Status.Conditions {
+			if live.Status.Conditions[i].Type == corev1alpha1.ConnectionConditionReady {
+				live.Status.Conditions[i].Status = metav1.ConditionFalse
+			}
+		}
+		if err := h.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
+		t.Fatal("a link disconnected during the grant read must refuse the exchanged credential")
+	}
+}
+
+// requireDisconnectedDuringRefresh resolves a credential whose refresh a
+// disconnect wins, and requires the typed connection-required refusal the
+// broker reports as OrkaConnectionRequired, not a plain error.
+func requireDisconnectedDuringRefresh(t *testing.T, h *harness) {
+	t.Helper()
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	var required *outboundaccess.ConnectionRequiredError
+	if !errors.As(err, &required) || required.Kind != outboundaccess.ConnectionNoCredential {
+		t.Fatalf("refresh after disconnect err = %v, want a ConnectionRequiredError for a missing credential", err)
 	}
 }

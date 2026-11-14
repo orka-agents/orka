@@ -398,7 +398,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		return result, nil
 	}
 	tracing.StampTaskTraceContext(ctx, task)
-	if err := tc.Client.Create(ctx, task); err != nil {
+	if err := createChatTask(ctx, tc.Client, task); err != nil {
 		return ChatToolSuccess(map[string]any{
 			"agentName":      agent.Name,
 			"agentNamespace": agent.Namespace, messageField: fmt.Sprintf("Agent created, but task creation failed: %v", err),

@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/orka-agents/orka/test/utils"
 )
@@ -98,6 +99,7 @@ var _ = BeforeSuite(func() {
 		fakeForgeImage,
 		mockLLMCaptureImage,
 		aimockAuthorityImage,
+		fakeEntraImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -320,7 +322,7 @@ var _ = BeforeSuite(func() {
 
 	By("waiting for controller-manager to be ready")
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeployment,
-		"-n", namespace, "--timeout=5m")
+		"-n", namespace, "--timeout="+controllerRolloutTimeout(controllerManagerDeployment).String())
 	_, err = utils.Run(cmd)
 	if err != nil {
 		dumpControllerManagerDiagnostics()
@@ -495,6 +497,30 @@ func controllerManagerDeploymentName() (string, error) {
 	return name, nil
 }
 
+// controllerRolloutStartupMargin covers scheduling, image start and readiness
+// of the replacement controller-manager Pod.
+const controllerRolloutStartupMargin = 3 * time.Minute
+
+// controllerRolloutMinimumTimeout keeps a short grace period from making the
+// wait shorter than the fixed 5m these rollouts used before.
+const controllerRolloutMinimumTimeout = 5 * time.Minute
+
+// controllerRolloutTimeout bounds a controller-manager rollout. The Deployment
+// uses the Recreate strategy, so the new Pod starts only after the old one has
+// exited, and the old one may spend its whole termination grace period in the
+// upgrade drain.
+func controllerRolloutTimeout(deployment string) time.Duration {
+	output, err := utils.Run(exec.Command("kubectl", "get", "deployment", deployment, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.terminationGracePeriodSeconds}"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to read the controller-manager termination grace period")
+	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+	if value := strings.TrimSpace(output); value != "" {
+		grace, err = strconv.ParseInt(value, 10, 64)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "invalid controller-manager termination grace period %q", value)
+	}
+	return max(time.Duration(grace)*time.Second+controllerRolloutStartupMargin, controllerRolloutMinimumTimeout)
+}
+
 // createK8sSecret creates a Kubernetes Secret with the given key-value data.
 func createK8sSecret(name, ns string, data map[string]string) error {
 	secret := map[string]interface{}{
@@ -649,6 +675,7 @@ func e2eImageBuilds() []e2eImageBuild {
 		dockerBuild(fakeForgeImage, "test/fixtures/fakeforge/Dockerfile"),
 		dockerBuild(mockLLMCaptureImage, "test/fixtures/aimockcapture/Dockerfile"),
 		dockerBuild(aimockAuthorityImage, "test/fixtures/aimockauthority/Dockerfile"),
+		dockerBuild(fakeEntraImage, "test/fixtures/fakeentra/Dockerfile"),
 	}
 	if gatewayE2EEnabled() {
 		builds = append(builds,

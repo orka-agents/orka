@@ -31,10 +31,12 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	"github.com/orka-agents/orka/internal/labels"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -63,6 +65,7 @@ const (
 	acpTaskTimeoutReason                     = "TaskTimeout"
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
+	acpCancelledReason                       = "Cancelled"
 	acpSettlingOperation                     = "settling"
 	acpSucceededOperation                    = "succeeded"
 	acpCredentialBlockedOperation            = "credential-blocked"
@@ -94,6 +97,9 @@ const (
 // Task reconciliation only persists queued demand; this leader-elected runnable
 // reserves capacity and advances the durable attempt state machine.
 type ACPDispatcher struct {
+	// Identity is the controller's Agent identity configuration (ADR 0039),
+	// against which a Task bound to an identity is admitted.
+	Identity                 agentidentity.Config
 	Client                   client.Client
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
@@ -115,6 +121,7 @@ type ACPDispatcher struct {
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
+	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
@@ -309,8 +316,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		recoveryKind := ""
 		switch attempt.ExecutionState {
 		case store.PromptExecutionSucceeded:
-			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
-				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
+			terminalPhase := task.Status.Phase.IsTerminal()
 			if task.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
 				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil || !terminalPhase {
 				recoveryKind = acpSucceededOperation
@@ -819,7 +825,11 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 				}
 				continue
 			}
-			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			// A recorded cancel request stops the run at once, as deletion
+			// does, whether or not the Task's Cancelled status was written:
+			// that write can keep failing while the agent's work would go on.
+			_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
+			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				_, _ = d.cancelPreparedPublication(cancelCtx, task)
 				stop()
@@ -1187,6 +1197,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
 		runtimeFence.RuntimeSessionGeneration = taskScopedGeneration
 		leaseGeneration = int64(taskScopedGeneration)
+		if held, err := d.settleRetainedTaskScopedRuntimeSession(ctx, runtimeClient, task, reservedAttempt, runtimeFence); held || err != nil {
+			return err
+		}
 	}
 	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
@@ -1791,6 +1804,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	sessionCompleted = true
 	endSessionTrace(nil)
+	// Admission checked the identity claim before the RuntimeSession
+	// started; that and any wait for capacity can outlast the claim. It is
+	// confirmed again while the attempt is still Planned, so a claim that
+	// cannot be read yet requeues an attempt that was provably never sent.
+	unavailable, requeued, err := d.confirmIdentityWhilePlanned(ctx, task, attemptID, fence, sessionExecution)
+	if err != nil || requeued {
+		return err
+	}
+	if unavailable != "" {
+		_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+		)
+	}
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1839,7 +1867,27 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	accepted := false
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
+	// lastRejection is the rate-limited admission a resubmission follows; it
+	// proves the prompt was not accepted.
+	var lastRejection error
 	for {
+		// A resubmission after a rejected admission is made only while the
+		// claim still covers the Task. A claim that stays unreadable requeues
+		// the attempt on the rejection's proof that it was never accepted.
+		if admissionRetry > 0 {
+			var confirmErr error
+			unavailable, confirmErr = d.identityUnavailableBeforeResubmission(ctx, task)
+			if confirmErr != nil {
+				return d.requeueRejectedPromptForIdentity(ctx, task, attemptID, fence, lastRejection, reservationLease, sessionExecution, confirmErr)
+			}
+		}
+		if unavailable != "" {
+			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+			)
+		}
 		promptRequest, err := d.buildPromptRequest(
 			task, runtimeFence, profile, mcpConfiguration, bootstrap, toolboxNote, userPrompt, promptLimits, admissionRetry,
 		)
@@ -1990,10 +2038,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			break
 		}
 		if !accepted && !summary.Accepted && isACPRateLimitedClientError(streamErr) {
-			if target.external != nil {
+			requeueRejectedAdmission := func() error {
 				var runtimeBinding *ACPRuntimeSessionBinding
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
+				} else if runtimeSessionCleanupPending {
+					// Retire the task-scoped RuntimeSession and record its
+					// cleanup receipt while the Task still names it. If that
+					// cannot be proven, keep naming it: the receipt can still
+					// be recorded later, by the deferred retry or by the
+					// instance's retirement, and no new instance is bound
+					// until it is.
+					if cleanupErr := cleanupRuntimeSession("prompt_admission_requeued"); cleanupErr != nil {
+						runtimeBinding = &ACPRuntimeSessionBinding{
+							SessionUID: string(runtimeFence.RuntimeSessionUID), Generation: runtimeFence.RuntimeSessionGeneration,
+							RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+						}
+					}
 				}
 				if err := d.requeueProvenNotAcceptedPromptAdmission(
 					ctx, task, attemptID, fence, streamErr, runtimeBinding, false,
@@ -2004,6 +2065,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					sessionExecution.requeued = true
 				}
 				return nil
+			}
+			if d.promptAdmissionRejectionRequeues(runtimeCtx, target) {
+				return requeueRejectedAdmission()
 			}
 			if reservationLease != nil {
 				releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -2020,8 +2084,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}); err != nil {
 				return err
 			}
+			lastRejection = streamErr
 			admissionRetry++
 			reservationLease, err = d.waitForPromptCapacityReservation(runtimeCtx, task, target, fence, runtimeFence.RuntimeInstanceID)
+			if errors.Is(err, errACPPromptAdmissionInstanceRetiring) {
+				// The rejected prompt was never accepted, and the instance it
+				// waited on is being retired: requeue it for the replacement.
+				return requeueRejectedAdmission()
+			}
 			if err != nil {
 				_ = cleanupRuntimeSession("prompt_admission_reconciliation_stopped")
 				if runtimeContextError(runtimeCtx) != nil {
@@ -3799,13 +3869,30 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	message := ""
 	now := time.Now().UTC()
 	deadline, hasDeadline := acpTaskDeadline(task, now)
+	// Callers pass a live read. A recorded cancel request stops admission
+	// before the controller writes the Cancelled phase.
+	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
 	switch {
-	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
-		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
+	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested:
+		operation, reason, message = "cancelled-before-admission", acpCancelledReason, "task cancelled before runtime admission"
+		// The cancel request names who cancelled and why.
+		if requested := strings.TrimSpace(task.Annotations[labels.AnnotationCancelRequested]); requested != "" && task.DeletionTimestamp.IsZero() {
+			message = boundACPStatusMessage(requested)
+		}
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
-		return false, nil
+		// A Task bound to an identity starts only while its Agent still holds
+		// the identity for it (ADR 0039).
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
+			return true, nil
+		}
+		if unavailable == "" {
+			return false, nil
+		}
+		operation, reason, message = "identity-unavailable-before-admission", taskExecutionReasonIdentityUnavailable, unavailable
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -3833,6 +3920,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 				return true, releaseErr
 			}
 		}
+	}
+	if reason == taskExecutionReasonIdentityUnavailable {
+		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, operation, reason, message); err != nil {
+			return true, err
+		}
+		if err := d.failTaskBeforeRuntimeAdmission(
+			ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+		); err != nil {
+			return true, err
+		}
+		return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
 	}
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
@@ -4272,12 +4370,36 @@ func (d *ACPDispatcher) handlePreSubmissionContextDone(
 	attemptID string,
 	fence store.ControllerEpochFence,
 ) (bool, error) {
-	if !errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
+	switch runtimeErr := runtimeContextError(runtimeCtx); {
+	case errors.Is(runtimeErr, context.DeadlineExceeded):
+		return true, d.settlePreSubmissionCancellation(
+			ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
+		)
+	case runtimeErr != nil && d.liveTaskCancelled(ctx, task):
+		// The cancellation watcher stopped the run: settle it as Cancelled so
+		// the aborted runtime call is not reported as a start failure. Any
+		// other stop, such as a controller shutdown, keeps its own handling.
+		return true, d.settlePreSubmissionCancellation(
+			ctx, task, attemptID, fence, "cancelled-before-submission", acpCancelledReason, "task cancelled before prompt submission",
+		)
+	default:
 		return false, nil
 	}
-	return true, d.settlePreSubmissionCancellation(
-		ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
-	)
+}
+
+// liveTaskCancelled reports whether the live Task was cancelled or had its
+// cancellation requested.
+func (d *ACPDispatcher) liveTaskCancelled(ctx context.Context, task *corev1alpha1.Task) bool {
+	reader := uncachedReader(d.APIReader, d.Client)
+	if reader == nil || task == nil {
+		return false
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID {
+		return false
+	}
+	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
+	return requested || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func (d *ACPDispatcher) newTaskRuntimeContext(ctx context.Context, task *corev1alpha1.Task) (context.Context, context.CancelFunc) {
@@ -4309,6 +4431,13 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 	reason corev1alpha1.TaskExecutionReason,
 	message string,
 ) error {
+	if reason == acpCancelledReason {
+		// A requested cancellation settles with the request, which names who
+		// cancelled and why.
+		if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			message = requested
+		}
+	}
 	if err := d.transitionAttemptToCancelled(
 		ctx, attemptID, fence, operation, reason, message,
 	); err != nil {
@@ -4510,6 +4639,12 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
 		}
 	}
+	// A routed native runtime is reachable only through the configured
+	// Substrate router; the harness client keeps its own control deadlines.
+	routedHTTPClient, err := externalRoutedPoolHTTPClient(d.SubstrateRouter, pool, 0)
+	if err != nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool routed transport: %w", err)
+	}
 	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
 		harnessv2.WithControllerBearerToken(controllerToken),
@@ -4520,6 +4655,9 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		}),
 	}
 
+	if routedHTTPClient != nil {
+		options = append(options, harnessv2.WithHTTPClient(routedHTTPClient))
+	}
 	runtimeClient, err := harnessv2.NewClient(endpoint, options...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
@@ -5626,11 +5764,17 @@ func promptAttemptIDFromTaskUID(task *corev1alpha1.Task, taskUID types.UID) (str
 	}).CanonicalID()
 }
 
+// patchExecution applies mutate to the latest Task execution status and moves
+// a Pending Task to Running once its prompt is admitted. The patch carries the
+// read resourceVersion, so a concurrent status write (for example a
+// cancellation) forces a fresh read instead of being overwritten by a phase
+// decided from stale state. The read bypasses the informer cache so that cache
+// lag after this dispatcher's own writes cannot exhaust the conflict retries.
 func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.TaskExecutionStatus)) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
-		if err := d.Client.Get(ctx, key, latest); err != nil {
+		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, key, latest); err != nil {
 			return err
 		}
 		base := latest.DeepCopy()
@@ -5640,6 +5784,8 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 		mutate(latest.Status.Execution)
 		switch latest.Status.Execution.State {
 		case corev1alpha1.TaskExecutionStateAccepted, corev1alpha1.TaskExecutionStateRunning, corev1alpha1.TaskExecutionStateSettling:
+			// Only a Task that is still Pending in the read just made starts
+			// running; a terminal phase written by another actor stays in place.
 			if latest.Status.Phase == corev1alpha1.TaskPhasePending || latest.Status.Phase == "" {
 				latest.Status.Phase = corev1alpha1.TaskPhaseRunning
 				if latest.Status.StartTime == nil {
@@ -5648,7 +5794,7 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
-		if err := d.Client.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
+		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		task.Status = latest.Status
@@ -5995,6 +6141,115 @@ func frozenMCPPermissionDecision(
 	return cancelled
 }
 
+// taskScopedRuntimeSessionCleanupUnconfirmed reports whether the Task still
+// names a task-scoped RuntimeSession whose cleanup receipt has not been
+// recorded.
+func taskScopedRuntimeSessionCleanupUnconfirmed(task *corev1alpha1.Task) bool {
+	if task == nil || task.Status.Execution == nil {
+		return false
+	}
+	execution := task.Status.Execution
+	return strings.TrimSpace(execution.RuntimeSessionUID) != "" && strings.TrimSpace(execution.RuntimeInstanceID) != "" &&
+		!runtimeSessionCleanupCompleteForUID(task, acpTaskControlUID(task))
+}
+
+// settleRetainedTaskScopedRuntimeSession retires a task-scoped RuntimeSession
+// that the Task still names without a cleanup receipt before another
+// generation is planned, because planning overwrites that binding. A binding
+// the reserved attempt still owns is the session the retry reuses and is left
+// alone; only a binding the attempt released is retired here. On the
+// same runtime instance it deletes the exact retained generation and records
+// its receipt. Otherwise, or when deletion is not proven, it holds the Task
+// with the retained binding untouched until a receipt exists, which the
+// instance's retirement can also record. It reports whether the Task was held.
+func (d *ACPDispatcher) settleRetainedTaskScopedRuntimeSession(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	runtimeFence harnessv2.Fence,
+) (bool, error) {
+	if !taskScopedRuntimeSessionCleanupUnconfirmed(task) {
+		return false, nil
+	}
+	execution := task.Status.Execution
+	if attempt != nil && attempt.RuntimeInstanceID == execution.RuntimeInstanceID && attempt.SessionUID == execution.RuntimeSessionUID &&
+		attempt.SessionLeaseGeneration == execution.RuntimeSessionGeneration {
+		return false, nil
+	}
+	hold := func(cause error) (bool, error) {
+		return true, d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, cause)
+	}
+	if execution.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) || execution.RuntimeSessionGeneration < 1 {
+		return hold(errors.New("a retained task-scoped RuntimeSession on another runtime instance has no cleanup receipt"))
+	}
+	retained := runtimeFence
+	retained.RuntimeSessionUID = harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID)
+	retained.RuntimeSessionGeneration = uint64(execution.RuntimeSessionGeneration)
+	if err := d.deleteRuntimeSession(
+		context.WithoutCancel(ctx), runtimeClient, harnessv2.RuntimeSessionID(runtimeSessionID(retained)), task, retained,
+		"retained_task_scoped_cleanup",
+	); err != nil {
+		return hold(err)
+	}
+	if err := d.markTaskScopedRuntimeSessionCleanupComplete(
+		context.WithoutCancel(ctx), task, task.UID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
+	); err != nil {
+		return true, err
+	}
+	return false, nil
+}
+
+// errACPPromptAdmissionInstanceRetiring reports that the execution-workspace
+// instance a rate-limited prompt waited on is being retired or replaced.
+var errACPPromptAdmissionInstanceRetiring = errors.New("execution workspace runtime instance is retiring before prompt acceptance")
+
+// promptAdmissionRejectionRequeues reports whether a proven-unaccepted,
+// retryable rate-limit rejection releases the Task for requeue instead of
+// waiting for capacity on the same exact instance. External runtimes always
+// requeue. A dedicated execution-workspace pool requeues only while its
+// current state shows the instance draining, stopping, or evicted, as on a
+// worker eviction; a Serving and Accepting pool, whose 429 means its prompt
+// slot is busy, keeps waiting for capacity like a shared pool.
+func (d *ACPDispatcher) promptAdmissionRejectionRequeues(ctx context.Context, target acpDispatchTarget) bool {
+	if target.external != nil {
+		return true
+	}
+	if !runtimePoolHasExternalWorkspace(target.pool) {
+		return false
+	}
+	retiring, err := d.externalWorkspacePoolRetiring(ctx, target.pool)
+	return err == nil && retiring
+}
+
+// externalWorkspacePoolRetiring reads the pool's current state. A read
+// failure keeps the caller waiting for capacity, which re-evaluates it.
+func (d *ACPDispatcher) externalWorkspacePoolRetiring(ctx context.Context, pool *corev1alpha1.RuntimePool) (bool, error) {
+	current := &corev1alpha1.RuntimePool{}
+	if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		return false, err
+	}
+	if current.UID != pool.UID {
+		return false, fmt.Errorf("RuntimePool identity changed before prompt acceptance")
+	}
+	return runtimePoolWorkspaceInstanceRetiring(current), nil
+}
+
+func runtimePoolWorkspaceInstanceRetiring(pool *corev1alpha1.RuntimePool) bool {
+	if !runtimePoolHasExternalWorkspace(pool) ||
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing && pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		return false
+	}
+	switch pool.Status.Lifecycle {
+	case corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolLifecycleStopping, corev1alpha1.RuntimePoolLifecycleStopped:
+		return true
+	}
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction); condition != nil && condition.Status == metav1.ConditionTrue {
+		return true
+	}
+	return pool.Annotations[externalRuntimeRetirementRequestedAnnotation] == booleanTrueValue || pool.Annotations[externalRuntimeEvictionAnnotation] != ""
+}
+
 func isACPRateLimitedClientError(err error) bool {
 	var clientErr *harnessv2.ClientError
 	return errors.As(err, &clientErr) && clientErr.StatusCode == 429 &&
@@ -6091,7 +6346,7 @@ func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 		return fmt.Errorf("prompt attempt %s cannot requeue rejected admission from state %s: %w", attemptID, attempt.ExecutionState, cause)
 	}
 	proof := "rate_limited_rejection"
-	message := "external runtime prompt admission was rate limited and will be retried"
+	message := "runtime prompt admission was rate limited and will be retried"
 	if preserveBindings {
 		proof = "retryable_zero_write"
 		message = "runtime prompt submission was not sent and will be retried"
@@ -6172,6 +6427,11 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 		}
 		pool, identity, err := d.claimRuntimePoolReservation(ctx, task, target.pool.Name, fence, 0)
 		if err != nil {
+			if errors.Is(err, errACPRuntimePoolNotAdmitting) && runtimePoolHasExternalWorkspace(target.pool) {
+				if retiring, retiringErr := d.externalWorkspacePoolRetiring(ctx, target.pool); retiringErr == nil && retiring {
+					return nil, errACPPromptAdmissionInstanceRetiring
+				}
+			}
 			if errors.Is(err, errACPRuntimePoolAtCapacity) || errors.Is(err, errACPRuntimePoolNotAdmitting) {
 				continue
 			}
@@ -6183,6 +6443,9 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 			cancel()
 			if releaseErr != nil {
 				return nil, releaseErr
+			}
+			if runtimePoolHasExternalWorkspace(target.pool) {
+				return nil, errACPPromptAdmissionInstanceRetiring
 			}
 			return nil, fmt.Errorf("RuntimePool exact instance changed before prompt acceptance")
 		}
@@ -6483,10 +6746,18 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		)
 	}
 	if runtimeContextErr != nil {
+		// A requested cancellation settles with the request, which names who
+		// cancelled and why; a deadline keeps its timeout message.
+		requested := ""
+		if !errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+			requested = d.requestedCancellationMessage(ctx, task)
+		}
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
 			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"
 			if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 				operation, terminalReason, message = "timeout-before-acceptance", acpTaskTimeoutReason, "task deadline exceeded before prompt acceptance"
+			} else if requested != "" {
+				message = requested
 			}
 			if transitionErr := d.transitionAttemptToCancelled(
 				ctx, attemptID, fence, operation, terminalReason, message,
@@ -6505,6 +6776,8 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
 			terminalMessage = acpTaskTimeoutCancellationSettledMessage
+		} else if requested != "" {
+			terminalMessage = requested
 		}
 		if cancellation == nil {
 			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptCancellationTimeout)
@@ -6846,6 +7119,23 @@ func (d *ACPDispatcher) finishNonSuccess(ctx context.Context, task *corev1alpha1
 	return d.finishNonSuccessWithCancellationReason(ctx, task, attemptID, fence, session, terminal, "")
 }
 
+// requestedCancellationMessage returns the recorded cancel request on the
+// live Task, which names who cancelled it and why, or "" when there is none
+// or the Task is being deleted. The dispatcher's copy of the Task predates a
+// request made during the run.
+func (d *ACPDispatcher) requestedCancellationMessage(ctx context.Context, task *corev1alpha1.Task) string {
+	reader := uncachedReader(d.APIReader, d.Client)
+	if reader == nil || task == nil {
+		return ""
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID ||
+		!latest.DeletionTimestamp.IsZero() {
+		return ""
+	}
+	return boundACPStatusMessage(strings.TrimSpace(latest.Annotations[labels.AnnotationCancelRequested]))
+}
+
 func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -6864,6 +7154,8 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 			operation = "timeout-cancelled"
 			reason = acpTaskTimeoutReason
 			message = acpTaskTimeoutCancellationSettledMessage
+		} else if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			message = requested
 		}
 		if err := d.transitionAttemptToCancelled(
 			ctx, attemptID, fence, operation, reason, message,
@@ -6902,6 +7194,146 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpPromptFailedReason, message)
 	}
+}
+
+// identityUnavailableBeforeSubmission says why a Task bound to an identity
+// must not send a prompt the runtime has not yet accepted, or "" when its
+// Agent still holds the identity for it (ADR 0039). A claim that cannot be
+// read, or an enforcement period still unrecorded, is an error: the prompt
+// is neither sent nor failed, and is retried.
+func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	// A controller that just won leadership records its enforcement period
+	// within moments; a prompt waits for it here before it is retried.
+	for deadline := time.Now().Add(identityEnforcementPeriodWait); errors.Is(err, errEnforcementPeriodPending) && time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+		unavailable, err = boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	}
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent; retrying", "namespace", task.Namespace, "task", task.Name)
+		return "", err
+	}
+	return unavailable, nil
+}
+
+// confirmIdentityWhilePlanned confirms the identity claim for an attempt not
+// yet Submitting. A claim that cannot be confirmed requeues the attempt,
+// which was provably never sent; a lost one is returned to fail the prompt.
+func (d *ACPDispatcher) confirmIdentityWhilePlanned(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	sessionExecution *acpTaskSession,
+) (unavailable string, requeued bool, err error) {
+	unavailable, err = d.identityUnavailableBeforeSubmission(ctx, task)
+	if err == nil {
+		return unavailable, false, nil
+	}
+	identityErr := fmt.Errorf("confirm the Agent identity claim before the prompt: %w", err)
+	if sessionExecution != nil {
+		if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+			ctx, task, attemptID, fence, identityErr, &sessionExecution.Binding,
+		); requeueErr != nil {
+			return "", false, errors.Join(identityErr, requeueErr)
+		}
+		sessionExecution.requeued = true
+		return "", true, nil
+	}
+	if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, identityErr); requeueErr != nil {
+		return "", false, errors.Join(identityErr, requeueErr)
+	}
+	return "", true, nil
+}
+
+// identityUnavailableBeforeResubmission is identityUnavailableBeforeSubmission
+// for an attempt already Submitting: it retries a claim it cannot confirm for
+// up to identityConfirmationWait, then returns the error.
+func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	deadline := time.Now().Add(identityConfirmationWait)
+	for {
+		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
+		if err == nil || !time.Now().Before(deadline) {
+			return unavailable, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// requeueRejectedPromptForIdentity requeues an attempt whose resubmission
+// cannot confirm the identity claim. The rate-limited rejection it follows
+// proves no prompt was accepted, so the attempt returns to dispatch.
+func (d *ACPDispatcher) requeueRejectedPromptForIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	rejection error,
+	reservationLease *acpRuntimePoolReservationLease,
+	sessionExecution *acpTaskSession,
+	confirmErr error,
+) error {
+	identityErr := fmt.Errorf("confirm the Agent identity claim before resubmitting the prompt: %w", confirmErr)
+	if reservationLease != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		releaseErr := reservationLease.release(releaseCtx)
+		cancel()
+		if releaseErr != nil {
+			return errors.Join(identityErr, releaseErr)
+		}
+	}
+	var runtimeBinding *ACPRuntimeSessionBinding
+	if sessionExecution != nil {
+		runtimeBinding = &sessionExecution.Binding
+	}
+	if err := d.requeueProvenNotAcceptedPromptAdmission(ctx, task, attemptID, fence, rejection, runtimeBinding, false); err != nil {
+		return errors.Join(identityErr, err)
+	}
+	if sessionExecution != nil {
+		sessionExecution.requeued = true
+	}
+	return nil
+}
+
+// identityConfirmationWait bounds how long a resubmission retries an
+// unreadable identity claim.
+const identityConfirmationWait = 30 * time.Second
+
+// identityEnforcementPeriodWait bounds how long a prompt waits for a new
+// leader to record its period of Agent use enforcement.
+const identityEnforcementPeriodWait = 30 * time.Second
+
+// failPromptForUnavailableIdentity settles a prompt the runtime never
+// accepted, and its Task, as IdentityUnavailable.
+func (d *ACPDispatcher) failPromptForUnavailableIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	unavailable string,
+) error {
+	message := boundACPStatusMessage(unavailable)
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "identity-unavailable-before-submission", taskExecutionReasonIdentityUnavailable, message); err != nil {
+		return err
+	}
+	execution := corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
+		Reason: taskExecutionReasonIdentityUnavailable, Message: message,
+	}
+	if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution); err != nil {
+		return err
+	}
+	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, taskExecutionReasonIdentityUnavailable, message)
 }
 
 // acpPromptFailedReason classifies a prompt that the runtime settled as failed.

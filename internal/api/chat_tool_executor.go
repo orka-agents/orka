@@ -52,7 +52,9 @@ type ToolExecutor struct {
 	providerType      string
 	executionMode     executionmode.Mode
 	sessionID         string
-	taskSeq           atomic.Int32
+	// chatSessionEpoch pins the chat Session incarnation the turn runs in.
+	chatSessionEpoch string
+	taskSeq          atomic.Int32
 	// taskSeqMu guards seeding taskSeq from the Session's existing Tasks;
 	// taskSeqSeeded is set only after a successful lookup, so a failed one
 	// is retried by the next name instead of restarting numbering at 1.
@@ -402,10 +404,17 @@ func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) (int32, error) 
 }
 
 func (e *ToolExecutor) taskLabels() map[string]string {
-	return map[string]string{
+	taskLabels := map[string]string{
 		labels.LabelCreatedBy:   "orchestrator",
 		labels.LabelChatSession: e.sessionID,
+		// The chat may create Tasks in other namespaces; its Session stays
+		// in the chat's own.
+		labels.LabelChatSessionNamespace: e.namespace,
 	}
+	if e.chatSessionEpoch != "" {
+		taskLabels[labels.LabelChatSessionEpoch] = e.chatSessionEpoch
+	}
+	return taskLabels
 }
 
 func sanitizeTaskNameComponent(s string) string {

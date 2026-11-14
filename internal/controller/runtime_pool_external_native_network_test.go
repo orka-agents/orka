@@ -132,7 +132,17 @@ func (r *nativeIngressReviewTransport) RoundTrip(*http.Request) (*http.Response,
 
 func nativeIngressReviewFixture(t *testing.T) (*externalRuntimePoolFixture, *nativeIngressReviewClient, *nativeIngressReviewTransport, corev1.Pod) {
 	t.Helper()
+	return nativeIngressReviewFixtureWith(t, nil)
+}
+
+// nativeIngressReviewFixtureWith lets a test adjust the workspace before its
+// first workload is published.
+func nativeIngressReviewFixtureWith(t *testing.T, prepare func(*externalRuntimePoolFixture)) (*externalRuntimePoolFixture, *nativeIngressReviewClient, *nativeIngressReviewTransport, corev1.Pod) {
+	t.Helper()
 	f := newExternalRuntimePoolFixture(t)
+	if prepare != nil {
+		prepare(f)
+	}
 	f.advertiseNativeProcess(t)
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
 	pool.Spec.RuntimeNamespace = "native-runtime"
