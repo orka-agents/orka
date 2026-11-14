@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/redact"
@@ -243,16 +244,25 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
-		for key, child := range typed {
+		// Keys are sorted so that redacted keys, which may collide, are
+		// told apart the same way every time.
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
+			outKey := sanitizeExecutionEventJSONKey(key, out)
 			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && child != nil && !isExecutionEventNumericValue(child) {
-				out[key] = ExecutionEventRedactedValue
+				out[outKey] = ExecutionEventRedactedValue
 				continue
 			}
 			if IsSensitiveExecutionEventKey(key) {
-				out[key] = ExecutionEventRedactedValue
+				out[outKey] = ExecutionEventRedactedValue
 				continue
 			}
-			out[key] = sanitizeExecutionEventJSONValue(child)
+			out[outKey] = sanitizeExecutionEventJSONValue(child)
 		}
 		return out
 	case []any:
@@ -265,6 +275,22 @@ func sanitizeExecutionEventJSONValue(value any) any {
 		return RedactExecutionEventText(typed)
 	default:
 		return typed
+	}
+}
+
+// sanitizeExecutionEventJSONKey redacts a key the way string values are
+// redacted: keys are as caller-controlled as values, so a credential sent as
+// a key must not survive in the event either. A key that collides with one
+// already kept, as a literal key can with an earlier key's redacted form, is
+// numbered, so no field is dropped.
+func sanitizeExecutionEventJSONKey(key string, kept map[string]any) string {
+	redacted := RedactExecutionEventText(key)
+	candidate := redacted
+	for n := 2; ; n++ {
+		if _, taken := kept[candidate]; !taken {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s (%d)", redacted, n)
 	}
 }
 

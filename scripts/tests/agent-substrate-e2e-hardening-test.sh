@@ -6,45 +6,39 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
-# Direct egress changes exactly the supported deployment argument, even when
-# containers or arguments move. Ambiguous state and failed updates stop setup.
+# The v1 control plane is installed by the pinned ate-setup. Only the shared
+# test identity is a bootstrap owner, only Orka's controller may reach Actors
+# through the router, and egress credential injection stays off. A failed
+# install or rollout stops setup.
 (
-  deployment='{"metadata":{"uid":"api-uid","resourceVersion":"42"},"spec":{"template":{"spec":{"containers":[{"name":"sidecar","args":["--unrelated"]},{"name":"ate-api-server","args":["--unrelated","--egress-gateway-address=atenet-egress.ate-system.svc:443","--other"]}]}}}}'
-  egress_failure=""
-  kubectl() {
-    case "$*" in
-      '-n ate-system get deployment ate-api-server -o json')
-        [[ "${egress_failure}" != read ]] || return 7
-        printf '%s\n' "${deployment}"
-        ;;
-      '-n ate-system patch deployment ate-api-server --type=json -p '*)
-        [[ "${egress_failure}" != patch ]] || return 7
-        printf '%s\n' "${@: -1}" >"${test_root}/egress-patch.json"
-        ;;
-      '-n ate-system rollout status deployment/ate-api-server --timeout=5m')
-        [[ "${egress_failure}" != rollout ]] || return 7
-        ;;
-      *) return 9 ;;
-    esac
+  SUBSTRATE_DIR="${test_root}/substrate-checkout"
+  mkdir -p "${SUBSTRATE_DIR}"
+  KIND_CLUSTER_NAME=fixture-cluster KUBECONFIG="${test_root}/kubeconfig" KUBECTL_CONTEXT=kind-fixture-cluster
+  install_failure=""
+  go() {
+    [[ "${install_failure}" != install ]] || return 7
+    printf '%s\n' "$@" >"${test_root}/ate-setup-args"
   }
-  substrate_configure_direct_egress
-  jq -e '. == [
-    {op:"test",path:"/metadata/uid",value:"api-uid"},
-    {op:"test",path:"/metadata/resourceVersion",value:"42"},
-    {op:"replace",path:"/spec/template/spec/containers/1/args/1",value:"--egress-gateway-address="}
-  ]' "${test_root}/egress-patch.json" >/dev/null
-  for egress_failure in read patch rollout; do
-    if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
-      echo 'Substrate setup ignored a failed direct egress configuration' >&2
+  kubectl() {
+    [[ "$*" == '-n ate-system rollout status deployment/ate-api-server --timeout=5m' ]] || return 9
+    [[ "${install_failure}" != rollout ]] || return 7
+  }
+  substrate_install_ate_system
+  grep -Fxq 'deploy' "${test_root}/ate-setup-args"
+  grep -Fxq -- '--kind' "${test_root}/ate-setup-args"
+  grep -Fxq -- '--credential-provider={"enabled":false}' "${test_root}/ate-setup-args"
+  grep -Fxq -- '--ateapi-authz-bootstrap-owners=system:serviceaccount:ate-system:ate-client' "${test_root}/ate-setup-args"
+  grep -Fxq -- '--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/orka-system/sa/orka-controller-manager' "${test_root}/ate-setup-args"
+  if grep -q -- 'egress-gateway' "${test_root}/ate-setup-args"; then
+    echo 'Substrate setup changed the egress gateway' >&2
+    exit 1
+  fi
+  for install_failure in install rollout; do
+    if substrate_install_ate_system >"${test_root}/install-error" 2>&1; then
+      echo "Substrate setup ignored a failed ${install_failure}" >&2
       exit 1
     fi
   done
-  egress_failure=""
-  deployment="$(jq '.spec.template.spec.containers[1].args += ["--egress-gateway-address=another:443"]' <<<"${deployment}")"
-  if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
-    echo 'Substrate setup accepted ambiguous egress configuration' >&2
-    exit 1
-  fi
 )
 
 # A failed API read is not proof of deletion.

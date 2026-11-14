@@ -817,50 +817,9 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	var attempt *store.PromptAttempt
-	if r.DurableControlStore != nil && latest.UID != "" {
-		attemptNumber := latest.Status.Attempts + 1
-		promptID := fmt.Sprintf("prompt-%s-%d", latest.UID, attemptNumber)
-		attemptKey := store.PromptAttemptKey{
-			Namespace: latest.Namespace, TaskUID: string(latest.UID), Attempt: int64(attemptNumber), PromptID: promptID,
-		}
-		attemptID, err := attemptKey.CanonicalID()
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		attempt, err = r.DurableControlStore.GetPromptAttempt(ctx, attemptID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return ctrl.Result{}, err
-		}
-		if attempt != nil {
-			if attempt.ExecutionState == store.PromptExecutionQueued {
-				if r.ControllerEpochManager == nil {
-					return ctrl.Result{}, fmt.Errorf("controller epoch manager is required to cancel queued ACP attempt")
-				}
-				fence, fenceErr := r.ControllerEpochManager.CurrentFence(ctx)
-				if fenceErr != nil {
-					return ctrl.Result{}, fenceErr
-				}
-				operationID := "timeout-before-status-" + fmt.Sprint(attempt.Version)
-				digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{
-					"id": attempt.ID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionCancelled,
-					operationField: operationID, versionField: attempt.Version,
-				})
-				if digestErr != nil {
-					return ctrl.Result{}, digestErr
-				}
-				attempt, err = r.DurableControlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
-					ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionQueued,
-					NewState: store.PromptExecutionCancelled, OperationID: operationID, OperationDigest: digest,
-					TerminalReason: acpTaskTimeoutReason, OutcomeMarker: message, UpdatedAt: time.Now().UTC(),
-				})
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-			} else if attempt.ExecutionState != store.PromptExecutionCancelled {
-				return ctrl.Result{}, fmt.Errorf("prompt attempt %q is %s while Task execution status is empty", attempt.ID, attempt.ExecutionState)
-			}
-		}
+	attempt, err := r.settleUnprojectedACPAttempt(ctx, latest, acpTaskTimeoutReason, message, "timeout-before-status")
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	now := metav1.Now()
@@ -885,23 +844,7 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		current.Status.Phase = corev1alpha1.TaskPhaseCancelled
 		current.Status.CompletionTime = &now
 		current.Status.Message = message
-		current.Status.Execution = &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
-			Reason: acpTaskTimeoutReason, Message: message, LastTransitionTime: &now,
-		}
-		if attempt != nil {
-			if current.Status.Attempts < int32(attempt.Key.Attempt) {
-				current.Status.Attempts = int32(attempt.Key.Attempt)
-			}
-			current.Status.Execution.Attempt = int32(attempt.Key.Attempt)
-			current.Status.Execution.PromptID = attempt.Key.PromptID
-			current.Status.Execution.RequestDigest = attempt.RequestDigest
-			current.Status.Execution.ControllerEpoch = attempt.ControllerEpoch
-		}
-		current.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
-			State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
-			LastTransitionTime: &now,
-		}
+		setCancelledBeforeStatusExecution(&current.Status, attempt, acpTaskTimeoutReason, message, now)
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
 			Reason: eventReasonTaskCancelled, Message: "task is terminal",
@@ -918,6 +861,95 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// settleUnprojectedACPAttempt settles the PromptAttempt a Task may have
+// persisted before its execution status was projected: a Queued attempt is
+// cancelled with reason and message. It returns the attempt, or nil when
+// none was persisted.
+func (r *TaskReconciler) settleUnprojectedACPAttempt(
+	ctx context.Context,
+	latest *corev1alpha1.Task,
+	reason corev1alpha1.TaskExecutionReason,
+	message string,
+	operation string,
+) (*store.PromptAttempt, error) {
+	if r.DurableControlStore == nil || latest.UID == "" {
+		return nil, nil
+	}
+	attemptNumber := latest.Status.Attempts + 1
+	promptID := fmt.Sprintf("prompt-%s-%d", latest.UID, attemptNumber)
+	attemptKey := store.PromptAttemptKey{
+		Namespace: latest.Namespace, TaskUID: string(latest.UID), Attempt: int64(attemptNumber), PromptID: promptID,
+	}
+	attemptID, err := attemptKey.CanonicalID()
+	if err != nil {
+		return nil, err
+	}
+	attempt, err := r.DurableControlStore.GetPromptAttempt(ctx, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionCancelled:
+		return attempt, nil
+	case store.PromptExecutionQueued:
+	default:
+		return nil, fmt.Errorf("prompt attempt %q is %s while Task execution status is empty", attempt.ID, attempt.ExecutionState)
+	}
+	if r.ControllerEpochManager == nil {
+		return nil, fmt.Errorf("controller epoch manager is required to cancel queued ACP attempt")
+	}
+	fence, err := r.ControllerEpochManager.CurrentFence(ctx)
+	if err != nil {
+		return nil, err
+	}
+	operationID := operation + "-" + fmt.Sprint(attempt.Version)
+	digest, err := acpDomainDigest("attempt-transition", map[string]any{
+		"id": attempt.ID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionCancelled,
+		operationField: operationID, versionField: attempt.Version,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.DurableControlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionQueued,
+		NewState: store.PromptExecutionCancelled, OperationID: operationID, OperationDigest: digest,
+		TerminalReason: string(reason), OutcomeMarker: message, UpdatedAt: time.Now().UTC(),
+	})
+}
+
+// setCancelledBeforeStatusExecution records a Task that ended Cancelled before
+// its execution status was projected, bound to the attempt settled by
+// settleUnprojectedACPAttempt when one exists. Cleanup recognizes this shape
+// and discovers any unbound attempt authoritatively.
+func setCancelledBeforeStatusExecution(
+	status *corev1alpha1.TaskStatus,
+	attempt *store.PromptAttempt,
+	reason corev1alpha1.TaskExecutionReason,
+	message string,
+	now metav1.Time,
+) {
+	status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+		Reason: reason, Message: message, LastTransitionTime: &now,
+	}
+	if attempt != nil {
+		if status.Attempts < int32(attempt.Key.Attempt) {
+			status.Attempts = int32(attempt.Key.Attempt)
+		}
+		status.Execution.Attempt = int32(attempt.Key.Attempt)
+		status.Execution.PromptID = attempt.Key.PromptID
+		status.Execution.RequestDigest = attempt.RequestDigest
+		status.Execution.ControllerEpoch = attempt.ControllerEpoch
+	}
+	status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+		LastTransitionTime: &now,
+	}
 }
 
 func (r *TaskReconciler) failACPPlanningTask(

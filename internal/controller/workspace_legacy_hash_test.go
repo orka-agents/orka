@@ -9,8 +9,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// The old hash is a private decode compatibility boundary. Removing served
-// provider APIs must not rewrite immutable execution snapshots from before upgrade.
+// Direct-provider class profile hashes are frozen into class bindings and
+// execution snapshots. Changing their canonical inputs would make every existing
+// binding look drifted after an upgrade.
 func TestLegacyWorkspaceClassProfileHashIsStable(t *testing.T) {
 	f := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	f.class.Spec.RequiredFeatures = nil

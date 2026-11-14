@@ -122,7 +122,9 @@ suffix so long release names cannot collapse all trust tiers to one name.
 {{- end -}}
 {{- end }}
 
-{{/* Read the exact chart fullname from the live controller's in-cluster URL. */}}
+{{/* Read the exact chart fullname from the live controller's in-cluster URL:
+<fullname>.<namespace>.svc, optionally followed by the cluster domain, which
+earlier releases omitted. */}}
 {{- define "orka.existingControllerFullname" -}}
 {{- $fullnames := list -}}
 {{- $namespaceSuffix := printf ".%s.svc" .namespace -}}
@@ -134,9 +136,12 @@ suffix so long release names cannot collapse all trust tiers to one name.
 {{- $endpoint := trimPrefix "--controller-url=http://" $arg -}}
 {{- $hostPort := first (splitList "/" $endpoint) -}}
 {{- $host := first (splitList ":" $hostPort) -}}
-{{- if hasSuffix $namespaceSuffix $host -}}
-{{- $fullname := trimSuffix $namespaceSuffix $host -}}
-{{- if and $fullname (not (contains "." $fullname)) -}}
+{{- /* Split only at the first suffix: the cluster domain may repeat it. */ -}}
+{{- $parts := splitn $namespaceSuffix 2 $host -}}
+{{- if eq (len $parts) 2 -}}
+{{- $fullname := $parts._0 -}}
+{{- $clusterDomain := $parts._1 -}}
+{{- if and $fullname (not (contains "." $fullname)) (or (eq $clusterDomain "") (and (hasPrefix "." $clusterDomain) (gt (len $clusterDomain) 1))) -}}
 {{- $fullnames = append $fullnames $fullname -}}
 {{- end -}}
 {{- end -}}

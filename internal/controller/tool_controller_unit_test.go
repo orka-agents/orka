@@ -7,10 +7,12 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +20,7 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -30,7 +33,9 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 )
 
 const (
@@ -87,6 +92,22 @@ func TestValidateTool(t *testing.T) {
 					HTTP:        &corev1alpha1.HTTPExecution{URL: "http://example.com/api?max_tokens=10&tokenizer=model&pagination-token=next"},
 				},
 			},
+		},
+		{
+			name: "forwarding tool with a parameter schema",
+			tool: &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "forward-parameters", Namespace: "default"},
+				Spec: corev1alpha1.ToolSpec{
+					Description: "Azure Resource Manager",
+					Parameters:  &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+					HTTP: &corev1alpha1.HTTPExecution{
+						URL:     "https://management.azure.com",
+						Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "takes no parameter schema",
 		},
 		{
 			name: "missing URL",
@@ -261,7 +282,7 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	template := approvedMCPActorTemplateForTest()
 	var gotHost string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHost = r.Host
+		gotHost = r.Header.Get(daemonprotocol.TargetActorHeader)
 		if r.URL.Path != testMCPPath {
 			http.NotFound(w, r)
 			return
@@ -284,15 +305,16 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -338,16 +360,15 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool: %v", err)
 	}
-	wantRouteHost := wantActorID + ".actors.resources.substrate.ate.dev"
+	wantTarget, _ := daemonprotocol.TargetActor(wantActorID)
 	if !got.Status.Available ||
-		got.Status.Endpoint != srv.URL+testMCPPath ||
+		got.Status.Endpoint != workerexecutor.SubstrateMCPProxyPath(defaultNS, "mcp-tool") ||
 		got.Status.Actor == nil ||
-		got.Status.Actor.ActorID != wantActorID ||
-		got.Status.Actor.RouteHost != wantRouteHost {
+		got.Status.Actor.ActorID != wantActorID {
 		t.Fatalf("status = %#v, want ready MCP actor endpoint", got.Status)
 	}
-	if gotHost != wantRouteHost {
-		t.Fatalf("MCP readiness Host = %q, want %q", gotHost, wantRouteHost)
+	if gotHost != wantTarget || wantTarget != "ate-demo/"+strings.Split(wantActorID, ".")[0] {
+		t.Fatalf("MCP readiness target = %q, want %q", gotHost, wantTarget)
 	}
 }
 
@@ -381,15 +402,16 @@ func TestToolReconcilerMCPSubstrateActorPollsEndpointReadiness(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   time.Second,
+			RouterURL:    srv.URL,
+			ClaimTimeout: time.Second,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -449,15 +471,16 @@ func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -509,15 +532,16 @@ func TestToolReconcilerMCPSubstrateActorRetriesBootAfterWaitReadyFailure(t *test
 		waitReadyErrs: []error{errors.New("timed out waiting for actor readiness")},
 	}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -631,23 +655,23 @@ func TestToolReconcilerMCPSubstrateActorSeedsBootedAnnotationWithoutReboot(t *te
 			Available: true,
 			Endpoint:  "http://old-router/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				Provider:  corev1alpha1.WorkspaceProviderSubstrate,
-				ActorID:   actorID,
-				RouteHost: actorID + ".actors.resources.substrate.ate.dev",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				ActorID:  actorID,
 			},
 		},
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -690,15 +714,16 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -718,8 +743,8 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 	if got.Status.Available {
 		t.Fatal("Available = true, want false while MCP endpoint is not ready")
 	}
-	if got.Status.Endpoint != srv.URL+"/missing" {
-		t.Fatalf("endpoint = %q, want resolved MCP endpoint", got.Status.Endpoint)
+	if got.Status.Endpoint != workerexecutor.SubstrateMCPProxyPath(defaultNS, "mcp-tool") {
+		t.Fatalf("endpoint = %q, want Orka MCP proxy endpoint", got.Status.Endpoint)
 	}
 	if got.Status.Actor == nil || got.Status.Actor.ActorID == "" {
 		t.Fatalf("actor status = %#v, want preserved actor metadata", got.Status.Actor)
@@ -761,15 +786,16 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -847,9 +873,8 @@ func TestToolReconcilerMCPSubstrateActorReplacementRetriesNonPooledCleanupAfterD
 			Available: true,
 			Endpoint:  "http://old-router/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				Provider:  corev1alpha1.WorkspaceProviderSubstrate,
-				ActorID:   oldMCPActorID,
-				RouteHost: oldMCPActorID + ".actors.resources.substrate.ate.dev",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				ActorID:  oldMCPActorID,
 			},
 		},
 	}
@@ -857,15 +882,16 @@ func TestToolReconcilerMCPSubstrateActorReplacementRetriesNonPooledCleanupAfterD
 		deleteErrs: []error{errors.New("temporary delete failure")},
 	}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -947,15 +973,16 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 	lease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1030,23 +1057,23 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 			Available: true,
 			Endpoint:  "http://old-router/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				Provider:  corev1alpha1.WorkspaceProviderSubstrate,
-				ActorID:   oldMCPActorID,
-				RouteHost: oldMCPActorID + ".actors.resources.substrate.ate.dev",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				ActorID:  oldMCPActorID,
 			},
 		},
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1126,15 +1153,16 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1265,14 +1293,15 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 		Client: fake.NewClientBuilder().WithScheme(scheme).
 			WithStatusSubresource(&corev1alpha1.Tool{}, &corev1alpha1.Task{}).
 			WithObjects(tool, template, pool, legacyTask, legacyLease).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   time.Second,
+			RouterURL:    srv.URL,
+			ClaimTimeout: time.Second,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1370,15 +1399,16 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1478,14 +1508,15 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, oldLease).
 			Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1593,14 +1624,15 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, holder, busyLease).
 			Build(),
-		Scheme:                   scheme,
-		HTTPClient:               srv.Client(),
-		SubstrateMCPToolsEnabled: true,
+		Scheme:                    scheme,
+		HTTPClient:                srv.Client(),
+		SubstrateRouterHTTPClient: srv.Client(),
+		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      srv.URL,
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    srv.URL,
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1710,7 +1742,8 @@ func TestToolReconcilerFinalizesNonPooledMCPSubstrateActor(t *testing.T) {
 					WithStatusSubresource(&corev1alpha1.Tool{}).
 					WithObjects(tool).
 					Build(),
-				Scheme: scheme,
+				Scheme:                       scheme,
+				SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 				SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 					factoryHit = true
 					return executor, nil
@@ -1765,7 +1798,8 @@ func TestToolReconcilerFinalizerIgnoresUntrustedNonPooledMCPActorAnnotation(t *t
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			factoryHit = true
 			return executor, nil
@@ -1830,7 +1864,8 @@ func TestToolReconcilerFinalizesMCPReplacementWithStaleStatusDeletesOwnedActor(t
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1885,7 +1920,8 @@ func TestToolReconcilerFinalizesPooledMCPSubstrateActorDeletesActorBeforeLeaseRe
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, lease).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -1937,7 +1973,8 @@ func TestToolReconcilerFinalizesAnnotatedPooledMCPSubstrateActorWithoutStatus(t 
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, lease).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			factoryHit = true
 			return executor, nil
@@ -1992,7 +2029,8 @@ func TestToolReconcilerFinalizerIgnoresAnnotatedPooledMCPActorWithoutLease(t *te
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			factoryHit = true
 			return executor, nil
@@ -2058,7 +2096,8 @@ func TestToolReconcilerFinalizerIgnoresPooledMCPActorHeldByAnotherTool(t *testin
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, otherTool, lease).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			factoryHit = true
 			return executor, nil
@@ -2118,7 +2157,8 @@ func TestToolReconcilerFinalizesMCPActorFromSpecWhenStatusMissing(t *testing.T) 
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -2161,7 +2201,8 @@ func TestToolReconcilerFinalizesMCPActorWhenToolBecomesHTTP(t *testing.T) {
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool).
 			Build(),
-		Scheme: scheme,
+		Scheme:                       scheme,
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			return executor, nil
 		},
@@ -2241,10 +2282,10 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 		Scheme:                   scheme,
 		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      "http://atenet-router.ate-system.svc",
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    "http://atenet-router.ate-system.svc",
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			executorFactoryCalled = true
 			return &recordingToolWorkspaceExecutor{}, nil
@@ -2294,10 +2335,10 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 		Scheme:                   scheme,
 		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
-			RouterURL:      "http://atenet-router.ate-system.svc",
-			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
-			ClaimTimeout:   1,
+			RouterURL:    "http://atenet-router.ate-system.svc",
+			ClaimTimeout: 1,
 		},
+		SubstrateEgressPolicyApplier: allowSubstrateEgressForTest,
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 			executorFactoryCalled = true
 			return &recordingToolWorkspaceExecutor{}, nil
@@ -2367,9 +2408,10 @@ func TestHealthCheck(t *testing.T) {
 
 			scheme := newToolScheme()
 			r := &ToolReconciler{
-				Client:     fake.NewClientBuilder().WithScheme(scheme).Build(),
-				Scheme:     scheme,
-				HTTPClient: srv.Client(),
+				Client:                    fake.NewClientBuilder().WithScheme(scheme).Build(),
+				Scheme:                    scheme,
+				HTTPClient:                srv.Client(),
+				SubstrateRouterHTTPClient: srv.Client(),
 			}
 			r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
 
@@ -2555,6 +2597,9 @@ type recordingToolWorkspaceExecutor struct {
 	claimTemplate                  workspace.TemplateRef
 	claimCreated                   bool
 	claimCreateds                  []bool
+	claimPhase                     workspace.Phase
+	releaseReqs                    []workspace.ReleaseRequest
+	releaseErr                     error
 	waitReadyCalled                bool
 	waitReadyBoot                  bool
 	waitReadyBoots                 []bool
@@ -2565,6 +2610,11 @@ type recordingToolWorkspaceExecutor struct {
 	deletedActorIDs                []string
 	deleteReqs                     []workspace.DeleteRequest
 	deleteErrs                     []error
+	// describeTemplates is the template Describe reports for each Actor ID.
+	describeTemplates map[string]workspace.TemplateRef
+	// describeDeleted lists Actor IDs Describe reports as already deleted.
+	describeDeleted []string
+	describePhase   workspace.Phase
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2583,7 +2633,7 @@ func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspac
 		},
 		Template: req.Template,
 		Created:  created,
-		Phase:    workspace.PhasePending,
+		Phase:    cmp.Or(e.claimPhase, workspace.PhasePending),
 	}, nil
 }
 
@@ -2616,6 +2666,10 @@ func (e *recordingToolWorkspaceExecutor) Download(ctx context.Context, req works
 }
 
 func (e *recordingToolWorkspaceExecutor) Release(ctx context.Context, req workspace.ReleaseRequest) (*workspace.ReleaseResult, error) {
+	e.releaseReqs = append(e.releaseReqs, req)
+	if e.releaseErr != nil {
+		return nil, e.releaseErr
+	}
 	return &workspace.ReleaseResult{Ref: req.Ref}, nil
 }
 
@@ -2633,7 +2687,10 @@ func (e *recordingToolWorkspaceExecutor) Delete(ctx context.Context, req workspa
 }
 
 func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
-	return &workspace.Description{Ref: req.Ref}, nil
+	if slices.Contains(e.describeDeleted, req.Ref.ID) {
+		return &workspace.Description{Ref: req.Ref, Phase: workspace.PhaseDeleted}, nil
+	}
+	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase, Template: e.describeTemplates[req.Ref.ID]}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {

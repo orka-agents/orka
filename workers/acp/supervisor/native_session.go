@@ -31,7 +31,7 @@ type nativeSessionCapture struct {
 type nativeCaptureUnsupportedError struct{}
 
 func (*nativeCaptureUnsupportedError) Error() string {
-	return "native Codex context is unsupported or exceeds the transport budget; stopped private home retained"
+	return "native Codex context is unsupported, unavailable, or exceeds the transport budget; stopped private home retained"
 }
 
 // A retry is safe only after the writer and all descendants are proven gone.

@@ -133,7 +133,7 @@ Notes:
 
 The `SecurityStore` interface (`internal/store/store.go`, SQLite implementation under
 `internal/store/sqlite/`) persists dynamic security data. Domain types live in
-`internal/store/security_types.go`: `ScanRun`, `ThreatModel`, `Finding`,
+`pkg/storage/v1/security_types.go`: `ScanRun`, `ThreatModel`, `Finding`,
 `FindingEvidenceRef`, `ReviewSlice`, `DroppedFinding`, and `PatchProposal`.
 
 ```go

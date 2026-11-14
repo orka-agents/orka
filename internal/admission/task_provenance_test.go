@@ -103,6 +103,12 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: labels.AnnotationContinuationOfUID,
 		},
 		{
+			name:     "untrusted create with parent task namespace denied",
+			user:     untrustedUsername,
+			task:     withParentTaskNamespace(newAdmissionTestTask()),
+			contains: labels.AnnotationParentTaskNamespace,
+		},
+		{
 			name:     "untrusted create with workspace settlement marker denied",
 			user:     untrustedUsername,
 			task:     withWorkspaceSettledAnnotation(newAdmissionTestTask()),
@@ -485,6 +491,14 @@ func withParentTaskUID(task *corev1alpha1.Task) *corev1alpha1.Task {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[labels.AnnotationParentTaskUID] = admissionTestParentTaskUID
+	return task
+}
+
+func withParentTaskNamespace(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationParentTaskNamespace] = "parent-namespace"
 	return task
 }
 

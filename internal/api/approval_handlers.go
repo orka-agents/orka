@@ -159,6 +159,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
+	if decision == approvalDecisionApprove {
+		if err := requireRequesterApprovesDelegatedWrite(task, GetUserInfo(c)); err != nil {
+			return err
+		}
+	}
 	// A parked turn has ended, but its sign-off approval stays decidable
 	// while the wait is active: the decision starts the continuation turn.
 	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {

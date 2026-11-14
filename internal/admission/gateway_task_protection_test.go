@@ -378,6 +378,21 @@ func (p admissionPolicyEvaluator) admits(
 	object, oldObject *unstructured.Unstructured,
 ) bool {
 	t.Helper()
+	return p.admitsAs(t, kind, resource, name, operation, &user.DefaultInfo{Name: username}, subresource, object, oldObject)
+}
+
+// admitsAs is admits for a requester with groups.
+func (p admissionPolicyEvaluator) admitsAs(
+	t *testing.T,
+	kind schema.GroupVersionKind,
+	resource schema.GroupVersionResource,
+	name string,
+	operation apiserveradmission.Operation,
+	requester user.Info,
+	subresource string,
+	object, oldObject *unstructured.Unstructured,
+) bool {
+	t.Helper()
 	var newRuntimeObject, oldRuntimeObject runtime.Object
 	if object != nil {
 		newRuntimeObject = object
@@ -386,7 +401,7 @@ func (p admissionPolicyEvaluator) admits(
 		oldRuntimeObject = oldObject
 	}
 	attributes := apiserveradmission.NewAttributesRecord(newRuntimeObject, oldRuntimeObject, kind, admissionTestNamespace, name,
-		resource, subresource, operation, nil, false, &user.DefaultInfo{Name: username})
+		resource, subresource, operation, nil, false, requester)
 	versioned := &apiserveradmission.VersionedAttributes{
 		Attributes: attributes, VersionedKind: kind,
 		VersionedObject:    apiserveradmission.NewLazyObject(newRuntimeObject),

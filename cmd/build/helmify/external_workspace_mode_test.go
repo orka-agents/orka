@@ -16,9 +16,7 @@ func TestStaticChartExternalWorkspaceDispatchAndMCPFlags(t *testing.T) {
 		}, dispatch: true},
 		{name: "MCP support", args: []string{
 			"--set", "controller.substrate.mcpToolsEnabled=true",
-			"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
-			"--set-string", "controller.substrate.apiCredentials.bearerTokenKey=token",
-			"--set-string", "controller.substrate.apiCredentials.caKey=ca",
+			"--set", "controller.substrate.podCertificate.enabled=true",
 		}, mcp: true},
 		{name: "default"},
 	} {

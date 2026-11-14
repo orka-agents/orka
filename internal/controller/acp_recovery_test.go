@@ -181,6 +181,70 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 }
 
+// A cancel request recorded just before the controller restarted does not
+// prove the in-flight prompt stopped: recovery keeps the outcome unknown and
+// carries the request in the terminal message, whether or not the controller
+// already wrote the Cancelled phase.
+func TestACPDispatcherRecoveryKeepsACancelRequestedBeforeRestart(t *testing.T) {
+	const request = "cancelled by alice: wrong repository"
+	const wantMessage = request + "; controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+	for _, test := range []struct {
+		name           string
+		state          store.PromptExecutionState
+		phaseCancelled bool
+	}{
+		{name: "accepted", state: store.PromptExecutionAccepted},
+		{name: "running", state: store.PromptExecutionRunning},
+		{name: "running-already-cancelled", state: store.PromptExecutionRunning, phaseCancelled: true},
+		{name: "settling", state: store.PromptExecutionSettling},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, test.state)
+			defer fixture.close(t)
+			key := types.NamespacedName{Namespace: "default", Name: "task"}
+			task := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Annotations == nil {
+				task.Annotations = map[string]string{}
+			}
+			task.Annotations[labels.AnnotationCancelRequested] = request
+			if err := fixture.kubeClient.Update(fixture.ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			if test.phaseCancelled {
+				task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+				task.Status.Message = request
+				if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.OutcomeMarker != wantMessage {
+				t.Fatalf("attempt = %s %q, want OutcomeUnknown carrying the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
+			}
+			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
+				t.Fatal(err)
+			}
+			execution := task.Status.Execution
+			if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Message != wantMessage || execution == nil ||
+				execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+				execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown ||
+				execution.Reason != "RuntimeLost" || execution.Message != wantMessage {
+				t.Fatalf("task status = %#v, want Failed with OutcomeUnknown carrying the cancel request", task.Status)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherClosesRecoveredPromptAndOpenToolsAsOutcomeUnknown(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionAccepted)
 	defer fixture.close(t)

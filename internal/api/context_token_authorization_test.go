@@ -1304,6 +1304,42 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 	require.Contains(t, failures[0], "resource-assertion")
 }
 
+func TestContextTokenTaskToolCredentialFailuresForSubstrateEgressCredentials(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-mcp", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+			Egress: []corev1alpha1.SubstrateActorEgressRule{{
+				Scheme: "https", Host: "api.github.com",
+				Credential: &corev1alpha1.SubstrateActorEgressCredential{SecretRef: corev1alpha1.SecretKeySelector{Name: "github-token", Key: "token"}},
+			}},
+		}}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"github-mcp"}}
+
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+
+	token.TransactionContext = map[string]any{"secret": "different-secret"}
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "github-token")
+}
+
 func TestContextTokenTaskToolCredentialFailuresResolvesBuiltInRuntimeCustomTools(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}

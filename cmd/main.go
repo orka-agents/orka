@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -50,6 +53,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -60,6 +64,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/agenthost"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -88,6 +93,7 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -95,6 +101,7 @@ import (
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	serviceAccountTokenFile     = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101 -- a path, not a credential.
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
 	// storageConfigResolveTimeout bounds the startup Secret reads for storage
 	// adapters.
@@ -130,6 +137,18 @@ func splitCommaList(raw string) []string {
 		}
 	}
 	return out
+}
+
+// validateAgentIdentityProvenance refuses an identity issuer without Task
+// provenance admission. Identity binding judges a Task by who created it: the
+// RepositoryScan or RepositoryMonitor owner and markers it carries. Without
+// the webhook any Task editor could remove them and let an unchecked
+// automation Task bind as a root Task.
+func validateAgentIdentityProvenance(config agentidentity.Config, provenanceProtected bool) error {
+	if config.Entra != nil && !provenanceProtected {
+		return fmt.Errorf("an Agent identity issuer requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect how Tasks record who created them")
+	}
+	return nil
 }
 
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
@@ -209,25 +228,45 @@ func validateDisabledSubstrateRecoveryConfig(
 		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	recoveryState := ""
 	// Only registered cleanup controllers can service these obligations.
-
-	if recoveryState == "" {
-		var err error
-		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
-		if err != nil {
-			return err
-		}
+	recoveryState, routerRequired, err := controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+	if err != nil {
+		return err
 	}
-
 	if recoveryState == "" {
 		return nil
 	}
 	if configErr != nil {
 		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
 	}
-	if err := cfg.ValidateMCPTools(); err != nil {
+	// SubstrateActorPool finalization uses only the control API; MCP Tool
+	// finalization also builds the router client.
+	validate := cfg.ValidateControl
+	if routerRequired {
+		validate = cfg.ValidateMCPTools
+	}
+	if err := validate(); err != nil {
 		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
+	}
+	return nil
+}
+
+// validateSubstrateStartupConfig rejects removed Substrate v0.1.0 settings
+// unconditionally, then validates MCP Tool admission when it is enabled.
+// Disabled-admission recovery is validated separately once existing cleanup
+// obligations can be discovered.
+func validateSubstrateStartupConfig(mcpToolsEnabled bool, cfg controller.SubstrateConfig, configErr error) error {
+	if errors.Is(configErr, controller.ErrRemovedSubstrateSetting) {
+		return configErr
+	}
+	if !mcpToolsEnabled {
+		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("invalid substrate configuration from environment: %w", configErr)
+	}
+	if err := cfg.ValidateMCPTools(); err != nil {
+		return fmt.Errorf("invalid substrate configuration: %w", err)
 	}
 	return nil
 }
@@ -242,6 +281,10 @@ func main() {
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
+	var agentUseAuthorizationEnabled bool
+	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
+	var agentIdentityEntraAuthority, agentIdentityTokenFile string
+	var agentIdentityMaxDelegationAge time.Duration
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -307,6 +350,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var acpWorkspaceAllowProviderTokenInSandbox bool
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -370,6 +414,7 @@ func main() {
 	var outboundAccessTrustedGatewayServices string
 	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
+	var runtimeTelemetryCollectorEgress bool
 	var workspaceProviderAPIEnabled bool
 	var agentHostsEnabled bool
 	var agentHostNamespace string
@@ -446,6 +491,24 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
+		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
+	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
+		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
+	flag.StringVar(&agentIdentityEntraAuthority, "agent-identity-entra-authority",
+		envStringDefault("ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY", agentidentity.DefaultEntraAuthority),
+		"Entra authority URL used for agent identity tokens, for example a sovereign cloud's login endpoint.")
+	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
+		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
+	flag.DurationVar(&agentIdentityMaxDelegationAge, "agent-identity-max-delegation-age",
+		envDurationDefault("ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE", outboundaccess.DefaultMaxDelegationAgeCap),
+		"Longest maxDelegationAge any Delegated agentIdentity policy may use.")
+	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
+		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -488,7 +551,7 @@ func main() {
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
-			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
+			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
 			ConnectorPrivateEndpointsAcknowledgement+" and only with a plain-http localhost --connector-callback-base-url; never enable this in production.")
 	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
 		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
@@ -587,6 +650,8 @@ func main() {
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
+		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
 		"Enable in-tree Substrate MCP Tool actors and actor pools.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
@@ -604,8 +669,6 @@ func main() {
 		"Skip Substrate control API certificate verification. Only for local smoke tests.")
 	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
 		"Substrate router base URL for Actor traffic.")
-	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
-		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
 		"Default Substrate ActorTemplate for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
@@ -617,30 +680,21 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
-		substrateConfig.SessionIdentitySecretName,
-		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
-		substrateConfig.SessionIdentitySecretKey,
-		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
-	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
-		substrateConfig.SessionIdentityRequired,
-		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
-	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
-		substrateConfig.SessionIdentityAudience,
-		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
-		substrateConfig.SessionIdentityAppID,
-		"Application ID requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
-		substrateConfig.SessionIdentityUserID,
-		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
 		"Timeout for agent runtime execution inside the Substrate actor.")
+	flag.DurationVar(&substrateConfig.EgressPolicyPropagation, "substrate-egress-policy-propagation",
+		substrateConfig.EgressPolicyPropagation,
+		"How long a Substrate MCP Tool stays unavailable, with its Actor stopped, after the Actor's egress policy is "+
+			"replaced or the Actor is created, because the Substrate egress gateway may still apply earlier rules. Set "+
+			"it to the gateway's --egress-policy-cache-ttl plus 4s. 0 does not wait and is correct only with that "+
+			"cache disabled.")
 	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
 		"Default Substrate workspace cleanup policy (delete, retain).")
+	flag.StringVar(&substrateConfig.EgressCredentialProvider, "substrate-egress-credential-provider",
+		substrateConfig.EgressCredentialProvider,
+		"Credential provider class the Substrate egress gateway was installed with (only k8s.io). Enables MCP Tool egress credentials; empty makes Tools that request one fail closed.")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -779,6 +833,11 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.BoolVar(&runtimeTelemetryCollectorEgress, "runtime-telemetry-collector-egress",
+		strings.EqualFold(os.Getenv("ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS"), "true"),
+		"Admit the OTLP collector endpoints projected into ACP supervisors to the egress allowlist of "+
+			"gateway-enforced native runtimes (Agent Substrate). Requires --enable-telemetry and absolute "+
+			"http(s) collector URLs with fully qualified DNS hosts.")
 	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
@@ -810,6 +869,40 @@ func main() {
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
+	agentIdentityEntraBlueprintClientID = strings.TrimSpace(agentIdentityEntraBlueprintClientID)
+	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
+		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
+			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: strings.TrimSpace(agentIdentityEntraAuthority),
+		}
+	}
+	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	// No OutboundAccessPolicy may mint tokens for the controller's own
+	// ServiceAccount, which the agent identity blueprint trusts.
+	controllerServiceAccount, controllerServiceAccountErr := currentServiceAccount()
+	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
+		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
+	var agentIdentitySource *agentidentity.Source
+	if agentIdentityConfig.Entra != nil {
+		agentIdentitySource = &agentidentity.Source{
+			Config: agentIdentityConfig,
+			Entra: &agentidentity.EntraIssuer{
+				Config:     *agentIdentityConfig.Entra,
+				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
+			},
+		}
+	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -906,7 +999,13 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to every worker ServiceAccount,
+	// however the provenance trust list is overridden.
+	api.SetWorkerServiceAccountNames(orkaadmission.WorkerServiceAccountNames(
+		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
+		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
+	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 	// Read the storage configuration before anything opens storage. It reads
@@ -918,14 +1017,29 @@ func main() {
 	}
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
+	substrateConfig.EnableTelemetry = enableTracing
+	if err := controller.ValidateRuntimeTelemetryCollectorEgress(enableTracing, runtimeTelemetryCollectorEgress, os.Getenv); err != nil {
+		setupLog.Error(err, "invalid runtime telemetry collector egress configuration")
+		os.Exit(1)
+	}
 	substrateConfig = substrateConfig.WithDefaults()
+	if err := validateSubstrateStartupConfig(substrateMCPToolsEnabled, substrateConfig, substrateConfigErr); err != nil {
+		setupLog.Error(err, "invalid substrate configuration")
+		os.Exit(1)
+	}
+	// The manager is the only Orka identity on the Substrate router's SPIFFE
+	// allowlist. Substrate MCP Tool calls from workers reach Actors through the
+	// authenticated orka-api proxy, and the ACP broker calls in-process.
+	var substrateMCPRouter *worker.SubstrateMCPRouter
 	if substrateMCPToolsEnabled {
-		if substrateConfigErr != nil {
-			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration")
 			os.Exit(1)
 		}
-		if err := substrateConfig.ValidateMCPTools(); err != nil {
-			setupLog.Error(err, "invalid substrate configuration")
+		substrateMCPRouter, err = worker.NewSubstrateMCPRouter(substrateConfig.RouterURL, routerHTTP)
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router configuration")
 			os.Exit(1)
 		}
 	}
@@ -1155,6 +1269,18 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Record whether Agent use is enforced before anything serves requests,
+	// so work created while it was off can never bind an Agent identity. A
+	// new period starts only once this controller leads.
+	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to identify the leader election Lease")
+		os.Exit(1)
+	}
+	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+		setupLog.Error(err, "unable to record the Agent use enforcement period")
+		os.Exit(1)
+	}
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
 	if err != nil {
 		setupLog.Error(err, "unable to set up webhook certificate rotation")
@@ -1251,6 +1377,8 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
+			admissionConfig.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+				admissionConfig.TrustedServiceAccountNames, []string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName})
 			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
@@ -1286,10 +1414,17 @@ func main() {
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
-		Reader:     mgr.GetAPIReader(),
-		KubeClient: kubeClient,
-		Trust:      outboundAccessTrust,
-		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		Reader:                 mgr.GetAPIReader(),
+		ReservedServiceAccount: controllerServiceAccount,
+		KubeClient:             kubeClient,
+		Trust:                  outboundAccessTrust,
+		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		AuditLog:               agentIdentityAuditLog,
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.AgentIdentities = agentIdentitySource
+		outboundAccessResolver.MaxDelegationAge = agentIdentityMaxDelegationAge
+		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger
@@ -1389,6 +1524,19 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	// Identity-use records pseudonymize the requester with this key, also for
+	// calls refused while no issuer is configured.
+	auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+	if keyErr != nil {
+		setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+		os.Exit(1)
+	}
+	outboundAccessResolver.AuditPseudonymKey = auditKey
+	if agentIdentitySource != nil {
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
+		}.Check
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
@@ -1412,7 +1560,7 @@ func main() {
 		os.Exit(1)
 	}
 	if connectorsAllowPrivateEndpoints {
-		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector and Agent identity Tool endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
 		connectors.SetAllowPrivateEndpoints(true)
 		worker.SetAllowPrivateConnectionEndpoints(true)
 	}
@@ -1500,10 +1648,27 @@ func main() {
 	sessionManager := controller.NewSessionManager(appStorage)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 
+	// Agent Substrate v1 native workspaces are reached only through atenet-router
+	// with the controller's allowlisted pod certificate. Build it from the
+	// configured identity alone, not the admission flags: after new dispatch is
+	// disabled, existing routed runtimes still need authenticated recovery,
+	// drain and cleanup. Without that identity the router stays unset and routed
+	// pools fail closed as Degraded; Pod-backed providers are unaffected.
+	var runtimePoolSubstrateRouter *controller.RuntimePoolSubstrateRouter
+	if strings.TrimSpace(substrateConfig.APICertFile) != "" {
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration for execution workspaces")
+			os.Exit(1)
+		}
+		runtimePoolSubstrateRouter = &controller.RuntimePoolSubstrateRouter{URL: substrateConfig.RouterURL, HTTPClient: routerHTTP}
+	}
+
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
+		Snapshots: agentExecutionSnapshotStore, SubstrateRouter: runtimePoolSubstrateRouter,
 	}
 	controlStoreOptions := []storekube.Option{
 		storekube.WithAPIReader(mgr.GetAPIReader()),
@@ -1667,6 +1832,7 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
+		SubstrateRouter:      runtimePoolSubstrateRouter,
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
@@ -1683,6 +1849,7 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	runtimePoolReconciler.AllowProviderTokenInSandbox = acpWorkspaceAllowProviderTokenInSandbox
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
 		Namespace:       acpProviderProxyNamespace,
@@ -1693,6 +1860,7 @@ func main() {
 	runtimePoolReconciler.ControlStore = kubeControlStore
 	runtimePoolReconciler.EnablePDB = true
 	runtimePoolReconciler.EnableTelemetry = enableTracing
+	runtimePoolReconciler.TelemetryCollectorEgress = runtimeTelemetryCollectorEgress
 	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 	runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
 
@@ -1758,6 +1926,7 @@ func main() {
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
 		ACPToolboxPolicy:            acpToolboxPolicy,
+		Identity:                    agentIdentityConfig,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
@@ -1803,7 +1972,9 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Identity:        agentIdentityConfig,
+		SubstrateRouter: runtimePoolSubstrateRouter,
+		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
 		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
@@ -1837,6 +2008,7 @@ func main() {
 	)
 
 	upgradeDrain.ControllerNamespace = controlNamespace
+	upgradeDrain.SubstrateRouter = runtimePoolSubstrateRouter
 	if err := mgr.Add(upgradeDrain); err != nil {
 		setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 		os.Exit(1)
@@ -1849,9 +2021,11 @@ func main() {
 	if err := (&controller.OutboundAccessPolicyReconciler{
 		Client:                     mgr.GetClient(),
 		APIReader:                  mgr.GetAPIReader(),
+		ReservedServiceAccount:     controllerServiceAccount,
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+		MaxDelegationAge:           agentIdentityMaxDelegationAge,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)
@@ -2047,6 +2221,14 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
+		Identity:      agentIdentityConfig,
+		APIReader:     mgr.GetAPIReader(),
+		IdentityVerifier: func() controller.AgentIdentityVerifier {
+			if agentIdentitySource == nil {
+				return nil
+			}
+			return agentIdentitySource
+		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2164,6 +2346,7 @@ func main() {
 		connectorToolEffects = kubeControlStore
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
+		SubstrateMCPProxy:         api.SubstrateMCPProxyConfig{Router: substrateMCPRouter},
 		Port:                      apiPort,
 		NativeSessionMaxBytes:     nativeSessionMaxBytes,
 		WatchNamespace:            watchNamespace,
@@ -2211,8 +2394,9 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled: dashboardEnabled,
-		TaskWebhookKeys:  taskWebhookKeys,
+		DashboardEnabled:      dashboardEnabled,
+		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2230,7 +2414,8 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-		Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		SubstrateMCPRouter: substrateMCPRouter,
+		Reader:             mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
 		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,
@@ -2261,7 +2446,7 @@ func main() {
 				// Children the broker creates for this Task inherit its
 				// verified requester only through this seal.
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
-				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName, AgentUID: task.AgentUID,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
 				ExecutionEvents: appStorage,
 				Tenant:          request.Namespace, WatchNamespace: watchNamespace,
@@ -2615,6 +2800,83 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 	return options
 }
 
+// establishAgentUseEnforcementPeriod records this run's Agent use
+// enforcement with a direct client, since the manager's cache is not running
+// yet, and stores when the current enforcement period began.
+func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	period := &agentidentity.EnforcementPeriod{}
+	config.Enforcement = period
+	if !config.AgentUseAuthorization {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+			return err
+		}
+		period.Start(time.Time{})
+		// An enforcing leader may have started a period since: end it again
+		// once this controller leads, or stop rather than serve beside it.
+		return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			var err error
+			for range 6 {
+				if err = agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return err
+		}))
+	}
+	// The period is decided each time this controller wins leadership, never
+	// from what it read before: the leader it replaces, or one that ran while
+	// this controller waited, may not have checked Agent use. Identity
+	// decisions wait until then.
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		for {
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace, leader)
+			if err == nil {
+				period.Start(since)
+				setupLog.Info("Agent use enforcement period started", "since", since)
+				return nil
+			}
+			setupLog.Error(err, "unable to start the Agent use enforcement period; retrying")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}))
+}
+
+// agentUseLeaderLease names the leader election Lease this controller holds
+// once it leads, as controller-runtime names it, or nil with leader election
+// off.
+func agentUseLeaderLease(leaderElection bool, watchNamespace string) (*agentidentity.LeaderLease, error) {
+	if !leaderElection {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(watchNamespace)
+	if namespace == "" {
+		namespace = currentPodNamespace()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &agentidentity.LeaderLease{
+		Key:          crclient.ObjectKey{Namespace: namespace, Name: controllerLeaderElectionID},
+		HolderPrefix: hostname + "_",
+	}, nil
+}
+
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
@@ -2764,6 +3026,19 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
 
+// agentIdentityAuditLogger returns the sink for agent identity use records.
+// It writes where and how the diagnostic logger does, but no
+// --zap-log-level filters it and it is never sampled: an audit record must
+// not depend on how verbose the controller's diagnostics are.
+func agentIdentityAuditLogger(opts zap.Options) logr.Logger {
+	opts.Level = uberzap.LevelEnablerFunc(func(zapcore.Level) bool { return true })
+	return zap.New(zap.UseFlagOptions(&opts))
+}
+
+// agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
+// requesters in agent identity use records.
+const agentIdentityAuditKeyInfo = "orka.agent-identity.audit-pseudonym.v1"
+
 // requesterStampKeyInfo is the HKDF label for the requester stamp key.
 const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
 
@@ -2791,4 +3066,22 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// currentServiceAccount returns the ServiceAccount this Pod runs as, from its
+// mounted API token.
+func currentServiceAccount() (outboundaccess.ReservedServiceAccount, error) {
+	token, err := os.ReadFile(serviceAccountTokenFile)
+	if err != nil {
+		return outboundaccess.ReservedServiceAccount{}, fmt.Errorf("read the controller's ServiceAccount token: %w", err)
+	}
+	return outboundaccess.ServiceAccountFromToken(string(token))
+}
+
+// envStringDefault returns the trimmed environment value, or fallback when unset.
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

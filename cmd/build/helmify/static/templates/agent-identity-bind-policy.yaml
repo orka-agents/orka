@@ -1,0 +1,34 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-agent-identity-bind
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["agents"]
+  validations:
+  - expression: >-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) ||
+      (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) &&
+      oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) ||
+      authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-agent-identity-bind
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-agent-identity-bind
+  validationActions: [Deny]

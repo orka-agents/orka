@@ -9,6 +9,7 @@ package admission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,6 +26,7 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -75,6 +78,7 @@ var (
 	controllerManagedTaskAnnotationKeys = []string{
 		labels.AnnotationCancelRequested,
 		labels.AnnotationParentTaskUID,
+		labels.AnnotationParentTaskNamespace,
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
 		// Continuation lineage lets a resumed turn act for its parked
@@ -103,6 +107,10 @@ type TaskProvenanceConfig struct {
 	// metadata stays reserved to ControllerUsernames.
 	TrustedUsernames           []string
 	TrustedServiceAccountNames []string
+	// WorkerServiceAccountNames are the ServiceAccounts worker Pods run as,
+	// trusted or not. They hold Agent use broadly, so the identity-bound
+	// Agent rule applies to them however TrustedServiceAccountNames is set.
+	WorkerServiceAccountNames []string
 }
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
@@ -135,6 +143,7 @@ func NewTaskProvenanceConfig(
 	if len(cfg.TrustedServiceAccountNames) == 0 {
 		cfg.TrustedServiceAccountNames = append([]string{}, defaultTrustedWorkerServiceAccounts...)
 	}
+	cfg.WorkerServiceAccountNames = WorkerServiceAccountNames(cfg.TrustedServiceAccountNames)
 	return cfg
 }
 
@@ -210,6 +219,19 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		if workerTrusted && task.Spec.SessionRef != nil && taskCoordinationOwner(task) == nil {
 			return ctrladmission.Denied("worker session references require an authorized coordination parent")
 		}
+		if (workerTrusted || isWorkerServiceAccountUser(v.config, req.UserInfo, req.Namespace)) && taskCoordinationOwner(task) == nil {
+			// Workers hold Agent use broadly, so a parentless Task from a
+			// worker would bind an identity-bound Agent as a root Task that
+			// no use check covered. A worker reaches such an Agent only as a
+			// delegated child, where its parent must already hold it.
+			identityBound, err := v.namesIdentityBoundAgent(ctx, req.Namespace, task)
+			if err != nil {
+				return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("read the Task's Agent: %w", err))
+			}
+			if identityBound {
+				return ctrladmission.Denied("a worker may name an identity-bound Agent only in a Task delegated from its own Task")
+			}
+		}
 		allowed, err := v.authorizedTaskCoordinationParent(ctx, req, task)
 		if err != nil {
 			return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("verify Task coordination parent: %w", err))
@@ -227,19 +249,69 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 	return ctrladmission.Allowed("Task provenance fields unchanged")
 }
 
-// A Task's creator establishes its coordination ancestry. Later metadata
-// updates must not move an existing worker into another Task's scope.
+// namesIdentityBoundAgent reports whether the Task names an Agent that
+// declares an external identity or still holds a claim to one. A missing Agent declares none; any other
+// read failure is returned so admission fails closed.
+func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, namespace string, task *corev1alpha1.Task) (bool, error) {
+	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
+		return false, nil
+	}
+	if v.reader == nil {
+		return false, errors.New("no reader is configured for Agents")
+	}
+	agent := &corev1alpha1.Agent{}
+	if task.Namespace != "" {
+		namespace = task.Namespace
+	}
+	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return agent.HoldsIdentity(), nil
+}
+
+// A Task's creator establishes its coordination ancestry and, for a chat
+// Task, the chat Session incarnation it belongs to. Later metadata updates
+// must not move an existing worker into another Task's scope, nor detach a
+// Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
-	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, []string{labels.LabelParentTask})
-	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
-	oldOwner, newOwner := taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)
+	// The markers of the scan, monitor, or GatewayBinding that created a
+	// Task are held too: they keep it from binding an identity as a root
+	// Task, also after the garbage collector orphans it. A GatewayBinding's
+	// Task has no owner reference, so its markers are all that say so.
+	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
+			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
+	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
+		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation})...)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
 	// metadata then has no matching owner UID, so coordination access fails
 	// closed. Cleanup controllers cannot attach the Task to a different owner.
-	if !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil) {
+	// The RepositoryScan or RepositoryMonitor that created a Task is held the
+	// same way: removing it would let the Task pass as a root Task when it
+	// binds to an identity-bound Agent.
+	changed := func(oldOwner, newOwner *metav1.OwnerReference) bool {
+		return !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil)
+	}
+	if changed(taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)) ||
+		changed(taskAutomationOwner(oldTask), taskAutomationOwner(newTask)) {
 		fields = append(fields, "metadata.ownerReferences")
 	}
 	return fields
+}
+
+// taskAutomationOwner returns the RepositoryScan or RepositoryMonitor that
+// controls a Task, or nil.
+func taskAutomationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		(owner.Kind != "RepositoryScan" && owner.Kind != "RepositoryMonitor") {
+		return nil
+	}
+	owner.BlockOwnerDeletion = nil
+	return owner
 }
 
 func taskCoordinationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
@@ -366,6 +438,32 @@ func isTrustedControllerProvenanceUser(cfg TaskProvenanceConfig, user authentica
 // trusted worker ServiceAccount or a flag-listed trusted user: it keeps the
 // provenance-field allowance but never the workspace settlement metadata
 // reservation.
+// WorkerServiceAccountNames returns the default worker ServiceAccount names
+// joined with extra, without duplicates or blanks.
+func WorkerServiceAccountNames(extra ...[]string) []string {
+	names := append([]string{}, defaultTrustedWorkerServiceAccounts...)
+	for _, list := range extra {
+		for _, name := range list {
+			if name = strings.TrimSpace(name); name != "" && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// isWorkerServiceAccountUser reports a worker Pod's ServiceAccount in the
+// request namespace, whether or not provenance admission trusts it.
+func isWorkerServiceAccountUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
+	username := strings.TrimSpace(user.Username)
+	for _, name := range cfg.WorkerServiceAccountNames {
+		if username != "" && username == serviceAccountUsername(namespace, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func isTrustedWorkerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
 	username := strings.TrimSpace(user.Username)
 	if username == "" {

@@ -326,6 +326,18 @@ func TestLinkedBuiltinAccountsFailClosed(t *testing.T) {
 	if _, _, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests"); err == nil || !strings.Contains(err.Error(), "connection revoked") {
 		t.Fatalf("source err = %v", err)
 	}
+	// A link the person must fix names the provider, so the agent is told
+	// how to relink, and the source's own shared error stays untouched.
+	shared := &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
+	source.err = shared
+	_, _, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests")
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok ||
+		!strings.Contains(refusal.Error(), "`orka connect github -n tenant`") {
+		t.Fatalf("expired link err = %v, want the relink command", err)
+	}
+	if shared.Provider != "" || shared.Namespace != "" {
+		t.Fatalf("the source's error was annotated in place: %+v", shared)
+	}
 	source.err = nil
 	source.credential.Mode = corev1alpha1.ConnectionModeReadOnly
 	if _, _, err := accounts.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "readOnly") {
