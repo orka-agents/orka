@@ -133,6 +133,26 @@ variables. Upstream allows at most 32 environment variables per container and th
 Orka supervisor uses 31, so core admits only `HTTP` and `TLSPassthrough` rules for
 workspaces today.
 
+### Provider-proxy token injection
+
+Native runtimes never receive the provider-auth-proxy token. When the provider
+advertises `runtime.egress-credential-injection`, Core's proxy rule asks the
+egress gateway to replace `Authorization` with `Bearer ` plus the token from
+Core's private provider Secret in its runtime namespace; the runtime boots with a
+public placeholder. Enable it by installing the gateway with
+`--credential-provider='{"name":"k8s.io"}'`, granting the profile Atespace the
+runtime namespace (narrowed to `orka.ai/runtime-pool-provider-credential: "true"`)
+in the credential provider's namespace policy and restarting it, and starting the
+provider with `--egress-credential-provider=k8s.io` and
+`--egress-credential-namespace=orka-runtimes`. The provider-auth-proxy URL must be
+`http` and must not share a host with the controller API, because the gateway
+re-originates `https` trusting only public roots. If injection is unavailable the
+pool reports why and stays closed; `--acp-workspace-allow-provider-token-in-sandbox`
+explicitly restores bootstrap delivery. See
+[ADR 0045](https://github.com/orka-agents/orka/blob/main/docs/adr/0045-substrate-egress-credential-injection.md)
+for the remaining limits: any guest process can send the placeholder, a
+header-echoing destination reveals the value, and grants are per Atespace.
+
 The infrastructure ActorTemplate must select exactly one operator-owned
 WorkerPool (`ate.dev/v1`, one `gvisor` sandbox class, no `template.resources`).
 Each allocation copies its frozen worker image, scheduling, labels, and annotations
@@ -254,7 +274,13 @@ MCP Actors get no egress unless `spec.mcp.substrateActor.egress` allows it, usin
 lowercase FQDN or leftmost `*.` wildcard and ports. The controller applies the
 policy before every resume and reports `EgressPolicyReady`. Intercepted `https`
 egress requires the operator's ActorTemplate to trust the `egress-mitm.ate.dev`
-bundle. MCP templates must set a `wakeupProbe` on the routable port and disable
+bundle. An `http` or `https` rule on an exact host may add a
+`credential` (header, default `Authorization`; optional `prefix`; `secretRef` in
+the Tool's namespace). The gateway replaces that header, which the Actor sends
+with any placeholder value, with the Secret value, so the Actor never holds it.
+It needs `--substrate-egress-credential-provider=k8s.io`, a credential-provider
+grant from the Actor's Atespace to the Tool namespace, and a caller allowed to
+`get` the Secret; the REST API rejects such Tools. MCP templates must set a `wakeupProbe` on the routable port and disable
 golden snapshots when Tools request `boot: true`.
 `SubstrateActorPool.spec.templateRef` is immutable and belongs to native MCP Tool
 placement. It does not select a Task's ACP workspace.

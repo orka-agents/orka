@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -37,11 +39,70 @@ const (
 )
 
 // SubstrateEgressRule allows one DNS host name on explicit ports. It never
-// carries credentials: Orka does not configure gateway header effects.
+// carries credential values: an optional Credential names a Kubernetes Secret
+// key that the egress gateway resolves and injects at request time.
 type SubstrateEgressRule struct {
-	Scheme string
-	Host   string
-	Ports  []int32
+	Scheme     string
+	Host       string
+	Ports      []int32
+	Credential *SubstrateEgressCredential
+}
+
+// SubstrateEgressCredential replaces one request header with a Kubernetes
+// Secret value through the gateway's credential provider. Provider is the
+// credential provider class the gateway was installed with; an empty
+// Provider means injection is not configured and the rule fails closed.
+type SubstrateEgressCredential struct {
+	Header    string
+	Prefix    string
+	Provider  string
+	Namespace string
+	Name      string
+	Key       string
+}
+
+// SubstrateKubernetesSecretsCredentialProvider is the upstream reference
+// credential provider class for ate-secret://k8s.io/default/<ns>/<name>/<key>.
+const SubstrateKubernetesSecretsCredentialProvider = "k8s.io"
+
+// credentialURI returns the upstream reference to the Secret key.
+func (c SubstrateEgressCredential) credentialURI() string {
+	return fmt.Sprintf("ate-secret://%s/default/%s/%s/%s", c.Provider, c.Namespace, c.Name, c.Key)
+}
+
+func validateSubstrateEgressCredential(scheme, host string, credential *SubstrateEgressCredential) error {
+	if credential == nil {
+		return nil
+	}
+	if credential.Provider == "" {
+		return fmt.Errorf("egress credential injection is not configured (--substrate-egress-credential-provider)")
+	}
+	if credential.Provider != SubstrateKubernetesSecretsCredentialProvider {
+		return fmt.Errorf("egress credential provider %q is unsupported", credential.Provider)
+	}
+	if len(validation.IsDNS1123Label(credential.Namespace)) != 0 {
+		return fmt.Errorf("egress credential Secret namespace is invalid")
+	}
+	protocol := workspacev1alpha1.RuntimeEgressProtocol("")
+	switch scheme {
+	case SubstrateEgressSchemeHTTP:
+		protocol = workspacev1alpha1.RuntimeEgressHTTP
+	case SubstrateEgressSchemeHTTPS:
+		protocol = workspacev1alpha1.RuntimeEgressHTTPS
+	default:
+		protocol = workspacev1alpha1.RuntimeEgressTLSPassthrough
+	}
+	return workspacev1alpha1.ValidateRuntimeEgressCredentialHeaders(protocol, host, []workspacev1alpha1.RuntimeEgressCredentialHeader{{
+		Header: credential.Header, Prefix: credential.Prefix,
+		SecretKeyRef: workspacev1alpha1.RuntimeEgressSecretKeyReference{Namespace: credential.Namespace, Name: credential.Name, Key: credential.Key},
+	}})
+}
+
+func compileSubstrateEgressEffects(credential *SubstrateEgressCredential) *ateapipb.HttpRuleEffects {
+	if credential == nil {
+		return nil
+	}
+	return &ateapipb.HttpRuleEffects{ReplaceHeaders: []*ateapipb.CredentialHeader{{Header: credential.Header, Prefix: credential.Prefix, CredentialUri: credential.credentialURI()}}}
 }
 
 // substrateEgressControl is the subset of the native Control API used to
@@ -78,9 +139,9 @@ func CompileSubstrateActorEgressPolicy(atespace string, rules []SubstrateEgressR
 		hostnames := []string{rule.Host}
 		switch rule.Scheme {
 		case SubstrateEgressSchemeHTTP:
-			policy.Rules = append(policy.Rules, &ateapipb.EgressRule{Http: &ateapipb.HttpRule{Hostnames: hostnames, Ports: ports}})
+			policy.Rules = append(policy.Rules, &ateapipb.EgressRule{Http: &ateapipb.HttpRule{Hostnames: hostnames, Ports: ports, Effects: compileSubstrateEgressEffects(rule.Credential)}})
 		case SubstrateEgressSchemeHTTPS:
-			policy.Rules = append(policy.Rules, &ateapipb.EgressRule{Https: &ateapipb.HttpsRule{Hostnames: hostnames, Ports: ports}})
+			policy.Rules = append(policy.Rules, &ateapipb.EgressRule{Https: &ateapipb.HttpsRule{Hostnames: hostnames, Ports: ports, Effects: compileSubstrateEgressEffects(rule.Credential)}})
 		case SubstrateEgressSchemeTLS:
 			policy.Rules = append(policy.Rules, &ateapipb.EgressRule{TlsPassthrough: &ateapipb.TlsPassthroughRule{Hostnames: hostnames, Ports: ports}})
 		}
@@ -235,6 +296,14 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 		if err != nil {
 			return nil, egressRuleError(fmt.Sprintf("egress rule %d: %v", i, err))
 		}
+		if err := validateSubstrateEgressCredential(scheme, host, rule.Credential); err != nil {
+			return nil, egressRuleError(fmt.Sprintf("egress rule %d: %v", i, err))
+		}
+		var credential *SubstrateEgressCredential
+		if rule.Credential != nil {
+			copied := *rule.Credential
+			credential = &copied
+		}
 		ports := slices.Clone(rule.Ports)
 		if len(ports) == 0 {
 			switch scheme {
@@ -265,7 +334,7 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 			}
 			claimed[key] = scheme
 		}
-		out = append(out, SubstrateEgressRule{Scheme: scheme, Host: host, Ports: ports})
+		out = append(out, SubstrateEgressRule{Scheme: scheme, Host: host, Ports: ports, Credential: credential})
 	}
 	if err := rejectSubstrateEgressOverrides(out); err != nil {
 		return nil, err
@@ -359,8 +428,9 @@ func egressRuleError(message string) error {
 	return NewError("validate egress policy", ErrorKindInvalidArgument, message, false, nil)
 }
 
-// substrateEgressRulesEqual compares rule sets independent of order. Any
-// effect on an existing rule makes it unequal, so Orka replaces it.
+// substrateEgressRulesEqual compares rule sets independent of order,
+// including each rule's exact gateway effects, so a changed or foreign
+// effect makes the policy unequal and Orka replaces it.
 func substrateEgressRulesEqual(a, b []*ateapipb.EgressRule) bool {
 	return slices.Equal(substrateEgressRuleKeys(a), substrateEgressRuleKeys(b))
 }
@@ -371,14 +441,14 @@ func substrateEgressRuleKeys(rules []*ateapipb.EgressRule) []string {
 		kind := "unknown"
 		var hostnames []string
 		var ports *ateapipb.Ports
-		effects := false
+		var effects *ateapipb.HttpRuleEffects
 		switch {
 		case rule.GetHttp() != nil:
 			kind, hostnames, ports = "http", rule.GetHttp().GetHostnames(), rule.GetHttp().GetPorts()
-			effects = rule.GetHttp().GetEffects() != nil
+			effects = rule.GetHttp().GetEffects()
 		case rule.GetHttps() != nil:
 			kind, hostnames, ports = "https", rule.GetHttps().GetHostnames(), rule.GetHttps().GetPorts()
-			effects = rule.GetHttps().GetEffects() != nil
+			effects = rule.GetHttps().GetEffects()
 		case rule.GetTlsPassthrough() != nil:
 			kind, hostnames, ports = "tls", rule.GetTlsPassthrough().GetHostnames(), rule.GetTlsPassthrough().GetPorts()
 		}
@@ -397,8 +467,20 @@ func substrateEgressRuleKeys(rules []*ateapipb.EgressRule) []string {
 			}
 			portText = strings.Join(parts, ",")
 		}
-		keys = append(keys, fmt.Sprintf("%s|%s|%s|%t", kind, strings.Join(hostnames, ","), portText, effects))
+		keys = append(keys, fmt.Sprintf("%s|%s|%s|%s", kind, strings.Join(hostnames, ","), portText, substrateEgressEffectsKey(effects)))
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// substrateEgressEffectsKey canonically encodes a rule's gateway effects.
+func substrateEgressEffectsKey(effects *ateapipb.HttpRuleEffects) string {
+	if effects == nil {
+		return "none"
+	}
+	data, err := (proto.MarshalOptions{Deterministic: true}).Marshal(effects)
+	if err != nil {
+		return "unencodable"
+	}
+	return hex.EncodeToString(data)
 }

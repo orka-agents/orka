@@ -316,6 +316,9 @@ func validateRuntimePoolProviderToken(token []byte) error {
 	if len(token) < 32 || len(token) > 4096 {
 		return fmt.Errorf("authenticated provider proxy bearer token is required")
 	}
+	if string(token) == harnessv2.ProviderTokenEgressInjectionPlaceholder {
+		return fmt.Errorf("authenticated provider proxy bearer token must not be the public egress injection placeholder")
+	}
 	for _, value := range token {
 		if value <= ' ' || value == 0x7f {
 			return fmt.Errorf("authenticated provider proxy bearer token is invalid")
@@ -348,6 +351,11 @@ type RuntimePoolReconciler struct {
 	NativeSessionMaxBytes int
 	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
 	ProviderProxy RuntimePoolProviderProxyConfig
+	// AllowProviderTokenInSandbox lets a gateway-enforced native workspace
+	// whose provider cannot inject the provider-proxy token at its egress
+	// gateway receive the token through its sealed bootstrap instead. Off by
+	// default: such workspaces are refused admission.
+	AllowProviderTokenInSandbox bool
 	// ControllerEpoch is a test/static override. Production uses Epochs.
 	ControllerEpoch int64
 	// Epochs supplies the current durable leader epoch.

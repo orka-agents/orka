@@ -169,6 +169,58 @@ func TestToolExecutorSubstrateMCPProxyKeepsTaskCredentialAuthority(t *testing.T)
 	}
 }
 
+// substrateMCPEgressCredentialTestTool has no Orka-injected credential; the
+// Substrate egress gateway injects its Secret into the actor's requests.
+func substrateMCPEgressCredentialTestTool() *corev1alpha1.Tool {
+	tool := substrateMCPTestTool()
+	tool.Spec.HTTP.AuthSecretRef = nil
+	tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{
+		Scheme: "https", Host: "api.github.com",
+		Credential: &corev1alpha1.SubstrateActorEgressCredential{SecretRef: corev1alpha1.SecretKeySelector{Name: "github-token", Key: "token"}},
+	}}
+	return tool
+}
+
+func TestToolExecutorSubstrateMCPEgressCredentialsRequireTaskCredentialAuthority(t *testing.T) {
+	for _, route := range []string{"proxy", "router"} {
+		for name, authority := range map[string]struct {
+			allowed bool
+			secret  string
+			ok      bool
+		}{
+			"missing credential scope":               {allowed: false},
+			"secret constraint names another Secret": {allowed: true, secret: "other-token"},
+			"authorized":                             {allowed: true, secret: "github-token", ok: true},
+		} {
+			t.Run(route+"/"+name, func(t *testing.T) {
+				server, requests := newRecordingMCPServer(t)
+				executor := &ToolExecutor{client: server.Client(), namespace: "tenant"}
+				if route == "proxy" {
+					if err := executor.SetSubstrateMCPProxy(server.URL, func() (string, error) { return "worker-sa-token", nil }); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					useSubstrateMCPTestRouter(t, executor, server.URL)
+				}
+				executor.SetTransactionCredentialAuthority(true, authority.allowed, authority.secret)
+				_, err := executor.Execute(context.Background(), substrateMCPEgressCredentialTestTool(), json.RawMessage(`{}`))
+				if authority.ok {
+					if err != nil || len(requests()) == 0 {
+						t.Fatalf("Execute() error = %v, requests = %d", err, len(requests()))
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), "task transaction authority") {
+					t.Fatalf("Execute() error = %v, want a transaction authority denial", err)
+				}
+				if len(requests()) != 0 {
+					t.Fatal("MCP actor was called without authority for its egress credential")
+				}
+			})
+		}
+	}
+}
+
 func TestToolExecutorSubstrateMCPProxyDoesNotFollowRedirects(t *testing.T) {
 	var redirected bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

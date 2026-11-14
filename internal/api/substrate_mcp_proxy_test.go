@@ -358,6 +358,69 @@ func TestSubstrateMCPProxyIdentityAndContextTokenScopes(t *testing.T) {
 	}
 }
 
+// Invoking a Tool whose actor egress carries a gateway-injected credential
+// uses that credential, so callers need the same authority as for
+// spec.http.authSecretRef even though the proxy never reads the Secret.
+func TestSubstrateMCPProxyAuthorizesEgressCredentials(t *testing.T) {
+	egressTool := func() *corev1alpha1.Tool {
+		tool := substrateMCPProxyTool()
+		tool.Spec.HTTP.AuthSecretRef = nil
+		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{
+			Scheme: "https", Host: "api.github.com",
+			Credential: &corev1alpha1.SubstrateActorEgressCredential{SecretRef: corev1alpha1.SecretKeySelector{Name: "github-token", Key: "token"}},
+		}}
+		return tool
+	}
+	enforce := ContextTokenAuthorizationConfig{
+		Mode: ContextTokenAuthorizationModeEnforce, ToolUseScopes: []string{"tools:use"},
+		SecretCredentialReadScopeList: []string{"secrets:credentials"},
+	}
+	token := func(scopes []string, transactionContext map[string]any) *UserInfo {
+		return &UserInfo{AuthType: AuthTypeContextToken, Namespace: "default", ContextToken: &ContextToken{Scopes: scopes, TransactionContext: transactionContext}}
+	}
+	for _, tc := range []struct {
+		name   string
+		ui     *UserInfo
+		status int
+	}{
+		{name: "missing credential scope", ui: token([]string{"tools:use"}, nil), status: http.StatusForbidden},
+		{name: "credential secret mismatch", ui: token([]string{"tools:use", "secrets:credentials"}, map[string]any{"secret": "other"}), status: http.StatusForbidden},
+		{name: "allowed", ui: token([]string{"tools:use", "secrets:credentials"}, map[string]any{"secret": "github-token"}), status: http.StatusOK},
+	} {
+		t.Run("context token/"+tc.name, func(t *testing.T) {
+			f := newSubstrateMCPProxyFixture(t, egressTool())
+			app := contextTokenProxyApp(f, enforce, tc.ui)
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(substrateMCPProxyToolCall))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer caller-token")
+			workerexecutor.SetSubstrateMCPToolBinding(request.Header, egressTool())
+			response, err := app.Test(request, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
+			require.NoError(t, err)
+			defer response.Body.Close() //nolint:errcheck
+			body, _ := io.ReadAll(response.Body)
+			require.Equal(t, tc.status, response.StatusCode, string(body))
+			if tc.status != http.StatusOK {
+				require.Zero(t, f.upstreamCalls())
+				return
+			}
+			require.Equal(t, 1, f.upstreamCalls())
+			require.Empty(t, f.upstream[0].Header.Get("Authorization"), "the gateway, not the proxy, injects egress credentials")
+		})
+	}
+	t.Run("kubernetes identity without Secret RBAC", func(t *testing.T) {
+		f := newSubstrateMCPProxyFixture(t, egressTool())
+		f.deny = func(a authorizationv1.ResourceAttributes) bool {
+			return a.Resource == "secrets" && a.Name == "github-token"
+		}
+		header := http.Header{}
+		header.Set("Content-Type", "application/json")
+		workerexecutor.SetSubstrateMCPToolBinding(header, egressTool())
+		response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, substrateMCPProxyToolCall)
+		require.Equal(t, http.StatusForbidden, response.StatusCode)
+		require.Zero(t, f.upstreamCalls())
+	})
+}
+
 func TestSubstrateMCPProxyRefusesToolChangedSinceCallerValidated(t *testing.T) {
 	for name, mutate := range map[string]func(http.Header){
 		"missing binding":    func(h http.Header) { h.Del(workerexecutor.SubstrateMCPToolUIDHeader) },
@@ -367,7 +430,7 @@ func TestSubstrateMCPProxyRefusesToolChangedSinceCallerValidated(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newSubstrateMCPProxyFixture(t)
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(`{}`))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(substrateMCPProxyToolCall))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer worker-sa-token-"+t.Name())
 			workerexecutor.SetSubstrateMCPToolBinding(request.Header, substrateMCPProxyTool())
