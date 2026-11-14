@@ -362,8 +362,12 @@ type RuntimePoolReconciler struct {
 	Epochs *ControllerEpochManager
 	// EnablePDB protects a serving singleton from voluntary disruption.
 	EnablePDB bool
-	// EnableTelemetry projects non-secret trace exporter settings into supervisors.
+	// EnableTelemetry projects non-secret trace and metrics exporter settings into supervisors.
 	EnableTelemetry bool
+	// TelemetryCollectorEgress admits the projected OTLP collector origins to
+	// the egress allowlist of gateway-enforced native runtimes. It has no
+	// effect without EnableTelemetry, and never changes NetworkPolicy shapes.
+	TelemetryCollectorEgress bool
 	// AllowedImages is the controller-configured immutable image allowlist for
 	// built-in pools. RuntimePool is controller-owned; its public spec cannot be
 	// used to select an arbitrary privileged supervisor image.

@@ -60,6 +60,10 @@ type SubstrateConfig struct {
 	// SealedBootstrap enables native process-bound credential delivery for injected clients.
 	// Real upstream control clients always use this protocol.
 	SealedBootstrap bool
+	// EnableTelemetry propagates W3C trace context to the Substrate control
+	// API and router and records content-free client spans. It follows the
+	// controller's --enable-telemetry flag.
+	EnableTelemetry bool
 	HTTPClient      *http.Client
 	ControlClient   substrateControlClient
 }

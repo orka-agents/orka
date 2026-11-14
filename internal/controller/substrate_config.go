@@ -74,6 +74,9 @@ type SubstrateConfig struct {
 	// gateway was installed with (only "k8s.io"). Empty disables MCP Tool
 	// egress credentials: Tools that request one fail closed.
 	EgressCredentialProvider string
+	// EnableTelemetry mirrors --enable-telemetry: Substrate control and router
+	// clients then propagate Task trace context and record client spans.
+	EnableTelemetry bool
 	// EgressPolicyPropagation is how long the egress gateway may apply rules
 	// other than an Actor's stored policy: after the policy is replaced, and
 	// after the Actor is created under a name a deleted Actor may have had.
@@ -304,5 +307,6 @@ func (c SubstrateConfig) WorkspaceClientConfig() workspace.SubstrateConfig {
 		APICertFile: c.APICertFile, APIKeyFile: c.APIKeyFile,
 		APIBearerTokenFile: c.APIBearerTokenFile, APIInsecureSkipVerify: c.APIInsecureSkipVerify,
 		Atespace: c.Atespace, RouterURL: c.RouterURL,
+		EnableTelemetry: c.EnableTelemetry,
 	}
 }

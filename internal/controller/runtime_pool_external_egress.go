@@ -5,6 +5,7 @@ package controller
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,6 +67,8 @@ const bearerAuthorizationPrefix = "Bearer "
 // host-name allowlist: the in-cluster provider authentication proxy and the
 // controller artifact/MCP broker API, the destinations Core's NetworkPolicy
 // shape admits besides DNS (the egress gateway resolves allowlisted names).
+// With --runtime-telemetry-collector-egress and telemetry enabled, the OTLP
+// collector endpoints projected into the supervisor are admitted too.
 // Cleartext origins become HTTP rules; TLS origins become TLSPassthrough so the
 // runtime still verifies the in-cluster origin's own certificate. Any origin
 // the allowlist cannot express fails admission.
@@ -76,6 +79,10 @@ const bearerAuthorizationPrefix = "Bearer "
 // cleartext proxy origin (the gateway re-originates TLS trusting only public
 // roots) that no other admitted origin shares.
 func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, injection *externalProviderTokenInjection) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
+	return r.externalRuntimeEgressWithEnv(cfg, injection, os.Getenv)
+}
+
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConfig, injection *externalProviderTokenInjection, getenv func(string) string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	type destination struct {
 		host string
 		port int32
@@ -87,32 +94,36 @@ func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, inj
 	if err != nil {
 		return nil, fmt.Errorf("provider proxy origin cannot be admitted to the runtime egress allowlist: %w", err)
 	}
-	controllerHost, controllerPort, controllerProtocol, err := externalEgressOrigin(r.ControllerAPIURL)
-	if err == nil {
-		err = externalEgressHostResolvable("--controller-url", controllerHost)
+	if injection != nil && proxyProtocol != workspacev1alpha1.RuntimeEgressHTTP {
+		return nil, fmt.Errorf("provider proxy token injection requires an http provider proxy origin")
 	}
-	if err != nil {
-		return nil, fmt.Errorf("controller API origin cannot be admitted to the runtime egress allowlist: %w", err)
-	}
-	if injection != nil {
-		if proxyProtocol != workspacev1alpha1.RuntimeEgressHTTP {
-			return nil, fmt.Errorf("provider proxy token injection requires an http provider proxy origin")
-		}
-		if proxyHost == controllerHost {
-			return nil, fmt.Errorf("provider proxy token injection requires a provider proxy host that the controller API does not share")
+	type origin struct{ name, flag, raw string }
+	others := []origin{{name: "controller API", flag: "--controller-url", raw: r.ControllerAPIURL}}
+	if r.EnableTelemetry && r.TelemetryCollectorEgress {
+		for _, endpoint := range runtimePoolTelemetryCollectorEndpoints(true, getenv) {
+			if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
+				return nil, fmt.Errorf("telemetry collector origin cannot be admitted to the runtime egress allowlist: %w", err)
+			}
+			others = append(others, origin{name: "telemetry collector", flag: "the OTLP collector endpoint", raw: endpoint})
 		}
 	}
-	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{}
-	for _, origin := range []struct {
-		host     string
-		port     int32
-		protocol workspacev1alpha1.RuntimeEgressProtocol
-	}{{proxyHost, proxyPort, proxyProtocol}, {controllerHost, controllerPort, controllerProtocol}} {
-		key := destination{host: origin.host, port: origin.port}
-		if existing, ok := granted[key]; ok && existing != origin.protocol {
-			return nil, fmt.Errorf("runtime egress origins grant %s port %d with conflicting protocols", origin.host, origin.port)
+	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{{host: proxyHost, port: proxyPort}: proxyProtocol}
+	for _, other := range others {
+		host, port, protocol, err := externalEgressOrigin(other.raw)
+		if err == nil {
+			err = externalEgressHostResolvable(other.flag, host)
 		}
-		granted[key] = origin.protocol
+		if err != nil {
+			return nil, fmt.Errorf("%s origin cannot be admitted to the runtime egress allowlist: %w", other.name, err)
+		}
+		if injection != nil && host == proxyHost {
+			return nil, fmt.Errorf("provider proxy token injection requires a provider proxy host that the %s does not share", other.name)
+		}
+		key := destination{host: host, port: port}
+		if existing, ok := granted[key]; ok && existing != protocol {
+			return nil, fmt.Errorf("runtime egress origins grant %s port %d with conflicting protocols", host, port)
+		}
+		granted[key] = protocol
 	}
 	type ruleKey struct {
 		host     string

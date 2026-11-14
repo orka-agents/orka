@@ -414,6 +414,7 @@ func main() {
 	var outboundAccessTrustedGatewayServices string
 	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
+	var runtimeTelemetryCollectorEgress bool
 	var workspaceProviderAPIEnabled bool
 	var agentHostsEnabled bool
 	var agentHostNamespace string
@@ -832,6 +833,11 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.BoolVar(&runtimeTelemetryCollectorEgress, "runtime-telemetry-collector-egress",
+		strings.EqualFold(os.Getenv("ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS"), "true"),
+		"Admit the OTLP collector endpoints projected into ACP supervisors to the egress allowlist of "+
+			"gateway-enforced native runtimes (Agent Substrate). Requires --enable-telemetry and absolute "+
+			"http(s) collector URLs with fully qualified DNS hosts.")
 	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
@@ -1011,6 +1017,11 @@ func main() {
 	}
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
+	substrateConfig.EnableTelemetry = enableTracing
+	if err := controller.ValidateRuntimeTelemetryCollectorEgress(enableTracing, runtimeTelemetryCollectorEgress, os.Getenv); err != nil {
+		setupLog.Error(err, "invalid runtime telemetry collector egress configuration")
+		os.Exit(1)
+	}
 	substrateConfig = substrateConfig.WithDefaults()
 	if err := validateSubstrateStartupConfig(substrateMCPToolsEnabled, substrateConfig, substrateConfigErr); err != nil {
 		setupLog.Error(err, "invalid substrate configuration")
@@ -1849,6 +1860,7 @@ func main() {
 	runtimePoolReconciler.ControlStore = kubeControlStore
 	runtimePoolReconciler.EnablePDB = true
 	runtimePoolReconciler.EnableTelemetry = enableTracing
+	runtimePoolReconciler.TelemetryCollectorEgress = runtimeTelemetryCollectorEgress
 	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 	runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
 

@@ -26,6 +26,10 @@ const (
 	ToolTypeFunction     = "function"
 	ToolTypeExtension    = "extension"
 	ToolTypeDatastore    = "datastore"
+
+	// ErrorTypeOther is the semantic-convention fallback error.type value
+	// when no more specific low-cardinality class is known.
+	ErrorTypeOther = "_OTHER"
 )
 
 const (
