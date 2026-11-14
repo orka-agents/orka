@@ -53,6 +53,9 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 			case "malformed":
 				_, _ = w.Write([]byte("{"))
 				return
+			case "escaped-pass":
+				_ = json.NewEncoder(w).Encode(map[string]any{"pass": "opaque\\pass", "expiresAt": expires})
+				return
 			case "empty":
 				_ = json.NewEncoder(w).Encode(map[string]any{"pass": "", "expiresAt": expires})
 				return
@@ -74,6 +77,10 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"pass": "ephemeral-pass", "expiresAt": expires})
 		case "/v1/task-tools/lookup":
 			called++
+			if mode == "escaped-pass" {
+				_ = json.NewEncoder(w).Encode(map[string]string{"answer": "opaque\\pass"})
+				return
+			}
 			require.Equal(t, "Bearer ephemeral-pass", r.Header.Get("Authorization"))
 			require.Equal(t, "root-operation", r.Header.Get("Idempotency-Key"))
 			require.Empty(t, r.Header.Get("Txn-Token"))
@@ -111,6 +118,10 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 	body, err := decodeAgentExecutionSnapshot(snapshot.Body)
 	require.NoError(t, err)
 	require.Equal(t, []string{"lookup"}, body.GatewayGrant.Tools)
+	child := task.DeepCopy()
+	child.Labels["orka.ai/parent-task"] = "parent"
+	_, childErr := r.freezeGatewayTaskGrant(t.Context(), child, *body.MCPConfiguration)
+	require.True(t, isPermanentACPAgentConfigurationError(childErr), "unsupported child configuration must fail, not retry: %v", childErr)
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectReadOnly)
 	request.Namespace = task.Namespace
 	request.Metadata.TaskUID = harnessv2.TaskUID(task.UID)
@@ -142,7 +153,7 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 	require.Equal(t, 2, issued, "mismatched operator origin must receive no credential")
 	require.Equal(t, 2, called)
 	r.GatewayService.TaskPassCredentials = map[string]gatewayruntime.TaskPassCredential{gatewayUID: {Endpoint: server.URL, Token: "target-controller-credential"}}
-	for _, failure := range []string{"expired", "overlong", "deadline", "redirect", "relinked", "oversized", "malformed", "empty"} {
+	for _, failure := range []string{"expired", "overlong", "deadline", "redirect", "relinked", "oversized", "malformed", "empty", "escaped-pass"} {
 		mode = failure
 		_, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
 		require.Error(t, err)

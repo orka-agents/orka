@@ -829,6 +829,52 @@ func TestHandlers_ToolRESTMutationRejectsMalformedURL(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+func TestHandlers_ToolRESTMutationRejectsGatewayTaskPass(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		marked bool
+	}{
+		{"create marked tool", http.MethodPost, false},
+		{"enable on update", http.MethodPut, false},
+		{"edit existing marked tool", http.MethodPut, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "gateway-tool", Namespace: "default"},
+				Spec: corev1alpha1.ToolSpec{
+					Description: "original",
+					HTTP:        &corev1alpha1.HTTPExecution{URL: "https://example.com/tool", GatewayTaskPass: tc.marked},
+				},
+			}
+			handlers, app := setupTestHandlers()
+			path := "/tools"
+			if tc.method == http.MethodPut {
+				require.NoError(t, handlers.client.Create(t.Context(), tool))
+				path += "/gateway-tool"
+			}
+			app.Post("/tools", handlers.CreateTool)
+			app.Put("/tools/:name", handlers.UpdateTool)
+			resp := testJSONRequest(t, app, tc.method, path, map[string]any{
+				"name": "gateway-tool",
+				"spec": map[string]any{
+					"description": "updated",
+					"http":        map[string]any{"url": "https://example.com/tool", "gatewayTaskPass": !tc.marked},
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			stored := &corev1alpha1.Tool{}
+			err := handlers.client.Get(t.Context(), client.ObjectKeyFromObject(tool), stored)
+			if tc.method == http.MethodPost {
+				require.True(t, apierrors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tool.Spec, stored.Spec)
+			}
+		})
+	}
+}
+
 func TestHandlers_ToolRESTMutationRejectsAuthSecretRef(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tools", handlers.CreateTool)

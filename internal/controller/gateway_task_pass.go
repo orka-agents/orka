@@ -36,10 +36,10 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 			continue
 		}
 		if err := workerexecutor.ValidateGatewayTaskPassTool(tool); err != nil {
-			return nil, err
+			return nil, permanentACPAgentConfiguration(err)
 		}
 		if grant == nil || grant.GrantRef == "" || tool.Spec.HTTP.URL != grant.Endpoint+"/v1/task-tools/"+tool.Name {
-			return nil, errors.New("gateway task pass requires a bound root and matching gateway endpoint")
+			return nil, permanentACPAgentConfiguration(errors.New("gateway task pass requires a bound root and matching gateway endpoint"))
 		}
 		names = append(names, tool.Name)
 	}

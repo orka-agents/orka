@@ -100,6 +100,20 @@ func validTaskPass(token string) bool {
 	return true
 }
 
+// Issued passes use a JSON-stable bearer alphabet so standard response encoding
+// cannot hide the literal token from the executor's existing redaction.
+func validIssuedTaskPass(token string) bool {
+	if !validTaskPass(token) {
+		return false
+	}
+	for _, c := range token {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && !strings.ContainsRune("-._~+/=", c) {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidateTaskGrant rechecks Task liveness and durable origin immediately before
 // both issuance and tool send. Children and unbound Tasks have no authority.
 func (s *Service) ValidateTaskGrant(ctx context.Context, task *corev1alpha1.Task, frozen *TaskGrant, tool string) error {
@@ -163,7 +177,7 @@ func (s *Service) TaskPass(ctx context.Context, task *corev1alpha1.Task, frozen 
 		Pass      string    `json:"pass"`
 		ExpiresAt time.Time `json:"expiresAt"`
 	}
-	if json.Unmarshal(data, &reply) != nil || !validTaskPass(reply.Pass) || !reply.ExpiresAt.After(time.Now()) || reply.ExpiresAt.After(time.Now().Add(5*time.Minute)) || reply.ExpiresAt.After(frozen.Deadline) || s.ValidateTaskGrant(ctx, task, frozen, tool) != nil {
+	if json.Unmarshal(data, &reply) != nil || !validIssuedTaskPass(reply.Pass) || !reply.ExpiresAt.After(time.Now()) || reply.ExpiresAt.After(time.Now().Add(5*time.Minute)) || reply.ExpiresAt.After(frozen.Deadline) || s.ValidateTaskGrant(ctx, task, frozen, tool) != nil {
 		return "", errTaskPass
 	}
 	return reply.Pass, nil
