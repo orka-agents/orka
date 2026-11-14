@@ -10,8 +10,8 @@
       "previewUrl": "http://localhost:5173"
     },
     {
-      "name": "Setup Worktree",
-      "command": "make ensure-ui-embed",
+      "name": "Install Dependencies",
+      "command": "make ensure-ui-embed && cd ui && bun install --frozen-lockfile",
       "icon": "configure"
     },
     {
