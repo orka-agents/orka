@@ -599,8 +599,9 @@ error type or a fixed Orka outcome name, in its status description and
 event carries the same class and no message or stack trace. Orka's tracer
 providers do not record panics on spans, because the SDK would store the panic
 value as the exception message. A stop reason that is neither known to Orka
-nor a documented provider value is reported as `unknown_stop_reason`, and a tool
-error type outside Orka's tool error types is reported as `tool_error`.
+nor a documented provider value is reported as `unknown_stop_reason`. A failed
+tool result whose `errorType` is outside Orka's tool error types is reported as
+`tool_error`; a Go error returned by a tool is reported by its error class.
 
 Future opt-in content capture must pass through Orka redaction and size caps
 before any span attribute or event is emitted.
