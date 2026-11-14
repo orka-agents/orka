@@ -402,8 +402,11 @@ spec:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               contractVersion:
-                description: ContractVersion is the immutable Orka harness contract
-                  this runtime implements.
+                default: orka.harness.v2
+                description: |-
+                  ContractVersion is the immutable Orka harness contract this runtime
+                  implements. Only orka.harness.v2 is supported, so the API server fills it
+                  in when omitted.
                 enum:
                 - orka.harness.v2
                 type: string
@@ -458,7 +461,6 @@ spec:
             required:
             - capabilities
             - clientAuth
-            - contractVersion
             - deployment
             type: object
             x-kubernetes-validations:

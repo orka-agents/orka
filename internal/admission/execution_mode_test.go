@@ -178,7 +178,7 @@ func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
 		{name: "update keeps an omitted contract omitted", operation: admissionv1.Update, object: agent(nil), old: agent(nil), allowed: true},
 		{name: "update may write the namespace contract", operation: admissionv1.Update, object: agent(&v2), old: agent(nil), allowed: true},
 		{name: "update may not write an unsupported contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "only orka.harness.v2 is supported"},
-		{name: "update may not remove a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), messagePart: "immutable"},
+		{name: "update may clear a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), allowed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

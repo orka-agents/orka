@@ -28,6 +28,9 @@ folder appear read-only at the same path inside the runtime Pod and puts its
   `ToolboxUnavailable` reason. An agent never starts without the tools it was
   promised, and nothing retries forever.
 
+[Runtime skills](./runtime-skills.md) use the same image delivery, registry
+allowlist, pull secrets, node selector, and mount method.
+
 ## Operator setup
 
 Enable toolboxes in the chart and name the registries that may serve them:
@@ -100,7 +103,8 @@ and again inside the runtime Pod:
 - `mountPath` is exactly `/home/linuxbrew/.linuxbrew` or `/opt/<name>`. It
   must be clean (no `..`, no `//`, no trailing `/`) and `<name>` must not be
   one the runtime images already use: `codex`, `codex-acp`, `claude`,
-  `claude-agent-acp`, `copilot`, `opencode`, `ripgrep`, `yarn-v1.22.22`.
+  `claude-agent-acp`, `copilot`, `opencode`, `ripgrep`, `yarn-v1.22.22`,
+  and `orka-skills`, where Orka binds [runtime skills](./runtime-skills.md).
 - Two toolboxes may not share, contain, or sit inside each other's
   `mountPath`.
 - `pathEntries` are clean relative paths inside `mountPath` with no `..`.

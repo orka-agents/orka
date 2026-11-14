@@ -279,7 +279,6 @@ spec:
       agentIdentityID: "<agent identity appId>"
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     defaultAllowedTools: [Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, graph-users]
     ceiling:
       allowedTools: [Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, graph-users]

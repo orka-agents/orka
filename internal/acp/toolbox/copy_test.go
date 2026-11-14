@@ -900,6 +900,50 @@ func TestRunSubcommands(t *testing.T) {
 	}
 }
 
+// TestRunWithholdsSecretShapedCopyDiagnostics drives the copy subcommand the
+// skill-copy init container runs: a copier failure quoting a credential-shaped
+// file name must not reach stderr (and so the termination log), while the
+// stable reason survives.
+func TestRunWithholdsSecretShapedCopyDiagnostics(t *testing.T) {
+	token := "gh" + "p_0123456789abcdefghijABCDEFGHIJ012345"
+	cases := map[string]struct {
+		setup  func(t *testing.T, source string)
+		reason string
+	}{
+		"oversized file": {setup: func(t *testing.T, source string) {
+			mustWrite(t, filepath.Join(source, token), bytes.Repeat([]byte("x"), 64), 0o644)
+		}, reason: ReasonFileTooLarge},
+		"fifo": {setup: func(t *testing.T, source string) {
+			if err := unix.Mkfifo(filepath.Join(source, token), 0o644); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+		}, reason: ReasonUnsupportedFileType},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			source, destination := newLayout(t)
+			tc.setup(t, source)
+			var stdout, stderr bytes.Buffer
+			args := []string{"--src", source, "--dst", destination, "--max-file-bytes", "16"}
+			if code := Run(CopySubcommand, args, &stdout, &stderr); code != 1 {
+				t.Fatalf("copy exit %d, want 1: %s", code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), token) {
+				t.Fatalf("stderr echoes the credential-shaped file name: %s", stderr.String())
+			}
+			failure, ok := ParseFailureLine(stderr.String())
+			if !ok || failure.Reason != tc.reason || failure.Message != WithheldDiagnostic {
+				t.Fatalf("failure = %+v ok=%v, want reason %s with the withheld diagnostic", failure, ok, tc.reason)
+			}
+		})
+	}
+	// Ordinary diagnostics keep their detail.
+	line := FormatFailureLine(&Failure{Reason: ReasonFileTooLarge, Message: "bin/tool is larger than 16 bytes"})
+	if line != "FAIL reason=TOOLBOX_FILE_TOO_LARGE msg=bin/tool is larger than 16 bytes" {
+		t.Fatalf("benign line = %q", line)
+	}
+}
+
 func TestParseFailureLine(t *testing.T) {
 	line := FormatFailureLine(&Failure{Reason: ReasonTooDeep, Message: "a\nb"})
 	if line != "FAIL reason=TOOLBOX_TOO_DEEP msg=a b" {

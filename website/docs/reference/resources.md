@@ -345,7 +345,6 @@ spec:
     inline: "You are a senior software engineer."
   runtime:
     type: claude         # or "codex" / "copilot" / "opencode"
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -359,13 +358,14 @@ spec:
 | --- | --- |
 | `model.name` | Required. A model your gateway lists. |
 | `runtime.type` | `codex`, `claude`, `copilot`, or `opencode`. |
-| `runtime.contractVersion` | `orka.harness.v2`. |
+| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value. |
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |
 | `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Runtimes reject values they do not support: `none` is Codex-only and `max` is Claude-only. |
 | `runtime.runtimeRef` | Selects an external [AgentRuntime](../guides/bring-your-own-agent-runtime.md) instead of a built-in type. |
 | `runtime.toolboxes` | Built-in types only. Read-only [toolbox](../guides/toolboxes.md) images whose tool folders are added to the agent's `PATH`. |
+| `runtime.skills` | `codex`, `claude`, and `opencode` only. [Agent Skills](../guides/runtime-skills.md) (`name`, digest-pinned `image`, optional `path` under `/skills`) copied into each session's native skills folder. |
 
 All four built-in harness v2 runtimes support `spec.systemPrompt` and the optional
 [`spec.soul`](../concepts/soul.md) persona source. Copilot and OpenCode receive

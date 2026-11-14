@@ -48,9 +48,11 @@ for the external service lifecycle and capacity.
 
 Built-in runtimes can mount extra command-line tools from read-only toolbox
 images declared in `Agent.spec.runtime.toolboxes`; see
-[Toolboxes](../guides/toolboxes.md).
+[Toolboxes](../guides/toolboxes.md). Codex, Claude, and OpenCode can also receive
+Agent Skills from digest-pinned images declared in `Agent.spec.runtime.skills`; see
+[Runtime skills](../guides/runtime-skills.md).
 
-External runtimes use an `AgentRuntime` registration with `contractVersion: orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
+External runtimes register through an `AgentRuntime` that implements `orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
 
 ## Architecture
 
@@ -255,7 +257,6 @@ metadata:
 spec:
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 20
     defaultAllowBash: true
     defaultAllowedTools:
@@ -286,7 +287,6 @@ narrow but never exceed, add a `ceiling`:
 spec:
   runtime:
     type: claude
-    contractVersion: orka.harness.v2
     defaultAllowedTools: [Read, Grep]
     defaultAllowBash: false
     defaultMaxTurns: 20

@@ -22,6 +22,7 @@ const sidebars = {
           items: [
             'guides/agents-skills-and-tools',
             'guides/toolboxes',
+            'guides/runtime-skills',
             'guides/azure-cli',
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
@@ -63,6 +64,7 @@ const sidebars = {
             'reference/openai-compat',
             'reference/anthropic-compat',
             'operations/shared-compatibility-api',
+            'guides/mcp-server',
             'guides/gateways',
           ],
         },

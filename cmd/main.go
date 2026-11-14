@@ -316,6 +316,8 @@ func main() {
 	var gatewayEnabled bool
 	var connectorsEnabled bool
 	var dashboardEnabled bool
+	var mcpServerEnabled bool
+	var mcpMaxConcurrent int
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
@@ -362,6 +364,7 @@ func main() {
 	var acpToolboxImagePullSecrets string
 	var acpToolboxNodeSelector string
 	var acpToolboxMountMethod string
+	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
@@ -549,6 +552,10 @@ func main() {
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
+	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
+		"Serve the control-plane MCP endpoint at /mcp on the API port. Every tool runs with the caller's own REST API permissions.")
+	flag.IntVar(&mcpMaxConcurrent, "mcp-max-concurrent", api.DefaultMCPMaxConcurrent,
+		"Max concurrent MCP requests per API replica; waiting tools use a separate pool of half as many wait slots.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
 			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
@@ -648,6 +655,8 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&acpSkillsEnabled, "acp-skills-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_SKILLS_ENABLED"), "true"),
+		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
@@ -1239,6 +1248,11 @@ func main() {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
 		os.Exit(1)
 	}
+	if acpSkillsEnabled && !acpToolboxesEnabled {
+		setupLog.Error(errors.New("--acp-skills-enabled requires --acp-toolboxes-enabled"), "invalid ACP skill configuration")
+		os.Exit(1)
+	}
+	acpToolboxPolicy.SkillsEnabled = acpSkillsEnabled
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,
@@ -2396,6 +2410,7 @@ func main() {
 		},
 		DashboardEnabled:      dashboardEnabled,
 		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
 		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,

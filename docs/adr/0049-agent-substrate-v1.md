@@ -1,4 +1,4 @@
-# 39. Move to Agent Substrate v1.0.0
+# 49. Move to Agent Substrate v1.0.0
 
 Date: 2026-11-06
 

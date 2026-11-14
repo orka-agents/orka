@@ -357,9 +357,12 @@ func (c AgentRuntimeCapabilitiesSpec) ValidateStrictWorkspaceIntent(intent Works
 // +kubebuilder:validation:XValidation:rule="self.contractVersion == oldSelf.contractVersion",message="contractVersion is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.capabilities.runtimeInstanceID) && has(self.capabilities.profile) && has(self.capabilities.mcpPolicy) && has(self.capabilities.limits) && has(self.capabilities.workspaceGovernance)",message="orka.harness.v2 requires pinned instance, profile, MCP policy, limits, and workspace governance capabilities"
 type AgentRuntimeRegistrySpec struct {
-	// ContractVersion is the immutable Orka harness contract this runtime implements.
-	// +kubebuilder:validation:Required
-	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion"`
+	// ContractVersion is the immutable Orka harness contract this runtime
+	// implements. Only orka.harness.v2 is supported, so the API server fills it
+	// in when omitted.
+	// +kubebuilder:default=orka.harness.v2
+	// +optional
+	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
 	// Deployment identifies the runtime endpoint provider.
 	// +kubebuilder:validation:Required
@@ -464,8 +467,9 @@ type AgentRuntime struct {
 	Status AgentRuntimeStatus       `json:"status,omitempty"`
 }
 
-// RegisteredContractVersion returns the explicit contract selector, or empty
-// when absent. Callers must reject an absent contract.
+// RegisteredContractVersion returns the stored contract selector, or empty
+// when absent. The CRD defaults it, so an absent value means the object never
+// passed through the current schema; callers must reject it.
 func (in *AgentRuntime) RegisteredContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.ContractVersion == nil {
 		return ""
