@@ -381,6 +381,8 @@ The controller starts bounded repairs automatically when enabled. Ad hoc PR comm
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.
 
+Repair Tasks follow the same path limits as issue implementation. A repair may not change repository control paths (`.github/workflows/`, `config/rbac/`, and `charts/` paths that contain `secret`), and when `spec.issueWorkflow.implementation.allowedPaths` is set, it may change only files that match those patterns. Orka checks the repair's changes before publishing them, so a repair that breaks either rule pushes nothing and fails with `patch_path_denied` or `patch_path_not_allowed`.
+
 Repairers run in Orka's built-in runtime image, which has no language toolchains, so by default a repair cannot build or test its change before Orka publishes it. `spec.validation.image` checks only the next review of the pushed head. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing.
 
 ### Pull requests from forks

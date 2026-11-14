@@ -184,7 +184,7 @@ revoke them.
 | `maxActive` | `2` | Active implementation jobs per monitor |
 | `maxAttemptsPerIssue` | `2` | Implementation attempts for one issue |
 | `maxChangedFiles` | `12` | Files in one `orka.patch.v1` patch |
-| `allowedPaths` | none | Path globs or prefixes, such as `api/**` or `docs/**`, that a patch may touch |
+| `allowedPaths` | none | Path globs or prefixes, such as `api/**` or `docs/**`, that a patch may touch. Pull request repairs use the same list |
 
 ## Watch and debug
 

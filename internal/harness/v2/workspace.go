@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// Messages a runtime returns when a workspace delta violates its path limits.
+// They are stable so the controller can report the rejected path policy.
+const (
+	WorkspaceDeltaDisallowedPathMessage        = "workspace delta contains a disallowed path"
+	WorkspaceDeltaRepositoryControlPathMessage = "workspace delta contains a protected repository-control path"
+)
+
 type WorkspaceDeltaLimits struct {
 	MaxBytes                   int64    `json:"maxBytes"`
 	MaxEntries                 uint32   `json:"maxEntries"`
