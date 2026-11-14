@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Upgrading | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/upgrading"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Upgrading | Orka"><meta data-rh="true" name="description" content="Back up Orka, update its Kubernetes resource definitions, and check the result."><meta data-rh="true" property="og:description" content="Back up Orka, update its Kubernetes resource definitions, and check the result."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/upgrading"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Upgrading","item":"https://orka-agents.github.io/orka/docs/upgrading"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.7a0ca9a5.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.4d0fc480.js" defer="defer"></script>
 <script src="/orka/assets/js/main.ff503a50.js" defer="defer"></script>
 </head>
 <body>
@@ -258,6 +258,14 @@ Sandbox/Substrate ACP flags are removed. Install the selected provider&#x27;s ow
 config/profile kinds instead. Native MCP Tools remain separate and use
 <code>--substrate-mcp-tools-enabled</code>; their control credentials are not external ACP
 provider credentials.</p>
+<p>Substrate-native workspaces need fully qualified Service names in
+<code>--controller-url</code> and <code>--acp-provider-proxy-base-url</code>
+(<code>&lt;service&gt;.&lt;namespace&gt;.svc.&lt;cluster domain&gt;</code>). The chart and kustomize
+manifests now render them (chart value <code>clusterDomain</code>, default
+<code>cluster.local</code>). An installation that sets either flag itself to a short
+<code>&lt;service&gt;.&lt;namespace&gt;.svc</code> name must change it before using Substrate-native
+workspaces; Core refuses the short form for them and the RuntimePool reports
+<code>Degraded</code>. See <a class="" href="/orka/docs/substrate#upgrades-and-proof-limits">Agent Substrate</a>.</p>
 <p>The <a href="https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh" target="_blank" rel="noopener noreferrer" class="">local upgrade proof</a>
 uses actual API objects and a released stock core image. It covers old-shaped
 pools, all retained workspace states, schema pruning, unchanged legacy identities,
