@@ -194,6 +194,22 @@ func TestMCPProtocolConformance(t *testing.T) {
 		require.Equal(t, mcpLatestLegacyVersion, result["protocolVersion"])
 	})
 
+	t.Run("a revision that requires batches is not negotiated", func(t *testing.T) {
+		// 2025-03-26 requires receiving JSON-RPC batches, which this server
+		// refuses, so a client asking for it is offered the latest legacy
+		// revision and a request claiming it is refused.
+		response := f.mcpRPC(t, "initialize", map[string]any{"protocolVersion": "2025-03-26"})
+		require.Equal(t, http.StatusOK, response.status, response.body)
+		var result map[string]any
+		require.NoError(t, json.Unmarshal(response.Result, &result))
+		require.Equal(t, mcpLatestLegacyVersion, result["protocolVersion"])
+
+		claimed := f.mcpRaw(t, http.MethodPost, mcpBody(t, "ping", nil), map[string]string{mcpProtocolVersionHeader: "2025-03-26"})
+		require.Equal(t, http.StatusBadRequest, claimed.status, claimed.body)
+		require.Equal(t, mcpCodeUnsupportedVersion, claimed.Error.Code)
+		require.NotContains(t, mcpSupportedProtocolVersions, "2025-03-26")
+	})
+
 	t.Run("notifications and responses are accepted without a body", func(t *testing.T) {
 		response := f.mcpRaw(t, http.MethodPost, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, nil)
 		require.Equal(t, http.StatusAccepted, response.status)

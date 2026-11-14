@@ -88,11 +88,13 @@ const (
 	mcpCodeForbidden = -32001
 )
 
+// mcpSupportedProtocolVersions lists only revisions this server fully
+// implements. 2025-03-26 is absent: it requires receiving JSON-RPC batches,
+// which every later revision removed and this server refuses.
 var mcpSupportedProtocolVersions = []string{
 	mcpProtocolVersionSessionless,
 	"2025-11-25",
 	"2025-06-18",
-	"2025-03-26",
 }
 
 const mcpServerInstructions = "Orka runs Tasks on Kubernetes-hosted Agents. Use list_agents to find an Agent, " +

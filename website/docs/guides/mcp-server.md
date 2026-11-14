@@ -37,8 +37,10 @@ is refused with HTTP 413 without being expanded.
 The endpoint is a stateless [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
 server. It answers every request with one JSON body, issues no `Mcp-Session-Id`, and
 opens no server-sent event stream; `GET /mcp` returns 405. It supports protocol
-versions `2025-03-26`, `2025-06-18`, `2025-11-25`, and the sessionless `2026-07-28`
-revision (`server/discover` and per-request `_meta`).
+versions `2025-06-18`, `2025-11-25`, and the sessionless `2026-07-28` revision
+(`server/discover` and per-request `_meta`). It does not accept JSON-RPC batches, so
+it does not negotiate `2025-03-26`, the one revision that requires them; `initialize`
+with that version is answered with `2025-11-25`.
 
 Mirrored headers are validated against the JSON-RPC body and never used for
 authorization. A `2026-07-28` request must send `MCP-Protocol-Version` (equal to its
