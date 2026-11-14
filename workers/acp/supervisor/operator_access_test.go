@@ -898,11 +898,27 @@ func TestOperatorAccessStaysClosedOnceTheSupervisorTerminates(t *testing.T) {
 	if err := supervisor.quiesceOperators(state, 50*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	supervisor.mu.Lock()
-	setSessionState(state, harnessv2.RuntimeSessionStateIdle)
-	supervisor.mu.Unlock()
-	if _, status, _ := supervisor.operatorTargetFor(sessionID, metadata); status == 0 {
-		t.Fatal("a terminating supervisor admitted operator access")
+	// Close records no drain, so a later drain request must not move the
+	// lifecycle back to Draining and reopen admission.
+	for name, drain := range map[string]func(){
+		"BeginDrain": func() { supervisor.BeginDrain("late") },
+		"beginDrainLocked": func() {
+			supervisor.mu.Lock()
+			_ = supervisor.beginDrainLocked("late", time.Now())
+			supervisor.mu.Unlock()
+		},
+	} {
+		supervisor.mu.Lock()
+		supervisor.drain.Requested = false
+		supervisor.mu.Unlock()
+		drain()
+		supervisor.mu.Lock()
+		state.drainCleanupScheduled = false
+		setSessionState(state, harnessv2.RuntimeSessionStateIdle)
+		supervisor.mu.Unlock()
+		if _, status, _ := supervisor.operatorTargetFor(sessionID, metadata); status == 0 {
+			t.Fatalf("%s: a terminating supervisor admitted operator access", name)
+		}
 	}
 }
 

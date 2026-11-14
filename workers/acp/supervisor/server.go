@@ -1654,7 +1654,7 @@ func (s *Server) beginDrainLocked(reason string, now time.Time) []drainCleanupCa
 			RequestedAt:          now,
 			Reason:               reason,
 		}
-		s.lifecycle = harnessv2.SupervisorLifecycleDraining
+		s.lifecycle = drainingLifecycle(s.lifecycle)
 	}
 	cleanup := make([]drainCleanupCandidate, 0, len(s.sessions))
 	for id, state := range s.sessions {
@@ -1904,7 +1904,17 @@ func (s *Server) BeginDrain(reason string) {
 		RequestedAt:          time.Now().UTC(),
 		Reason:               reason,
 	}
-	s.lifecycle = harnessv2.SupervisorLifecycleDraining
+	s.lifecycle = drainingLifecycle(s.lifecycle)
+}
+
+// drainingLifecycle is the lifecycle after a drain request. Terminating is
+// final: Close does not record a drain, and a later request must not reopen
+// what teardown, including operator admission, has closed.
+func drainingLifecycle(current harnessv2.SupervisorLifecycle) harnessv2.SupervisorLifecycle {
+	if current == harnessv2.SupervisorLifecycleTerminating {
+		return current
+	}
+	return harnessv2.SupervisorLifecycleDraining
 }
 
 // durableResumeTransitionAuthorized reports whether a committed durable
