@@ -22,15 +22,15 @@ type lossySessionStore struct {
 }
 
 func (s *lossySessionStore) AppendMessagesWithLock(
-	ctx context.Context, namespace, name, ownerName, ownerUID string, messages []store.SessionMessage,
+	ctx context.Context, owner store.SessionOwnerWrite, messages []store.SessionMessage,
 ) error {
 	if len(s.appendErrs) == 0 {
-		return s.Store.AppendMessagesWithLock(ctx, namespace, name, ownerName, ownerUID, messages)
+		return s.Store.AppendMessagesWithLock(ctx, owner, messages)
 	}
 	err := s.appendErrs[0]
 	s.appendErrs = s.appendErrs[1:]
 	if errors.Is(err, store.ErrOutcomeUnknown) {
-		if appendErr := s.Store.AppendMessagesWithLock(ctx, namespace, name, ownerName, ownerUID, messages); appendErr != nil {
+		if appendErr := s.Store.AppendMessagesWithLock(ctx, owner, messages); appendErr != nil {
 			return appendErr
 		}
 	}

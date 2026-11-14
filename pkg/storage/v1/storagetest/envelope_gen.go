@@ -9,19 +9,19 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
+func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 storagev1.AcquireChatTurnRequest) (bool, error) {
 	var r0 bool
-	err := p.ops.run(ctx, writeCall{method: "AcquireChatTurn", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+	err := p.ops.run(ctx, writeCall{method: "AcquireChatTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
-		r0, err = p.StateProvider.AcquireChatTurn(ctx, a1, a2, a3)
+		r0, err = p.StateProvider.AcquireChatTurn(ctx, a1)
 		return err
 	})
 	return r0, err
 }
 
-func (p envelopedState) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
-	return p.ops.run(ctx, writeCall{method: "AcquireLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
-		return p.StateProvider.AcquireLock(ctx, a1, a2, a3, a4)
+func (p envelopedState) AcquireLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "AcquireLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+		return p.StateProvider.AcquireLock(ctx, a1, a2, a3, a4, a5)
 	})
 }
 
@@ -48,33 +48,64 @@ func (p envelopedState) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 
 func (p envelopedState) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
+	var w1 *storagev1.ExecutionEvent
 	err := p.ops.run(ctx, writeCall{method: "AppendExecutionEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
 		var err error
-		r0, err = p.StateProvider.AppendExecutionEvent(ctx, a1)
-		return err
+		r0, err = p.StateProvider.AppendExecutionEvent(ctx, c1)
+		if err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
 	return r0, err
 }
 
 func (p envelopedState) AppendExecutionEventIfAbsent(ctx context.Context, a1 *storagev1.ExecutionEvent, a2 string) (*storagev1.ExecutionEvent, bool, error) {
 	var r0 *storagev1.ExecutionEvent
 	var r1 bool
+	var w1 *storagev1.ExecutionEvent
 	err := p.ops.run(ctx, writeCall{method: "AppendExecutionEventIfAbsent", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
 		var err error
-		r0, r1, err = p.StateProvider.AppendExecutionEventIfAbsent(ctx, a1, a2)
-		return err
+		r0, r1, err = p.StateProvider.AppendExecutionEventIfAbsent(ctx, c1, a2)
+		if err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
 	return r0, r1, err
 }
 
 func (p envelopedState) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, a1 *storagev1.ExecutionEvent, a2 string, a3 *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
 	var r0 *storagev1.ExecutionEvent
 	var r1 bool
+	var w1 *storagev1.ExecutionEvent
+	var w3 *storagev1.PlanState
 	err := p.ops.run(ctx, writeCall{method: "AppendExecutionEventWithPlanIfAbsent", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		c3 := attemptCopy(a3)
 		var err error
-		r0, r1, err = p.StateProvider.AppendExecutionEventWithPlanIfAbsent(ctx, a1, a2, a3)
-		return err
+		r0, r1, err = p.StateProvider.AppendExecutionEventWithPlanIfAbsent(ctx, c1, a2, c3)
+		if err != nil {
+			return err
+		}
+		w1 = c1
+		w3 = c3
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+		writeBack(a3, w3)
+	}
 	return r0, r1, err
 }
 
@@ -94,9 +125,9 @@ func (p envelopedState) AppendMessages(ctx context.Context, a1 string, a2 string
 	})
 }
 
-func (p envelopedState) AppendMessagesWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 []storagev1.SessionMessage) error {
-	return p.ops.run(ctx, writeCall{method: "AppendMessagesWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
-		return p.StateProvider.AppendMessagesWithLock(ctx, a1, a2, a3, a4, a5)
+func (p envelopedState) AppendMessagesWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 []storagev1.SessionMessage) error {
+	return p.ops.run(ctx, writeCall{method: "AppendMessagesWithLock", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.AppendMessagesWithLock(ctx, a1, a2)
 	})
 }
 
@@ -107,9 +138,19 @@ func (p envelopedState) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 }
 
 func (p envelopedState) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
-	return p.ops.run(ctx, writeCall{method: "BindPatchProposalPublicationEvidence", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.BindPatchProposalPublicationEvidence(ctx, a1)
+	var w1 *storagev1.PatchProposal
+	err := p.ops.run(ctx, writeCall{method: "BindPatchProposalPublicationEvidence", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.BindPatchProposalPublicationEvidence(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) BindSessionCleanupIdentity(ctx context.Context, a1 string, a2 string, a3 string) error {
@@ -198,9 +239,9 @@ func (p envelopedState) CommitSealedSessionTurnFinalization(ctx context.Context,
 	return r0, err
 }
 
-func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 storagev1.CommitSessionTurnRequest) error {
+	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CommitSessionTurn(ctx, a1)
 	})
 }
 
@@ -215,9 +256,19 @@ func (p envelopedState) CompleteOutboxProjectionRecord(ctx context.Context, a1 s
 }
 
 func (p envelopedState) CompleteScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun) error {
-	return p.ops.run(ctx, writeCall{method: "CompleteScanRunCancellation", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CompleteScanRunCancellation(ctx, a1)
+	var w1 *storagev1.ScanRun
+	err := p.ops.run(ctx, writeCall{method: "CompleteScanRunCancellation", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CompleteScanRunCancellation(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CompleteScanTaskIngestion(ctx context.Context, a1 storagev1.ScanTaskIdentity) error {
@@ -230,6 +281,16 @@ func (p envelopedState) CompleteSessionCleanup(ctx context.Context, a1 storagev1
 	return p.ops.run(ctx, writeCall{method: "CompleteSessionCleanup", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CompleteSessionCleanup(ctx, a1)
 	})
+}
+
+func (p envelopedState) ConsumeMessages(ctx context.Context, a1 storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
+	var r0 []storagev1.Message
+	err := p.ops.run(ctx, writeCall{method: "ConsumeMessages", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.ConsumeMessages(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) ConsumeSealedConnectorCompletion(ctx context.Context, a1 string) (*storagev1.SealedConnectorCompletion, error) {
@@ -253,98 +314,247 @@ func (p envelopedState) ConsumeSealedConnectorConsent(ctx context.Context, a1 st
 }
 
 func (p envelopedState) CreateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
-	return p.ops.run(ctx, writeCall{method: "CreateActionRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateActionRecord(ctx, a1)
+	var w1 *storagev1.ActionRecord
+	err := p.ops.run(ctx, writeCall{method: "CreateActionRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateActionRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
-	return p.ops.run(ctx, writeCall{method: "CreateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateCommandEvent(ctx, a1)
+	var w1 *storagev1.CommandEvent
+	err := p.ops.run(ctx, writeCall{method: "CreateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateCommandEvent(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateDroppedFinding(ctx context.Context, a1 *storagev1.DroppedFinding) error {
-	return p.ops.run(ctx, writeCall{method: "CreateDroppedFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateDroppedFinding(ctx, a1)
+	var w1 *storagev1.DroppedFinding
+	err := p.ops.run(ctx, writeCall{method: "CreateDroppedFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateDroppedFinding(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateGatewayDelivery(ctx context.Context, a1 *storagev1.GatewayDelivery) (*storagev1.GatewayDelivery, bool, error) {
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
+	var w1 *storagev1.GatewayDelivery
 	err := p.ops.run(ctx, writeCall{method: "CreateGatewayDelivery", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
 		var err error
-		r0, r1, err = p.StateProvider.CreateGatewayDelivery(ctx, a1)
-		return err
+		r0, r1, err = p.StateProvider.CreateGatewayDelivery(ctx, c1)
+		if err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
 	return r0, r1, err
 }
 
 func (p envelopedState) CreateGitHubMutationRecord(ctx context.Context, a1 *storagev1.GitHubMutationRecord) error {
-	return p.ops.run(ctx, writeCall{method: "CreateGitHubMutationRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateGitHubMutationRecord(ctx, a1)
+	var w1 *storagev1.GitHubMutationRecord
+	err := p.ops.run(ctx, writeCall{method: "CreateGitHubMutationRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateGitHubMutationRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateImplementationJob(ctx context.Context, a1 *storagev1.ImplementationJob) error {
-	return p.ops.run(ctx, writeCall{method: "CreateImplementationJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateImplementationJob(ctx, a1)
+	var w1 *storagev1.ImplementationJob
+	err := p.ops.run(ctx, writeCall{method: "CreateImplementationJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateImplementationJob(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateMemory(ctx context.Context, a1 *storagev1.Memory) error {
-	return p.ops.run(ctx, writeCall{method: "CreateMemory", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateMemory(ctx, a1)
+	var w1 *storagev1.Memory
+	err := p.ops.run(ctx, writeCall{method: "CreateMemory", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateMemory(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateMemoryProposal(ctx context.Context, a1 *storagev1.MemoryProposal) error {
-	return p.ops.run(ctx, writeCall{method: "CreateMemoryProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateMemoryProposal(ctx, a1)
+	var w1 *storagev1.MemoryProposal
+	err := p.ops.run(ctx, writeCall{method: "CreateMemoryProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateMemoryProposal(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateMonitorEvent(ctx context.Context, a1 *storagev1.MonitorEvent) error {
-	return p.ops.run(ctx, writeCall{method: "CreateMonitorEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateMonitorEvent(ctx, a1)
+	var w1 *storagev1.MonitorEvent
+	err := p.ops.run(ctx, writeCall{method: "CreateMonitorEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateMonitorEvent(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateMonitorRun(ctx context.Context, a1 *storagev1.MonitorRun) error {
-	return p.ops.run(ctx, writeCall{method: "CreateMonitorRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateMonitorRun(ctx, a1)
+	var w1 *storagev1.MonitorRun
+	err := p.ops.run(ctx, writeCall{method: "CreateMonitorRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateMonitorRun(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreatePatchProposal(ctx context.Context, a1 *storagev1.PatchProposal) error {
-	return p.ops.run(ctx, writeCall{method: "CreatePatchProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreatePatchProposal(ctx, a1)
+	var w1 *storagev1.PatchProposal
+	err := p.ops.run(ctx, writeCall{method: "CreatePatchProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreatePatchProposal(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateRepairJob(ctx context.Context, a1 *storagev1.RepairJob) error {
-	return p.ops.run(ctx, writeCall{method: "CreateRepairJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateRepairJob(ctx, a1)
+	var w1 *storagev1.RepairJob
+	err := p.ops.run(ctx, writeCall{method: "CreateRepairJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateRepairJob(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateReviewPublishRecord(ctx context.Context, a1 *storagev1.ReviewPublishRecord) error {
-	return p.ops.run(ctx, writeCall{method: "CreateReviewPublishRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateReviewPublishRecord(ctx, a1)
+	var w1 *storagev1.ReviewPublishRecord
+	err := p.ops.run(ctx, writeCall{method: "CreateReviewPublishRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateReviewPublishRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateReviewRecord(ctx context.Context, a1 *storagev1.ReviewRecord) error {
-	return p.ops.run(ctx, writeCall{method: "CreateReviewRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateReviewRecord(ctx, a1)
+	var w1 *storagev1.ReviewRecord
+	err := p.ops.run(ctx, writeCall{method: "CreateReviewRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateReviewRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateScanRun(ctx context.Context, a1 *storagev1.ScanRun) error {
-	return p.ops.run(ctx, writeCall{method: "CreateScanRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateScanRun(ctx, a1)
+	var w1 *storagev1.ScanRun
+	err := p.ops.run(ctx, writeCall{method: "CreateScanRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateScanRun(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateSealedAgentExecutionSnapshot(ctx context.Context, a1 storagev1.SealedAgentExecutionSnapshot) error {
@@ -366,9 +576,19 @@ func (p envelopedState) CreateSealedConnectorConsent(ctx context.Context, a1 sto
 }
 
 func (p envelopedState) CreateSession(ctx context.Context, a1 *storagev1.SessionRecord) error {
-	return p.ops.run(ctx, writeCall{method: "CreateSession", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateSession(ctx, a1)
+	var w1 *storagev1.SessionRecord
+	err := p.ops.run(ctx, writeCall{method: "CreateSession", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateSession(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) CreateSessionTurnRecord(ctx context.Context, a1 storagev1.CreateSessionTurnRecordRequest) (*storagev1.SessionTurn, error) {
@@ -382,9 +602,19 @@ func (p envelopedState) CreateSessionTurnRecord(ctx context.Context, a1 storagev
 }
 
 func (p envelopedState) CreateWorkAction(ctx context.Context, a1 *storagev1.WorkAction) error {
-	return p.ops.run(ctx, writeCall{method: "CreateWorkAction", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.CreateWorkAction(ctx, a1)
+	var w1 *storagev1.WorkAction
+	err := p.ops.run(ctx, writeCall{method: "CreateWorkAction", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.CreateWorkAction(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) DeferGatewayEventProjection(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
@@ -465,9 +695,9 @@ func (p envelopedState) DeleteResult(ctx context.Context, a1 string, a2 string) 
 	})
 }
 
-func (p envelopedState) DeleteSession(ctx context.Context, a1 string, a2 string) error {
-	return p.ops.run(ctx, writeCall{method: "DeleteSession", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.DeleteSession(ctx, a1, a2)
+func (p envelopedState) DeleteSession(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteSession", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteSession(ctx, a1, a2, a3)
 	})
 }
 
@@ -496,17 +726,26 @@ func (p envelopedState) EnqueueGatewayMessage(ctx context.Context, a1 storagev1.
 
 func (p envelopedState) EnqueueOutboxProjectionRecord(ctx context.Context, a1 *storagev1.OutboxProjection, a2 storagev1.ControllerEpochFence) (*storagev1.OutboxProjection, error) {
 	var r0 *storagev1.OutboxProjection
+	var w1 *storagev1.OutboxProjection
 	err := p.ops.run(ctx, writeCall{method: "EnqueueOutboxProjectionRecord", contract: storagev1.StateContract, args: []any{a1, a2}, fence: &a2}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
 		var err error
-		r0, err = p.StateProvider.EnqueueOutboxProjectionRecord(ctx, a1, a2)
-		return err
+		r0, err = p.StateProvider.EnqueueOutboxProjectionRecord(ctx, c1, a2)
+		if err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
 	return r0, err
 }
 
-func (p envelopedState) EnsureSessionSoulWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
-	return p.ops.run(ctx, writeCall{method: "EnsureSessionSoulWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
-		return p.StateProvider.EnsureSessionSoulWithLock(ctx, a1, a2, a3, a4, a5)
+func (p envelopedState) EnsureSessionSoulWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "EnsureSessionSoulWithLock", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.EnsureSessionSoulWithLock(ctx, a1, a2)
 	})
 }
 
@@ -537,21 +776,11 @@ func (p envelopedState) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Co
 	return r0, err
 }
 
-func (p envelopedState) GetMessages(ctx context.Context, a1 string, a2 string, a3 string, a4 bool) ([]storagev1.Message, error) {
-	var r0 []storagev1.Message
-	err := p.ops.run(ctx, writeCall{method: "GetMessages", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
-		var err error
-		r0, err = p.StateProvider.GetMessages(ctx, a1, a2, a3, a4)
-		return err
-	})
-	return r0, err
-}
-
-func (p envelopedState) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string) (bool, error) {
+func (p envelopedState) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) (bool, error) {
 	var r0 bool
-	err := p.ops.run(ctx, writeCall{method: "IsLocked", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
+	err := p.ops.run(ctx, writeCall{method: "IsLocked", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
 		var err error
-		r0, err = p.StateProvider.IsLocked(ctx, a1, a2, a3, a4)
+		r0, err = p.StateProvider.IsLocked(ctx, a1, a2, a3, a4, a5)
 		return err
 	})
 	return r0, err
@@ -707,9 +936,9 @@ func (p envelopedState) ReleaseLock(ctx context.Context, a1 string, a2 string, a
 	})
 }
 
-func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "ReleaseLockWithTokenUsage", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.ReleaseLockWithTokenUsage(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
+	return p.ops.run(ctx, writeCall{method: "ReleaseLockWithTokenUsage", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.ReleaseLockWithTokenUsage(ctx, a1, a2, a3)
 	})
 }
 
@@ -740,9 +969,19 @@ func (p envelopedState) ReplaceSealedConnectorCredential(ctx context.Context, a1
 }
 
 func (p envelopedState) RequestScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun, a2 string) error {
-	return p.ops.run(ctx, writeCall{method: "RequestScanRunCancellation", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.RequestScanRunCancellation(ctx, a1, a2)
+	var w1 *storagev1.ScanRun
+	err := p.ops.run(ctx, writeCall{method: "RequestScanRunCancellation", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.RequestScanRunCancellation(ctx, c1, a2); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) ResolveFindingIfCurrent(ctx context.Context, a1 string, a2 string, a3 string, a4 int) (bool, error) {
@@ -790,9 +1029,19 @@ func (p envelopedState) RevokeTaskJob(ctx context.Context, a1 storagev1.TaskJobI
 }
 
 func (p envelopedState) SavePlan(ctx context.Context, a1 string, a2 string, a3 *storagev1.PlanState) error {
-	return p.ops.run(ctx, writeCall{method: "SavePlan", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
-		return p.StateProvider.SavePlan(ctx, a1, a2, a3)
+	var w3 *storagev1.PlanState
+	err := p.ops.run(ctx, writeCall{method: "SavePlan", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		c3 := attemptCopy(a3)
+		if err := p.StateProvider.SavePlan(ctx, a1, a2, c3); err != nil {
+			return err
+		}
+		w3 = c3
+		return nil
 	})
+	if err == nil {
+		writeBack(a3, w3)
+	}
+	return err
 }
 
 func (p envelopedState) SavePromptResultReceipt(ctx context.Context, a1 storagev1.PromptResultReceipt) error {
@@ -814,15 +1063,35 @@ func (p envelopedState) SaveSealedNativeSession(ctx context.Context, a1 storagev
 }
 
 func (p envelopedState) SaveThreatModel(ctx context.Context, a1 *storagev1.ThreatModel) error {
-	return p.ops.run(ctx, writeCall{method: "SaveThreatModel", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.SaveThreatModel(ctx, a1)
+	var w1 *storagev1.ThreatModel
+	err := p.ops.run(ctx, writeCall{method: "SaveThreatModel", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.SaveThreatModel(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) SaveThreatModelIfVersion(ctx context.Context, a1 *storagev1.ThreatModel, a2 int64) error {
-	return p.ops.run(ctx, writeCall{method: "SaveThreatModelIfVersion", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.SaveThreatModelIfVersion(ctx, a1, a2)
+	var w1 *storagev1.ThreatModel
+	err := p.ops.run(ctx, writeCall{method: "SaveThreatModelIfVersion", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.SaveThreatModelIfVersion(ctx, c1, a2); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) ScheduleGatewayDeliveryRetry(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 time.Time) error {
@@ -832,9 +1101,19 @@ func (p envelopedState) ScheduleGatewayDeliveryRetry(ctx context.Context, a1 str
 }
 
 func (p envelopedState) SendMessage(ctx context.Context, a1 *storagev1.Message) error {
-	return p.ops.run(ctx, writeCall{method: "SendMessage", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.SendMessage(ctx, a1)
+	var w1 *storagev1.Message
+	err := p.ops.run(ctx, writeCall{method: "SendMessage", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.SendMessage(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) SetMemoryDisabled(ctx context.Context, a1 string, a2 string, a3 bool) error {
@@ -866,15 +1145,35 @@ func (p envelopedState) TombstoneConnectorCustody(ctx context.Context, a1 string
 }
 
 func (p envelopedState) UpdateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateActionRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateActionRecord(ctx, a1)
+	var w1 *storagev1.ActionRecord
+	err := p.ops.run(ctx, writeCall{method: "UpdateActionRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateActionRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateCommandEvent(ctx, a1)
+	var w1 *storagev1.CommandEvent
+	err := p.ops.run(ctx, writeCall{method: "UpdateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateCommandEvent(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateFindingState(ctx context.Context, a1 string, a2 string, a3 string) error {
@@ -884,45 +1183,115 @@ func (p envelopedState) UpdateFindingState(ctx context.Context, a1 string, a2 st
 }
 
 func (p envelopedState) UpdateGitHubMutationRecord(ctx context.Context, a1 *storagev1.GitHubMutationRecord) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateGitHubMutationRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateGitHubMutationRecord(ctx, a1)
+	var w1 *storagev1.GitHubMutationRecord
+	err := p.ops.run(ctx, writeCall{method: "UpdateGitHubMutationRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateGitHubMutationRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateImplementationJob(ctx context.Context, a1 *storagev1.ImplementationJob) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateImplementationJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateImplementationJob(ctx, a1)
+	var w1 *storagev1.ImplementationJob
+	err := p.ops.run(ctx, writeCall{method: "UpdateImplementationJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateImplementationJob(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateMemory(ctx context.Context, a1 *storagev1.Memory) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateMemory", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateMemory(ctx, a1)
+	var w1 *storagev1.Memory
+	err := p.ops.run(ctx, writeCall{method: "UpdateMemory", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateMemory(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateMonitorRun(ctx context.Context, a1 *storagev1.MonitorRun) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateMonitorRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateMonitorRun(ctx, a1)
+	var w1 *storagev1.MonitorRun
+	err := p.ops.run(ctx, writeCall{method: "UpdateMonitorRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateMonitorRun(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdatePatchProposal(ctx context.Context, a1 *storagev1.PatchProposal) error {
-	return p.ops.run(ctx, writeCall{method: "UpdatePatchProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdatePatchProposal(ctx, a1)
+	var w1 *storagev1.PatchProposal
+	err := p.ops.run(ctx, writeCall{method: "UpdatePatchProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdatePatchProposal(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateRepairJob(ctx context.Context, a1 *storagev1.RepairJob) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateRepairJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateRepairJob(ctx, a1)
+	var w1 *storagev1.RepairJob
+	err := p.ops.run(ctx, writeCall{method: "UpdateRepairJob", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateRepairJob(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateReviewPublishRecord(ctx context.Context, a1 *storagev1.ReviewPublishRecord) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateReviewPublishRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateReviewPublishRecord(ctx, a1)
+	var w1 *storagev1.ReviewPublishRecord
+	err := p.ops.run(ctx, writeCall{method: "UpdateReviewPublishRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateReviewPublishRecord(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateReviewSliceStatus(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
@@ -932,9 +1301,19 @@ func (p envelopedState) UpdateReviewSliceStatus(ctx context.Context, a1 string, 
 }
 
 func (p envelopedState) UpdateScanRun(ctx context.Context, a1 *storagev1.ScanRun) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateScanRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateScanRun(ctx, a1)
+	var w1 *storagev1.ScanRun
+	err := p.ops.run(ctx, writeCall{method: "UpdateScanRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateScanRun(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpdateTokenCounts(ctx context.Context, a1 string, a2 string, a3 int, a4 int) error {
@@ -943,46 +1322,106 @@ func (p envelopedState) UpdateTokenCounts(ctx context.Context, a1 string, a2 str
 	})
 }
 
-func (p envelopedState) UpdateTokenCountsWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 int, a6 int) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateTokenCountsWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateTokenCountsWithLock(ctx, a1, a2, a3, a4, a5, a6)
+func (p envelopedState) UpdateTokenCountsWithLock(ctx context.Context, a1 storagev1.SessionOwnerWrite, a2 int, a3 int) error {
+	return p.ops.run(ctx, writeCall{method: "UpdateTokenCountsWithLock", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.UpdateTokenCountsWithLock(ctx, a1, a2, a3)
 	})
 }
 
 func (p envelopedState) UpdateWorkAction(ctx context.Context, a1 *storagev1.WorkAction) error {
-	return p.ops.run(ctx, writeCall{method: "UpdateWorkAction", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpdateWorkAction(ctx, a1)
+	var w1 *storagev1.WorkAction
+	err := p.ops.run(ctx, writeCall{method: "UpdateWorkAction", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpdateWorkAction(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpsertFinding(ctx context.Context, a1 *storagev1.Finding) error {
-	return p.ops.run(ctx, writeCall{method: "UpsertFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpsertFinding(ctx, a1)
+	var w1 *storagev1.Finding
+	err := p.ops.run(ctx, writeCall{method: "UpsertFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpsertFinding(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpsertMonitorItem(ctx context.Context, a1 *storagev1.MonitorItem) error {
-	return p.ops.run(ctx, writeCall{method: "UpsertMonitorItem", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpsertMonitorItem(ctx, a1)
+	var w1 *storagev1.MonitorItem
+	err := p.ops.run(ctx, writeCall{method: "UpsertMonitorItem", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpsertMonitorItem(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpsertObservedFinding(ctx context.Context, a1 *storagev1.Finding) error {
-	return p.ops.run(ctx, writeCall{method: "UpsertObservedFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpsertObservedFinding(ctx, a1)
+	var w1 *storagev1.Finding
+	err := p.ops.run(ctx, writeCall{method: "UpsertObservedFinding", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpsertObservedFinding(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpsertRepositoryMonitor(ctx context.Context, a1 *storagev1.RepositoryMonitorRecord) error {
-	return p.ops.run(ctx, writeCall{method: "UpsertRepositoryMonitor", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpsertRepositoryMonitor(ctx, a1)
+	var w1 *storagev1.RepositoryMonitorRecord
+	err := p.ops.run(ctx, writeCall{method: "UpsertRepositoryMonitor", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpsertRepositoryMonitor(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedState) UpsertReviewSlice(ctx context.Context, a1 *storagev1.ReviewSlice) error {
-	return p.ops.run(ctx, writeCall{method: "UpsertReviewSlice", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
-		return p.StateProvider.UpsertReviewSlice(ctx, a1)
+	var w1 *storagev1.ReviewSlice
+	err := p.ops.run(ctx, writeCall{method: "UpsertReviewSlice", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.UpsertReviewSlice(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
 	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
 }
 
 func (p envelopedArtifacts) DeleteArtifacts(ctx context.Context, a1 storagev1.ArtifactOwner) error {
@@ -995,4 +1434,23 @@ func (p envelopedArtifacts) SaveArtifact(ctx context.Context, a1 storagev1.SaveA
 	return p.ops.run(ctx, writeCall{method: "SaveArtifact", contract: storagev1.ArtifactsContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.ArtifactProvider.SaveArtifact(ctx, a1)
 	})
+}
+
+// attemptCopy returns a fresh copy of the record a write-back argument points
+// to, or nil for a nil argument, so every attempt of an operation sends the
+// caller's record as it was when the operation's digest was computed.
+func attemptCopy[T any](record *T) *T {
+	if record == nil {
+		return nil
+	}
+	fresh := *record
+	return &fresh
+}
+
+// writeBack gives the caller's record the copy the successful attempt wrote
+// into.
+func writeBack[T any](record, written *T) {
+	if record != nil && written != nil {
+		*record = *written
+	}
 }

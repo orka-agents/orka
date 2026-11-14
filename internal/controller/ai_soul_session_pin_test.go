@@ -23,26 +23,26 @@ type faultingSoulSessionStore struct {
 	pinCalls          int
 }
 
-func (s *faultingSoulSessionStore) EnsureSessionSoulWithLock(ctx context.Context, namespace, name, owner, uid, digest string) error {
+func (s *faultingSoulSessionStore) EnsureSessionSoulWithLock(ctx context.Context, owner store.SessionOwnerWrite, digest string) error {
 	s.pinCalls++
 	if s.pinError != nil {
 		err := s.pinError
 		s.pinError = nil
 		if s.commitBeforeError {
-			if commitErr := s.Store.EnsureSessionSoulWithLock(ctx, namespace, name, owner, uid, digest); commitErr != nil {
+			if commitErr := s.Store.EnsureSessionSoulWithLock(ctx, owner, digest); commitErr != nil {
 				return commitErr
 			}
 		}
 		return err
 	}
-	return s.Store.EnsureSessionSoulWithLock(ctx, namespace, name, owner, uid, digest)
+	return s.Store.EnsureSessionSoulWithLock(ctx, owner, digest)
 }
 
-func (s *faultingSoulSessionStore) AppendMessagesWithLock(ctx context.Context, namespace, name, owner, uid string, messages []store.SessionMessage) error {
+func (s *faultingSoulSessionStore) AppendMessagesWithLock(ctx context.Context, owner store.SessionOwnerWrite, messages []store.SessionMessage) error {
 	if s.appendError != nil {
 		return s.appendError
 	}
-	return s.Store.AppendMessagesWithLock(ctx, namespace, name, owner, uid, messages)
+	return s.Store.AppendMessagesWithLock(ctx, owner, messages)
 }
 
 func newAISoulSessionPinFixture(t *testing.T, prompt string) (*TaskReconciler, *corev1alpha1.Task, *corev1alpha1.Agent, *faultingSoulSessionStore) {
