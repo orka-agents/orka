@@ -1149,6 +1149,14 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	applyRuntimePoolProbeCapacity(&status, cfg, probe)
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionTrue, "PodScheduled", "selected runtime Pod is scheduled")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ExactInstanceReady", "selected runtime Pod and supervisor profile are ready")
+	if probe.Status.Lifecycle != harnessv2.SupervisorLifecycleUnhealthy {
+		// A worker eviction must start its deadline-bound retirement even when
+		// it arrives during a capacity drain, which the rotation below would
+		// otherwise keep handling without the eviction deadline.
+		if result, handled, err := r.observeExternalSupervisorEviction(ctx, pool, probe.Status); err != nil || handled {
+			return result, err
+		}
+	}
 	if probe.Status.SessionIdentityCapacity == nil {
 		probe.Status.SessionIdentityCapacity = &harnessv2.SessionIdentityCapacity{Total: 2, Remaining: 1, ExhaustionReserve: 1}
 		return r.reconcileRuntimePoolIdentityCapacityRotation(ctx, pool, &readyPods[0], authSecret, active, probe, status)
@@ -3506,29 +3514,43 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	status corev1alpha1.RuntimePoolStatus,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	recorded, err := r.recordRuntimePoolStatus(ctx, pool, status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !recorded {
+		// Another writer (the drain, session, or supervisor probe path)
+		// advanced the pool first; recompute from the fresh object instead
+		// of surfacing the optimistic-lock miss as a reconcile error.
+		return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// recordRuntimePoolStatus persists status and reports whether the stored pool
+// now holds it. An optimistic-lock conflict is not an error: it reports false
+// so the caller recomputes from the fresh object.
+func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, pool *corev1alpha1.RuntimePool, status corev1alpha1.RuntimePoolStatus) (bool, error) {
 	clearRuntimePoolUnfencedProbePressure(&status)
 	status.Message = sanitizeStatusMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
 		recordRuntimePoolMetrics(pool, status)
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		return true, nil
 	}
 	scaledToZero := runtimePoolCompletedScaleToZero(pool.Status, status)
 	base := pool.DeepCopy()
 	pool.Status = status
 	if err := r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		if apierrors.IsConflict(err) {
-			// Another writer (the drain, session, or supervisor probe path)
-			// advanced the pool first; recompute from the fresh object instead
-			// of surfacing the optimistic-lock miss as a reconcile error.
-			return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+			return false, nil
 		}
-		return ctrl.Result{}, err
+		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return true, nil
 }
 
 // Supervisor pressure belongs to one exact authenticated runtime instance.

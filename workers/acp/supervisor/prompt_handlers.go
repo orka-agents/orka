@@ -62,6 +62,19 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state := s.sessions[sessionID]
+	if state == nil {
+		unaccepted, mismatch := s.drainCleanedPromptUnacceptedLocked(sessionID, request.Metadata)
+		if mismatch != harnessv2.FenceMatch {
+			s.mu.Unlock()
+			writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+			return
+		}
+		if unaccepted {
+			s.mu.Unlock()
+			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+			return
+		}
+	}
 	if state == nil || state.creating {
 		s.mu.Unlock()
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -1508,6 +1521,39 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	setSessionState(state, nextState)
 	state.descriptor.LastTransitionAt = now
 	return true, nil
+}
+
+// drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
+// that drain cleanup already retired is provably unaccepted: the pool is still
+// draining, the request carries this supervisor's exact fence for that retired
+// session (runtime instance, supervisor boot, controller epoch, pool identity,
+// session UID and generation, and profile), and neither the operation nor the
+// prompt was ever admitted on it. Such a prompt is rejected as retryable, like
+// any prompt that reaches a draining pool, so the controller can requeue it.
+// A request for that retired session with any other fence gets the
+// non-retryable stale-fence refusal through the returned mismatch, never a
+// retry. Replays of admitted work keep their existing classification. The
+// caller must hold s.mu.
+func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (bool, harnessv2.FenceMismatch) {
+	if !s.drain.Requested {
+		return false, harnessv2.FenceMatch
+	}
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID {
+		return false, harnessv2.FenceMatch
+	}
+	expected := s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration)
+	expected.RuntimeProfileDigest = tombstone.RuntimeProfileDigest
+	if mismatch := harnessv2.CompareFence(expected, metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		return false, mismatch
+	}
+	if tombstoneOperation(tombstone.RuntimeSessionTombstone, metadata.OperationID) != nil {
+		return false, harnessv2.FenceMatch
+	}
+	if _, ok := tombstone.cancellationOperations[metadata.OperationID]; ok {
+		return false, harnessv2.FenceMatch
+	}
+	return tombstone.prompt == nil || tombstone.prompt.metadata.PromptID != metadata.PromptID, harnessv2.FenceMatch
 }
 
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {

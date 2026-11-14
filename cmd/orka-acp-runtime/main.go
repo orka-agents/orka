@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,8 +25,26 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	evictionWindow, err := supervisor.EvictionSuspendWindow()
+	if err != nil {
+		logger.Error("invalid ACP supervisor eviction configuration", "error", err)
+		os.Exit(1)
+	}
+	// A provider-hosted worker forwards its own SIGTERM to this process and
+	// then gives the Actor a bounded window to be suspended. A supervisor that
+	// serves a data-only suspendable workspace must not exit in that window.
+	var evictionTarget atomic.Pointer[supervisor.Server]
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	go supervisor.WatchShutdownSignals(ctx, signals, evictionWindow, func() supervisor.EvictionHolder {
+		if server := evictionTarget.Load(); server != nil {
+			return server
+		}
+		return nil
+	}, nil, nil, stop)
 	if _, err := acp.HardenSupervisorProcess(); err != nil {
 		logger.Error("failed to harden ACP supervisor", "error", err)
 		os.Exit(1)
@@ -90,6 +109,7 @@ func main() {
 		MaxHeaderBytes: 32 << 10,
 	}
 
+	evictionTarget.Store(runtimeServer)
 	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
