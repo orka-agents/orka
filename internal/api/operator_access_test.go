@@ -416,6 +416,23 @@ func TestOperatorCopyInTaintsBeforeWriting(t *testing.T) {
 	require.Equal(t, []string{OperatorAuditStarted, OperatorAuditFinished}, f.audit.phases())
 }
 
+// A path within MaxPathBytes can still encode past the signed request header
+// bound; that refusal must come before the taint.
+func TestOperatorCopyInOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
+	f := newOperatorFixture(t, true, "exec")
+	path := strings.Repeat("<", 3500)
+	_, err := operatoraccess.CleanWorkspacePath(path)
+	require.NoError(t, err)
+	status, body := f.do(t, http.MethodPut, "/api/v1/tasks/t1/files?namespace=team&size=1&path="+path, strings.NewReader("x"))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	require.Contains(t, body, "could not be signed")
+	require.False(t, f.workspaceTainted(t))
+	require.False(t, f.taskTainted(t))
+	for _, call := range f.calls() {
+		require.NotContains(t, call, "operator-files")
+	}
+}
+
 func TestOperatorCopyRejectsTraversalBeforeEffects(t *testing.T) {
 	for _, path := range []string{"../etc/passwd", "a/../../b", "a%00b", "", "/"} {
 		f := newOperatorFixture(t, true, "exec")
@@ -721,6 +738,46 @@ func TestOperatorExecRevalidatesAfterTheDelayedExecRequest(t *testing.T) {
 	require.Equal(t, operatoraccess.ExitReasonError, status.Reason)
 	require.Contains(t, status.Message, "no longer allows")
 	require.False(t, f.workspaceTainted(t))
+	for _, call := range f.calls() {
+		require.NotContains(t, call, "operator-exec")
+	}
+	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
+}
+
+// An argv within the argv bounds can still encode past the signed request
+// header bound (HTML-escaped '<' is six bytes). That refusal must come before
+// the taint, so the workspace keeps its publication and continuation.
+func TestOperatorExecOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+listener.Addr().String()+"/api/v1/tasks/t1/exec?namespace=team",
+		&websocket.DialOptions{Subprotocols: []string{operatoraccess.WebSocketSubprotocol}})
+	require.NoError(t, err)
+	defer conn.CloseNow() //nolint:errcheck
+
+	options := operatoraccess.ExecOptions{Argv: []string{"sh", "-c", strings.Repeat("<", operatoraccess.MaxArgvBytes-8)}}
+	require.NoError(t, options.Normalize())
+	request, err := json.Marshal(map[string]any{"type": "exec", "exec": options})
+	require.NoError(t, err)
+	require.NoError(t, conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelControl, request)))
+	var status operatoraccess.Status
+	for {
+		_, payload, err := conn.Read(ctx)
+		require.NoError(t, err)
+		if len(payload) > 0 && payload[0] == operatoraccess.ChannelStatus {
+			require.NoError(t, json.Unmarshal(payload[1:], &status))
+			break
+		}
+	}
+	require.Equal(t, operatoraccess.ExitReasonError, status.Reason)
+	require.Contains(t, status.Message, "could not be signed")
+	require.False(t, f.workspaceTainted(t))
+	require.False(t, f.taskTainted(t))
 	for _, call := range f.calls() {
 		require.NotContains(t, call, "operator-exec")
 	}

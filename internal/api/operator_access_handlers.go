@@ -212,6 +212,17 @@ func (s *Server) relayOperatorExec(client *websocket.Conn, target *operatorTarge
 		refuse(err)
 		return
 	}
+	// Sign before tainting: a valid argv can still encode past the request
+	// header bound, and that refusal must not forfeit the workspace.
+	request := harnessv2.OperatorExecRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationExec),
+		AuditID: record.AuditID, Exec: options,
+	}
+	header, capability, err := harnessv2.SealOperatorRequest(target.secret, &request, &request.Metadata)
+	if err != nil {
+		refuse(fiber.NewError(fiber.StatusBadRequest, "operator exec request could not be signed: "+err.Error()))
+		return
+	}
 	if err := s.taintOperatorTarget(ctx, target); err != nil {
 		if _, refused := errors.AsType[*fiber.Error](err); refused {
 			refuse(err)
@@ -219,15 +230,6 @@ func (s *Server) relayOperatorExec(client *websocket.Conn, target *operatorTarge
 		}
 		log.Error(err, "operator exec refused: taint could not be persisted", "auditID", record.AuditID)
 		fail("operator exec refused: the workspace taint could not be persisted")
-		return
-	}
-	request := harnessv2.OperatorExecRequest{
-		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationExec),
-		AuditID: record.AuditID, Exec: options,
-	}
-	header, capability, err := harnessv2.SealOperatorRequest(target.secret, &request, &request.Metadata)
-	if err != nil {
-		fail("operator exec request could not be signed")
 		return
 	}
 	path, err := harnessv2.OperatorExecPath(target.sessionID)
@@ -369,7 +371,12 @@ func (s *Server) handleOperatorFileDownload(c fiber.Ctx, envelope *operatorAudit
 	started.Phase = OperatorAuditStarted
 	envelope.recorded = true
 	s.operatorAudit(c.Context(), started)
-	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, http.MethodGet, nil)
+	sealed, err := sealOperatorFileRequest(target, &request)
+	if err != nil {
+		s.operatorAudit(c.Context(), operatorFinishRecord(target.record, operatorFailureOutcome(err), nil, 0))
+		return err
+	}
+	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, sealed, http.MethodGet, nil)
 	if err != nil {
 		s.operatorAudit(c.Context(), operatorFinishRecord(target.record, operatorFailureOutcome(err), nil, 0))
 		return err
@@ -427,6 +434,16 @@ func (s *Server) handleOperatorFileUpload(c fiber.Ctx, envelope *operatorAuditEn
 	if err := s.revalidateOperatorTarget(c.Context(), target, operatoraccess.OperationCopyIn); err != nil {
 		return err
 	}
+	// Sign before tainting: a valid path can still encode past the request
+	// header bound, and that refusal must not forfeit the workspace.
+	request := harnessv2.OperatorFileRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationCopyIn),
+		AuditID: target.record.AuditID, Path: cleaned, Write: true, MaxBytes: max(size, 1), Size: size,
+	}
+	sealed, err := sealOperatorFileRequest(target, &request)
+	if err != nil {
+		return err
+	}
 	if err := s.taintOperatorTarget(c.Context(), target); err != nil {
 		if _, refused := errors.AsType[*fiber.Error](err); refused {
 			return err
@@ -435,10 +452,6 @@ func (s *Server) handleOperatorFileUpload(c fiber.Ctx, envelope *operatorAuditEn
 		return fiber.NewError(fiber.StatusServiceUnavailable, "operator copy refused: the workspace taint could not be persisted")
 	}
 	envelope.record = target.record
-	request := harnessv2.OperatorFileRequest{
-		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationCopyIn),
-		AuditID: target.record.AuditID, Path: cleaned, Write: true, MaxBytes: max(size, 1), Size: size,
-	}
 	var body io.Reader
 	if c.Request().IsBodyStream() {
 		body = c.Request().BodyStream()
@@ -449,7 +462,7 @@ func (s *Server) handleOperatorFileUpload(c fiber.Ctx, envelope *operatorAuditEn
 	started.Phase = OperatorAuditStarted
 	envelope.recorded = true
 	s.operatorAudit(c.Context(), started)
-	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, http.MethodPut, io.LimitReader(body, size))
+	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, sealed, http.MethodPut, io.LimitReader(body, size))
 	if err != nil {
 		s.operatorAudit(c.Context(), operatorFinishRecord(target.record, operatorFailureOutcome(err), nil, 0))
 		return err
@@ -483,13 +496,25 @@ func parseOperatorBytes(raw string) (int64, error) {
 	return value, nil
 }
 
-func (s *Server) sendOperatorFileRequest(
-	ctx context.Context, target *operatorTarget, request *harnessv2.OperatorFileRequest, method string, body io.Reader,
-) (*http.Response, error) {
+// sealedOperatorRequest is a signed operator request header and its
+// single-use capability.
+type sealedOperatorRequest struct {
+	header     string
+	capability string
+}
+
+func sealOperatorFileRequest(target *operatorTarget, request *harnessv2.OperatorFileRequest) (sealedOperatorRequest, error) {
 	header, capability, err := harnessv2.SealOperatorRequest(target.secret, request, &request.Metadata)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "operator file request could not be signed")
+		return sealedOperatorRequest{}, fiber.NewError(fiber.StatusBadRequest, "operator file request could not be signed: "+err.Error())
 	}
+	return sealedOperatorRequest{header: header, capability: capability}, nil
+}
+
+func (s *Server) sendOperatorFileRequest(
+	ctx context.Context, target *operatorTarget, request *harnessv2.OperatorFileRequest, sealed sealedOperatorRequest,
+	method string, body io.Reader,
+) (*http.Response, error) {
 	path, err := harnessv2.OperatorFilesPath(target.sessionID)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusConflict, "runtime session identity is invalid")
@@ -505,8 +530,8 @@ func (s *Server) sendOperatorFileRequest(
 		}
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+target.bearer)
-	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
-	httpRequest.Header.Set(harnessv2.OperatorRequestHeader, header)
+	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, sealed.capability)
+	httpRequest.Header.Set(harnessv2.OperatorRequestHeader, sealed.header)
 	response, err := s.operatorHTTPClient().Do(httpRequest)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusBadGateway, "runtime supervisor is unreachable")
