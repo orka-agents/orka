@@ -448,6 +448,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/agents/:name", s.handlers.GetAgent)
 	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
+	api.Put("/agents/:name/spec", s.handlers.UpdateAgentSpec)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
 	// Skills endpoints
