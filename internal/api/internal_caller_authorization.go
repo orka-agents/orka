@@ -23,6 +23,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/taskwait"
 )
 
 const (
@@ -423,7 +424,20 @@ func coordinationRootTask(
 		seen[current.UID] = struct{}{}
 		parentName, parentUID, hasParent, valid := coordinationParentIdentity(current)
 		if !valid {
-			return nil, false
+			// A continuation of a delegated child inherits the parent labels
+			// but is owned, not controlled, by the Task it resumes. It shares
+			// that Task's tree when the link is proven from the predecessor's
+			// controller-written wait, as verifiedCoordinationParentIdentity
+			// requires; lineage annotations alone never place a Task in a tree.
+			previous := tasksByName[strings.TrimSpace(current.Annotations[labels.AnnotationContinuationOfName])]
+			if previous == nil || !previous.DeletionTimestamp.IsZero() || !taskwait.Continues(previous, current) {
+				return nil, false
+			}
+			if previousName, _, previousHasParent, _ := coordinationParentIdentity(previous); !previousHasParent || previousName != parentName {
+				return nil, false
+			}
+			current = previous
+			continue
 		}
 		if !hasParent {
 			return current, true
@@ -450,6 +464,42 @@ func coordinationParentIdentity(task *corev1alpha1.Task) (string, types.UID, boo
 		}
 	}
 	return parentName, "", true, false
+}
+
+// verifiedCoordinationParentIdentity is coordinationParentIdentity for a Task
+// that may continue a parked turn. A continuation inherits its predecessor's
+// parent labels but is owned, not controlled, by that predecessor, so its
+// coordination parent is that of the original Task of its verified
+// continuation chain. Every link is proven by Predecessor from controller
+// state; an unproven link or a read failure never grants a parent.
+func (a internalCallerAuthorizer) verifiedCoordinationParentIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (string, types.UID, bool, bool, error) {
+	parentName, parentUID, hasParent, valid := coordinationParentIdentity(task)
+	if valid || !hasParent || !a.taskProvenanceProtected || a.k8sReader == nil ||
+		strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) == "" {
+		return parentName, parentUID, hasParent, valid, nil
+	}
+	current := task
+	for range taskwait.MaxChainLength {
+		previous, ok, err := taskwait.Predecessor(ctx, a.k8sReader, current)
+		if err != nil {
+			return parentName, "", true, false, err
+		}
+		if !ok || !previous.DeletionTimestamp.IsZero() {
+			return parentName, "", true, false, nil
+		}
+		previousName, previousUID, previousHasParent, previousValid := coordinationParentIdentity(previous)
+		if !previousHasParent || previousName != parentName {
+			return parentName, "", true, false, nil
+		}
+		if previousValid {
+			return parentName, previousUID, true, true, nil
+		}
+		current = previous
+	}
+	return parentName, "", true, false, nil
 }
 
 func (a internalCallerAuthorizer) verifyMessageSender(
@@ -487,7 +537,10 @@ func (a internalCallerAuthorizer) verifyTaskMessageScope(ctx context.Context, ca
 	if target.Name == parent.Name && target.UID == parent.UID {
 		return nil
 	}
-	targetParentName, targetParentUID, hasParent, valid := coordinationParentIdentity(target)
+	targetParentName, targetParentUID, hasParent, valid, err := a.verifiedCoordinationParentIdentity(ctx, target)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to verify message target")
+	}
 	if !valid || !hasParent || targetParentName != parent.Name || targetParentUID != parent.UID {
 		return fiber.NewError(fiber.StatusForbidden, "message target is outside caller coordination scope")
 	}
@@ -517,7 +570,10 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 		return nil, fiber.NewError(fiber.StatusForbidden, "coordination requires Task provenance admission")
 	}
 	requestedParent = strings.TrimSpace(requestedParent)
-	parentName, parentUID, hasParent, valid := coordinationParentIdentity(callerTask)
+	parentName, parentUID, hasParent, valid, err := a.verifiedCoordinationParentIdentity(ctx, callerTask)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to verify message parent")
+	}
 	if !valid {
 		return nil, fiber.NewError(fiber.StatusForbidden, "message parent is outside caller coordination scope")
 	}
@@ -557,7 +613,10 @@ func (a internalCallerAuthorizer) verifiedCoordinationChild(
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load child task")
 	}
-	parentName, parentUID, hasParent, valid := coordinationParentIdentity(child)
+	parentName, parentUID, hasParent, valid, err := a.verifiedCoordinationParentIdentity(ctx, child)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to verify child task")
+	}
 	if child.UID == "" || !child.DeletionTimestamp.IsZero() || !valid || !hasParent ||
 		parentName != callerTask.Name || parentUID != callerTask.UID {
 		return nil, fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")

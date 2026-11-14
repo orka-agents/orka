@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { http, HttpResponse, delay } from 'msw'
-import { render, screen, waitFor } from '@/test/test-utils'
+import { act, render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
@@ -309,5 +309,48 @@ describe('TaskApprovalPanel', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
     expect(screen.getByText(/can no longer be decided because the task has completed/i)).toBeInTheDocument()
+  })
+
+  it('keeps the sign-off a parked turn waits on decidable after the turn ended', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () =>
+        HttpResponse.json(listResponse([approval({ id: 'parked-1', action: 'park_until' }), approval({ id: 'other' })])),
+      ),
+    )
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" parkedApprovalId="parked-1" />)
+    await waitFor(() => expect(screen.getAllByTestId('approval-card')).toHaveLength(2))
+    // Only the parked sign-off is actionable; the unrelated approval stays read-only.
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Decline' })).toHaveLength(1)
+    expect(screen.getAllByText(/can no longer be decided because the task has completed/i)).toHaveLength(1)
+  })
+
+  it.each([
+    ['an empty first response', () => HttpResponse.json(listResponse([]))],
+    ['a failed first read', () => HttpResponse.json({ error: { code: 500, message: 'store unavailable' } }, { status: 500 })],
+  ])('keeps polling for a parked sign-off after %s', async (_name, firstResponse) => {
+    let requests = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => {
+        requests++
+        return requests === 1
+          ? firstResponse()
+          : HttpResponse.json(listResponse([approval({ id: 'parked-1', action: 'park_until' })]))
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" parkedApprovalId="parked-1" />)
+      await waitFor(() => expect(requests).toBe(1))
+      expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_500)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    // The turn has ended, so only the poll can bring the sign-off controls.
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(requests).toBeGreaterThan(1)
   })
 })

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -139,12 +140,12 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if pool.Spec.PrecreateActors {
 		if _, _, err := executor.ConvergeSubstrateActors(ctx, prefix, int(pool.Spec.TargetActors), template); err != nil {
 			logger.Error(err, "failed to converge substrate pool actors", "pool", pool.Name)
-			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+			return r.updateSubstrateActorPoolExecutorError(ctx, pool, err)
 		}
 	} else {
 		if _, err := executor.PruneSubstrateActors(ctx, prefix, int(pool.Spec.TargetActors)); err != nil {
 			logger.Error(err, "failed to prune substrate pool actors", "pool", pool.Name)
-			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+			return r.updateSubstrateActorPoolExecutorError(ctx, pool, err)
 		}
 	}
 	workerPool := workspace.TemplateRef{}
@@ -159,7 +160,7 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	density, err := executor.SubstratePoolTelemetry(ctx, prefix, template, workerPool)
 	if err != nil {
-		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+		return r.updateSubstrateActorPoolExecutorError(ctx, pool, err)
 	}
 	return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseReady, density, "pool reconciled")
 }
@@ -229,6 +230,17 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 	density workspace.Density,
 	message string,
 ) (ctrl.Result, error) {
+	return r.writeSubstrateActorPoolStatus(ctx, pool, phase, density, message, false)
+}
+
+func (r *SubstrateActorPoolReconciler) writeSubstrateActorPoolStatus(
+	ctx context.Context,
+	pool *corev1alpha1.SubstrateActorPool,
+	phase corev1alpha1.SubstrateActorPoolPhase,
+	density workspace.Density,
+	message string,
+	waitingForCapacity bool,
+) (ctrl.Result, error) {
 	now := metav1.Now()
 	pool.Status.Phase = phase
 	pool.Status.ObservedGeneration = pool.Generation
@@ -243,20 +255,44 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 		LastTransitionTime: now,
 		ObservedGeneration: pool.Generation,
 	}
-	if phase == corev1alpha1.SubstrateActorPoolPhaseReady {
+	switch {
+	case phase == corev1alpha1.SubstrateActorPoolPhaseReady:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = "PoolReady"
 		condition.Message = "Substrate actor pool is ready"
-	} else {
+	case waitingForCapacity:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = corev1alpha1.TaskConditionWaitingForCapacity
+		condition.Message = pool.Status.Message
+	default:
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = reasonPoolNotReady
 		condition.Message = pool.Status.Message
 	}
+	previous := meta.FindStatusCondition(pool.Status.Conditions, condition.Type)
+	enteringCapacityWait := waitingForCapacity && (previous == nil || previous.Reason != condition.Reason)
 	meta.SetStatusCondition(&pool.Status.Conditions, condition)
 	if err := r.Status().Update(ctx, pool); err != nil {
 		return ctrl.Result{}, err
 	}
+	if enteringCapacityWait {
+		metrics.RecordWaitingForCapacity("substrate_actor_pool", string(workspace.ErrorKindResourceExhausted))
+	}
 	return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
+}
+
+// updateSubstrateActorPoolExecutorError reports an executor failure. Provider
+// capacity exhaustion is a retryable wait, not a pool failure.
+func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolExecutorError(
+	ctx context.Context,
+	pool *corev1alpha1.SubstrateActorPool,
+	err error,
+) (ctrl.Result, error) {
+	if workspace.IsKind(err, workspace.ErrorKindResourceExhausted) {
+		return r.writeSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhasePending, workspace.Density{},
+			"waiting for Substrate capacity: "+err.Error(), true)
+	}
+	return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 }
 
 func sanitizeSubstrateActorPoolMessage(message string) string {

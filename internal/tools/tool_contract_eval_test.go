@@ -48,6 +48,7 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -1585,6 +1586,56 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name: "brokered park_until",
+			limits: []string{
+				"brokered/park_until.kind enum=approval|tasks|timer",
+				"brokered/park_until.reason maxLength=512",
+				"brokered/park_until.tasks maxItems=16",
+			},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) {
+					parked := parkTestTask()
+					child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+						Name: "child", Namespace: defaultNamespace, UID: "uid-child",
+						Labels:      map[string]string{labels.LabelParentTask: parked.Name},
+						Annotations: map[string]string{labels.AnnotationParentTaskUID: string(parked.UID)},
+						OwnerReferences: []metav1.OwnerReference{
+							*metav1.NewControllerRef(parked, corev1alpha1.GroupVersion.WithKind("Task")),
+						},
+					}}
+					fc := newFakeClient(parked, child)
+					toolCtx := parkToolContext(fc, "eval-operation")
+					toolCtx.TaskProvenanceProtected = true
+					tool, _ := evalToolRegistries(fc)["brokered"].Get(ParkUntilToolName)
+					return tool, WithToolContext(context.Background(), toolCtx)
+				}
+				kind := func(value string) string {
+					switch value {
+					case "tasks":
+						return `{"kind":"tasks","reason":"r","tasks":["child"]}`
+					case "timer":
+						return `{"kind":"timer","reason":"r","duration":"10m"}`
+					}
+					return `{"kind":"` + value + `","reason":"r"}`
+				}
+				tooMany := make([]string, 0, 17)
+				for i := range 17 {
+					tooMany = append(tooMany, fmt.Sprintf("%q", fmt.Sprintf("child-%d", i)))
+				}
+				return evalAll(
+					func() (bool, string) {
+						return evalEnumEnforced(call, kind, "kind", "meh", "approval", "tasks", "timer")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(call, `{"kind":"approval","reason":"`+long(512)+`"}`, `{"kind":"approval","reason":"`+long(513)+`"}`, "reason")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(call, kind("tasks"), `{"kind":"tasks","reason":"r","tasks":[`+strings.Join(tooMany, ",")+`]}`, "tasks")
+					},
+				)
+			},
+		},
+		{
 			name:   "brokered run_validation command",
 			limits: []string{"brokered/run_validation.command maxLength=8192", "brokered/run_validation.command minLength=1"},
 			check: func(t *testing.T) (bool, string) {
@@ -2037,6 +2088,12 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 			tool.client = evalWebClient()
 		case *WebSearchTool:
 			tool.client = evalWebClient()
+		case *ParkUntilTool:
+			parked := parkTestTask()
+			parked.Name, parked.UID = parent.Name, parent.UID
+			pc := newFakeClient(parked)
+			tc.Client, tc.PolicyReader = pc, pc
+			tc.ExecutionEvents = storetest.NewFakeExecutionEventStore()
 		case *RunValidationTool:
 			monitor, review := runValidationFixtures()
 			fc := newFakeClient(monitor, review)
@@ -2070,6 +2127,8 @@ func evalArgumentSemanticValues(label, name, localURL string) map[string]any {
 		return map[string]any{"path": filepath.Join(os.Getenv(workerenv.WorkDir), "eval")}
 	case "wait_for_tasks":
 		return map[string]any{"tasks": []any{evalPlaceholder}}
+	case "park_until":
+		return map[string]any{"kind": "timer", "duration": "10m"}
 	case "post_review_comment":
 		return map[string]any{"event": "COMMENT"}
 	case "create_tool":
