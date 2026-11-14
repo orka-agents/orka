@@ -56,6 +56,9 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 			case "escaped-pass":
 				_ = json.NewEncoder(w).Encode(map[string]any{"pass": "opaque\\pass", "expiresAt": expires})
 				return
+			case "slash-escaped-pass":
+				_ = json.NewEncoder(w).Encode(map[string]any{"pass": "opaque/pass", "expiresAt": expires})
+				return
 			case "empty":
 				_ = json.NewEncoder(w).Encode(map[string]any{"pass": "", "expiresAt": expires})
 				return
@@ -77,6 +80,10 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"pass": "ephemeral-pass", "expiresAt": expires})
 		case "/v1/task-tools/lookup":
 			called++
+			if mode == "slash-escaped-pass" {
+				_, _ = w.Write([]byte(`{"answer":"opaque\/pass"}`))
+				return
+			}
 			if mode == "escaped-pass" {
 				_ = json.NewEncoder(w).Encode(map[string]string{"answer": "opaque\\pass"})
 				return
@@ -153,7 +160,7 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 	require.Equal(t, 2, issued, "mismatched operator origin must receive no credential")
 	require.Equal(t, 2, called)
 	r.GatewayService.TaskPassCredentials = map[string]gatewayruntime.TaskPassCredential{gatewayUID: {Endpoint: server.URL, Token: "target-controller-credential"}}
-	for _, failure := range []string{"expired", "overlong", "deadline", "redirect", "relinked", "oversized", "malformed", "empty", "escaped-pass"} {
+	for _, failure := range []string{"expired", "overlong", "deadline", "redirect", "relinked", "oversized", "malformed", "empty", "escaped-pass", "slash-escaped-pass"} {
 		mode = failure
 		_, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
 		require.Error(t, err)
