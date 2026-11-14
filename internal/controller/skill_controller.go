@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"path"
 	"reflect"
 	"sort"
@@ -94,19 +95,24 @@ func (r *SkillReconciler) validateSkill(skill *corev1alpha1.Skill) error {
 	return nil
 }
 
-// computeContentHash computes a SHA-256 hash of all skill content.
+// computeContentHash computes a SHA-256 hash of all skill content. Each field is
+// length-prefixed so that moving bytes between the inline content, a file path
+// and a file's content always changes the hash.
 func (r *SkillReconciler) computeContentHash(skill *corev1alpha1.Skill) string {
 	h := sha256.New()
-	h.Write([]byte(skill.Spec.Content.Inline))
+	writeField := func(s string) {
+		_, _ = fmt.Fprintf(h, "%d:", len(s))
+		_, _ = io.WriteString(h, s)
+	}
+	writeField(skill.Spec.Content.Inline)
 	keys := make([]string, 0, len(skill.Spec.Content.Files))
 	for k := range skill.Spec.Content.Files {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		v := skill.Spec.Content.Files[k]
-		h.Write([]byte(k))
-		h.Write([]byte(v))
+		writeField(k)
+		writeField(skill.Spec.Content.Files[k])
 	}
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
