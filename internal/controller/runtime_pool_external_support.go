@@ -71,6 +71,12 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 				// supervisor never reads the Pod name or namespace; dropping
 				// them keeps headroom under the backend's 32-entry limit.
 				continue
+			case "ORKA_ACP_MODEL_CONTEXT_LIMIT", "ORKA_ACP_MODEL_OUTPUT_LIMIT":
+				// Both readers treat an empty limit as unset, so an empty
+				// entry only spends the backend's environment budget.
+				if variable.Value == "" && variable.ValueFrom == nil {
+					continue
+				}
 			case "ORKA_ACP_LISTEN_ADDRESS":
 				variable = corev1.EnvVar{Name: variable.Name, Value: ":80"}
 			}

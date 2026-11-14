@@ -121,10 +121,14 @@ therefore passes the fewest settings that keep each signal's SDK meaning:
   example separate OTLP/HTTP collectors per signal, supervisor metrics are
   dropped and traces are kept.
 
-A dropped signal never falls back to a generic endpoint. Trace settings that
-exceed three entries on their own, such as an OTLP/HTTP endpoint with an
-insecure or compression setting, or telemetry on a native runtime whose
-workspace can suspend, exceed the limit and the provider rejects the workload.
+A dropped signal never falls back to a generic endpoint. On a native runtime,
+Orka fits telemetry last, into the entries its other settings leave: a runtime
+whose workspace can suspend uses two more, and empty model limits are omitted.
+When traces and metrics do not fit, metrics are dropped; when traces alone do
+not fit, supervisor telemetry is left out rather than publishing a workload the
+provider would reject. The RuntimePool's `TelemetryReady` condition is `True`
+with reason `TelemetryProjected` when every signal fits, and `False` with reason
+`NativeEnvironmentLimit` and the entry counts when a signal was left out.
 Headers, certificate paths,
 resource attributes and content-capture settings are never copied. Adding metrics
 settings changes the supervisor Pod template, so existing RuntimePools roll through

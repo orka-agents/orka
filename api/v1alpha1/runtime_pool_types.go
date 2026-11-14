@@ -86,6 +86,10 @@ const (
 	// roll, node drain, or Spot reclaim) and how the controller is handling it.
 	// It is absent until an eviction is observed.
 	RuntimePoolConditionWorkerEviction = "WorkerEviction"
+	// RuntimePoolConditionTelemetryReady reports whether a native execution-
+	// workspace runtime receives every supervisor telemetry signal the
+	// controller exports. It is set only when telemetry is enabled.
+	RuntimePoolConditionTelemetryReady = "TelemetryReady"
 )
 
 const (
@@ -100,6 +104,13 @@ const (
 	// not be bound into the runtime Pod. Tasks waiting on the pool fail with the
 	// same reason instead of waiting for a rollout that cannot complete.
 	RuntimePoolReasonToolboxUnavailable = "ToolboxUnavailable"
+	// RuntimePoolReasonTelemetryProjected: every exported telemetry signal is
+	// configured on the runtime.
+	RuntimePoolReasonTelemetryProjected = "TelemetryProjected"
+	// RuntimePoolReasonNativeEnvironmentLimit: supervisor metrics, or all
+	// supervisor telemetry, were left out so the runtime fits the native
+	// backend's per-container environment limit.
+	RuntimePoolReasonNativeEnvironmentLimit = "NativeEnvironmentLimit"
 	// RuntimePoolReasonEvictionDraining: admission is closed and the runtime is
 	// draining toward a data-only suspension before the eviction window ends.
 	RuntimePoolReasonEvictionDraining = "EvictionDraining"
