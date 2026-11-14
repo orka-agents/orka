@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Controller internals | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/internals"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Controller internals | Orka"><meta data-rh="true" name="description" content="How Orka&#x27;s controller is laid out in the source tree, and the storage and model-provider internals behind it."><meta data-rh="true" property="og:description" content="How Orka&#x27;s controller is laid out in the source tree, and the storage and model-provider internals behind it."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/internals"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/internals" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/internals" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Controller internals","item":"https://orka-agents.github.io/orka/docs/internals"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.cadd974d.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.6796bc78.js" defer="defer"></script>
 <script src="/orka/assets/js/main.7cf831cb.js" defer="defer"></script>
 </head>
 <body>
@@ -115,7 +115,9 @@ recognized layouts.</p>
 <p>Use <code>&quot;toTask&quot;: &quot;*&quot;</code> to broadcast to all siblings.</p>
 <p><strong>Response:</strong> <code>204 No Content</code></p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="get-messages">Get messages<a href="#get-messages" class="hash-link" aria-label="Direct link to Get messages" title="Direct link to Get messages" translate="no">​</a></h3>
-<p>Workers call this to check for unread messages.</p>
+<p>Workers call this to check for unread messages. It returns the oldest unread messages, ordered
+by ID, up to 500 per call; a longer backlog is read over several calls. With <code>markRead=true</code>
+exactly the returned messages are marked read.</p>
 <p><strong>Endpoint:</strong> <code>GET /internal/v1/messages/{namespace}/{taskName}?parentTask={parentTask}&amp;markRead={true|false}</code></p>
 <p><strong>Query Parameters:</strong></p>
 <ul>
