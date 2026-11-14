@@ -205,6 +205,51 @@ func OperatorTagInUse(tag int) bool {
 	return !ok || len(tagged) > 0
 }
 
+// ReapOperatorTag reaps exited processes of uid that carry the operation's
+// tag group. The supervisor is a child subreaper, so an operation's orphaned
+// descendants are reparented to it; the session-wide reaper runs only on
+// freeze and stop, and until then each such zombie keeps a PID allocated
+// against the session's process limit. Only the operation's processes carry
+// the tag, so the agent is never reaped here, and held operator leaders stay
+// with their owners. Call it only after containment is proven and before the
+// tag is released for reuse.
+func ReapOperatorTag(uid, tag int) {
+	reapOperatorTag("/proc", uid, tag, func(pid int) {
+		var status unix.WaitStatus
+		_, _ = unix.Wait4(pid, &status, unix.WNOHANG, nil)
+	})
+}
+
+func reapOperatorTag(procRoot string, uid, tag int, reap func(pid int)) {
+	if uid <= 0 || tag < OperatorTagFirstGID || tag > OperatorTagLastGID {
+		return
+	}
+	pids, ok := listPIDs(procRoot)
+	if !ok {
+		return
+	}
+	// Held for the whole pass, as in the session-wide reaper, so a leader
+	// cannot start and be registered behind the scan.
+	operatorLeaders.mu.Lock()
+	defer operatorLeaders.mu.Unlock()
+	for pid := range pids {
+		data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+		if err != nil {
+			continue
+		}
+		process := parseProcCredentials(pid, data)
+		if !process.complete || !process.zombie || process.uid != uid || !slices.Contains(process.groups, tag) {
+			continue
+		}
+		if _, held := operatorLeaders.pids[pid]; held {
+			continue
+		}
+		// An unreaped zombie's PID cannot be reused, and no other owner
+		// waits for a reparented descendant, so the PID still names it.
+		reap(pid)
+	}
+}
+
 // KillOperatorTag kills every process of uid carrying the operation's tag
 // group and reports whether termination was proven. Because the tag cannot be
 // dropped and is inherited, this reaches every descendant, including ones that

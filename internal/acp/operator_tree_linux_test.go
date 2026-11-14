@@ -201,6 +201,49 @@ func TestKillOperatorTagProvesContainmentBeforeReapAsRoot(t *testing.T) {
 	}
 }
 
+// Only exited processes of the operation's UID that carry its tag are reaped;
+// the agent's processes, other UIDs, live processes, and held operator
+// leaders are left alone.
+func TestReapOperatorTagReapsOnlyTheOperationsZombies(t *testing.T) {
+	root := t.TempDir()
+	write := func(pid, state, uid, groups string) {
+		dir := filepath.Join(root, pid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		status := "Name:\tsh\nState:\t" + state + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\nGroups:\t" + groups + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tag := OperatorTagFirstGID + 5
+	tagged := strconv.Itoa(tag)
+	write("40", "Z (zombie)", "20001", tagged)                              // orphaned descendant: reaped
+	write("41", "Z (zombie)", "20001", strconv.Itoa(tag+1)+" "+tagged)      // multiple groups: reaped
+	write("42", "Z (zombie)", "20001", "")                                  // the agent's orphan
+	write("43", "Z (zombie)", "20002", tagged)                              // another UID
+	write("44", "S (sleeping)", "20001", tagged)                            // still live
+	write("45", "Z (zombie)", "20001", tagged)                              // a held operator leader
+	write("46", "Z (zombie)", "20001", strconv.Itoa(OperatorTagFirstGID+6)) // another operation
+	held := &operatorLeaderRegistration{pid: 45}
+	operatorLeaders.mu.Lock()
+	operatorLeaders.pids[45] = held
+	operatorLeaders.mu.Unlock()
+	t.Cleanup(func() { releaseOperatorLeader(held) })
+	var reaped []int
+	reapOperatorTag(root, 20001, tag, func(pid int) { reaped = append(reaped, pid) })
+	slices.Sort(reaped)
+	if !slices.Equal(reaped, []int{40, 41}) {
+		t.Fatalf("reaped = %v, want [40 41]", reaped)
+	}
+	reaped = nil
+	reapOperatorTag(root, 0, tag, func(pid int) { reaped = append(reaped, pid) })
+	reapOperatorTag(root, 20001, 100, func(pid int) { reaped = append(reaped, pid) })
+	if len(reaped) != 0 {
+		t.Fatalf("root or an out-of-range tag reaped %v", reaped)
+	}
+}
+
 func TestTaggedProcessesCountZombieLeadersWithLiveThreads(t *testing.T) {
 	root := t.TempDir()
 	write := func(path, state string) {

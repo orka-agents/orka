@@ -32,10 +32,12 @@ const (
 	OperatorAccessCapabilityHeader = "X-Orka-Operator-Access-Capability"
 
 	maxConcurrentOperatorOperations = 4
-	operatorFileTimeout             = 5 * time.Minute
 	operatorOutputDrainGrace        = 2 * time.Second
 	operatorFileStatusLineBytes     = 1024
 )
+
+// operatorFileTimeout bounds one file operation. Replaceable in tests.
+var operatorFileTimeout = 5 * time.Minute
 
 // operatorLeaderExitGrace bounds how long a killed operation's leader may take
 // to exit. A leader stuck in uninterruptible I/O never does; the handler then
@@ -104,7 +106,8 @@ func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProc
 		return false
 	}
 	_, admitted := operatorAccessStates[target.state.descriptor.State]
-	if current != target.state || registration.revoked || !admitted || target.state.creating || target.state.operatorsClosed {
+	if current != target.state || registration.revoked || !admitted || target.state.creating || target.state.operatorsClosed ||
+		s.lifecycle == harnessv2.SupervisorLifecycleTerminating {
 		registration.revoked = true
 		return false
 	}
@@ -330,6 +333,11 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	state := s.sessions[sessionID]
 	if state == nil || state.runtime == nil {
 		return operatorTarget{}, http.StatusNotFound, "runtime session not found"
+	}
+	// Close quiesces each session once; a later return to an admitting
+	// session state must not reopen operator access during teardown.
+	if s.lifecycle == harnessv2.SupervisorLifecycleTerminating {
+		return operatorTarget{}, http.StatusConflict, "runtime supervisor is terminating"
 	}
 	if state.creating {
 		return operatorTarget{}, http.StatusConflict, "runtime session is still being created"
@@ -843,7 +851,15 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operatorFileTimeout)
 	defer cancel()
-	stop := context.AfterFunc(ctx, func() { process.Kill() })
+	stop := context.AfterFunc(ctx, func() {
+		process.Kill()
+		// A helper stuck in uninterruptible I/O keeps its stdout open even
+		// when the kill is unproven; closing the read end unblocks the
+		// handler so finishOperation can fail the runtime closed.
+		if stdout := process.Stdout(); stdout != nil {
+			_ = stdout.Close()
+		}
+	})
 	defer stop()
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(operatorFileTimeout))
@@ -1110,6 +1126,7 @@ var (
 	startOperatorCommand     = acp.StartOperatorCommand
 	signalOperatorGroup      = acp.SignalOperatorCommand
 	killOperatorTagProcesses = acp.KillOperatorTag
+	reapOperatorTagProcesses = acp.ReapOperatorTag
 )
 
 func (p *realOperatorProcess) Signal(name string) error {
@@ -1183,6 +1200,11 @@ func (p *realOperatorProcess) Retire() bool {
 	}
 	proven := p.killLocked()
 	p.retired = true
+	if proven && p.cmd != nil && p.cmd.Process != nil {
+		// Reap the operation's orphaned descendants while the tag still
+		// names only them; the held leader is left to wait.
+		reapOperatorTagProcesses(p.uid, p.tag)
+	}
 	return proven
 }
 

@@ -76,6 +76,33 @@ func TestOperatorKillIsFencedAfterRetire(t *testing.T) {
 	}
 }
 
+// Orphaned descendants of a contained operation are reparented to the
+// subreaping supervisor; retiring the operation reaps them while the tag still
+// names only that operation, and never after an unproven kill.
+func TestOperatorRetireReapsTheTagOnlyAfterProvenContainment(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		process := startRealOperatorTestProcess(t)
+		previousKill, previousReap := killOperatorTagProcesses, reapOperatorTagProcesses
+		killOperatorTagProcesses = func(int, int) bool { return proven }
+		var reaped [][2]int
+		reapOperatorTagProcesses = func(uid, tag int) { reaped = append(reaped, [2]int{uid, tag}) }
+		got := process.Retire()
+		_ = process.Kill()
+		killOperatorTagProcesses, reapOperatorTagProcesses = previousKill, previousReap
+		if got != proven {
+			t.Fatalf("Retire() = %v, want %v", got, proven)
+		}
+		want := 0
+		if proven {
+			want = 1
+		}
+		if len(reaped) != want || (want == 1 && reaped[0] != [2]int{20001, 61020}) {
+			t.Fatalf("proven=%v: reaped %v, want %d reap of uid 20001 tag 61020", proven, reaped, want)
+		}
+		_, _, _ = process.Wait()
+	}
+}
+
 // The session-wide reaper must not take an operator leader: its owner would
 // lose the exit status, and the leader's PID, which is its process group ID,
 // could be reused while group signals are still allowed. The owner therefore

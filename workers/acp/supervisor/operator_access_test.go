@@ -132,6 +132,11 @@ func newOperatorTestServer(t *testing.T, state harnessv2.RuntimeSessionState, st
 	previous := operatorChildIdentity
 	operatorChildIdentity = func(*sessionState) (int, int) { return 20001, 20000 }
 	t.Cleanup(func() { operatorChildIdentity = previous })
+	// Outside Linux no tag can be proven free; the fixture's fake processes
+	// never hold one, and allocateTag still tracks the tags it hands out.
+	previousTagInUse := operatorTagInUse
+	operatorTagInUse = func(int) bool { return false }
+	t.Cleanup(func() { operatorTagInUse = previousTagInUse })
 	httpServer := httptest.NewServer(server.Handler())
 	t.Cleanup(httpServer.Close)
 	return server, httpServer, sessionID
@@ -810,6 +815,94 @@ func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusConflict || len(launches) != 0 {
 		t.Fatalf("a session whose workspace is no longer held = %d (launches %d), want 409 and no helper", response.StatusCode, len(launches))
+	}
+}
+
+// A file helper stuck in uninterruptible I/O keeps its stdout open after an
+// unproven kill. The operation timeout must still unblock the handler so its
+// cleanup fails the runtime closed.
+func TestOperatorFileHelperStuckAfterKillFailsClosed(t *testing.T) {
+	previous := operatorFileTimeout
+	operatorFileTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { operatorFileTimeout = previous })
+	process := newFakeOperatorProcess()
+	process.stuck, process.unkillable = true, true
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	supervisor.operatorState().runtimeExecutable = "/orka-acp-runtime"
+	state := supervisor.sessions[sessionID]
+	state.drainCleanupScheduled = true
+	if err := acp.RecordWorkspaceIdentity(&state.paths); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(state.paths.ReleaseWorkspaceIdentity)
+	path, _ := harnessv2.OperatorFilesPath(sessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+path, nil)
+	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-stuck")
+	// The response may race the expired write deadline; what matters is
+	// that the handler returns and its cleanup runs.
+	if response, err := http.DefaultClient.Do(request); err == nil {
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadGateway {
+			t.Fatalf("stuck helper = %d, want 502", response.StatusCode)
+		}
+	} else if ctx.Err() != nil {
+		t.Fatal("a stuck file helper pinned the handler")
+	}
+	if !process.killed.Load() {
+		t.Fatal("the stuck helper was not killed")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		poisoned := state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && supervisor.poisoned
+		registrations := len(state.operators)
+		supervisor.mu.Unlock()
+		if poisoned {
+			if registrations != 1 {
+				t.Fatalf("the uncontained operation's registration was released: %d", registrations)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a file helper stuck after SIGKILL must fail the runtime closed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Close quiesces each session once. A session that afterwards returns to an
+// admitting state (a workspace delta with no change returns it to Idle) must
+// not reopen operator access while teardown runs.
+func TestOperatorAccessStaysClosedOnceTheSupervisorTerminates(t *testing.T) {
+	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
+	state := supervisor.sessions[sessionID]
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	metadata := harnessv2.MutationMetadata{Fence: fence}
+	// A launch admitted before Close is not revoked when Close skips the
+	// session (for example while its native capture is still running).
+	target, status, _ := supervisor.operatorTargetFor(sessionID, metadata)
+	if status != 0 {
+		t.Fatal("admission failed")
+	}
+	supervisor.mu.Lock()
+	supervisor.lifecycle = harnessv2.SupervisorLifecycleTerminating
+	supervisor.mu.Unlock()
+	if supervisor.bindOperatorProcess(target, newFakeOperatorProcess()) {
+		t.Fatal("a launch admitted before teardown was bound after it")
+	}
+	supervisor.finishOperation(&operatorLease{target: target})
+	if err := supervisor.quiesceOperators(state, 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.mu.Lock()
+	setSessionState(state, harnessv2.RuntimeSessionStateIdle)
+	supervisor.mu.Unlock()
+	if _, status, _ := supervisor.operatorTargetFor(sessionID, metadata); status == 0 {
+		t.Fatal("a terminating supervisor admitted operator access")
 	}
 }
 
