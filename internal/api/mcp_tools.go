@@ -269,10 +269,10 @@ func mcpToolDefinitions() []mcpToolDefinition {
 		},
 		{
 			Name: mcpToolCancelTask, Title: "Cancel an Orka Task",
-			Description: "Stop a Task by deleting it, exactly like DELETE /api/v1/tasks/:id. Its result and artifacts become unavailable.",
+			Description: "Ask Orka to stop a Pending or Running Task, exactly like POST /api/v1/tasks/:id/cancel. The Task ends as Cancelled shortly afterwards and keeps its result and artifacts.",
 			InputSchema: objectSchema([]string{"name"}, map[string]any{"name": mcpTaskNameProperty, "namespace": mcpNamespaceProperty}),
 			Annotations: mutatingToolAnnotations("Cancel an Orka Task", true, true),
-			REST:        []string{"DELETE /api/v1/tasks/:id"},
+			REST:        []string{"POST /api/v1/tasks/:id/cancel"},
 			run:         (*mcpServer).toolCancelTask,
 		},
 		{
@@ -779,10 +779,11 @@ func (s mcpTaskState) summary(includePrompt bool) mcpTaskSummary {
 	}
 	if delivery := task.Status.Delivery; delivery != nil {
 		summary.Delivery = &mcpDeliverySummary{
-			State: string(delivery.State), Outcome: string(delivery.Outcome), Reason: string(delivery.Reason), Branch: delivery.Branch,
+			State: string(delivery.State), Outcome: string(delivery.Outcome), Reason: string(delivery.Reason),
+			Branch: mcpSafeText(delivery.Branch, mcpMaxStatusMessage),
 		}
 		if delivery.PRReceipt != nil {
-			summary.Delivery.PullRequestURL = delivery.PRReceipt.URL
+			summary.Delivery.PullRequestURL = mcpSafeText(delivery.PRReceipt.URL, mcpMaxStatusMessage)
 		}
 	}
 	return summary
@@ -1060,10 +1061,24 @@ func (m *mcpServer) toolCancelTask(call *mcpCall, raw json.RawMessage) (any, err
 	if err := args.validate("name"); err != nil {
 		return nil, err
 	}
-	if _, err := m.rest(call.c, fiber.MethodDelete, mcpTaskPath(args.Name), mcpNamespaceQuery(args.Namespace), nil); err != nil {
+	cancelled, err := m.requestCancellation(call.c, args.Namespace, args.Name, "")
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"name": args.Name, "cancelled": true, "deleted": true}, nil
+	return map[string]any{
+		"name": cancelled.Name, "namespace": cancelled.Namespace, "phase": cancelled.Phase,
+		"requested": cancelled.Requested, "message": mcpSafeText(cancelled.Message, mcpMaxStatusMessage),
+	}, nil
+}
+
+// requestCancellation asks POST /api/v1/tasks/:id/cancel to stop a Task.
+// Unlike deletion it keeps the Task's result and artifacts; the controller
+// ends the Task as Cancelled asynchronously. A non-empty uid fences the
+// request to that Task.
+func (m *mcpServer) requestCancellation(c fiber.Ctx, namespace, name, uid string) (taskCancellation, error) {
+	var cancelled taskCancellation
+	err := m.restJSON(c, fiber.MethodPost, mcpTaskPath(name, "cancel"), mcpNamespaceQuery(namespace), cancelRequest{UID: uid}, &cancelled)
+	return cancelled, err
 }
 
 // --- Approvals ---
@@ -1168,10 +1183,15 @@ func validateMCPApprovalID(id string) error {
 // decideApproval records a decision through the REST decision route, which
 // owns every decision rule: permissions, Task and run binding, first
 // decision wins, and refusal for finished or deleting Tasks.
-func (m *mcpServer) decideApproval(c fiber.Ctx, namespace, task, approvalID, decision, reason string) (approvals.Approval, error) {
+// A non-empty uid fences the decision to that Task.
+func (m *mcpServer) decideApproval(c fiber.Ctx, namespace, task, uid, approvalID, decision, reason string) (approvals.Approval, error) {
 	var decided approvals.Approval
 	path := mcpTaskPath(task, "approvals", url.PathEscape(approvalID), mcpFieldDecision)
-	err := m.restJSON(c, fiber.MethodPost, path, mcpNamespaceQuery(namespace),
+	query := mcpNamespaceQuery(namespace)
+	if uid != "" {
+		query = mcpTaskUIDQuery(namespace, uid)
+	}
+	err := m.restJSON(c, fiber.MethodPost, path, query,
 		ApprovalDecisionRequest{Decision: decision, Reason: reason}, &decided)
 	return decided, err
 }
@@ -1199,7 +1219,7 @@ func (m *mcpServer) toolDecideApproval(call *mcpCall, raw json.RawMessage) (any,
 	if utf8.RuneCountInString(args.Reason) > mcpMaxReasonLength {
 		return nil, mcpArgumentError(fmt.Sprintf("reason must be at most %d characters", mcpMaxReasonLength))
 	}
-	decided, err := m.decideApproval(call.c, args.Namespace, args.Task, args.ApprovalID, args.Decision, args.Reason)
+	decided, err := m.decideApproval(call.c, args.Namespace, args.Task, "", args.ApprovalID, args.Decision, args.Reason)
 	if err != nil {
 		return nil, err
 	}

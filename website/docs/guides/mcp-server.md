@@ -149,7 +149,7 @@ and `--enforce-namespace-isolation` behave exactly as for the REST route.
 | `get_task` | Status, pending approvals, plan progress, delivery and pull request | `GET /api/v1/tasks/:id`; `GET /api/v1/tasks/:id/approvals` while running |
 | `list_tasks` | List Tasks, optionally by label selector | `GET /api/v1/tasks` |
 | `wait_for_task` | Wait up to 50 seconds for a Task to finish or need a decision | `GET /api/v1/tasks/:id`, `GET /api/v1/tasks/:id/approvals` |
-| `cancel_task` | Stop a Task by deleting it | `DELETE /api/v1/tasks/:id` |
+| `cancel_task` | Ask a Pending or Running Task to stop | `POST /api/v1/tasks/:id/cancel` |
 | `list_pending_approvals` | Show a Task's approval requests | `GET /api/v1/tasks/:id/approvals` |
 | `decide_approval` | Record a human's approve or decline decision | `POST /api/v1/tasks/:id/approvals/:approvalID/decision` |
 | `get_task_result` | Read the result text in chunks | `GET /api/v1/tasks/:id/result` |
@@ -163,8 +163,10 @@ continues an existing Orka Session and records the Task's turns in it). Give `ta
 native Agents) to skip the Agent lookup; otherwise the caller also needs `get` on the
 Agent. Omit `name` to generate one starting with `mcp-`.
 
-`cancel_task` deletes the Task, because deletion is the public API's only way to stop
-one. Its result and artifacts become unavailable. Read anything you need first.
+`cancel_task` requests cancellation exactly like `POST /api/v1/tasks/:id/cancel`: the
+controller then ends the Task as `Cancelled`, and its result and artifacts are kept.
+The request returns before that, with the Task's current phase and whether this call
+recorded the request.
 
 ### Approvals need a human
 
@@ -196,11 +198,12 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
   update that failed partway can be retried as sent: an answer matching a decision
   already recorded succeeds, and an update with any answer that contradicts one is
   refused before anything is recorded.
-  `tasks/cancel` deletes the Task.
+  `tasks/cancel` requests cancellation through `POST /api/v1/tasks/:id/cancel`.
 - **2025-11-25 task-augmented calls.** A `tools/call` for `create_task` with
   `params.task` returns `{ "task": { ... } }`. `tasks/get` returns the task,
   `tasks/result` waits up to 50 seconds for the result and otherwise asks you to
-  poll again, and `tasks/cancel` deletes the Task. Answer approvals with
+  poll again, and `tasks/cancel` requests cancellation and returns the task with
+  its current status. Answer approvals with
   `decide_approval`; the server sends no elicitation requests on this path. Only
   `create_task` supports task augmentation: `params.task` on any other tool is
   refused with `-32601` before the tool runs. A task-augmented `create_task` that
@@ -229,8 +232,10 @@ to read the result from, and `get_task_result` returns an error saying the same.
 
 A task ID names the Task's namespace and name and pins its UID. A later Task created
 with the same name is a different MCP task, and the old ID reports "task not found".
-Result reads and cancellation carry the UID to the REST route (`?uid=`), so they never
-return or delete a later Task that reuses the name.
+Cancellation is asynchronous: the task reports its current status until the
+controller ends the Task as `Cancelled`.
+Result reads, approval decisions, and cancellation carry the UID to the REST route, so
+they never read, decide, or cancel a later Task that reuses the name.
 MCP keeps no state of its own: every `tasks/*` call re-reads the Task with your
 credentials, so a controller or API restart changes nothing. A finished task is never
 reported without its output because a result read failed: `tasks/get` and
@@ -248,8 +253,9 @@ signed URL parameters. Redaction is best-effort pattern matching, not a guarante
 Results and artifacts are returned in chunks of at most 256 KiB (32 KiB by default).
 The whole text is redacted before it is split, so a credential that crosses a chunk
 boundary is still removed; `offset` and `nextOffset` refer to the redacted text.
-Binary artifacts are refused; download them through the REST API. Lists return at
-most 50 items per page.
+Binary artifacts are refused; download them through the REST API. `list_agents` and
+`list_tasks` return at most 50 items per page. `list_pending_approvals` and
+`list_task_artifacts` are not paged and return at most 200 entries.
 
 ## Authorization
 

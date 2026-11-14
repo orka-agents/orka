@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 )
 
@@ -514,15 +515,16 @@ func (m *mcpServer) updateTask(call *mcpCall) (any, error) {
 		decisions = append(decisions, decision{id, choice, response.Content.Reason})
 	}
 	for _, d := range decisions {
-		if _, err := m.decideApproval(call.c, ref.Namespace, ref.Name, d.id, d.decision, d.reason); err != nil {
+		if _, err := m.decideApproval(call.c, ref.Namespace, ref.Name, ref.UID, d.id, d.decision, d.reason); err != nil {
 			return nil, mcpTaskRPCError(err)
 		}
 	}
 	return map[string]any{"resultType": "complete"}, nil
 }
 
-// cancelTask deletes the Task through DELETE /api/v1/tasks/:id, the only
-// public cancellation route, fenced to the task ID's UID.
+// cancelTask asks POST /api/v1/tasks/:id/cancel, fenced to the task ID's
+// UID, to stop the Task. Cancellation is asynchronous: the task reports its
+// current status until the controller ends the Task as Cancelled.
 func (m *mcpServer) cancelTask(call *mcpCall) (any, error) {
 	_, ref, err := decodeMCPTaskParams(call.params)
 	if err != nil {
@@ -535,15 +537,21 @@ func (m *mcpServer) cancelTask(call *mcpCall) (any, error) {
 	if mcpTaskTerminal(state.response.Status.Phase) {
 		return nil, newMCPError(mcpCodeInvalidParams, "task has already finished")
 	}
-	if _, err := m.rest(call.c, fiber.MethodDelete, mcpTaskPath(ref.Name), mcpTaskUIDQuery(ref.Namespace, ref.UID), nil); err != nil {
+	cancelled, err := m.requestCancellation(call.c, ref.Namespace, ref.Name, ref.UID)
+	if err != nil {
 		return nil, mcpTaskRPCError(err)
 	}
 	if call.tasksExtension {
 		return map[string]any{"resultType": "complete"}, nil
 	}
 	fields := state.coreTaskFields()
-	fields["status"] = mcpStatusCancelled
-	fields["statusMessage"] = "cancelled by deleting the Task"
+	if corev1alpha1.TaskPhase(cancelled.Phase) == corev1alpha1.TaskPhaseCancelled {
+		fields["status"] = mcpStatusCancelled
+	}
+	fields["statusMessage"] = "cancellation requested"
+	if message := mcpSafeText(cancelled.Message, mcpMaxStatusMessage); message != "" {
+		fields["statusMessage"] = "cancellation requested: " + message
+	}
 	fields["lastUpdatedAt"] = mcpTimeValue(time.Now())
 	return fields, nil
 }

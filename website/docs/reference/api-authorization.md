@@ -347,7 +347,7 @@ any effect and is returned as a tool error carrying the REST status.
 | `create_task` | `POST /api/v1/tasks`; `GET /api/v1/agents/:name` when `taskType` is omitted | `create` `tasks` plus its additional checks; `get` on the Agent when looked up |
 | `get_task`, `wait_for_task` | `GET /api/v1/tasks/:id`; `GET /api/v1/tasks/:id/approvals` while the Task runs | `get` `tasks`, named; Gateway read |
 | `list_tasks` | `GET /api/v1/tasks` | `list` `tasks`; Gateway read |
-| `cancel_task` | `DELETE /api/v1/tasks/:id` | `delete` `tasks`, named; Gateway operate |
+| `cancel_task` | `POST /api/v1/tasks/:id/cancel` | `update` `tasks/cancel`, named; Gateway operate |
 | `list_pending_approvals` | `GET /api/v1/tasks/:id/approvals` | `get` `tasks`, named; Gateway read |
 | `decide_approval` | `POST /api/v1/tasks/:id/approvals/:approvalID/decision` | `update` `tasks/approvals` and `patch` `tasks`, named; Gateway operate |
 | `get_task_result` | `GET /api/v1/tasks/:id/result` | `get` `tasks`, named; Gateway read |
@@ -356,7 +356,7 @@ any effect and is returned as a tool error carrying the REST status.
 
 MCP Tasks methods use the same routes: `tasks/get` and `tasks/result` read the Task
 and its approvals, `tasks/update` records decisions through the decision route, and
-`tasks/cancel` uses `DELETE /api/v1/tasks/:id`. Transaction-token callers need the
+`tasks/cancel` uses `POST /api/v1/tasks/:id/cancel`. Transaction-token callers need the
 scopes those routes require, such as `orka:tasks:create` for `create_task`.
 
 ## Grant access

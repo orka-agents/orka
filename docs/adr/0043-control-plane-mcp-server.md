@@ -49,8 +49,10 @@ an `input_required` state when a human must answer.
 - Both the `io.modelcontextprotocol/tasks` extension (with approvals offered as
   form elicitations and answered through `tasks/update`) and 2025-11-25
   task-augmented `tools/call` are served from the same mapping.
-- Cancellation is `DELETE /api/v1/tasks/:id`, the only public way to stop a Task.
-  No new cancellation route is added.
+- Cancellation is `POST /api/v1/tasks/:id/cancel`, which keeps the Task's output
+  and needs `update` on `tasks/cancel` rather than `delete` on `tasks`. It is
+  asynchronous: the controller ends the Task as `Cancelled`. No new cancellation
+  route is added.
 - Tool results are projections, not raw objects: they omit environment values,
   Secret references, transaction metadata, and runtime identifiers. Text fields,
   results, and artifacts pass through `redact.SensitiveText`; results and
@@ -74,6 +76,7 @@ an `input_required` state when a human must answer.
   the person instead, but Orka cannot tell a model's call from a person's. Teams
   that need a hard separation should give IDE agents a token without
   `tasks/approvals` update.
-- Cancelling deletes the Task, so its result and artifacts disappear with it.
+- Cancelling does not delete the Task, so its result and artifacts stay readable;
+  a client that wants them gone deletes the Task through the REST API.
 - The endpoint does not implement MCP OAuth discovery or `tasks/list`; clients
   configure a bearer or transaction-token header, and use `list_tasks`.

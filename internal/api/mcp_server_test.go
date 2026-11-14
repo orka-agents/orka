@@ -35,6 +35,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -362,7 +363,7 @@ var mcpToolRouteCases = []mcpToolRouteCase{
 	{mcpToolGetTask, map[string]any{"name": "protected"}, "GET /api/v1/tasks/:id"},
 	{mcpToolListTasks, map[string]any{}, "GET /api/v1/tasks"},
 	{mcpToolWaitForTask, map[string]any{"name": "protected", "timeoutSeconds": 1}, "GET /api/v1/tasks/:id"},
-	{mcpToolCancelTask, map[string]any{"name": "protected"}, "DELETE /api/v1/tasks/:id"},
+	{mcpToolCancelTask, map[string]any{"name": "protected"}, "POST /api/v1/tasks/:id/cancel"},
 	{mcpToolListPendingApprovals, map[string]any{"task": "protected"}, "GET /api/v1/tasks/:id/approvals"},
 	{mcpToolDecideApproval, map[string]any{"task": "protected", "approvalId": "protected", "decision": "approve"}, "POST /api/v1/tasks/:id/approvals/:approvalID/decision"},
 	{mcpToolGetTaskResult, map[string]any{"name": "protected"}, "GET /api/v1/tasks/:id/result"},
@@ -441,7 +442,7 @@ var mcpToolRESTRequests = map[string]struct{ method, path, body string }{
 	mcpToolGetTask:              {http.MethodGet, "/api/v1/tasks/protected", ""},
 	mcpToolListTasks:            {http.MethodGet, "/api/v1/tasks?limit=20", ""},
 	mcpToolWaitForTask:          {http.MethodGet, "/api/v1/tasks/protected", ""},
-	mcpToolCancelTask:           {http.MethodDelete, "/api/v1/tasks/protected", ""},
+	mcpToolCancelTask:           {http.MethodPost, "/api/v1/tasks/protected/cancel", `{"uid":""}`},
 	mcpToolListPendingApprovals: {http.MethodGet, "/api/v1/tasks/protected/approvals", ""},
 	mcpToolDecideApproval:       {http.MethodPost, "/api/v1/tasks/protected/approvals/protected/decision", `{"decision":"approve"}`},
 	mcpToolGetTaskResult:        {http.MethodGet, "/api/v1/tasks/protected/result", ""},
@@ -521,6 +522,7 @@ func TestMCPToolsEnforceContextTokenScopes(t *testing.T) {
 	cfg.ContextTokens = testContextTokenConfig(t, provider, "")
 	cfg.ContextTokenAuthorization = authz
 	f.server = NewServer(f.kube, nil, cfg)
+	createMCPTestTask(t, f, "cancellable", corev1alpha1.TaskPhaseRunning)
 
 	call := func(t *testing.T, scope, tool string, args map[string]any) mcpTestToolResult {
 		t.Helper()
@@ -543,7 +545,7 @@ func TestMCPToolsEnforceContextTokenScopes(t *testing.T) {
 		{mcpToolListTasks, map[string]any{}, ContextTokenScopeTaskList, ContextTokenScopeTaskGet},
 		{mcpToolGetTask, map[string]any{"name": "protected"}, ContextTokenScopeTaskGet, ContextTokenScopeTaskList},
 		{mcpToolListAgents, map[string]any{}, ContextTokenScopeAgentsRead, ContextTokenScopeTaskList},
-		{mcpToolCancelTask, map[string]any{"name": "protected"}, ContextTokenScopeTaskDelete, ContextTokenScopeTaskGet},
+		{mcpToolCancelTask, map[string]any{"name": "cancellable"}, defaultTaskUpdateScope, ContextTokenScopeTaskDelete},
 		{mcpToolCreateTask, map[string]any{"agent": "protected", "prompt": "hi", "taskType": "agent"}, "", ContextTokenScopeTaskGet},
 		{mcpToolDecideApproval, map[string]any{"task": "protected", "approvalId": "a", "decision": "approve"}, "", ContextTokenScopeTaskGet},
 	} {
@@ -851,10 +853,14 @@ func TestMCPCoreTaskAugmentedCreateTask(t *testing.T) {
 
 	response = f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": taskID})
 	require.Nil(t, response.Error, response.body)
+	fields = nil
 	require.NoError(t, json.Unmarshal(response.Result, &fields))
-	require.Equal(t, mcpStatusCancelled, fields["status"])
-	err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "core"}, &corev1alpha1.Task{})
-	require.Error(t, err, "cancellation deletes the Task through DELETE /api/v1/tasks/:id")
+	require.Equal(t, mcpStatusInputRequired, fields["status"], "cancellation is asynchronous: the task keeps its status until the controller ends it")
+	require.Contains(t, fields["statusMessage"], "cancellation requested")
+	cancelled := &corev1alpha1.Task{}
+	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "core"}, cancelled),
+		"cancellation keeps the Task and its output")
+	require.Contains(t, cancelled.Annotations, labels.AnnotationCancelRequested)
 
 	// tasks/result returns the tool result of a finished Task.
 	createMCPTestTask(t, f, "failed", corev1alpha1.TaskPhaseFailed, func(task *corev1alpha1.Task) { task.Status.Message = "boom" })
@@ -1195,8 +1201,12 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	mcp := f.server.mcpServer
 	next := mcp.handler
 	var replays []string
+	var cancelBody string
 	mcp.handler = func(ctx *fasthttp.RequestCtx) {
 		replays = append(replays, string(ctx.Method())+" "+string(ctx.RequestURI()))
+		if strings.HasSuffix(string(ctx.Path()), "/cancel") {
+			cancelBody = string(ctx.PostBody())
+		}
 		next(ctx)
 	}
 
@@ -1212,10 +1222,9 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	createMCPTestTask(t, f, "running", corev1alpha1.TaskPhaseRunning)
 	response = f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": encodeMCPTaskID("default", "running", "uid-running")})
 	require.Nil(t, response.Error, response.body)
-	require.Contains(t, replays, "DELETE /api/v1/tasks/running?namespace=default&uid=uid-running")
-	require.Len(t, preconditions, 1)
-	require.NotNil(t, preconditions[0])
-	require.Equal(t, types.UID("uid-running"), *preconditions[0].UID, "the Delete itself is UID-preconditioned")
+	require.Contains(t, replays, "POST /api/v1/tasks/running/cancel?namespace=default")
+	require.Equal(t, `{"reason":"","uid":"uid-running"}`, cancelBody, "the cancel request carries the task ID's UID")
+	require.Empty(t, preconditions, "cancellation never deletes the Task")
 
 	// REST enforcement: a mismatched uid is "task not found" and changes nothing.
 	status, body := f.request(t, http.MethodGet, "/api/v1/tasks/reused/result?uid=uid-original", "")
@@ -1227,7 +1236,61 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	status, body = f.request(t, http.MethodDelete, "/api/v1/tasks/kept?uid=uid-original", "")
 	require.Equal(t, http.StatusNotFound, status, body)
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "kept"}, &corev1alpha1.Task{}))
-	require.Len(t, preconditions, 1, "a mismatched uid never reaches Delete")
+	require.Empty(t, preconditions, "a mismatched uid never reaches Delete")
+	status, body = f.request(t, http.MethodDelete, "/api/v1/tasks/kept?uid=uid-kept", "")
+	require.Equal(t, http.StatusNoContent, status, body)
+	require.Len(t, preconditions, 1)
+	require.NotNil(t, preconditions[0])
+	require.Equal(t, types.UID("uid-kept"), *preconditions[0].UID, "the Delete itself is UID-preconditioned")
+}
+
+// tasks/update answers the Task its task ID names: the decision replay
+// carries the UID, and the REST decision route refuses a Task that reused the
+// name and the approval ID since the MCP layer resolved it.
+func TestMCPTaskUpdateDecisionsAreUIDFenced(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	mcp := f.server.mcpServer
+	next := mcp.handler
+	var replays []string
+	mcp.handler = func(ctx *fasthttp.RequestCtx) {
+		replays = append(replays, string(ctx.Method())+" "+string(ctx.RequestURI()))
+		next(ctx)
+	}
+	createMCPTestTask(t, f, "fenced", corev1alpha1.TaskPhaseRunning)
+	appendMCPTestApproval(t, f, "fenced", "same")
+
+	status, body := f.request(t, http.MethodPost, "/api/v1/tasks/fenced/approvals/same/decision?uid=uid-original", `{"decision":"approve"}`)
+	require.Equal(t, http.StatusNotFound, status, body)
+	listed := f.mcpTool(t, mcpToolListPendingApprovals, map[string]any{"task": "fenced"})
+	require.Len(t, listed.StructuredContent["approvals"], 1, "a mismatched uid records no decision")
+
+	response := f.mcpRPC(t, "tasks/update", map[string]any{
+		"taskId": encodeMCPTaskID("default", "fenced", "uid-fenced"), "_meta": extensionMeta(),
+		"inputResponses": map[string]any{"same": map[string]any{"action": "accept", "content": map[string]any{"decision": "approve"}}},
+	})
+	require.Nil(t, response.Error, response.body)
+	require.Contains(t, replays, "POST /api/v1/tasks/fenced/approvals/same/decision?namespace=default&uid=uid-fenced")
+}
+
+// Delivery branch names and pull request URLs pass through the same
+// redaction as every other text field.
+func TestMCPTaskDeliveryIsRedacted(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "delivered", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+			Branch:    "fix/token=supersecretvalue123",
+			PRReceipt: &corev1alpha1.TaskPullRequestReceipt{ID: "1", URL: "https://user:hunter2hunter2@example.com/pr/1"},
+		}
+	})
+	task := f.mcpTool(t, mcpToolGetTask, map[string]any{"name": "delivered"})
+	require.False(t, task.IsError, task.Content)
+	delivery := task.StructuredContent["delivery"].(map[string]any)
+	require.NotContains(t, delivery["branch"], "supersecretvalue123")
+	require.NotContains(t, delivery["pullRequestURL"], "hunter2hunter2")
+	require.NotContains(t, task.Content[0].Text, "supersecretvalue123")
+	require.NotContains(t, task.Content[0].Text, "hunter2hunter2")
 }
 
 // A same-name replacement can publish its result before the cache sees it, so
@@ -1430,10 +1493,16 @@ func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
 	require.False(t, decided.IsError, decided.Content)
 	cancelled := f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": taskID})
 	require.Nil(t, cancelled.Error, cancelled.body)
+	// The controller then ends the Task as Cancelled.
+	parked := &corev1alpha1.Task{}
+	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "parked"}, parked))
+	require.Contains(t, parked.Annotations, labels.AnnotationCancelRequested)
+	parked.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	require.NoError(t, f.kube.Update(t.Context(), parked))
 
 	select {
 	case response := <-done:
-		require.NotNil(t, response.Error, "the cancelled Task ends the wait: %s", response.body)
+		require.Nil(t, response.Error, "the cancelled Task ends the wait with its result: %s", response.body)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the wait did not end after its Task was cancelled")
 	}
@@ -1633,7 +1702,7 @@ func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 		h[mcpNameHeader] = "=?base64?" + base64.StdEncoding.EncodeToString([]byte(taskID)) + "?="
 	}
 
-	// tasks/cancel last: it deletes the Task the others read.
+	// tasks/cancel last: it asks the Task the others read to stop.
 	for _, method := range []string{"tasks/get", "tasks/update", "tasks/cancel"} {
 		t.Run(method, func(t *testing.T) {
 			for name, edit := range map[string]func(map[string]string){"missing": drop, "different": differ} {
@@ -1671,8 +1740,9 @@ func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 			}
 		})
 	}
-	err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "routed"}, &corev1alpha1.Task{})
-	require.Error(t, err, "the conforming tasks/cancel reached the Task")
+	routed := &corev1alpha1.Task{}
+	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "routed"}, routed))
+	require.Contains(t, routed.Annotations, labels.AnnotationCancelRequested, "the conforming tasks/cancel reached the Task")
 }
 
 // Deciding an approval moves the task from input_required to working, so
@@ -1825,8 +1895,11 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
 	createMCPTestTask(t, f, "kept", corev1alpha1.TaskPhaseRunning)
-	exists := func() bool {
-		return f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "kept"}, &corev1alpha1.Task{}) == nil
+	untouched := func() bool {
+		kept := &corev1alpha1.Task{}
+		require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "kept"}, kept))
+		_, requested := kept.Annotations[labels.AnnotationCancelRequested]
+		return !requested
 	}
 
 	for _, tool := range mcpToolDefinitions() {
@@ -1842,7 +1915,7 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 		require.NotNil(t, response.Error, "%s: %s", tool.Name, response.body)
 		require.Equal(t, mcpCodeMethodNotFound, response.Error.Code, "%s: %s", tool.Name, response.body)
 	}
-	require.True(t, exists(), "cancel_task was refused before it deleted the Task")
+	require.True(t, untouched(), "cancel_task was refused before it asked the Task to stop")
 
 	// A legacy request is held to the 2025-11-25 task shape.
 	response := f.mcpRPC(t, "tools/call", map[string]any{
@@ -1850,7 +1923,7 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	})
 	require.NotNil(t, response.Error, response.body)
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
-	require.True(t, exists())
+	require.True(t, untouched())
 
 	// The sessionless revisions define no params.task: it is an unknown
 	// field, ignored like any other without being held to the 2025-11-25
@@ -1861,7 +1934,7 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, response.status, response.body)
 	require.Nil(t, response.Error, response.body)
-	require.False(t, exists())
+	require.False(t, untouched())
 }
 
 // A bounded wait ends at its deadline even when a read it started is slow:
