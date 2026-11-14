@@ -803,6 +803,22 @@ func TestContinuationDeadlineDoesNotDriftWithCreationTime(t *testing.T) {
 	}
 }
 
+func TestContinuationKeepsItsChatSessionIncarnation(t *testing.T) {
+	parked := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	if parked.Labels == nil {
+		parked.Labels = map[string]string{}
+	}
+	parked.Labels[labels.LabelChatSession] = "chat"
+	parked.Labels[labels.LabelChatSessionNamespace] = "chat-home"
+	parked.Labels[labels.LabelChatSessionEpoch] = "1700000000000000000"
+	continuation := buildTaskContinuation(parked, taskwait.ContinuationTaskName(parked), time.Hour, taskWaitTestNow.Add(time.Hour))
+	for _, key := range []string{labels.LabelChatSession, labels.LabelChatSessionNamespace, labels.LabelChatSessionEpoch} {
+		if got, want := continuation.Labels[key], parked.Labels[key]; got != want {
+			t.Fatalf("continuation label %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestHistoryLimitsPruneAContinuationChainAsOneRun(t *testing.T) {
 	scheduled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: taskWaitTestNamespace, UID: "uid-nightly"},
 		Spec: corev1alpha1.TaskSpec{Schedule: "@daily", SuccessfulRunsHistoryLimit: new(int32(1)), FailedRunsHistoryLimit: new(int32(0))}}

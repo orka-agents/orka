@@ -799,6 +799,9 @@ var (
 	taskContinuationInheritedLabels = []string{
 		labels.LabelAgentName, labels.LabelAgentUID, labels.LabelTaskType, labels.LabelParentTask,
 		labels.LabelCoordinator, labels.LabelDelegatedAgent, labels.LabelCreatedBy, labels.LabelChatSession,
+		// The chat's namespace and incarnation travel with its name, so a
+		// continuation stays the turn of the exact chat that created it.
+		labels.LabelChatSessionNamespace, labels.LabelChatSessionEpoch,
 		labels.LabelScheduledRun, labels.LabelPurpose, labels.LabelManaged,
 	}
 	taskContinuationInheritedAnnotations = []string{
