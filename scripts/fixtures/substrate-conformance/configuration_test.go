@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/orka-agents/orka/internal/workspace"
 	"github.com/stretchr/testify/require"
@@ -22,7 +23,7 @@ func TestNativeConformanceTemplatesUsePinnedProtocol(t *testing.T) {
 	}
 	script, err := filepath.Abs("../../agent-substrate-e2e.sh")
 	require.NoError(t, err)
-	for _, name := range []string{"orka-direct", "orka-mcp", "orka-acp-infra"} {
+	for _, name := range []string{"orka-direct", "orka-mcp"} {
 		t.Run(name, func(t *testing.T) {
 			image := "registry.example.test/orka/conformance@sha256:" + strings.Repeat("a", 64)
 			command := exec.CommandContext(t.Context(), "bash", "-c",
@@ -43,6 +44,9 @@ func TestNativeConformanceTemplatesUsePinnedProtocol(t *testing.T) {
 			require.Positive(t, template.GetResources().GetLimits().GetCpuMillicores())
 			require.Positive(t, template.GetResources().GetLimits().GetMemoryBytes())
 			require.Equal(t, int32(80), template.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPort())
+			if name == conformanceTemplate {
+				requireDirectWorkspaceTemplate(t, template)
+			}
 		})
 	}
 }
@@ -63,4 +67,30 @@ func TestDirectConformanceEgressAllowsOnlyTheProviderProxyProbe(t *testing.T) {
 	port, err := strconv.ParseInt(probe.Port(), 10, 32)
 	require.NoError(t, err)
 	require.Equal(t, []int32{int32(port)}, rule.GetPorts().GetNumbers())
+}
+
+// The direct Actor runs the workspace agent behind the sealed bootstrap: it
+// needs the bootstrap public key, a DurableDir workspace, and the native
+// identity projection the agent binds its credential to.
+func requireDirectWorkspaceTemplate(t *testing.T, template *ateapipb.ActorTemplate) {
+	t.Helper()
+	container := template.GetContainers()[0]
+	env := map[string]string{}
+	for _, variable := range container.GetEnv() {
+		env[variable.GetName()] = variable.GetValue()
+	}
+	require.Equal(t, "public-test-key", env[harnessv2.WorkspaceBootstrapPublicKeyEnv])
+	mounts := map[string]string{}
+	for _, mount := range container.GetVolumeMounts() {
+		mounts[mount.GetName()] = mount.GetMountPath()
+	}
+	require.Equal(t, harnessv2.SubstrateIdentityDirectory, mounts["identity"])
+	require.Equal(t, "/workspace", mounts["workspace"])
+	volumes := map[string]*ateapipb.Volume{}
+	for _, volume := range template.GetVolumes() {
+		volumes[volume.GetName()] = volume
+	}
+	require.NotNil(t, volumes["workspace"].GetDurableDir(), "checkpointed data must live in a DurableDir")
+	require.Len(t, volumes["identity"].GetSystemInfo().GetDataSources(), 1)
+	require.Len(t, volumes["identity"].GetSystemInfo().GetDataSources()[0].GetActorMetadata().GetItems(), 3)
 }

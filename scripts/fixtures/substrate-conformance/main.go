@@ -78,7 +78,7 @@ func run() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
-	if report := workspace.DiagnoseSubstrate(ctx, cfg, "orka-acp-infra"); !report.Ready {
+	if report := workspace.DiagnoseSubstrate(ctx, cfg, conformanceTemplate); !report.Ready {
 		return fmt.Errorf("native diagnostics failed: %+v", report.Checks)
 	}
 	executor, err := workspace.NewSubstrateExecutor(cfg)

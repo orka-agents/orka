@@ -257,11 +257,11 @@ demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
 .PHONY: demo-substrate-up
-demo-substrate-up: ## Bootstrap a dedicated Substrate MCP Tools conformance cluster (no ACP provider)
+demo-substrate-up: ## Bootstrap a dedicated Substrate conformance cluster: direct exec, checkpoints, MCP Tools (no ACP provider)
 	hack/demos/cluster/install-substrate.sh
 
 .PHONY: demo-substrate-down
-demo-substrate-down: ## Tear down the Substrate MCP Tools conformance cluster
+demo-substrate-down: ## Tear down the Substrate conformance cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
