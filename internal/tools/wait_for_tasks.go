@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -71,6 +73,11 @@ type TaskResultInfo struct {
 	ExecutionOutcome *corev1alpha1.TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
 	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus     `json:"workspaceStatus,omitempty"`
 	Delivery         *corev1alpha1.TaskDeliveryStatus           `json:"delivery,omitempty"`
+	// ContinuationTask names the newest Task of the child's continuation
+	// chain when the child parked its turn; the other fields describe it.
+	ContinuationTask string `json:"continuationTask,omitempty"`
+	// WaitState is the parked-turn state of the reported Task, if any.
+	WaitState string `json:"waitState,omitempty"`
 }
 
 // FailureDetails provides structured information about a failed task
@@ -95,6 +102,9 @@ func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 // waitForTasksDeadlineGrace leaves time to assemble and return the result
 // before a caller's context deadline expires.
 const waitForTasksDeadlineGrace = 2 * time.Second
+
+// waitForTasksPollInterval is how often wait_for_tasks re-reads its children.
+var waitForTasksPollInterval = 5 * time.Second
 
 // Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
@@ -192,7 +202,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	deadline := time.Now().Add(timeout)
-	pollInterval := 5 * time.Second
+	pollInterval := waitForTasksPollInterval
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -205,6 +215,15 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	allTerminal := false
+	// A chain that cannot be followed is final only once an authoritative
+	// read agrees: k8sClient may be an informer cache, and two cache misses
+	// do not prove a continuation is gone. Without an authoritative reader, a
+	// missing continuation is final when a second poll confirms it.
+	var authoritative client.Reader
+	if toolCtx != nil {
+		authoritative = toolCtx.PolicyReader
+	}
+	missingContinuation := make(map[string]bool, len(waitArgs.Tasks))
 	for {
 		allTerminal = true
 		for _, taskName := range waitArgs.Tasks {
@@ -219,6 +238,37 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if err := validateBrokeredWaitTarget(ctx, toolCtx, parent, &task); err != nil {
 				return "", err
 			}
+			// A child that parked its turn continues in a controller-created
+			// continuation Task linked from its own status. Report the newest
+			// Task of that chain and treat the child as finished only when
+			// that Task is terminal and holds no active wait.
+			tail, chainErr := taskwait.ResolveTail(ctx, t.k8sClient, &task)
+			verified := false
+			if chainErr != nil && authoritative != nil && waitChainUnfollowable(chainErr) {
+				tail, verified, chainErr = resolveWaitTailAuthoritatively(ctx, authoritative, &task)
+			}
+			if chainErr != nil {
+				missing := apierrors.IsNotFound(chainErr)
+				// An unverified re-read never returns an unfollowable error.
+				confirmed := waitChainUnfollowable(chainErr) && (!missing || verified || missingContinuation[taskName])
+				missingContinuation[taskName] = missing
+				reportBrokenWaitChain(results[taskName], &task, chainErr, confirmed)
+				if !confirmed {
+					allTerminal = false
+				}
+				continue
+			}
+			missingContinuation[taskName] = false
+			// Results persist across polls; describe only the Task reported now.
+			results[taskName].ContinuationTask, results[taskName].WaitState = "", ""
+			if tail.Name != task.Name {
+				results[taskName].ContinuationTask = tail.Name
+			}
+			if tail.Status.Wait != nil {
+				results[taskName].WaitState = string(tail.Status.Wait.State)
+			}
+			resultTaskName := tail.Name
+			task = *tail
 
 			phase := task.Status.Phase
 
@@ -239,7 +289,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			results[taskName].WorkspaceStatus = task.Status.ExecutionWorkspace
 			results[taskName].Delivery = task.Status.Delivery
 
-			if !phase.IsTerminal() {
+			if !phase.IsTerminal() || taskwait.Active(task.Status.Wait) {
 				allTerminal = false
 				continue
 			}
@@ -262,7 +312,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// provide ResultStore through ToolContext; worker calls fall back to the
 			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
+				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, resultTaskName)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
@@ -340,6 +390,55 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return string(data), nil
 }
 
+// waitChainUnfollowable reports an error that, once confirmed, means the chain
+// has no Task left to follow: a missing continuation or a broken link.
+func waitChainUnfollowable(err error) bool {
+	return apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken)
+}
+
+// resolveWaitTailAuthoritatively follows task's chain again from reader, which
+// bypasses the informer cache. verified is true when the chain was followed, or
+// failed, from the same Task incarnation the caller authorized; only then does
+// the returned error describe the chain.
+func resolveWaitTailAuthoritatively(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) (tail *corev1alpha1.Task, verified bool, err error) {
+	current := &corev1alpha1.Task{}
+	if getErr := reader.Get(ctx, client.ObjectKeyFromObject(task), current); getErr != nil {
+		// Not wrapped: a failed read of the Task itself says nothing about
+		// its continuation.
+		return nil, false, fmt.Errorf("re-read task %s/%s: %v", task.Namespace, task.Name, getErr)
+	}
+	if current.UID != task.UID {
+		return nil, false, fmt.Errorf("task %s/%s was replaced while its continuation chain was resolved", task.Namespace, task.Name)
+	}
+	tail, err = taskwait.ResolveTail(ctx, reader, current)
+	if err != nil {
+		return nil, true, err
+	}
+	return tail, true, nil
+}
+
+// reportBrokenWaitChain describes a child whose continuation chain cannot be
+// followed. A confirmed break is final: the parked turn's own success is not
+// the child's outcome, and no later Task of the chain can be found.
+func reportBrokenWaitChain(result *TaskResultInfo, task *corev1alpha1.Task, chainErr error, confirmed bool) {
+	result.Phase = taskPhaseErrorString
+	if !confirmed {
+		result.Result = fmt.Sprintf("error: %v", chainErr)
+		return
+	}
+	result.ContinuationTask, result.WaitState = "", ""
+	if wait := task.Status.Wait; wait != nil {
+		result.ContinuationTask = wait.ContinuationTaskName
+		result.WaitState = string(wait.State)
+	}
+	result.Result = fmt.Sprintf("the continuation chain is broken (%v): %s parked its turn and resumed, "+
+		"but its continuation can no longer be followed, so the work it continued has no reported outcome", chainErr, task.Name)
+}
+
 // Publication happens after the agent exits. Its output cannot supply the
 // authoritative published SHA, even when it contains structured Git metadata.
 func applyWaitTaskPublication(result *TaskResultInfo, task *corev1alpha1.Task) {
@@ -383,7 +482,37 @@ func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *
 	return parent, nil
 }
 
+// validateBrokeredWaitTarget authorizes a child of the authenticated Task or,
+// for a continuation, a child of any verified predecessor in its chain: a
+// resumed coordinator keeps authority over the children it delegated before
+// it parked.
 func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
+	err := validateBrokeredWaitTargetForParent(ctx, toolCtx, parent, task)
+	if err == nil || toolCtx == nil || !toolCtx.Brokered {
+		return err
+	}
+	var reader = toolCtx.PolicyReader
+	if reader == nil && toolCtx.Client != nil {
+		reader = toolCtx.Client
+	}
+	current := parent
+	for range taskwait.MaxChainLength {
+		previous, ok, lookupErr := taskwait.Predecessor(ctx, reader, current)
+		if lookupErr != nil {
+			return fmt.Errorf("verify continuation predecessor: %w", lookupErr)
+		}
+		if !ok {
+			break
+		}
+		if validateBrokeredWaitTargetForParent(ctx, toolCtx, previous, task) == nil {
+			return nil
+		}
+		current = previous
+	}
+	return err
+}
+
+func validateBrokeredWaitTargetForParent(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
 	if toolCtx == nil || !toolCtx.Brokered {
 		return nil
 	}

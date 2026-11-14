@@ -27,6 +27,7 @@ const sidebars = {
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
             'guides/autonomous-tasks',
+            'guides/parking-agent-turns',
             'concepts/memory',
             'concepts/soul',
           ],

@@ -1114,6 +1114,96 @@ func TestCancelCascadeListsATreeOnce(t *testing.T) {
 	}
 }
 
+// TestCancelCascadeReachesParkedChildChains covers delegated children that
+// parked their turns: they finished Succeeded, but a waiting one can still
+// start another turn, and a resumed one continues in a Task it does not
+// control. The cascade cancels the wait and the continuation, and walks what
+// the continuation delegated.
+func TestCancelCascadeReachesParkedChildChains(t *testing.T) {
+	controller := true
+	root := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "default", UID: "root-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	ownedBy := func(name, uid string, isController bool) []metav1.OwnerReference {
+		ref := metav1.OwnerReference{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: name, UID: types.UID(uid)}
+		if isController {
+			ref.Controller = &controller
+		}
+		return []metav1.OwnerReference{ref}
+	}
+	waiting := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "waiting", Namespace: "default", UID: "waiting-uid",
+			Labels: map[string]string{labels.LabelParentTask: "root"}, OwnerReferences: ownedBy("root", "root-uid", true),
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Wait:  &corev1alpha1.TaskWaitStatus{State: corev1alpha1.TaskWaitStateWaiting},
+		},
+	}
+	resumed := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resumed", Namespace: "default", UID: "resumed-uid",
+			Labels: map[string]string{labels.LabelParentTask: "root"}, OwnerReferences: ownedBy("root", "root-uid", true),
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Wait: &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "resumed-next", ContinuationTaskUID: "resumed-next-uid",
+			},
+		},
+	}
+	// The continuation keeps its coordinator's parent label, but only a
+	// non-controller owner reference to the parked Task.
+	continuation := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resumed-next", Namespace: "default", UID: "resumed-next-uid",
+			Labels: map[string]string{labels.LabelParentTask: "root", labels.LabelContinuationOf: "resumed"},
+			Annotations: map[string]string{
+				labels.AnnotationContinuationOfName: "resumed", labels.AnnotationContinuationOfUID: "resumed-uid",
+			},
+			OwnerReferences: ownedBy("resumed", "resumed-uid", false),
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	grandchild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "grandchild", Namespace: "default", UID: "grandchild-uid",
+			Labels: map[string]string{labels.LabelParentTask: "resumed-next"}, OwnerReferences: ownedBy("resumed-next", "resumed-next-uid", true),
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, waiting, resumed, continuation, grandchild).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	if err := r.cancelChildTasks(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name                 string
+		wantCancel, wantWait bool
+	}{
+		{name: "waiting", wantWait: true},
+		{name: "resumed"},
+		{name: "resumed-next", wantCancel: true},
+		{name: "grandchild", wantCancel: true},
+	} {
+		got := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: tc.name}, got); err != nil {
+			t.Fatal(err)
+		}
+		_, cancel := got.Annotations[labels.AnnotationCancelRequested]
+		_, wait := got.Annotations[labels.AnnotationCancelWait]
+		if cancel != tc.wantCancel || wait != tc.wantWait {
+			t.Errorf("%s: cancel requested = %t, wait cancelled = %t; want %t, %t", tc.name, cancel, wait, tc.wantCancel, tc.wantWait)
+		}
+	}
+}
+
 // TestRequestedCancellationMessagesAreBounded covers a cancel request whose
 // message exceeds what the execution status may hold: both cancel paths read
 // it bounded, so the terminal status write cannot be refused for its length.

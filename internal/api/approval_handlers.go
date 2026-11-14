@@ -27,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 )
 
 // ListTaskApprovalsResponse is one read of a Task and the approvals filtered
@@ -168,7 +169,9 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 			return err
 		}
 	}
-	if task.Status.Phase.IsTerminal() {
+	// A parked turn has ended, but its sign-off approval stays decidable
+	// while the wait is active: the decision starts the continuation turn.
+	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 

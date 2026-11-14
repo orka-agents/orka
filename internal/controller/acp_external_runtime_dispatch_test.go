@@ -3206,8 +3206,8 @@ func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *
 		t.Fatal(err)
 	}
 	execution := requeued.Status.Execution
-	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved || execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity {
-		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved", execution)
+	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved || execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity {
+		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved waiting for capacity", execution)
 	}
 	if fixture.deleteCalls.Load() != 1 {
 		t.Fatalf("task-scoped RuntimeSession DELETE calls before requeue = %d, want 1", fixture.deleteCalls.Load())

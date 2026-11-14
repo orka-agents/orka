@@ -40,6 +40,7 @@ import (
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -60,7 +61,7 @@ const (
 	DefaultACPIdlePoolTTL                    = 15 * time.Minute
 	DefaultACPRuntimePoolReservationTTL      = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval     = time.Second
-	defaultACPTaskTimeout                    = 30 * time.Minute
+	defaultACPTaskTimeout                    = taskwait.DefaultAgentTaskTimeout
 	defaultPromptLeaseDuration               = 90 * time.Second
 	acpTaskTimeoutReason                     = "TaskTimeout"
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
@@ -128,8 +129,12 @@ type ACPDispatcher struct {
 	active          map[types.UID]struct{}
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
-	finalizedTurns  map[types.UID]string
-	staleRecoveryMu sync.Mutex
+	// parkedRuntimeReleases holds parked turns' RuntimeSessions whose
+	// release failed, by exact incarnation, until a later turn of the same
+	// Session retries them.
+	parkedRuntimeReleases map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease
+	finalizedTurns        map[types.UID]string
+	staleRecoveryMu       sync.Mutex
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
@@ -1165,6 +1170,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
+	if sessionExecution != nil && !sessionExecution.Reused {
+		// A parked turn whose release failed still holds a resident slot.
+		// Retry it before this turn claims one, whether or not one is free.
+		d.retryParkedRuntimeRelease(
+			ctx, runtimeClient, sessionExecution.Binding.SessionUID, runtimeFence.RuntimeInstanceID, sessionExecution.Binding.Generation,
+		)
+	}
 	if reservationLease != nil && sessionExecution != nil {
 		residentSlots := int32(0)
 		if !sessionExecution.Reused {
@@ -2078,7 +2090,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			}
 			if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-				status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
+				status.Reason = corev1alpha1.TaskExecutionReasonWaitingForCapacity
 				status.Message = "RuntimePool prompt admission was rate limited and will be reconciled"
 				status.LastTransitionTime = nowMeta()
 			}); err != nil {
@@ -2459,6 +2471,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := captureSuccessfulRuntimeSession(); err != nil {
 		return err
 	}
+	// A read-only Session normally keeps its RuntimeSession resident for the
+	// next turn. When this turn parked, release that capacity: mark the
+	// binding for recreation while the Session lease is still held, so no
+	// later turn can adopt the runtime this deletes.
+	releaseParkedRuntime := !runtimeSessionRetirementRequired && sessionExecution != nil &&
+		d.turnRequestedPark(ctx, task)
+	if releaseParkedRuntime {
+		sessionExecution.Binding.RecreationRequired = true
+		d.setRuntimeSessionBinding(sessionExecution.Binding)
+	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
 	); err != nil {
@@ -2471,6 +2493,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if sessionExecution != nil {
 			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
 		}
+	} else if releaseParkedRuntime {
+		d.releaseParkedRuntimeSession(ctx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, sessionExecution.Binding.SessionUID)
 	}
 	return d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
 }
@@ -3813,7 +3837,9 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 		task.Status.AgentExecutionBinding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2:
 		return time.Time{}, false
 	}
-	return taskDeadlineFromTimeout(task, now, timeout), true
+	// A parked turn's continuation keeps its chain's absolute deadline even
+	// though its timeout is measured from its own, later creation.
+	return taskwait.ClampToChainDeadline(task, taskDeadlineFromTimeout(task, now, timeout)), true
 }
 
 func taskDeadlineFromTimeout(task *corev1alpha1.Task, now time.Time, timeout time.Duration) time.Time {
@@ -4070,7 +4096,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 			}
 			if errors.Is(claimErr, errACPRuntimePoolAtCapacity) || errors.Is(claimErr, errACPRuntimePoolNotAdmitting) {
 				_ = d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-					status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
+					status.Reason = corev1alpha1.TaskExecutionReasonWaitingForCapacity
 					status.Message = claimErr.Error()
 				})
 				return nil, acpDispatchTarget{}, nil
@@ -6315,8 +6341,8 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 		status.State = corev1alpha1.TaskExecutionStateReserved
 		status.ControllerEpoch = fence.Epoch
 		applyRuntimeSessionBindingToExecution(status, runtimeBinding)
-		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
-		status.Message = "runtime admission will be retried"
+		status.Reason = acpAdmissionRetryReason(cause)
+		status.Message = acpAdmissionRetryMessage(cause)
 		status.LastTransitionTime = nowMeta()
 	})
 }
@@ -6374,7 +6400,7 @@ func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 		if runtimeBinding != nil || !preserveBindings {
 			applyRuntimeSessionBindingToExecution(status, runtimeBinding)
 		}
-		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
+		status.Reason = acpAdmissionRetryReason(cause)
 		status.Message = message
 		status.LastTransitionTime = nowMeta()
 	})
@@ -7537,6 +7563,34 @@ func (d *ACPDispatcher) requeueReservedTask(
 		status.Reason = corev1alpha1.TaskExecutionReasonAtCapacity
 		status.Message = fmt.Sprintf("runtime admission will be retried (stage: %s)", stage)
 	})
+}
+
+// acpAdmissionRetryReason distinguishes a retry caused only by exhausted
+// runtime capacity, which users see as WaitingForCapacity, from any other
+// bounded admission retry. A RuntimePool that is not admitting new sessions
+// is a capacity wait too, as when the initial reservation is claimed.
+func acpAdmissionRetryReason(cause error) corev1alpha1.TaskExecutionReason {
+	if isACPRateLimitedClientError(cause) || errors.Is(cause, errACPRuntimePoolAtCapacity) ||
+		errors.Is(cause, errACPRuntimePoolNotAdmitting) {
+		return corev1alpha1.TaskExecutionReasonWaitingForCapacity
+	}
+	return corev1alpha1.TaskExecutionReasonAtCapacity
+}
+
+// acpAdmissionRetryMessage names the capacity cause of a bounded admission
+// retry without exposing the underlying runtime error.
+func acpAdmissionRetryMessage(cause error) string {
+	const retried = "runtime admission will be retried"
+	switch {
+	case errors.Is(cause, errACPRuntimePoolAtCapacity):
+		return "RuntimePool is at capacity; " + retried
+	case errors.Is(cause, errACPRuntimePoolNotAdmitting):
+		return "RuntimePool is not admitting new sessions; " + retried
+	case isACPRateLimitedClientError(cause):
+		return "runtime prompt admission was rate limited; " + retried
+	default:
+		return retried
+	}
 }
 
 func nowMeta() *metav1.Time {
