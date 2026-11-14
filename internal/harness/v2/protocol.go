@@ -204,6 +204,9 @@ type CapabilitiesResponse struct {
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
 	SupportsNativeSessions            bool                            `json:"supportsNativeSessions,omitempty"`
 	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
+	// SupportsOperatorAccess advertises the operator exec and file routes.
+	// Callers must fail closed against supervisors that omit it.
+	SupportsOperatorAccess bool `json:"supportsOperatorAccess,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {

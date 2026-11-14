@@ -81,6 +81,7 @@ const sidebars = {
           ],
         },
         'guides/observability',
+        'guides/operator-workspace-access',
         'guides/bring-your-own-agent-runtime',
       ],
     },

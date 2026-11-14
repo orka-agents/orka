@@ -8,6 +8,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 type apiNamespaceSource uint8
@@ -63,6 +64,10 @@ func (p apiRoutePolicy) withStoreID() apiRoutePolicy {
 	return p
 }
 
+// operatorTaskGetPermission is the Task read that every operator workspace
+// access route requires in addition to its dedicated subresource verb.
+var operatorTaskGetPermission = apiResourcePermission{corev1alpha1.GroupVersion.Group, externalToolTaskResource, gatewayVerbGet, "id"}
+
 // externalAPIPolicies is the complete external user API inventory. Keep the
 // independent HTTP cases and the operator reference in sync when adding routes.
 // Existing handler checks still enforce loaded-object, gateway and workspace
@@ -100,6 +105,14 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/artifacts/:filename": coreAPIPolicy("get", "tasks", "id"),
+	// Operator workspace access uses dedicated virtual subresources that no
+	// built-in aggregate role grants; Task get alone never authorizes it.
+	"GET /api/v1/tasks/:id/exec": coreAPIPolicy(operatoraccess.ExecVerb, operatoraccess.ExecResource, "id",
+		operatorTaskGetPermission),
+	"GET /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesReadVerb, operatoraccess.FilesResource, "id",
+		operatorTaskGetPermission),
+	"PUT /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesWriteVerb, operatoraccess.FilesResource, "id",
+		operatorTaskGetPermission),
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),
@@ -274,26 +287,47 @@ type externalAPIRouter struct {
 	router fiber.Router
 	prefix string
 	h      *Handlers
+	// pre runs before route authorization; nil for ordinary routes.
+	pre fiber.Handler
 }
 
 func (s *Server) externalAPIGroup(prefix string, auth fiber.Handler) externalAPIRouter {
 	return externalAPIRouter{router: s.app.Group(prefix, auth), prefix: prefix, h: s.handlers}
 }
 
+// withPreAuthorization returns a router whose routes run pre before route
+// authorization, for example to audit refused calls. pre must call Next.
+func (r externalAPIRouter) withPreAuthorization(pre fiber.Handler) externalAPIRouter {
+	r.pre = pre
+	return r
+}
+
+func (r externalAPIRouter) handlers(method, path string, handler fiber.Handler) (any, []any) {
+	authorize := r.h.authorizeExternalRoute(method + " " + r.prefix + path)
+	if r.pre != nil {
+		return r.pre, []any{authorize, handler}
+	}
+	return authorize, []any{handler}
+}
+
 func (r externalAPIRouter) Get(path string, handler fiber.Handler) {
-	r.router.Get(path, r.h.authorizeExternalRoute(fiber.MethodGet+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodGet, path, handler)
+	r.router.Get(path, first, rest...)
 }
 
 func (r externalAPIRouter) Post(path string, handler fiber.Handler) {
-	r.router.Post(path, r.h.authorizeExternalRoute(fiber.MethodPost+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPost, path, handler)
+	r.router.Post(path, first, rest...)
 }
 
 func (r externalAPIRouter) Put(path string, handler fiber.Handler) {
-	r.router.Put(path, r.h.authorizeExternalRoute(fiber.MethodPut+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPut, path, handler)
+	r.router.Put(path, first, rest...)
 }
 
 func (r externalAPIRouter) Delete(path string, handler fiber.Handler) {
-	r.router.Delete(path, r.h.authorizeExternalRoute(fiber.MethodDelete+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodDelete, path, handler)
+	r.router.Delete(path, first, rest...)
 }
 
 func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {

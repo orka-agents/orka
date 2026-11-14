@@ -911,7 +911,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	case corev1alpha1.TaskPhaseFailed:
 		message = "ACP delivery failed"
 	case corev1alpha1.TaskPhaseCancelled:
-		message = "publication cancelled before push"
+		message = cancelledBeforePublishMessage(delivery, "publication cancelled before push")
 	}
 	payload, err := json.Marshal(taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: task.Status.Execution.Attempt,

@@ -16,4 +16,9 @@ func setSessionState(state *sessionState, next harnessv2.RuntimeSessionState) {
 		hook(state.descriptor.State, next)
 	}
 	state.descriptor.State = next
+	if _, admitted := operatorAccessStates[next]; !admitted {
+		revokeSessionOperatorsLocked(state)
+	} else {
+		state.operatorsClosed = false
+	}
 }

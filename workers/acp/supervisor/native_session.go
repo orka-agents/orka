@@ -309,6 +309,9 @@ func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.C
 }
 
 func (s *Server) removeSessionPrivateFiles(state *sessionState) error {
+	// Callers have proven the session child stopped, so nothing can recreate
+	// the workspace under its recorded identity any more.
+	state.paths.ReleaseWorkspaceIdentity()
 	if err := os.RemoveAll(state.paths.Root); err != nil {
 		return err
 	}
@@ -336,6 +339,10 @@ func (s *Server) nativeCaptureLimit(r *http.Request) int {
 }
 
 func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, limit int) (harnessv2.NativeSessionSnapshot, error) {
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native capture could not quiesce operator operations; private home retained")
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
