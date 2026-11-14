@@ -942,3 +942,25 @@ func TestOperatorFileUploadRequestConfigIgnoresPathCase(t *testing.T) {
 		t.Fatal("a download must not get the upload bounds")
 	}
 }
+
+// A copy-out streams its body to the caller; every spelling of the download
+// route gets a write deadline so a client that stops reading cannot pin it.
+func TestOperatorFileDownloadRequestConfigBoundsTheWrite(t *testing.T) {
+	server := &Server{handlers: NewHandlers(HandlersConfig{})}
+	for _, path := range []string{"/api/v1/tasks/t1/files?path=a", "/API/V1/TASKS/t1/FILES"} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(fiber.MethodGet)
+		header.SetRequestURI(path)
+		header.SetHost("orka")
+		if got := server.requestConfig(&header).WriteTimeout; got != operatorFileTransferTimeout {
+			t.Fatalf("%s write timeout = %s, want %s", path, got, operatorFileTransferTimeout)
+		}
+	}
+	var exec fasthttp.RequestHeader
+	exec.SetMethod(fiber.MethodGet)
+	exec.SetRequestURI("/api/v1/tasks/t1/exec")
+	exec.SetHost("orka")
+	if server.requestConfig(&exec).WriteTimeout != 0 {
+		t.Fatal("only the copy-out route gets the download write deadline")
+	}
+}

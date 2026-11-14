@@ -32,7 +32,8 @@ independent opt-ins, a dedicated permission, and a durable taint.
 ### Enablement and authorization
 
 - The controller serves the routes only with
-  `--operator-workspace-access-enabled`.
+  `--operator-workspace-access-enabled`, and refuses to start with it unless
+  Task provenance admission protects the reserved taint metadata.
 - An administrator opts a class in with the
   `acp.workspace.orka.ai/operator-access` annotation on the
   `ExecutionWorkspaceClass`: `read` allows copies out, `exec` also allows

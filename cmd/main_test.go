@@ -712,6 +712,18 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	}
 }
 
+func TestValidateOperatorAccessSecurityConfig(t *testing.T) {
+	if err := validateOperatorAccessSecurityConfig(false, false); err != nil {
+		t.Fatalf("disabled operator access: %v", err)
+	}
+	if err := validateOperatorAccessSecurityConfig(true, true); err != nil {
+		t.Fatalf("operator access with Task provenance admission: %v", err)
+	}
+	if err := validateOperatorAccessSecurityConfig(true, false); err == nil {
+		t.Fatal("operator access without Task provenance admission must fail closed")
+	}
+}
+
 func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
 	tests := []struct {
 		name      string

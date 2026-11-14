@@ -166,6 +166,18 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 	return nil
 }
 
+// validateOperatorAccessSecurityConfig fails operator workspace access closed
+// without Task provenance admission. The durable operator taint and the
+// workspace link it is read through are reserved acp.workspace.orka.ai/ Task
+// metadata; without the webhook any direct Task writer could strip them and
+// release a tainted workspace for publication or continuation.
+func validateOperatorAccessSecurityConfig(enabled, provenanceProtected bool) error {
+	if enabled && !provenanceProtected {
+		return fmt.Errorf("--operator-workspace-access-enabled requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the operator taint")
+	}
+	return nil
+}
+
 func validateStaticTrustedServiceReferences(
 	watchNamespace string,
 	trust outboundaccess.TrustConfig,
@@ -1148,6 +1160,10 @@ func main() {
 		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+	if err := validateOperatorAccessSecurityConfig(operatorWorkspaceAccessEnabled, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "operator workspace access fails closed without Task provenance admission")
 		os.Exit(1)
 	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(

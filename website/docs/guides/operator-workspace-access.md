@@ -45,7 +45,9 @@ Start the controller with:
 ```
 
 Without the flag, every operator route answers `403 operator workspace access
-is disabled`.
+is disabled`. The controller refuses to start with the flag unless Task
+provenance admission is enabled (`--task-provenance-admission-enabled` or
+`--task-provenance-admission-external`), which protects the operator taint.
 
 ### 2. Opt in a class
 

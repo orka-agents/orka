@@ -569,6 +569,9 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 		}
 		reasonMu.Unlock()
 		process.Kill()
+		// End the command wait too, so a leader stuck after the kill is
+		// bounded by operatorLeaderExitGrace rather than the command timeout.
+		cancel()
 	}
 
 	budget := &operatorOutputBudget{limit: options.MaxOutputBytes}

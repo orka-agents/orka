@@ -270,6 +270,11 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 	if isOperatorFileUpload(header) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: int(operatoraccess.MaxFileBytes), ReadTimeout: 10 * time.Minute}
 	}
+	if isOperatorFileDownload(header) {
+		// The streamed copy-out body is bounded like its supervisor transfer;
+		// a client that stops reading cannot pin the response and its audit.
+		return fasthttp.RequestConfig{WriteTimeout: operatorFileTransferTimeout}
+	}
 	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
@@ -288,9 +293,16 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 // isOperatorFileUpload matches PUT /api/v1/tasks/{task}/files, whose bounded
 // body is streamed to the runtime supervisor.
 func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
-	if string(header.Method()) != fiber.MethodPut {
-		return false
-	}
+	return string(header.Method()) == fiber.MethodPut && isOperatorFilesPath(header)
+}
+
+// isOperatorFileDownload matches GET /api/v1/tasks/{task}/files, whose body is
+// streamed from the runtime supervisor.
+func isOperatorFileDownload(header *fasthttp.RequestHeader) bool {
+	return string(header.Method()) == fiber.MethodGet && isOperatorFilesPath(header)
+}
+
+func isOperatorFilesPath(header *fasthttp.RequestHeader) bool {
 	var uri fasthttp.URI
 	if uri.Parse(header.Host(), header.RequestURI()) != nil {
 		return false

@@ -690,6 +690,41 @@ func TestOperatorExecLeaderStuckAfterKillFailsClosed(t *testing.T) {
 	}
 }
 
+// A forced stop other than the timeout (here the output limit) must not leave
+// a leader stuck after SIGKILL waiting out the full command timeout before
+// cleanup fails the runtime closed.
+func TestOperatorExecForcedStopBoundsAStuckLeader(t *testing.T) {
+	previous := operatorLeaderExitGrace
+	operatorLeaderExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { operatorLeaderExitGrace = previous })
+	process := newFakeOperatorProcess()
+	process.stuck, process.unkillable = true, true
+	go func() { _, _ = process.stdoutW.Write(bytes.Repeat([]byte("x"), 64)) }()
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	state := supervisor.sessions[sessionID]
+	state.drainCleanupScheduled = true
+	started := time.Now()
+	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
+		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, MaxOutputBytes: 16, TimeoutSeconds: 600}), nil)
+	if result.status.Reason != operatoraccess.ExitReasonOutputLimit || time.Since(started) > 10*time.Second {
+		t.Fatalf("forced stop of a stuck leader = %+v after %s", result.status, time.Since(started))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		poisoned := state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && supervisor.poisoned
+		supervisor.mu.Unlock()
+		if poisoned {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stuck leader after a forced stop must fail the runtime closed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestOperatorQuiesceFailsClosedOnStuckLaunch(t *testing.T) {
 	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
 	fence := operatorTestFence()
