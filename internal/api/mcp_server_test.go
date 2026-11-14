@@ -736,6 +736,90 @@ func TestMCPTasksExtensionLifecycle(t *testing.T) {
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code)
 }
 
+// A tasks/update whose later decision fails after an earlier one was recorded
+// can be retried as sent: a response that matches the recorded decision is
+// satisfied, and a conflicting one is refused before anything is recorded.
+func TestMCPTasksUpdateRetryOfPartiallyAppliedUpdate(t *testing.T) {
+	f := newMCPFixture(t)
+	var decisionCalls atomic.Int32
+	f.review = func(review *authorizationv1.SubjectAccessReview) error {
+		if attrs := review.Spec.ResourceAttributes; attrs != nil && attrs.Verb == "update" && attrs.Subresource == "approvals" {
+			decisionCalls.Add(1)
+		}
+		review.Status.Allowed = true
+		return nil
+	}
+	var patches, failPatch atomic.Int32
+	f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, task := obj.(*corev1alpha1.Task); task && patches.Add(1) == failPatch.Load() {
+				return apierrors.NewServiceUnavailable("transient")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	f.config.APIReader = f.kube
+	f.server = NewServer(f.kube, nil, f.config)
+	createMCPTestTask(t, f, "partial", corev1alpha1.TaskPhaseRunning)
+	for _, id := range []string{"first", "second", "third"} {
+		appendMCPTestApproval(t, f, "partial", id)
+	}
+	taskID := encodeMCPTaskID("default", "partial", "uid-partial")
+	update := func(responses map[string]any) mcpTestResponse {
+		return f.mcpRPC(t, "tasks/update", map[string]any{"taskId": taskID, "inputResponses": responses, "_meta": extensionMeta()})
+	}
+	statuses := func() map[string]any {
+		listed := f.mcpTool(t, mcpToolListPendingApprovals, map[string]any{"task": "partial", "includeDecided": true})
+		result := map[string]any{}
+		for _, item := range listed.StructuredContent["approvals"].([]any) {
+			result[item.(map[string]any)["id"].(string)] = item.(map[string]any)["status"]
+		}
+		return result
+	}
+	approve := map[string]any{"action": "accept", "content": map[string]any{"decision": "approve"}}
+	decline := map[string]any{"action": "decline"}
+
+	// The second decision's REST call fails after the first was recorded.
+	failPatch.Store(2)
+	sent := map[string]any{"first": approve, "second": decline}
+	response := update(sent)
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeInternalError, response.Error.Code, response.body)
+
+	// Retrying the same update succeeds and nudges the Task again.
+	failPatch.Store(0)
+	before := patches.Load()
+	response = update(sent)
+	require.Nil(t, response.Error, response.body)
+	require.JSONEq(t, `{"resultType":"complete"}`, string(response.Result))
+	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "pending"}, statuses())
+	require.GreaterOrEqual(t, patches.Load()-before, int32(2), "each decision is replayed through the REST route")
+
+	// A response that conflicts with a recorded decision is refused before
+	// any decision is sent, so a pending request in the same update is not
+	// decided.
+	decided := decisionCalls.Load()
+	response = update(map[string]any{"first": decline, "third": approve})
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
+	require.Contains(t, response.Error.Message, "approved")
+	response = update(map[string]any{"second": approve, "third": approve})
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
+	require.Equal(t, decided, decisionCalls.Load(), "no decision reaches the REST route")
+	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "pending"}, statuses())
+
+	// A dismissed response decides nothing, whatever the request's status.
+	response = update(map[string]any{"first": map[string]any{"action": "cancel"}, "third": approve})
+	require.Nil(t, response.Error, response.body)
+	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "approved"}, statuses())
+
+	// An unknown request is still refused.
+	response = update(map[string]any{"unknown": approve})
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
+}
+
 func TestMCPCoreTaskAugmentedCreateTask(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()

@@ -192,7 +192,10 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
   approval, keyed by approval ID, asking for `decision` (`approve` or `decline`)
   and an optional `reason`. Answer with `tasks/update`: `accept` records the chosen
   decision, `decline` declines the request, and `cancel` leaves it pending. Each
-  answer is recorded through the REST decision route under your identity.
+  answer is recorded through the REST decision route under your identity. An
+  update that failed partway can be retried as sent: an answer matching a decision
+  already recorded succeeds, and an update with any answer that contradicts one is
+  refused before anything is recorded.
   `tasks/cancel` deletes the Task.
 - **2025-11-25 task-augmented calls.** A `tools/call` for `create_task` with
   `params.task` returns `{ "task": { ... } }`. `tasks/get` returns the task,

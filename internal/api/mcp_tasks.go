@@ -464,17 +464,16 @@ func (m *mcpServer) updateTask(call *mcpCall) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	pending := map[string]bool{}
+	statuses := map[string]string{}
 	for _, approval := range state.approvals {
-		if approval.Status == approvals.StatusPending {
-			pending[approval.ID] = true
-		}
+		statuses[approval.ID] = approval.Status
 	}
 	type decision struct{ id, decision, reason string }
 	var decisions []decision
 	for id, raw := range params.InputResponses {
-		if !pending[id] || validateMCPApprovalID(id) != nil {
-			return nil, newMCPError(mcpCodeInvalidParams, "input response does not match a pending approval request")
+		status, known := statuses[id]
+		if !known || validateMCPApprovalID(id) != nil {
+			return nil, newMCPError(mcpCodeInvalidParams, "input response does not match an approval request")
 		}
 		var response struct {
 			Action  string `json:"action"`
@@ -489,20 +488,30 @@ func (m *mcpServer) updateTask(call *mcpCall) (any, error) {
 		if utf8.RuneCountInString(response.Content.Reason) > mcpMaxReasonLength {
 			return nil, newMCPError(mcpCodeInvalidParams, "reason is too long")
 		}
+		var choice string
 		switch response.Action {
 		case "accept":
 			if response.Content.Decision != approvalDecisionApprove && response.Content.Decision != approvalDecisionDecline {
 				return nil, newMCPError(mcpCodeInvalidParams, "accepted input must choose approve or decline")
 			}
-			decisions = append(decisions, decision{id, response.Content.Decision, response.Content.Reason})
+			choice = response.Content.Decision
 		case "decline":
 			// The person explicitly refused the request.
-			decisions = append(decisions, decision{id, approvalDecisionDecline, response.Content.Reason})
+			choice = approvalDecisionDecline
 		case "cancel":
-			// Dismissed without a choice: the request stays pending.
+			// Dismissed without a choice: nothing is recorded.
+			continue
 		default:
 			return nil, newMCPError(mcpCodeInvalidParams, "unsupported elicitation action")
 		}
+		// A retry of a partially applied update finds some requests already
+		// decided. A response that matches the recorded decision is replayed,
+		// and the REST route answers it idempotently; any other one is
+		// refused before anything is recorded.
+		if status != approvals.StatusPending && !approvalStatusMatchesDecision(status, choice) {
+			return nil, newMCPError(mcpCodeInvalidParams, "input response conflicts with the approval request's recorded "+status+" status")
+		}
+		decisions = append(decisions, decision{id, choice, response.Content.Reason})
 	}
 	for _, d := range decisions {
 		if _, err := m.decideApproval(call.c, ref.Namespace, ref.Name, d.id, d.decision, d.reason); err != nil {
