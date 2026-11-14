@@ -21,6 +21,6 @@ The upstream Apache 2.0 license is retained in `internal/substratepb/LICENSE`.
 Updating the pin requires source/digest review, regenerated protocol, native
 transport tests, `scripts/agent-substrate-e2e.sh`, and the orka-workspace Data
 and Core proofs that `.github/workflows/agent-substrate-acp-e2e.yml` runs at the
-commit pinned in `orka-workspace-proof.env`. See ADR 0031 and
+orka-workspace commit pinned in that workflow. See ADR 0031 and
 `website/docs/concepts/substrate.md` for the supported lifecycle and trust
 boundary. Do not interpret a source match or doctor result as live conformance.

@@ -5,7 +5,9 @@ name: Agent Substrate ACP E2E
 # export, cold import), then the actual-Core proof (ACP Task with gateway
 # credential injection and tracing, then a two-turn Session across a worker
 # eviction with data-only suspension and cold resume). The proof commit is
-# pinned in hack/agent-substrate/orka-workspace-proof.env.
+# pinned below as a literal SHA: it changes only through a reviewed PR here, and
+# must stay reachable on the orka-workspace default branch. Advance it with the
+# orka-workspace module pin in go.mod.
 
 on:
   workflow_dispatch: {}
@@ -78,25 +80,11 @@ jobs:
           path: orka
           persist-credentials: false
 
-      - name: Resolve the pinned orka-workspace proofs
-        id: proof
-        working-directory: ${{ github.workspace }}/orka
-        run: |
-          set -Eeuo pipefail
-          source hack/agent-substrate/orka-workspace-proof.env
-          [[ "${ORKA_WORKSPACE_PROOF_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error::ORKA_WORKSPACE_PROOF_COMMIT must be a full commit SHA" >&2; exit 1;
-          }
-          {
-            echo "repository=${ORKA_WORKSPACE_PROOF_REPOSITORY}"
-            echo "commit=${ORKA_WORKSPACE_PROOF_COMMIT}"
-          } >>"${GITHUB_OUTPUT}"
-
       - name: Checkout orka-workspace proofs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ steps.proof.outputs.repository }}
-          ref: ${{ steps.proof.outputs.commit }}
+          repository: orka-agents/orka-workspace
+          ref: 1970659e948560da714202d366b68c31fa332823
           path: orka-workspace
           persist-credentials: false
 
