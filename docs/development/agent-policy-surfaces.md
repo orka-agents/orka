@@ -9,7 +9,7 @@ things:
 - whether the action could be checked ahead of time.
 
 It describes current behavior. The contract for changing that behavior is
-[ADR 0038](../adr/0038-agent-policy-discovery.md).
+[ADR 0050](../adr/0050-agent-policy-discovery.md).
 
 **Not covered: [agent hosts](../../website/docs/operations/agent-hosts.md).**
 
