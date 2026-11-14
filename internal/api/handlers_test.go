@@ -273,6 +273,7 @@ func setupTestHandlersWithAuthzStore(
 	app.Get("/agents", handlers.ListAgents)
 	app.Get("/agents/:name", handlers.GetAgent)
 	app.Put("/agents/:name", handlers.UpdateAgent)
+	app.Put("/agents/:name/spec", handlers.UpdateAgentSpec)
 	app.Delete("/agents/:name", handlers.DeleteAgent)
 	app.Get("/memories", handlers.ListMemories)
 	app.Post("/memories", handlers.CreateMemory)

@@ -115,6 +115,7 @@ GET /api/v1/agents | list core.orka.ai:agents
 GET /api/v1/agents/:name | get core.orka.ai:agents protected
 GET /api/v1/agents/:name/system-prompt | get core.orka.ai:agents protected
 PUT /api/v1/agents/:name | patch core.orka.ai:agents protected
+PUT /api/v1/agents/:name/spec | patch core.orka.ai:agents protected
 DELETE /api/v1/agents/:name | delete core.orka.ai:agents protected
 POST /api/v1/skills | create core.orka.ai:skills
 GET /api/v1/skills | list core.orka.ai:skills
