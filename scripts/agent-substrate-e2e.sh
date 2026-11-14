@@ -563,7 +563,9 @@ YAML
   log 'Egress gateway injected the Tool credential without exposing it to the Actor'
   local trace_id
   trace_id="$(openssl rand -hex 16)"
-  run_tool_client native-mcp-trace native-mcp trace-context "mcp-e2e-trace:${trace_id}" "00-${trace_id}-$(openssl rand -hex 8)-01"
+  # The Actor must receive the caller's trace still sampled; a span exporter
+  # behind the router (such as the ACP supervisor's) drops unsampled parents.
+  run_tool_client native-mcp-trace native-mcp trace-context "mcp-e2e-trace:${trace_id}:01" "00-${trace_id}-$(openssl rand -hex 8)-01"
   verify_mcp_trace "${trace_id}"
   local tool
   for tool in native-mcp native-mcp-egress; do

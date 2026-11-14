@@ -73,7 +73,14 @@ substrate_install_ate_system() {
     --credential-provider='{"name":"k8s.io"}' \
     --ateapi-authz-bootstrap-owners="system:serviceaccount:ate-system:ate-client" \
     --ingress-allowed-spiffe-ids="${orka_spiffe_id}") || return 1
-  kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m
+  kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m || return 1
+  # Test-only: v1.0.0's atenet-router gives Envoy only a root RandomSampling
+  # ratio (1% by default), which replaces a caller's sampled decision, so a
+  # sampled Orka trace reaches the Actor unsampled and the ACP supervisor drops
+  # its spans. Root-sample every routed request so trace assertions see the
+  # sampled parent. Operators need the same setting for end-to-end traces.
+  kubectl -n ate-system set env deployment/atenet-router OTEL_TRACES_SAMPLER=parentbased_always_on || return 1
+  kubectl -n ate-system rollout status deployment/atenet-router --timeout=5m
 }
 
 substrate_require_clean_upstream() {

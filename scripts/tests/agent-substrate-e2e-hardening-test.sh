@@ -21,8 +21,16 @@ source "${root}/scripts/agent-substrate-e2e.sh"
     printf '%s\n' "$@" >"${test_root}/ate-setup-args"
   }
   kubectl() {
-    [[ "$*" == '-n ate-system rollout status deployment/ate-api-server --timeout=5m' ]] || return 9
-    [[ "${install_failure}" != rollout ]] || return 7
+    case "$*" in
+      '-n ate-system rollout status deployment/ate-api-server --timeout=5m')
+        [[ "${install_failure}" != rollout ]] || return 7 ;;
+      # The router root-samples every request so Orka's sampled traces survive.
+      '-n ate-system set env deployment/atenet-router OTEL_TRACES_SAMPLER=parentbased_always_on')
+        printf 'router-sampler\n' >>"${test_root}/router-calls"
+        [[ "${install_failure}" != router ]] || return 7 ;;
+      '-n ate-system rollout status deployment/atenet-router --timeout=5m') ;;
+      *) return 9 ;;
+    esac
   }
   substrate_install_ate_system
   grep -Fxq 'deploy' "${test_root}/ate-setup-args"
@@ -34,7 +42,8 @@ source "${root}/scripts/agent-substrate-e2e.sh"
     echo 'Substrate setup changed the egress gateway' >&2
     exit 1
   fi
-  for install_failure in install rollout; do
+  grep -Fxq 'router-sampler' "${test_root}/router-calls"
+  for install_failure in install rollout router; do
     if substrate_install_ate_system >"${test_root}/install-error" 2>&1; then
       echo "Substrate setup ignored a failed ${install_failure}" >&2
       exit 1

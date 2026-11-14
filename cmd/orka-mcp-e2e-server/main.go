@@ -155,7 +155,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 		case "egress-probe-unauthenticated":
 			result = "mcp-e2e-egress:" + egressProbe(r.Context(), false)
 		case "trace-context":
-			result = "mcp-e2e-trace:" + traceID(r.Header.Get("traceparent"))
+			result = "mcp-e2e-trace:" + traceContext(r.Header.Get("traceparent"))
 		}
 		writeJSON(w, map[string]any{
 			jsonRPCField: jsonRPCVersion,
@@ -217,13 +217,15 @@ func handleCredentialDigest(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, answer)
 }
 
-// traceID returns the W3C trace ID the Actor received, or "none".
-func traceID(traceparent string) string {
+// traceContext returns the W3C trace ID and trace flags the Actor received,
+// as "<trace-id>:<flags>", or "none". The flags carry the sampling decision a
+// downstream span exporter honors.
+func traceContext(traceparent string) string {
 	parts := strings.Split(strings.TrimSpace(traceparent), "-")
-	if len(parts) != 4 || len(parts[1]) != 32 {
+	if len(parts) != 4 || len(parts[1]) != 32 || len(parts[3]) != 2 {
 		return "none"
 	}
-	return strings.ToLower(parts[1])
+	return strings.ToLower(parts[1]) + ":" + strings.ToLower(parts[3])
 }
 
 func rawID(id json.RawMessage) any {

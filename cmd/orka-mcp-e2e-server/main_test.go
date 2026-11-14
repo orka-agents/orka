@@ -78,10 +78,10 @@ func TestEgressProbeReportsRefusalsAsBlocked(t *testing.T) {
 	}
 }
 
-func TestTraceContextReturnsOnlyTheReceivedTraceID(t *testing.T) {
+func TestTraceContextReturnsOnlyTheReceivedTraceIDAndFlags(t *testing.T) {
 	header := http.Header{}
 	header.Set("traceparent", "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01")
-	if got := callTool(t, "trace-context", header); got != "mcp-e2e-trace:4bf92f3577b34da6a3ce929d0e0e4736" {
+	if got := callTool(t, "trace-context", header); got != "mcp-e2e-trace:4bf92f3577b34da6a3ce929d0e0e4736:01" {
 		t.Fatalf("trace-context = %q", got)
 	}
 	if got := callTool(t, "trace-context", nil); got != "mcp-e2e-trace:none" {

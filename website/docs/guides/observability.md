@@ -475,9 +475,17 @@ checkpoint) are performed by the separately deployed `orka-workspace` provider,
 not by core. Core's instrumentation does not cover those calls; correlate them
 by time, Actor and template as described below.
 
-Substrate samples with parent-based samplers, so a sampled Orka trace is sampled
-end to end; its default ratios (10% control plane, 1% router) only apply to
-requests Orka does not trace. Client spans contain no request paths, queries,
+Substrate's control plane samples with parent-based samplers, so a sampled Orka
+trace stays sampled through ate-api; its default 10% ratio applies only to calls
+Orka does not trace. `atenet-router` in Agent Substrate v1.0.0 does not keep a
+caller's sampling decision: Envoy applies the router's root ratio (1% by
+default) to every routed request, so a sampled Orka trace usually reaches the
+Actor unsampled and the ACP supervisor, which samples by parent, exports no
+spans for it. The trace ID still propagates. For end-to-end supervisor traces,
+set `OTEL_TRACES_SAMPLER=parentbased_always_on` on the `atenet-router`
+Deployment, which root-samples every routed request, or a
+`parentbased_traceidratio` ratio you can afford; Orka's live Substrate e2e
+installs use the former. Client spans contain no request paths, queries,
 headers, gRPC metadata, bearer tokens or message bodies; a failed gRPC call's
 span status carries Substrate's status message. Disabled telemetry adds no
 instrumentation.
