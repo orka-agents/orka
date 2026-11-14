@@ -143,7 +143,8 @@ const (
 	// [ProviderLimits.MaxResultBytes].
 	// Revision 9 adds [AHPStore] to [StateProvider]. Revision 10 adds
 	// [UsageStore.ListUsageTasksInSessions] and the requester a [UsageTask] keeps.
-	ContractRevision = 10
+	// Revision 11 adds [AuthSessionStore] to [StateProvider].
+	ContractRevision = 11
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -223,6 +224,7 @@ type StateProvider interface {
 	TaskUsageObservationReader
 
 	AHPStore
+	AuthSessionStore
 }
 
 // ArtifactProvider is the provider side of artifacts.v1. Artifact bytes and

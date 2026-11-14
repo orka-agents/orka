@@ -1742,7 +1742,7 @@ func main() {
 		}
 		githubSignIn = api.GitHubSignInConfig{
 			Enabled: true, Provider: strings.TrimSpace(githubSignInProvider), Allowed: allowed,
-			CreateHosts: githubSignInCreateHosts, Sessions: sqliteStore, Credentials: hostCredentials,
+			CreateHosts: githubSignInCreateHosts, Sessions: appStorage, Credentials: hostCredentials,
 		}
 		setupLog.Info("GitHub sign-in enabled", "provider", githubSignIn.Provider,
 			"allowedOrgs", len(allowed.Orgs), "allowedTeams", len(allowed.Teams))

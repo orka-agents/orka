@@ -28,7 +28,7 @@ const (
 	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
 	schema173 = "ff007cbbf36932e96b3508c2059983850ca994e8d9d5015c954fb0bb30f73164" // schema version 6: Agent Host Protocol store
-	schema174 = "0000000000000000000000000000000000000000000000000000000000000000" // schema version 7: GitHub sign-in sessions
+	schema174 = "1e54cea52c63be66d8c021a8743e3aafef625e8216cc49892c21c363af347e50" // schema version 7: GitHub sign-in sessions
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.

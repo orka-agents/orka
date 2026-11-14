@@ -501,6 +501,16 @@ func (p *stateProvider) CreateActionRecord(ctx context.Context, a1 *storagev1.Ac
 	return err
 }
 
+func (p *stateProvider) CreateAuthSession(ctx context.Context, a1 storagev1.AuthSession) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateAuthSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateAuthSession(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateCommandEvent", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
@@ -1036,6 +1046,19 @@ func (p *stateProvider) GetActionRecord(ctx context.Context, a1 string, a2 strin
 	})
 	if injected {
 		var z0 *storagev1.ActionRecord
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAuthSessionByHash(ctx context.Context, a1 string) (storagev1.AuthSession, error) {
+	var r0 storagev1.AuthSession
+	injected, err := p.injector.call(ctx, p.contract, "GetAuthSessionByHash", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAuthSessionByHash(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AuthSession
 		return z0, err
 	}
 	return r0, err
@@ -2723,6 +2746,16 @@ func (p *stateProvider) ReleaseTaskDataFence(ctx context.Context, a1 storagev1.T
 	return err
 }
 
+func (p *stateProvider) RenewAuthSession(ctx context.Context, a1 string, a2 storagev1.AuthSession, a3 time.Time) error {
+	_, err := p.injector.call(ctx, p.contract, "RenewAuthSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		return p.inner.RenewAuthSession(ctx, a1, a2, a3)
+	})
+	return err
+}
+
 func (p *stateProvider) RenewGatewayEventClaim(ctx context.Context, a1 string, a2 string, a3 string, a4 time.Time, a5 time.Duration) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "RenewGatewayEventClaim", func(ctx context.Context) (err error) {
@@ -2856,6 +2889,13 @@ func (p *stateProvider) ReviewMemoryProposal(ctx context.Context, a1 storagev1.M
 func (p *stateProvider) RevokeAHPToken(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
 	_, err := p.injector.call(ctx, p.contract, "RevokeAHPToken", func(ctx context.Context) error {
 		return p.inner.RevokeAHPToken(ctx, a1, a2, a3)
+	})
+	return err
+}
+
+func (p *stateProvider) RevokeAuthSession(ctx context.Context, a1 string, a2 time.Time) error {
+	_, err := p.injector.call(ctx, p.contract, "RevokeAuthSession", func(ctx context.Context) error {
+		return p.inner.RevokeAuthSession(ctx, a1, a2)
 	})
 	return err
 }

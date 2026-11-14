@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 var _ store.AuthSessionStore = (*Store)(nil)
@@ -55,40 +56,43 @@ func authSessionArgs(session store.AuthSession) []any {
 		session.CreatedAt.UTC(), session.ExpiresAt.UTC()}
 }
 
-// CreateAuthSession stores a new session. The hash must be unique. Sessions
-// that ended are dropped, and a person keeps their maxAuthSessionsPerSubject
-// most recently issued ones.
+// CreateAuthSession stores a new session. Its ID and hash must be unique.
+// Sessions that ended are dropped, and a person keeps their
+// MaxAuthSessionsPerSubject most recently issued ones.
 func (s *Store) CreateAuthSession(ctx context.Context, session store.AuthSession) error {
 	if err := validAuthSession(session); err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "CreateAuthSession", func(ctx context.Context) error {
+		return s.createAuthSession(ctx, session)
+	})
+}
+
+func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("create sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := pruneAuthSessionsTx(ctx, tx, session.CreatedAt); err != nil {
+	if err := pruneAuthSessions(ctx, tx, session.CreatedAt); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, insertAuthSession, authSessionArgs(session)...); err != nil {
-		return fmt.Errorf("create sign-in session: %w", err)
+		return fmt.Errorf("create sign-in session: %w", uniqueConflict(err))
 	}
 	// A person holds a bounded number of sessions; a sign-in beyond it ends
 	// their least recently issued one.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE issuer = ? AND subject = ? AND id NOT IN (
 		SELECT id FROM auth_sessions WHERE issuer = ? AND subject = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-		session.Issuer, session.Subject, session.Issuer, session.Subject, maxAuthSessionsPerSubject); err != nil {
+		session.Issuer, session.Subject, session.Issuer, session.Subject, storagev1.MaxAuthSessionsPerSubject); err != nil {
 		return fmt.Errorf("bound sign-in sessions: %w", err)
 	}
 	return tx.Commit()
 }
 
-// maxAuthSessionsPerSubject bounds the live sessions one person holds.
-const maxAuthSessionsPerSubject = 10
-
-// pruneAuthSessionsTx drops sessions that ended before now: nothing accepts
-// or renews them again.
-func pruneAuthSessionsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+// pruneAuthSessions drops sessions that ended before now: nothing accepts or
+// renews them again.
+func pruneAuthSessions(ctx context.Context, tx taskDataExecutor, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL OR expires_at <= ?`, now.UTC()); err != nil {
 		return fmt.Errorf("prune sign-in sessions: %w", err)
 	}
@@ -118,7 +122,13 @@ func (s *Store) GetAuthSessionByHash(ctx context.Context, tokenHash string) (sto
 // RevokeAuthSession marks a session revoked. Revoking twice keeps the first
 // time.
 func (s *Store) RevokeAuthSession(ctx context.Context, id string, at time.Time) error {
-	result, err := s.db.ExecContext(ctx,
+	return writeOperationErr(ctx, s, "RevokeAuthSession", func(ctx context.Context) error {
+		return s.revokeAuthSession(ctx, id, at)
+	})
+}
+
+func (s *Store) revokeAuthSession(ctx context.Context, id string, at time.Time) error {
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?`, at.UTC(), id)
 	if err != nil {
 		return fmt.Errorf("revoke sign-in session: %w", err)
@@ -137,12 +147,18 @@ func (s *Store) RenewAuthSession(ctx context.Context, id string, next store.Auth
 	if err := validAuthSession(next); err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "RenewAuthSession", func(ctx context.Context) error {
+		return s.renewAuthSession(ctx, id, next, at)
+	})
+}
+
+func (s *Store) renewAuthSession(ctx context.Context, id string, next store.AuthSession, at time.Time) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("renew sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := pruneAuthSessionsTx(ctx, tx, at); err != nil {
+	if err := pruneAuthSessions(ctx, tx, at); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx,
@@ -157,7 +173,7 @@ func (s *Store) RenewAuthSession(ctx context.Context, id string, next store.Auth
 		return fmt.Errorf("%w: the sign-in session is no longer live", store.ErrConflict)
 	}
 	if _, err := tx.ExecContext(ctx, insertAuthSession, authSessionArgs(next)...); err != nil {
-		return fmt.Errorf("renew sign-in session: %w", err)
+		return fmt.Errorf("renew sign-in session: %w", uniqueConflict(err))
 	}
 	return tx.Commit()
 }
