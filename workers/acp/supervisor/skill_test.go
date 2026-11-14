@@ -593,7 +593,9 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 			ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: tools},
 		}}
 		request.Profile.Skills = skills
-		data, err := openCodeSessionConfig("openai/gpt-test", testOpenCodeModelLimits(), intent, request, paths, proxy)
+		// This model gets the edit and write tools; apply_patch is covered by
+		// TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills.
+		data, err := openCodeSessionConfig("anthropic/claude-test", testOpenCodeModelLimits(), intent, request, paths, proxy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -653,6 +655,70 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 	} {
 		if got := openCodeConfigRules(t, tc.data, openCodeToolEdit); !slices.Equal(got, plain(tc.want)) {
 			t.Errorf("%s: edit rules = %v, want a plain %s", name, got, tc.want)
+		}
+	}
+}
+
+// TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills follows OpenCode
+// 1.19.0's apply_patch, which it exposes instead of edit and write for GPT
+// models: it asks external_directory for a hunk's path and for a move's
+// destination, but the edit permission only for the source path. Moving a
+// workspace file onto a projected skill passes the edit rules, so the skill
+// folders must stay behind the external_directory deny whenever apply_patch
+// can mutate.
+func TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
+	config := func(t *testing.T, model string, intent harnessv2.WorkspaceIntent, tools []string) []byte {
+		t.Helper()
+		request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
+			ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: tools},
+		}}
+		request.Profile.Skills = supervisorTestSkills()
+		data, err := openCodeSessionConfig(model, testOpenCodeModelLimits(), intent, request, paths, proxy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	skillsDir := "/sessions/private/xdg/config/opencode/skills"
+	source := paths.Workspace + "/notes.md"
+	destinations := []string{
+		skillsDir + "/code-review/SKILL.md",
+		skillsDir + "/release-notes/scripts/deep/check.sh",
+	}
+	mutating := []string{"Read", "Edit", "Write"}
+	for _, model := range []string{"openai/gpt-test", "openai/gpt-5.2-codex"} {
+		if !openCodeUsesApplyPatch(model) {
+			t.Fatalf("OpenCode 1.19.0 gives %s the apply_patch tool", model)
+		}
+		data := config(t, model, harnessv2.WorkspaceIntentWrite, mutating)
+		// The source is a workspace file, so the edit check passes.
+		relative, err := filepath.Rel(paths.Workspace, source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := openCodeEvaluate(openCodeConfigRules(t, data, openCodeToolEdit), relative); got != openCodePermissionAllow {
+			t.Fatalf("%s: editing %s = %s, want allow", model, source, got)
+		}
+		externalDirectory := openCodeConfigRules(t, data, "external_directory")
+		for _, destination := range destinations {
+			if got := openCodeEvaluate(externalDirectory, filepath.Join(filepath.Dir(destination), "*")); got != openCodePermissionDeny {
+				t.Errorf("%s: moving %s onto %s passes external_directory = %s, want deny (rules %v)", model, source, destination, got, externalDirectory)
+			}
+		}
+	}
+	// Without a mutating apply_patch the skill folders stay readable.
+	for name, data := range map[string][]byte{
+		"edit and write model": config(t, "anthropic/claude-test", harnessv2.WorkspaceIntentWrite, mutating),
+		"gpt-4 model":          config(t, "openai/gpt-4.1", harnessv2.WorkspaceIntentWrite, mutating),
+		"gpt-oss model":        config(t, "openai/gpt-oss-120b", harnessv2.WorkspaceIntentWrite, mutating),
+		"mutation denied":      config(t, "openai/gpt-test", harnessv2.WorkspaceIntentWrite, []string{"Read"}),
+		"read intent":          config(t, "openai/gpt-test", harnessv2.WorkspaceIntentRead, mutating),
+	} {
+		externalDirectory := openCodeConfigRules(t, data, "external_directory")
+		if got := openCodeEvaluate(externalDirectory, skillsDir+"/code-review/*"); got != openCodePermissionAllow {
+			t.Errorf("%s: reading a skill's supporting files = %s, want allow (rules %v)", name, got, externalDirectory)
 		}
 	}
 }

@@ -597,6 +597,10 @@ func claudeSessionProjection(
 		if len(skills) > 0 {
 			// The Skill tool only loads the instructions of the skills listed
 			// below; it can't run anything the policy doesn't already allow.
+			// Listing it here only makes it available: the SDK (0.3.293)
+			// turns the skills option into Skill(<name>) allowedTools rules,
+			// so those skills load without a permission callback, which the
+			// frozen policy would reject.
 			allowed = append(allowed, claudeSkillToolName)
 		}
 		options["tools"] = allowed
@@ -995,11 +999,18 @@ func openCodeSessionConfig(
 		if !filepath.IsAbs(dir) {
 			return nil, fmt.Errorf("OpenCode skills folder %q must be absolute", dir)
 		}
-		externalDirectory := map[string]string{"*": openCodePermissionDeny}
-		for _, name := range skills {
-			externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+		// OpenCode's apply_patch asks the edit permission only for a move's
+		// source, so the edit rules below cannot stop it from moving a
+		// workspace file onto a projected skill. When that tool can mutate,
+		// keep the skill folders behind the deny: the skill tool still
+		// returns SKILL.md, but the supporting files stay unreadable.
+		if mutationAction != openCodePermissionAllow || intent == harnessv2.WorkspaceIntentRead || !openCodeUsesApplyPatch(model) {
+			externalDirectory := map[string]string{"*": openCodePermissionDeny}
+			for _, name := range skills {
+				externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+			}
+			permissions["external_directory"] = externalDirectory
 		}
-		permissions["external_directory"] = externalDirectory
 		// external_directory does not tell a read from a write, so that
 		// allowance would also let the edit, write, and apply_patch tools
 		// rewrite a projected skill. Keep them inside the workspace.
@@ -1098,6 +1109,14 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 // path repeats the session's own absolute path. The rules stop those
 // path-taking tools only; a session that may run shell commands still owns its
 // private copy.
+// openCodeUsesApplyPatch mirrors the OpenCode 1.19.0 tool registry, which
+// replaces the edit and write tools with apply_patch for these model IDs.
+// OpenCode matches the model's API ID; this config sets no ID override, so
+// that is the provider/model key it writes.
+func openCodeUsesApplyPatch(model string) bool {
+	return strings.Contains(model, "gpt-") && !strings.Contains(model, "oss") && !strings.Contains(model, "gpt-4")
+}
+
 func openCodeSkillEditRules(workspace, skillsDir string, skills []string) (map[string]string, error) {
 	rules := map[string]string{"*": openCodePermissionAllow}
 	for _, name := range skills {
