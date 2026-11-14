@@ -3190,7 +3190,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			// No retry can store a result above the limit. Finish without
 			// it and record why, rather than retry for good or report a
 			// success whose result was not stored.
-			phase, message = taskResultTooLargeOutcome(phase, message)
+			phase, message = taskResultTooLargeOutcome(phase, message, err)
 			task.Status.Phase, task.Status.Message = phase, message
 		case deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err):
 			// A result the store has not accepted yet, or may have saved, is
@@ -3567,11 +3567,15 @@ var errTaskResultTooLarge = fmt.Errorf("%w: task result exceeds the %d byte limi
 // whose result exceeds store.MaxResultBytes and is not stored: a Task that
 // would have succeeded fails, a cancelled or failed Task keeps its phase, and
 // the reason follows the message the Task was completed with.
-func taskResultTooLargeOutcome(phase corev1alpha1.TaskPhase, message string) (corev1alpha1.TaskPhase, string) {
+func taskResultTooLargeOutcome(phase corev1alpha1.TaskPhase, message string, err error) (corev1alpha1.TaskPhase, string) {
 	if phase == corev1alpha1.TaskPhaseSucceeded {
 		phase = corev1alpha1.TaskPhaseFailed
 	}
 	reason := fmt.Sprintf("task result exceeds the %d byte limit and was not stored", store.MaxResultBytes)
+	if errors.Is(err, errStdoutResultLogTooLarge) {
+		// The result itself may be small; the log it is read from is not.
+		reason = fmt.Sprintf("task log exceeds the %d byte stdout result read limit, so the result was not collected", stdoutResultLogLimitBytes)
+	}
 	if strings.TrimSpace(message) == "" {
 		return phase, reason
 	}

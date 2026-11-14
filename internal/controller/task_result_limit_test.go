@@ -172,3 +172,15 @@ func TestStdoutResultLogCutAtTheReadLimitIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, log[:limit], got)
 }
+
+// A Task whose result could not be collected says why: a result above the
+// storage limit, or a stdout log above its read limit with a result of any size.
+func TestTaskResultTooLargeOutcomeNamesTheLimit(t *testing.T) {
+	phase, message := taskResultTooLargeOutcome(corev1alpha1.TaskPhaseSucceeded, "", errTaskResultTooLarge)
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, phase)
+	require.Equal(t, fmt.Sprintf("task result exceeds the %d byte limit and was not stored", store.MaxResultBytes), message)
+
+	phase, message = taskResultTooLargeOutcome(corev1alpha1.TaskPhaseSucceeded, "done", fmt.Errorf("reading stdout result pod logs: %w", errStdoutResultLogTooLarge))
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, phase)
+	require.Equal(t, fmt.Sprintf("done; task log exceeds the %d byte stdout result read limit, so the result was not collected", stdoutResultLogLimitBytes), message)
+}
