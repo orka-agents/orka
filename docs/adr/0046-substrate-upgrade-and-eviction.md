@@ -5,7 +5,7 @@ Date: 2026-11-06
 ## Status
 
 Accepted. Refines the cold-resume infrastructure rule of ADR 0031 and the
-data-only suspension of ADR 0039: a data-only resume may now follow the operator
+data-only suspension of ADR 0049: a data-only resume may now follow the operator
 WorkerPool's current, digest-pinned worker image, and a worker termination
 triggers the existing drain and data-only suspension instead of losing the
 instance. Full-memory restore stays prohibited (ADR 0030). Task-level eviction

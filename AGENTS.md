@@ -88,7 +88,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
   - Class identity is frozen in the execution snapshot; Task attachment is exclusive and epoch-fenced; provider-native identifiers never enter Task status.
   - Checkpoint export needs `use` on the source workspace; `restoreFrom` needs `use` on the checkpoint.
   - Suspension preserves data only, never process memory. Core verifies exact Pod absence or the current-generation native-process termination for its authorized instance; resume cold-boots with rotated bootstrap credentials.
-  - Read `docs/adr/README.md`, ADRs 0024–0031, and 0039 first (0031 supersedes parts of 0027/0030; 0039 moves to Substrate v1.0.0 and supersedes parts of 0031).
+  - Read `docs/adr/README.md`, ADRs 0024–0031, and 0049 first (0031 supersedes parts of 0027/0030; 0049 moves to Substrate v1.0.0 and supersedes parts of 0031).
 - `Task.spec.workspace` is the only agent repository surface. Keep clone/read credentials in `readCredentialRef` and publication/forge credentials in `publicationCredentialRef`; neither enters the ACP process tree.
 - RuntimePools are controller-owned, digest-pinned, scale-to-zero resources. Only `Serving` + `Accepting` admits new RuntimeSessions; drain/finalization must complete before replacement or scale-down.
 - Safe v2 probes are `GET /v2/health` and `GET /v2/capabilities`; status and all mutations require controller authentication plus operation-scoped authorization and exact fences.
