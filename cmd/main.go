@@ -1284,7 +1284,7 @@ func main() {
 		setupLog.Error(err, "unable to identify the leader election Lease")
 		os.Exit(1)
 	}
-	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+	if err := establishAgentUseEnforcementPeriod(processCtx, startupRetries, mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
 		setupLog.Error(err, "unable to record the Agent use enforcement period")
 		os.Exit(1)
 	}
@@ -2847,7 +2847,7 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 // establishAgentUseEnforcementPeriod records this run's Agent use
 // enforcement with a direct client, since the manager's cache is not running
 // yet, and stores when the current enforcement period began.
-func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+func establishAgentUseEnforcementPeriod(ctx context.Context, retry startupRetry, mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
 	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
 	if err != nil {
 		return err
@@ -2855,9 +2855,14 @@ func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Confi
 	period := &agentidentity.EnforcementPeriod{}
 	config.Enforcement = period
 	if !config.AgentUseAuthorization {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+		// This runs before the manager starts, so a connection error just
+		// after a node restart is retried within the shared startup budget.
+		// Deleting the marker is idempotent, so a repeated attempt is safe.
+		if _, err := retryStartupStep(ctx, retry, "Kubernetes API server", isTransientConnectError, func() (struct{}, error) {
+			attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			return struct{}{}, agentidentity.EndEnforcementPeriod(attemptCtx, directClient, namespace)
+		}); err != nil {
 			return err
 		}
 		period.Start(time.Time{})
