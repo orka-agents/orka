@@ -100,6 +100,9 @@ func TestTaskProvenanceValidatorChildCreationUsesLiveParentIdentity(t *testing.T
 		readerError bool
 	}{
 		{name: "own active parent", allowed: true},
+		{name: "parent asked to cancel", change: func(f *coordinationCreateFixture) {
+			f.parent.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"}
+		}},
 		{name: "inherited session reference", allowed: true, change: func(f *coordinationCreateFixture) {
 			f.parent.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "parent-session", ThroughMessageID: "cutoff"}
 			f.child.Spec.SessionRef = f.parent.Spec.SessionRef.DeepCopy()

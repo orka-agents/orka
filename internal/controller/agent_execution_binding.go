@@ -309,6 +309,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// A forwarding Tool that allows writes brings its write tool, approved
+	// unless the Tool waives it.
+	if task, agent, err = adjustInputsForForwardingWrites(ctx, reader, task, agent, connectorClassification); err != nil {
+		return nil, err
+	}
 	if len(agentToolboxes(agent)) > 0 && (strings.TrimSpace(workspaceSessionUID) != "" || taskRequestsExecutionWorkspace(task)) {
 		return nil, permanentACPAgentConfiguration(errors.New(
 			"runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces cannot mount toolboxes yet",
@@ -478,6 +483,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		return nil, err
 	}
 	snapshotDigest := store.CanonicalAgentExecutionSnapshotDigest(encoded)
+	identity, err := r.agentExecutionIdentity(ctx, task, agent)
+	if err != nil {
+		return nil, err
+	}
+	if identity != nil {
+		identity.ActsForRequester = classificationActsForRequester(frozenClassification)
+	}
 
 	binding := corev1alpha1.AgentExecutionBinding{
 		SchemaVersion:   1,
@@ -493,6 +505,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			Name:       agent.Name,
 			UID:        agent.UID,
 			Generation: agent.Generation,
+			Identity:   identity,
 		},
 		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
 			ID:            string(task.UID) + "/" + snapshotDigest,
@@ -517,6 +530,35 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	}, nil
 }
 
+// resolveExternalBindingTargets reads the Task namespace and the exact
+// AgentRuntime registration an external binding freezes, and judges the Agent
+// ceiling against that registration.
+func resolveExternalBindingTargets(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) (*corev1.Namespace, *corev1alpha1.AgentRuntime, error) {
+	namespace := &corev1.Namespace{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
+		return nil, nil, fmt.Errorf("resolve Task namespace identity: %w", err)
+	}
+	runtime := &corev1alpha1.AgentRuntime{}
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: runtimeName}, runtime); err != nil {
+		return nil, nil, fmt.Errorf("resolve external AgentRuntime %q: %w", runtimeName, err)
+	}
+	if runtime.UID == "" || runtime.Generation < 1 {
+		return nil, nil, errors.New("external AgentRuntime immutable identity is incomplete")
+	}
+	// Planning judged an earlier read; judge the registration this binding
+	// freezes, so a policy change between the two reads cannot widen tools.
+	if err := validateAgentRuntimeCeilingForRegistration(task, agent, runtime); err != nil {
+		return nil, nil, permanentACPAgentConfiguration(err)
+	}
+	return namespace, runtime, nil
+}
+
 func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -533,17 +575,9 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		return nil, errors.New("API reader is required for external v2 binding")
 	}
 
-	namespace := &corev1.Namespace{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
-		return nil, fmt.Errorf("resolve Task namespace identity: %w", err)
-	}
-	runtime := &corev1alpha1.AgentRuntime{}
-	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: runtimeName}, runtime); err != nil {
-		return nil, fmt.Errorf("resolve external AgentRuntime %q: %w", runtimeName, err)
-	}
-	if runtime.UID == "" || runtime.Generation < 1 {
-		return nil, errors.New("external AgentRuntime immutable identity is incomplete")
+	namespace, runtime, err := resolveExternalBindingTargets(ctx, reader, task, agent)
+	if err != nil {
+		return nil, err
 	}
 	profile, external, err := r.resolveExternalAgentRuntimeSnapshot(ctx, task, runtime)
 	if err != nil {
@@ -617,6 +651,10 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		return nil, err
 	}
 	snapshotDigest := store.CanonicalAgentExecutionSnapshotDigest(encoded)
+	identity, err := r.agentExecutionIdentity(ctx, task, agent)
+	if err != nil {
+		return nil, err
+	}
 	binding := corev1alpha1.AgentExecutionBinding{
 		SchemaVersion:   1,
 		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
@@ -626,6 +664,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		},
 		Agent: &corev1alpha1.AgentExecutionAgentRef{
 			Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: agent.Generation,
+			Identity: identity,
 		},
 		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
 			ID: string(task.UID) + "/" + snapshotDigest, Digest: snapshotDigest,
@@ -1432,6 +1471,32 @@ func (r *TaskReconciler) handleAgentExecutionBindingVerificationFailure(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
+// agentCacheBehind returns how long to wait before binding when the cached
+// Agent a Task was validated against, ceiling included, is not the live one.
+// The binding freezes that generation, so a tightened ceiling is never bound
+// past by a stale copy. An Agent already deleted is left to the paths that
+// handle deletion; one recreated under its name differs by UID.
+func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent) time.Duration {
+	if agent == nil {
+		return 0
+	}
+	log := logf.FromContext(ctx)
+	live := &corev1alpha1.Agent{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live)
+	switch {
+	case apierrors.IsNotFound(err):
+		return 0
+	case err != nil:
+		log.Error(err, "uncached Agent read before execution binding")
+		return 2 * time.Second
+	case live.UID != agent.UID || live.Generation != agent.Generation:
+		log.Info("execution binding waits for the Agent cache", "agent", agent.Name,
+			"cachedGeneration", agent.Generation, "liveGeneration", live.Generation)
+		return time.Second
+	}
+	return 0
+}
+
 // ensureAgentExecutionBinding runs the binding stage for the ACP execution
 // path. It returns handled=true when the caller must return the result
 // immediately (failure or requeue) and handled=false when dispatch may
@@ -1467,7 +1532,14 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			)
 			return result, handleErr, true
 		}
-		return ctrl.Result{}, nil, false
+		if result, err, handled := r.requireBoundIdentityClaim(ctx, task, existing); handled {
+			return result, err, true
+		}
+		return r.requireBoundAgentCeiling(ctx, task, reader, existing)
+	}
+
+	if wait := agentCacheBehind(ctx, reader, agent); wait > 0 {
+		return ctrl.Result{RequeueAfter: wait}, nil, true
 	}
 
 	candidate, err := r.resolveAgentExecutionCandidate(ctx, task, agent)
@@ -1532,6 +1604,45 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			ctx, task, err, "bound execution verification failed after binding",
 		)
 		return result, handleErr, true
+	}
+	if result, err, handled := r.requireBoundIdentityClaim(ctx, task, binding); handled {
+		return result, err, true
+	}
+	return r.requireBoundAgentCeiling(ctx, task, reader, binding)
+}
+
+// requireBoundAgentCeiling re-judges a bound Task against its Agent's live
+// ceiling until the Task starts executing. The binding froze the generation
+// the cache held when the live check passed; a ceiling tightened between
+// that check and the binding write is caught here, and a Task the newer
+// ceiling refuses fails before it runs. A change after this read follows
+// the binding, as it does for a Task already running. Registered external
+// runtimes are judged against their AgentRuntime policy during planning.
+func (r *TaskReconciler) requireBoundAgentCeiling(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reader client.Reader,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (ctrl.Result, error, bool) {
+	if task.Status.Execution != nil || binding == nil || binding.Agent == nil {
+		return ctrl.Result{}, nil, false
+	}
+	live := &corev1alpha1.Agent{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: binding.Agent.Namespace, Name: binding.Agent.Name}, live)
+	switch {
+	case apierrors.IsNotFound(err):
+		return ctrl.Result{}, nil, false
+	case err != nil:
+		logf.FromContext(ctx).Error(err, "uncached Agent read after execution binding")
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+	case live.UID != binding.Agent.UID || live.Generation == binding.Agent.Generation:
+		return ctrl.Result{}, nil, false
+	case live.Spec.Runtime != nil && live.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(live.Spec.Runtime.RuntimeRef.Name) != "":
+		return ctrl.Result{}, nil, false
+	}
+	if err := validateAgentRuntimeCeiling(task, live); err != nil {
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("the Agent's ceiling changed while the Task was bound: %v", err))
+		return result, failErr, true
 	}
 	return ctrl.Result{}, nil, false
 }

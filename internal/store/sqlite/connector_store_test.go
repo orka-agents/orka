@@ -374,6 +374,37 @@ func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	}
 }
 
+// TestConnectorCredentialGrantFollowsCommits covers the grant read the
+// Delegated re-check uses: it follows every commit, and reports a missing or
+// tombstoned row as no grant.
+func TestConnectorCredentialGrantFollowsCommits(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	ref := testCredentialRef()
+	if _, err := s.GetConnectorCredentialGrant(ctx, ref); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing row err = %v, want ErrNotFound", err)
+	}
+	for want := int64(1); want <= 2; want++ {
+		if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho"}); err != nil {
+			t.Fatal(err)
+		}
+		held, err := s.GetConnectorCredential(ctx, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grant, err := s.GetConnectorCredentialGrant(ctx, ref)
+		if err != nil || grant.Sequence != held.GrantSequence || grant.Sequence != want {
+			t.Fatalf("grant = %d, %v; want %d, the sealed grant %d", grant.Sequence, err, want, held.GrantSequence)
+		}
+	}
+	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetConnectorCredentialGrant(ctx, ref); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		t.Fatalf("tombstoned row err = %v, want ErrConnectorCustodyTombstoned", err)
+	}
+}
+
 func TestConnectorCredentialTombstoneBlocksRecreation(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()

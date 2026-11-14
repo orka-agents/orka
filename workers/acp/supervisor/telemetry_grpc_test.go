@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -30,6 +31,16 @@ func (r *telemetryGRPCReceiver) Export(ctx context.Context, request *collectortr
 	return &collectortrace.ExportTraceServiceResponse{}, nil
 }
 
+// telemetryGRPCMetricsReceiver accepts the GenAI metrics a generic OTLP
+// endpoint also enables.
+type telemetryGRPCMetricsReceiver struct {
+	collectormetrics.UnimplementedMetricsServiceServer
+}
+
+func (telemetryGRPCMetricsReceiver) Export(context.Context, *collectormetrics.ExportMetricsServiceRequest) (*collectormetrics.ExportMetricsServiceResponse, error) {
+	return &collectormetrics.ExportMetricsServiceResponse{}, nil
+}
+
 func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -38,6 +49,7 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	server := grpc.NewServer()
 	receiver := &telemetryGRPCReceiver{t: t, received: make(chan *collectortrace.ExportTraceServiceRequest, 2)}
 	collectortrace.RegisterTraceServiceServer(server, receiver)
+	collectormetrics.RegisterMetricsServiceServer(server, telemetryGRPCMetricsReceiver{})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 	for _, prefix := range []string{"http://"} {
@@ -69,6 +81,32 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 				t.Fatal("no real OTLP gRPC export")
 			}
 		})
+	}
+}
+
+// OTEL_METRICS_EXPORTER=none keeps a generic endpoint for traces from becoming
+// the metrics collector.
+func TestSupervisorTelemetryMetricsExporterNone(t *testing.T) {
+	t.Setenv("ORKA_ENABLE_TELEMETRY", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+	t.Setenv("OTEL_METRICS_EXPORTER", "none")
+	telemetry, shutdown, err := NewSupervisorTelemetryFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	if telemetry.Tracer == nil || telemetry.GenAITracer == nil {
+		t.Fatal("metrics opt-out disabled traces")
+	}
+	if telemetry.Meter != nil {
+		t.Fatal("generic trace endpoint enabled metrics despite OTEL_METRICS_EXPORTER=none")
+	}
+	t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+	if _, _, err := NewSupervisorTelemetryFromEnv(); err == nil {
+		t.Fatal("OTEL_METRICS_EXPORTER other than none was accepted")
 	}
 }
 

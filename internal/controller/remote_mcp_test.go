@@ -29,6 +29,7 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	defer server.Close()
 	r, tool, statusWrites := newRemoteMCPControllerFixture(t, server.URL)
 	r.HTTPClient = server.Client()
+	r.SubstrateRouterHTTPClient = server.Client()
 	c := r.Client
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(tool)}); err != nil {
 		t.Fatal(err)
@@ -200,8 +201,10 @@ func TestRemoteMCPBackendTransitionClearsAccepted(t *testing.T) {
 					t.Fatal(err)
 				}
 				r.WorkspaceProviderAPIEnabled, r.SubstrateMCPToolsEnabled = true, true
-				r.SubstrateConfig = SubstrateConfig{RouterURL: server.URL, ActorDNSSuffix: "actors.example.com"}
+				r.SubstrateConfig = SubstrateConfig{RouterURL: server.URL}
+				r.SubstrateRouterHTTPClient = server.Client()
 				r.SubstrateTemplateValidator = func(context.Context, *ExecutionWorkspaceRequest) error { return nil }
+				r.SubstrateEgressPolicyApplier = allowSubstrateEgressForTest
 				r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
 					return &recordingToolWorkspaceExecutor{}, nil
 				}

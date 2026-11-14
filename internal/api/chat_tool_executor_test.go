@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -646,6 +647,41 @@ func TestTaskLabels(t *testing.T) {
 	}
 	if taskLabels[labels.LabelChatSession] != "sess-12345678" {
 		t.Errorf("chat-session label = %q", taskLabels[labels.LabelChatSession])
+	}
+	if taskLabels[labels.LabelChatSessionNamespace] != e.namespace || e.namespace == "" {
+		t.Errorf("chat-session-namespace label = %q, want the chat's namespace %q", taskLabels[labels.LabelChatSessionNamespace], e.namespace)
+	}
+	if _, pinned := taskLabels[labels.LabelChatSessionEpoch]; pinned {
+		t.Error("no epoch label without a known chat Session incarnation")
+	}
+}
+
+// A chat Task pins the chat Session incarnation it was created in, so
+// delegated calls stop when that chat is deleted even if its name is reused.
+func TestTaskLabelsPinTheChatSessionIncarnation(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := sqlite.NewStore(db, ":memory:")
+	created := time.Date(2026, 11, 1, 12, 0, 0, 123456789, time.UTC)
+	if err := sessions.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: testDefaultNamespace, Name: "sess-12345678", SessionType: store.SessionTypeChat, CreatedAt: created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestExecutor()
+	e.chatSessionEpoch = chatSessionEpoch(context.Background(), sessions, testDefaultNamespace, "sess-12345678")
+	stored, err := sessions.GetSessionCreatedAt(context.Background(), testDefaultNamespace, "sess-12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := e.taskLabels()[labels.LabelChatSessionEpoch], labels.SessionEpoch(stored); got == "" || got != want {
+		t.Fatalf("chat-session-epoch label = %q, want %q", got, want)
+	}
+	if chatSessionEpoch(context.Background(), sessions, testDefaultNamespace, "missing") != "" {
+		t.Fatal("a missing chat Session has no incarnation to pin")
 	}
 }
 

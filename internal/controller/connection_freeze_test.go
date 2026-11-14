@@ -171,10 +171,13 @@ func TestBindFrozenConnections(t *testing.T) {
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
 	snapshots := fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: body}}
-	if err := bindFrozenConnections(context.Background(), snapshots, task, executor); err != nil {
+	if err := bindFrozenConnections(context.Background(), nil, snapshots, task, executor); err != nil {
 		t.Fatal(err)
 	}
 	requester, frozen := executor.Requester(), executor.FrozenConnections()
+	if executor.TaskUID() != "task-uid" {
+		t.Fatalf("task UID = %q, want the authenticated Task's", executor.TaskUID())
+	}
 	if requester == nil || requester.Subject != "alice" {
 		t.Fatalf("requester = %+v", requester)
 	}
@@ -184,22 +187,22 @@ func TestBindFrozenConnections(t *testing.T) {
 
 	// No snapshot store or missing snapshot: requester set, nothing frozen.
 	executor = workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
-	if err := bindFrozenConnections(context.Background(), nil, task, executor); err != nil {
+	if err := bindFrozenConnections(context.Background(), nil, nil, task, executor); err != nil {
 		t.Fatal(err)
 	}
 	if requester, frozen := executor.Requester(), executor.FrozenConnections(); requester == nil || len(frozen) != 0 {
 		t.Fatalf("without store: requester = %+v frozen = %+v", requester, frozen)
 	}
-	if err := bindFrozenConnections(context.Background(), fakeSnapshotStore{err: store.ErrNotFound}, task, executor); err != nil {
+	if err := bindFrozenConnections(context.Background(), nil, fakeSnapshotStore{err: store.ErrNotFound}, task, executor); err != nil {
 		t.Fatalf("missing snapshot must not fail: %v", err)
 	}
-	if err := bindFrozenConnections(context.Background(), fakeSnapshotStore{err: errors.New("db down")}, task, executor); err == nil {
+	if err := bindFrozenConnections(context.Background(), nil, fakeSnapshotStore{err: errors.New("db down")}, task, executor); err == nil {
 		t.Fatal("store failure must propagate")
 	}
-	if err := bindFrozenConnections(context.Background(), fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: []byte("{")}}, task, executor); err == nil {
+	if err := bindFrozenConnections(context.Background(), nil, fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: []byte("{")}}, task, executor); err == nil {
 		t.Fatal("corrupt snapshot must fail")
 	}
-	if err := bindFrozenConnections(context.Background(), snapshots, nil, executor); err == nil {
+	if err := bindFrozenConnections(context.Background(), nil, snapshots, nil, executor); err == nil {
 		t.Fatal("nil task must fail")
 	}
 	_ = types.UID("")

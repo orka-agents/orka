@@ -1067,7 +1067,9 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 	permissions := make(map[string]bool)
 	owners := make(map[string]string)
 	for _, descriptor := range policy.Tools {
-		if !descriptor.Source.Brokered() {
+		// A forwarding Tool serves a command-line client and is hidden from
+		// the model's tool list, so it takes no model-facing permission.
+		if !descriptor.Source.Brokered() || descriptor.Forward != nil {
 			continue
 		}
 		// OpenCode prefixes tools from the controller MCP server with `orka_`,

@@ -28,6 +28,9 @@ const (
 
 const maxPathSegmentBytes = 253
 
+// MaxMCPToolNameBytes bounds an MCP tool name, as every identifier is.
+const MaxMCPToolNameBytes = maxPathSegmentBytes
+
 // PathSegment validates and escapes an opaque path identifier. Restricting the
 // accepted alphabet avoids router-dependent handling of encoded slashes,
 // traversal segments, control bytes, and Unicode normalization differences.

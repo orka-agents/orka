@@ -65,7 +65,11 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
-`update` on `tasks/approvals` and `patch` on the parent Task. A monitor run or
+`update` on `tasks/approvals` and `patch` on the parent Task. Cancelling a Task
+requires `update` on `tasks/cancel`, not `patch` or `delete` on `tasks`, so an
+on-call role can stop Tasks without editing or deleting them; cancelling keeps
+everything the Task produced. Stopping a Session's turn requires `get` on the
+Session and `update` on `tasks/cancel`. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs
@@ -106,6 +110,28 @@ A Task with `spec.execution.workspace.restoreFrom` also requires `use` on
 checkpoint name and the Task namespace. This includes forks that supply
 `executionCheckpoint`. The workspace-class grant is still required; permission
 to read a checkpoint or create Tasks does not grant checkpoint use.
+
+Agent `use` is an opt-in check, enabled with `--agent-use-authorization-enabled`
+(Helm: `controller.agentUseAuthorization.enabled`). When it is on, every
+authenticated identity, including OIDC and transaction-token callers, needs `use`
+on `agents` in `core.orka.ai`, with the Agent name and the Agent's namespace, to
+create a Task that names the Agent, or to create or edit a RepositoryScan or
+RepositoryMonitor so that it names the Agent. Agents an edited object already
+named are not checked again. Kubernetes-authenticated callers are checked exactly
+as the API server authenticated them. OIDC and transaction-token callers are
+checked as the user `<issuer>#<sub>`, using the token's `iss` and `sub` claims,
+with each OIDC group prefixed the same way, so bind Roles to, for example,
+`https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main`.
+Display claims such as `preferred_username`, `email`, and `name` are not used.
+Permission to read, create, or edit an Agent does not grant `use`.
+
+Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
+`agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
+`agentidentities/entra`), the lowercased identity ID as the name, and the Agent
+namespace. This applies to every authenticated identity, through the API and through
+the always-installed `agent-identity-bind` admission policy for direct writes.
+Removing an identity, or an edit that keeps it, needs no grant. Chat and worker
+tools cannot set an identity.
 
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
@@ -161,6 +187,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
+| `POST` | `/api/v1/tasks/:id/cancel` | `core.orka.ai` | `tasks/cancel` | `update` | `:id` | `Q` | Gateway operate |
 | `GET` | `/api/v1/tasks/:id/logs` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/events` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -180,6 +207,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
 | `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on the named Session; creates a fresh non-Gateway Session only |
 | `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
+| `POST` | `/api/v1/sessions/:id/cancel` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | `update` on `core.orka.ai/tasks/cancel`; Gateway operate per Task |
 | `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
 | `GET` | `/api/v1/gatewayclasses/:name` | `gateway.orka.ai` | `gatewayclasses` | `get` | `:name` | `cluster` | none |
 | `GET` | `/api/v1/gateways` | `gateway.orka.ai` | `gateways` | `list` | empty | `Q` | none |
@@ -325,7 +353,7 @@ read. Other lookup errors still stop discovery, and explicit Secret reads
 remain subject to authorization.
 
 Existing Task helper roles retain session access; Task editor/admin roles also
-grant `update` on `tasks/approvals`. Gateway helper roles include ledger reads;
+grant `update` on `tasks/approvals` and `tasks/cancel`. Gateway helper roles include ledger reads;
 Gateway editor/admin roles also grant delivery retry. GatewayClass reads require
 a cluster-scoped binding, such as the existing `orka-gatewayclass-viewer-role`.
 A namespaced RoleBinding cannot grant those cluster-scoped reads.

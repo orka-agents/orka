@@ -1,5 +1,7 @@
 # ACP workspace coordination Leases (acp-suspend-quota-* and
 # acp-retention-fence-*) serialize suspension quota and idle-expiry admission.
+# The orka-agent-use-enforcement Lease marks an unbroken period of Agent use
+# enforcement (ADR 0039) and is reserved the same way.
 # Only the controller may write them; Kubernetes cleanup controllers may delete
 # them through owner references or namespace deletion. This is CEL rather than
 # a webhook so the guard never depends on a webhook endpoint, and so managed
@@ -24,6 +26,7 @@ spec:
   matchConditions:
   - name: reserved-acp-workspace-lease-name
     expression: >-
+      request.?name.orValue('') == 'orka-agent-use-enforcement' ||
       request.?name.orValue('').startsWith('acp-suspend-quota-') ||
       request.?name.orValue('').startsWith('acp-retention-fence-') ||
       (request.operation == 'CREATE' &&

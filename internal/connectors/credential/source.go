@@ -67,7 +67,10 @@ type Source struct {
 	flightEntered func()
 }
 
-var _ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+var (
+	_ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+	_ outboundaccess.ConnectionLivenessChecker  = (*Source)(nil)
+)
 
 func (s *Source) now() time.Time {
 	if s.Now != nil {
@@ -120,7 +123,7 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	credential, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return outboundaccess.ConnectionCredential{}, errors.New("connection holds no credential; the person must reconnect")
+			return outboundaccess.ConnectionCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
@@ -179,6 +182,82 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	}, nil
 }
 
+// RequireLiveConnection implements outboundaccess.ConnectionLivenessChecker:
+// the frozen-binding check ResolveConnectionCredential applies before it
+// releases a credential, and the grant custody holds. Custody, not the
+// Connection's status, is authoritative: a re-consent commits there first,
+// so a status that still shows the frozen grant does not prove the
+// material a credential was derived from is still the person's current
+// grant. It reads the grant only, never the material, and never refreshes.
+func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) error {
+	if s == nil || s.Client == nil || s.Credentials == nil {
+		return errors.New("connection credential source is not configured")
+	}
+	if strings.TrimSpace(req.Frozen.UID) == "" {
+		return errors.New("connection credential requires a frozen Connection binding")
+	}
+	connection, err := s.loadLiveConnection(ctx, req)
+	if err != nil {
+		return err
+	}
+	grants, ok := s.Credentials.(store.ConnectorGrantReader)
+	if !ok {
+		return errors.New("connector custody cannot report the grant it holds")
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return err
+	}
+	grant, err := grants.GetConnectorCredentialGrant(ctx, ref)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
+	}
+	if err != nil {
+		return err
+	}
+	// The exchanged credential carried the frozen grant: resolution refuses
+	// any other before it releases material (frozenGrantHolds).
+	if grant.Sequence != req.Frozen.GrantSequence {
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
+	}
+	// The provider can change during the exchange too, before the
+	// Connection's status shows it: it must still be accepted, match the
+	// consent, and declare the Tool, as when the credential was resolved.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return errors.New("connector provider is unavailable")
+	}
+	if !connectors.ProviderAccepted(provider) {
+		return errors.New("connector provider is not accepted")
+	}
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		return errors.New("connector provider changed since consent; the person must consent again")
+	}
+	// The consent fence leaves scopes out, so a provider that now requires
+	// more than the person granted is caught here, from the grant recorded at
+	// consent.
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	// A refresh keeps the grant but can narrow its scopes before the status
+	// shows it, so custody's scopes must cover the mode too.
+	required := connectors.ScopesForMode(provider, mode)
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, required) || !connectors.ScopesCover(grant.Scopes, required) {
+		return errors.New("the provider now requires scopes the person did not grant; the person must consent again")
+	}
+	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
+		return err
+	}
+	// The person can disconnect or change the link while custody answers,
+	// and custody may report the grant it held before: the Connection must
+	// still be the frozen, Ready one once custody has answered.
+	if _, err := s.loadLiveConnection(ctx, req); err != nil {
+		return err
+	}
+	return nil
+}
+
 // loadLiveConnection re-reads the requester's Connection and checks that it
 // is exactly the one frozen at dispatch and still Ready for its current
 // generation.
@@ -193,7 +272,7 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	// frozen-binding check could pass against stale readiness.
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: name}, connection); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, errors.New("the requester has no connection to this provider")
+			return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotLinked}
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
@@ -202,16 +281,19 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 		return nil, errors.New("connection does not belong to the requester")
 	}
 	if !connection.DeletionTimestamp.IsZero() {
-		return nil, errors.New("connection is being deleted")
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionDeleting}
 	}
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
-		return nil, errors.New("connection changed since the task was dispatched; re-dispatch to use it")
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionChanged}
 	}
 	if !connectors.ConnectionLinked(connection) {
-		return nil, errors.New("connection is not ready")
+		if connection.Status.State == corev1alpha1.ConnectionStateExpired {
+			return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
+		}
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotReady, State: connection.Status.State}
 	}
 	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
-		return nil, errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	return connection, nil
 }
@@ -289,7 +371,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		}
 		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
 			"Access token expired and the provider issued no refresh token")
-		return store.ConnectorCredential{}, errors.New("connection credential expired and cannot be refreshed; the person must reconnect")
+		return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
 	}
 	if s.OAuth == nil {
 		return store.ConnectorCredential{}, errors.New("connection credential refresh is not configured")
@@ -328,7 +410,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 			}
 			s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonRevoked, corev1alpha1.ConnectionStateRevoked,
 				"The provider rejected the refresh token; the person must reconnect")
-			return store.ConnectorCredential{}, errors.New("connection was revoked by the provider; the person must reconnect")
+			return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRevoked}
 		}
 		logger.Info("connection refresh failed transiently", "reason", oauthReason(err))
 		return store.ConnectorCredential{}, errors.New("connection credential refresh failed")
@@ -377,7 +459,9 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		// committed grant, so its ownership is proven and it is revoked
 		// rather than left live outside the disconnect's revocation set.
 		s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
-		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
+		// The Tool request was never sent, so callers are told to reconnect,
+		// as for any other disconnected Connection.
+		return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 	case err != nil:
 		// The provider already issued this pair and may have invalidated the
 		// previous refresh token, so it is kept in sealed retirement custody,
@@ -505,7 +589,7 @@ func checkProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.C
 	// digest: client identity and endpoints, not tool destinations); a
 	// replaced provider or rotated client must never receive or use it.
 	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
-		return errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionClientChanged}
 	}
 	if !connectors.ConsentMatchesProvider(connection, provider) {
 		return errors.New("connector provider changed since consent; the person must consent again")
@@ -690,7 +774,7 @@ func oauthReason(err error) string {
 // produced.
 func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential store.ConnectorCredential) error {
 	if req.Frozen.GrantSequence <= 0 || credential.GrantSequence != req.Frozen.GrantSequence {
-		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	return nil
 }

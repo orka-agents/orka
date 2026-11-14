@@ -101,6 +101,9 @@ func Capture(ctx context.Context, home, threadID string, maxBytes ...int) ([]byt
 		if errors.As(err, &exhausted) && exhausted.Limit != "timeout" {
 			return nil, fmt.Errorf("%w: capture budget %s", ErrUnsupported, exhausted.Limit)
 		}
+		if captureSourceUnavailable(err) {
+			return nil, fmt.Errorf("%w: the native Codex session file is missing or unreadable", ErrUnsupported)
+		}
 		return nil, classifyNativeFormatError(err)
 	}
 	if err := supported(bundle.Manifest); err != nil {
@@ -122,6 +125,26 @@ func Capture(ctx context.Context, home, threadID string, maxBytes ...int) ([]byt
 		return nil, fmt.Errorf("%w: native bundle exceeds Orka's %d-byte transport limit", ErrUnsupported, limit)
 	}
 	return data, nil
+}
+
+// captureSourceUnavailable reports a session whose state cannot be read: no
+// rollout carries the thread, or its home or file is absent or unreadable.
+// Capture runs only once the writer and its descendants are stopped, so a
+// retry cannot change the answer; a timeout or other I/O failure still can.
+func captureSourceUnavailable(err error) bool {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	rejected, ok := errors.AsType[*sessionkit.RejectionError](err)
+	if !ok || len(rejected.Rejections) == 0 {
+		return false
+	}
+	for _, rejection := range rejected.Rejections {
+		if rejection.Code != "source_not_found" {
+			return false
+		}
+	}
+	return true
 }
 
 // SessionKit rejects encrypted content before producing an inspection manifest.

@@ -10,8 +10,6 @@ import { AGENTS, REPOS, type RepoKey } from '../world'
 const ns = DEMO_NAMESPACE
 const MINUTE = 60_000
 
-export const SECURITY_REPOS = ['checkout-service', 'inventory-api', 'web-storefront', 'platform-infra'] as const
-
 const repoKeyByScan: Record<string, RepoKey> = {
   'checkout-service': 'checkout',
   'inventory-api': 'inventory',

@@ -59,23 +59,97 @@ func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	if policy == nil {
 		return invalid("policy is required")
 	}
-	direct, gateway, connection := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection
+	direct, gateway, connection, identity := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection, policy.Spec.AgentIdentity
 	modes := 0
-	for _, set := range []bool{direct != nil, gateway != nil, connection != nil} {
+	for _, set := range []bool{direct != nil, gateway != nil, connection != nil, identity != nil} {
 		if set {
 			modes++
 		}
 	}
 	if modes != 1 {
-		return invalid("exactly one of direct, gateway, or connection is required")
+		return invalid("exactly one of direct, gateway, connection, or agentIdentity is required")
 	}
 	switch {
 	case direct != nil:
 		return validateDirectSpec(direct)
 	case connection != nil:
 		return validateConnectionSpec(connection)
+	case identity != nil:
+		return validateAgentIdentitySpec(identity)
 	}
 	return validateGatewaySpec(gateway)
+}
+
+// AgentIdentityMode returns the policy's mode with its default applied.
+func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) string {
+	if identity == nil || strings.TrimSpace(identity.Mode) == "" {
+		return corev1alpha1.OutboundAgentIdentityModeSelf
+	}
+	return strings.TrimSpace(identity.Mode)
+}
+
+// ConnectionProviderName returns the ConnectorProvider whose Connections a
+// policy draws on: a connection-mode policy, or an agentIdentity policy in
+// Delegated mode, which exchanges the requester's token for the Agent's.
+func ConnectionProviderName(policy *corev1alpha1.OutboundAccessPolicy) (string, bool) {
+	switch {
+	case policy == nil:
+		return "", false
+	case policy.Spec.Connection != nil:
+		return policy.Spec.Connection.ProviderRef.Name, true
+	case policy.Spec.AgentIdentity != nil && policy.Spec.AgentIdentity.Delegated != nil &&
+		AgentIdentityMode(policy.Spec.AgentIdentity) == corev1alpha1.OutboundAgentIdentityModeDelegated:
+		return policy.Spec.AgentIdentity.Delegated.ProviderRef.Name, true
+	}
+	return "", false
+}
+
+func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAccess) *Issue {
+	switch AgentIdentityMode(identity) {
+	case corev1alpha1.OutboundAgentIdentityModeSelf:
+		if identity.Delegated != nil {
+			return invalid("agentIdentity delegated is allowed only with mode Delegated")
+		}
+	case corev1alpha1.OutboundAgentIdentityModeDelegated:
+		if identity.Delegated == nil {
+			return invalid("agentIdentity mode Delegated requires delegated")
+		}
+		name := strings.TrimSpace(identity.Delegated.ProviderRef.Name)
+		if name == "" || name != identity.Delegated.ProviderRef.Name {
+			return invalid("agentIdentity delegated providerRef name is required and must not contain surrounding whitespace")
+		}
+		if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			return invalid("agentIdentity delegated providerRef name must be a valid resource name")
+		}
+		if age := identity.Delegated.MaxDelegationAge; age != nil && age.Duration <= 0 {
+			return invalid("agentIdentity delegated maxDelegationAge must be positive")
+		}
+	default:
+		return invalid("agentIdentity mode must be Self or Delegated")
+	}
+	if identity.Entra == nil {
+		return invalid("agentIdentity requires an entra target")
+	}
+	resource := identity.Entra.Resource
+	if strings.TrimSpace(resource) != resource || resource == "" || strings.ContainsAny(resource, " \t\r\n") {
+		return invalid("agentIdentity entra.resource is required and must not contain whitespace")
+	}
+	if !strings.HasPrefix(resource, "https://") && !strings.HasPrefix(resource, "api://") {
+		return invalid("agentIdentity entra.resource must start with https:// or api://")
+	}
+	if strings.HasSuffix(resource, "/.default") {
+		return invalid("agentIdentity entra.resource names the resource; Orka appends /.default")
+	}
+	// Orka appends /.default, so a query or fragment would leave a scope
+	// Entra refuses on every call.
+	if strings.ContainsAny(resource, "?#") {
+		return invalid("agentIdentity entra.resource must not contain a query or fragment")
+	}
+	// Entra refuses a scope without an authority, such as https://:123.
+	if parsed, err := url.Parse(resource); err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return invalid("agentIdentity entra.resource must name a host or application ID")
+	}
+	return validateCredentialOutput(identity.Output)
 }
 
 func validateConnectionSpec(connection *corev1alpha1.ConnectionOutboundAccess) *Issue {
@@ -341,6 +415,14 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 	}
 	if connection := policy.Spec.Connection; connection != nil {
 		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
+	}
+	if policy.Spec.AgentIdentity != nil {
+		// The identity comes from the Task binding at call time. Only a
+		// delegated policy references a cluster object: its provider.
+		if provider, ok := ConnectionProviderName(policy); ok {
+			return resolveConnectorProvider(ctx, reader, policy.Namespace, provider)
+		}
+		return nil, nil
 	}
 	if policy.Spec.Direct != nil {
 		direct := policy.Spec.Direct
