@@ -2583,6 +2583,10 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	// A finisher can run before the stream handler records the agent's usage
+	// (remote-renewal compensation does), and telemetry ends only once, so
+	// keep any usage this result carries first.
+	prompt.genai.setUsage(result.Usage)
 	// Cancellation can settle the prompt first; telemetry follows the
 	// canonical settlement, not this finisher's result.
 	prompt.genai.finishSettlement(settlement)

@@ -409,6 +409,38 @@ func TestFinishPromptGenAIFollowsCanonicalSettlement(t *testing.T) {
 	}
 }
 
+// A finisher that runs before the stream handler records usage, such as
+// remote-renewal compensation finishing with CancelPrompt's result, still
+// ends telemetry with the agent-reported usage.
+func TestFinishPromptGenAIKeepsUsageWhenItEndsTelemetryFirst(t *testing.T) {
+	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
+	start := time.Now().UTC()
+	state := &sessionState{id: "session-1"}
+	prompt := &promptState{request: testGenAIPromptRequest()}
+	prompt.genai = h.server.startInvokeAgent(context.Background(), state, prompt.request, start)
+	input, output := int64(120), int64(30)
+	h.server.finishPrompt(state, prompt, acp.PromptResult{
+		Outcome: acp.PromptOutcomeCancelled, Accepted: true, StopReason: acp.StopReasonCancelled,
+		Usage: &acp.PromptUsage{InputTokens: &input, OutputTokens: &output},
+	}, start.Add(time.Second))
+	// The stream handler's later setUsage cannot change ended telemetry.
+	prompt.genai.setUsage(nil)
+
+	invoke := h.spans("invoke_agent codex")
+	if len(invoke) != 1 {
+		t.Fatalf("invoke spans = %d", len(invoke))
+	}
+	attributes := genAISpanAttributes(invoke[0])
+	if attributes[genai.AttrUsageInputTokens].AsInt64() != input || attributes[genai.AttrUsageOutputTokens].AsInt64() != output {
+		t.Fatalf("invoke_agent usage = input %v output %v, want %d/%d",
+			attributes[genai.AttrUsageInputTokens], attributes[genai.AttrUsageOutputTokens], input, output)
+	}
+	usage, ok := h.metrics(t)[genai.MetricClientTokenUsage].(metricdata.Histogram[int64])
+	if !ok || len(usage.DataPoints) != 2 {
+		t.Fatalf("token usage = %+v, want input and output samples", h.metrics(t)[genai.MetricClientTokenUsage])
+	}
+}
+
 func TestGenAIToolNameIsContentFree(t *testing.T) {
 	for _, test := range []struct{ name, kind, want string }{
 		{"Bash", "execute", "Bash"},
