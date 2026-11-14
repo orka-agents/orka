@@ -36,8 +36,15 @@ var runtimePoolTelemetryScalarSuffixes = []string{otlpProtocolSuffix, "INSECURE"
 
 // runtimePoolTelemetryEnvBudget is how many environment entries supervisor
 // telemetry may use. The native backend admits 32 environment entries per
-// container and a native supervisor that cannot suspend already needs 29.
+// container and a native supervisor that cannot suspend already needs 29. A
+// native runtime that needs more, such as a suspendable one, re-fits telemetry
+// to what remains with fitNativeRuntimeTelemetry.
 const runtimePoolTelemetryEnvBudget = 3
+
+// nativeRuntimeEnvironmentLimit is the native backend's (Agent Substrate's)
+// per-container environment limit. A larger request is refused by the
+// provider and the runtime never starts.
+const nativeRuntimeEnvironmentLimit = 32
 
 // runtimePoolOTLPSignal is one signal's resolved exporter configuration.
 type runtimePoolOTLPSignal struct {
@@ -60,17 +67,76 @@ type runtimePoolOTLPSignal struct {
 // admits the projected origins for gateway-enforced runtimes. Never copy
 // headers, certificate paths, resource attributes or Task context.
 func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.EnvVar {
-	if !enabled {
+	traces, metrics, ok := runtimePoolTelemetrySignals(enabled, getenv)
+	if !ok {
 		return nil
 	}
+	if metrics == nil {
+		// Dropped metrics need no disable entry: no generic endpoint is
+		// projected, so the supervisor resolves no metrics collector.
+		return encodeRuntimePoolTelemetryEnv(traces, nil)
+	}
+	env := encodeRuntimePoolTelemetryEnv(traces, metrics)
+	if len(env) > runtimePoolTelemetryEnvBudget {
+		// Traces take precedence over metrics for the native budget. Metrics
+		// are dropped only when that brings telemetry within it; trace
+		// settings that exceed it on their own already exceed the limit.
+		if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= runtimePoolTelemetryEnvBudget {
+			return traceOnly
+		}
+	}
+	return env
+}
+
+// fitNativeRuntimeTelemetry re-projects supervisor telemetry into the entries
+// the native environment limit leaves after every other runtime setting.
+// Traces take precedence: metrics are dropped first, then all telemetry. It
+// returns the fitted environment and, when telemetry is enabled, whether every
+// projected signal survived with a status message.
+func fitNativeRuntimeTelemetry(env []corev1.EnvVar, enabled bool, getenv func(string) string) ([]corev1.EnvVar, bool, string) {
+	projected := runtimePoolTelemetryEnv(enabled, getenv)
+	if len(projected) == 0 {
+		return env, true, ""
+	}
+	names := map[string]bool{}
+	for _, variable := range projected {
+		names[variable.Name] = true
+	}
+	base := make([]corev1.EnvVar, 0, len(env))
+	for _, variable := range env {
+		if !names[variable.Name] {
+			base = append(base, variable)
+		}
+	}
+	room := nativeRuntimeEnvironmentLimit - len(base)
+	if len(projected) <= room {
+		return env, true, "supervisor telemetry is configured on the native runtime"
+	}
+	traces, _, _ := runtimePoolTelemetrySignals(enabled, getenv)
+	if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= room {
+		return append(base, traceOnly...), false, fmt.Sprintf(
+			"supervisor metrics are not exported: the native runtime has room for %d of its %d telemetry environment entries (backend limit %d)",
+			max(room, 0), len(projected), nativeRuntimeEnvironmentLimit)
+	}
+	return base, false, fmt.Sprintf(
+		"supervisor telemetry is not exported: the native runtime has room for %d of its %d telemetry environment entries (backend limit %d)",
+		max(room, 0), len(projected), nativeRuntimeEnvironmentLimit)
+}
+
+// runtimePoolTelemetrySignals resolves the supervisor's trace configuration
+// and, when it fits on its own, its metrics configuration.
+func runtimePoolTelemetrySignals(enabled bool, getenv func(string) string) (runtimePoolOTLPSignal, *runtimePoolOTLPSignal, bool) {
 	traces := runtimePoolOTLPSignal{path: otlpHTTPTracesPath, scalars: map[string]string{}}
+	if !enabled {
+		return traces, nil, false
+	}
 	endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryTracesEndpointEnv))
 	if endpoint == "" {
 		endpoint = strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
 		traces.generic = true
 	}
 	if !isWorkerReachableOTLPEndpoint(endpoint) {
-		return nil
+		return traces, nil, false
 	}
 	traces.endpoint = safeWorkerOTLPEnvValue(runtimePoolTelemetryTracesEndpointEnv, endpoint)
 	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
@@ -82,20 +148,9 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	}
 	metrics, ok := runtimePoolMetricsTelemetrySignal(getenv)
 	if !ok {
-		// Dropped metrics need no disable entry: no generic endpoint is
-		// projected, so the supervisor resolves no metrics collector.
-		return encodeRuntimePoolTelemetryEnv(traces, nil)
+		return traces, nil, true
 	}
-	env := encodeRuntimePoolTelemetryEnv(traces, &metrics)
-	if len(env) > runtimePoolTelemetryEnvBudget {
-		// Traces take precedence over metrics for the native budget. Metrics
-		// are dropped only when that brings telemetry within it; trace
-		// settings that exceed it on their own already exceed the limit.
-		if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= runtimePoolTelemetryEnvBudget {
-			return traceOnly
-		}
-	}
-	return env
+	return traces, &metrics, true
 }
 
 // normalizedOTLPScalar stores an explicit grpc protocol as unset: the

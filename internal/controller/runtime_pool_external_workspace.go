@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -32,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const externalRuntimeEndpointAnnotation = "orka.ai/external-runtime-endpoint"
@@ -288,11 +290,15 @@ func externalProviderOperationReport(w *workspacev1alpha1.ExecutionWorkspace) st
 }
 
 func (r *RuntimePoolReconciler) externalPoolProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
+	return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolProgressStatus(pool, lifecycle, message), time.Second)
+}
+
+func (r *RuntimePoolReconciler) externalPoolProgressStatus(pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) corev1alpha1.RuntimePoolStatus {
 	status := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
 	status.ActiveInstance = pool.Status.ActiveInstance
 	status.Lifecycle, status.AdmissionState, status.Message = lifecycle, corev1alpha1.RuntimePoolAdmissionClosed, message
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	return status
 }
 
 func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (ctrl.Result, error) {
@@ -340,6 +346,13 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "ORKA_ACP_DURABLE_WORKSPACE_KEY", Value: "shared"})
 	}
 	template = runtimePoolWorkspaceBootstrapTemplate(template, string(auth.Data[runtimePoolBootstrapNonceKey]), publicKey)
+	telemetryFits, telemetryMessage := true, ""
+	if nativeProcess {
+		// Fit telemetry last, to the room every other native setting leaves:
+		// the provider refuses an environment past the backend limit.
+		template.Spec.Containers[0].Env, telemetryFits, telemetryMessage = fitNativeRuntimeTelemetry(
+			template.Spec.Containers[0].Env, r.EnableTelemetry, os.Getenv)
+	}
 	container := template.Spec.Containers[0]
 	request := workspacev1alpha1.WorkloadRequest{
 		RestoreFrom: pool.Spec.ExecutionWorkspace.RestoreFrom.DeepCopy(),
@@ -413,7 +426,21 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "public workload request published; waiting for provider materialization")
+	const published = "public workload request published; waiting for provider materialization"
+	if telemetryMessage == "" {
+		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, published)
+	}
+	status := r.externalPoolProgressStatus(pool, corev1alpha1.RuntimePoolLifecycleStarting, published)
+	if telemetryFits {
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
+			corev1alpha1.RuntimePoolReasonTelemetryProjected, telemetryMessage)
+	} else {
+		log.FromContext(ctx).Info("Reduced supervisor telemetry to fit the native environment limit",
+			"runtimePool", pool.Name, "detail", telemetryMessage)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionFalse,
+			corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit, telemetryMessage)
+	}
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
