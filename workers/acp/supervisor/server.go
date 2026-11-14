@@ -29,6 +29,8 @@ type Server struct {
 	mux                    *http.ServeMux
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
+	genai                  *supervisorGenAI
+	azureAuthority         azureGatewayAuthority
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
@@ -164,6 +166,9 @@ type sessionTombstone struct {
 	// Late cancellation records stay separate so explicit deletion replays
 	// continue to return the original immutable wire tombstone.
 	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
+	// drainCleaned marks a session retired by drain cleanup rather than by an
+	// authenticated delete, so a fresh prompt for it is provably unaccepted.
+	drainCleaned bool
 }
 
 // A retired prompt retains proof, never its input, output, or capabilities.
@@ -311,6 +316,8 @@ type promptState struct {
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
+	// genai records the prompt's GenAI spans and metrics; nil when disabled.
+	genai *promptGenAI
 }
 
 type promptMutationExecutor interface {
@@ -472,6 +479,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		mux:                    http.NewServeMux(),
 		providerProxy:          proxy,
 		mcpProxy:               mcp,
+		genai:                  newSupervisorGenAI(cfg.GenAITracer, cfg.Meter, cfg.Provider.Kind, cfg.Provider.Model),
 		identityLock:           identityLock,
 		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
 		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,
@@ -807,7 +815,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "requested provider profile is not available in this image", nil, false)
 		return
 	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+	if request.MCPConfiguration.ApprovalPolicy.NeedsRuntimeApprovals(request.MCPConfiguration.ToolPolicy) &&
+		!s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
 		return
 	}
@@ -1254,6 +1263,11 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	azureEnvironment, err := s.attachAzureGateway(mcpProxy, request.MCPConfiguration, paths.Home, uid, gid)
+	if err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
+	}
+	maps.Copy(envValues, azureEnvironment)
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1719,7 +1733,9 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
-		s.tombstoneSessionLocked(state, deletedAt)
+		tombstone := s.tombstoneSessionLocked(state, deletedAt)
+		tombstone.drainCleaned = true
+		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()
 }
@@ -1865,7 +1881,7 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
-	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}

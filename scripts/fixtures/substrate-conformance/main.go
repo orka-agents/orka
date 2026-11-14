@@ -18,7 +18,32 @@ const (
 	conformanceTemplate = "orka-direct"
 	credentialBundle    = "/run/substrate-client/credential-bundle.pem"
 	proofContents       = "native-data"
+	// The proof's only outbound destination, reached over plain HTTP.
+	providerProxyHost = "orka-provider-auth-proxy.orka-system.svc.cluster.local"
+	providerProxyPort = 8080
 )
+
+// providerProxyEgress is the Actor's whole allowlist. Substrate v1 denies an
+// Actor without an egress policy everything, so the proof installs this one
+// before it boots the Actor.
+func providerProxyEgress() []workspace.SubstrateEgressRule {
+	return []workspace.SubstrateEgressRule{{Scheme: "http", Host: providerProxyHost, Ports: []int32{providerProxyPort}}}
+}
+
+func providerProxyHealthURL() string {
+	return fmt.Sprintf("http://%s:%d/healthz", providerProxyHost, providerProxyPort)
+}
+
+// allowProviderProxyEgress installs and verifies the Actor's egress policy.
+func allowProviderProxyEgress(ctx context.Context, cfg workspace.SubstrateConfig, ref workspace.WorkspaceRef) error {
+	api, err := workspace.NewSubstrateNativeClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer api.Close() //nolint:errcheck
+	actorID := workspace.SubstrateActorKey(conformanceAtespace, ref.ClaimName)
+	return api.EnsureActorEgressPolicy(ctx, actorID, providerProxyEgress())
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -48,7 +73,7 @@ func run() error {
 	cfg := workspace.SubstrateConfig{
 		APIEndpoint: "api.ate-system.svc:443", APICAFile: "/run/substrate-server/trust-bundle.pem",
 		APICertFile: credentialBundle, APIKeyFile: credentialBundle, Atespace: conformanceAtespace,
-		RouterURL: "http://atenet-router.ate-system.svc", ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+		RouterURL:      "https://atenet-router.ate-system.svc:443",
 		BootstrapToken: strings.TrimSpace(string(data)), HandoffToken: token,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
@@ -70,6 +95,9 @@ func run() error {
 		return fmt.Errorf("native direct claim: %w", err)
 	}
 	defer cleanupActor(executor, claim.Ref)
+	if err := allowProviderProxyEgress(ctx, cfg, claim.Ref); err != nil {
+		return fmt.Errorf("native direct egress policy: %w", err)
+	}
 	if err := bootAndSeed(ctx, executor, claim.Ref, token, true); err != nil {
 		return err
 	}
@@ -110,8 +138,7 @@ func verifyProviderConnectivity(
 	result, err := executor.Exec(ctx, workspace.ExecRequest{
 		Ref: ref,
 		Command: []string{"curl", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "20",
-			"--output", "/dev/null", "--write-out", "%{http_code}",
-			"http://orka-provider-auth-proxy.orka-system.svc:8080/healthz"},
+			"--output", "/dev/null", "--write-out", "%{http_code}", providerProxyHealthURL()},
 		Timeout: 30 * time.Second,
 	})
 	if err != nil || result == nil || result.ExitCode != 0 || result.Stdout != "200" {

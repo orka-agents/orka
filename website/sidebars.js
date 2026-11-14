@@ -22,6 +22,7 @@ const sidebars = {
           items: [
             'guides/agents-skills-and-tools',
             'guides/toolboxes',
+            'guides/azure-cli',
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
             'guides/autonomous-tasks',
@@ -71,6 +72,7 @@ const sidebars = {
           items: [
             'guides/human-approval-v2',
             'guides/connectors',
+            'guides/agent-identities',
             'concepts/outbound-access',
             'concepts/transaction-tokens',
           ],

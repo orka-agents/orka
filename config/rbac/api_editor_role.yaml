@@ -16,6 +16,7 @@ rules:
 - apiGroups: [core.orka.ai]
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs: [update]
 - apiGroups: [core.orka.ai]
   resources:

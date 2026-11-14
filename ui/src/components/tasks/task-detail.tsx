@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CircleStop, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
@@ -21,6 +21,7 @@ import { TaskActivity } from './task-activity'
 import { TaskArtifactsPanel } from './task-artifacts-panel'
 import { TaskStatusDetails } from './task-status-details'
 import { TaskYaml } from './task-yaml'
+import { TaskCancelDialog } from './task-cancel-dialog'
 import { ViewSwitch } from './view-switch'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -32,7 +33,7 @@ import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
-import { isTaskDeleting, isWaitingForApproval } from './task-state'
+import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval, nextCancelTarget } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
 import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
@@ -176,6 +177,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
+  // Holds the namespace/uid/name identity the dialog was opened for, like the
+  // armed delete, so a namespace switch or same-name recreation closes it.
+  const [cancelFor, setCancelFor] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
   // switch or same-name/new-uid recreation drops a stale confirm so it can't
@@ -347,6 +351,24 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {isTaskCancelling(task) ? (
+            <Button variant="outline" size="sm" disabled title="Cancellation requested">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancelling…
+            </Button>
+          ) : isTaskCancellable(task) && !deleteArmed ? (
+            <Button variant="outline" size="sm" onClick={() => setCancelFor(deleteIdentity)} title="Stop the task and keep its history">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancel task
+            </Button>
+          ) : null}
+          <TaskCancelDialog
+            // Remount per Task identity so a reason or error typed for a
+            // replaced Task is not carried over to its successor.
+            key={deleteIdentity}
+            taskName={task.metadata.name}
+            taskUID={task.metadata.uid}
+            open={cancelFor === deleteIdentity}
+            onOpenChange={(open) => setCancelFor((current) => nextCancelTarget(current, deleteIdentity, open))}
+          />
           {isTaskDeleting(task) ? (
             // The API accepted the delete; finalizers are still running.
             <Button variant="destructive" size="sm" disabled title="Deletion in progress">

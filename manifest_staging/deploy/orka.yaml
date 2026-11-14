@@ -292,6 +292,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agents
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connections
   - connectorproviders
   verbs:
@@ -453,6 +459,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -636,6 +643,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 - apiGroups:
@@ -1133,7 +1141,6 @@ rules:
   resources:
   - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
@@ -1217,6 +1224,25 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
   - watch
 - apiGroups:
   - core.orka.ai
@@ -1515,6 +1541,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1556,6 +1583,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1823,6 +1851,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -2629,6 +2658,7 @@ spec:
         - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
+        - --worker-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
         command:
         - /orka-admission
         image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -2736,7 +2766,7 @@ spec:
         - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
         - --agent-execution-snapshot-retention=720h
         - --agent-execution-snapshot-retention-interval=1h
-        - --controller-url=http://orka-api.orka-system.svc:8080
+        - --controller-url=http://orka-api.orka-system.svc.cluster.local:8080
         - --controller-mode=harness-v2
         - --watch-namespace=orka-system
         - --enforce-namespace-isolation=true
@@ -2746,7 +2776,7 @@ spec:
         - --acp-upgrade-drain-poll-interval=1s
         - --acp-upgrade-drain-trigger-timeout=5m15s
         - --acp-upgrade-drain-marker-namespace=orka-system
-        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080
+        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080
         - --acp-provider-proxy-namespace=orka-system
         - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
@@ -2763,8 +2793,7 @@ spec:
         - --gateway-delivery-max-attempts=10
         - --substrate-mcp-tools-enabled=false
         - --substrate-api-endpoint=api.ate-system.svc:443
-        - --substrate-router-url=http://atenet-router.ate-system.svc
-        - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+        - --substrate-router-url=https://atenet-router.ate-system.svc:443
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete
@@ -3246,8 +3275,9 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConditions:
-  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
-      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+  - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
@@ -3286,6 +3316,32 @@ spec:
         'system:serviceaccount:kube-system:namespace-controller',
         'system:kube-controller-manager']
     name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agents
+  validations:
+  - expression: |-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) || (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) && oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) || authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3840,6 +3896,18 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.substrateActor) || !has(object.spec.mcp.substrateActor.egress) || object.spec.mcp.substrateActor.egress.all(rule,
+
+        !has(rule.credential) ||
+        authorizer.group('')
+          .resource('secrets')
+          .namespace(request.namespace)
+          .name(rule.credential.secretRef.name)
+          .check('get').allowed())
+    message: caller is not authorized to get a Secret referenced by an MCP actor egress
+      credential
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -3847,6 +3915,15 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  policyName: orka-agent-identity-bind.orka.ai
   validationActions:
   - Deny
 ---

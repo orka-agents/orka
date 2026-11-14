@@ -42,6 +42,10 @@ type apiRoutePolicy struct {
 	trimStoreID  bool
 }
 
+// apiVerbUpdate is the Kubernetes verb for routes that change state without
+// editing the object, such as approval decisions and cancellation.
+const apiVerbUpdate = "update"
+
 func coreAPIPolicy(verb, resource, nameParam string, additional ...apiResourcePermission) apiRoutePolicy {
 	return apiRoutePolicy{permissions: append([]apiResourcePermission{{corev1alpha1.GroupVersion.Group, resource, verb, nameParam}}, additional...)}
 }
@@ -85,6 +89,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks":               coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/tasks/:id":           coreAPIPolicy("get", "tasks", "id"),
 	"DELETE /api/v1/tasks/:id":        coreAPIPolicy("delete", "tasks", "id"),
+	"POST /api/v1/tasks/:id/cancel":   coreAPIPolicy(apiVerbUpdate, "tasks/cancel", "id"),
 	"GET /api/v1/tasks/:id/logs":      coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/events":    coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/stream":    coreAPIPolicy("get", "tasks", "id"),
@@ -117,6 +122,8 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/sessions/:id/events": coreAPIPolicy("get", "sessions", "id"),
 	"GET /api/v1/sessions/:id/stream": coreAPIPolicy("get", "sessions", "id"),
 	"DELETE /api/v1/sessions/:id":     coreAPIPolicy("delete", "sessions", "id"),
+	"POST /api/v1/sessions/:id/cancel": coreAPIPolicy("get", "sessions", "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks/cancel", apiVerbUpdate, ""}),
 
 	"GET /api/v1/gatewayclasses":                gatewayAPIPolicy("list", "gatewayclasses", "").inNamespace(apiClusterScoped),
 	"GET /api/v1/gatewayclasses/:name":          gatewayAPIPolicy("get", "gatewayclasses", "name").inNamespace(apiClusterScoped),
@@ -145,16 +152,20 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "memories", "create", ""}).inNamespace(apiBodyThenQueryNamespace).withStoreID(),
 	"POST /api/v1/memory-proposals/:id/archive": coreAPIPolicy("update", "memoryproposals", "id").withStoreID(),
 
-	"GET /api/v1/providers":                  coreAPIPolicy("list", "providers", ""),
-	"POST /api/v1/providers":                 coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/providers/:name":            coreAPIPolicy("get", "providers", "name"),
-	"PUT /api/v1/providers/:name":            coreAPIPolicy("update", "providers", "name"),
-	"DELETE /api/v1/providers/:name":         coreAPIPolicy("delete", "providers", "name"),
-	"GET /api/v1/tools":                      coreAPIPolicy("list", "tools", ""),
-	"POST /api/v1/tools":                     coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/tools/:name":                coreAPIPolicy("get", "tools", "name"),
-	"PUT /api/v1/tools/:name":                coreAPIPolicy("update", "tools", "name"),
-	"DELETE /api/v1/tools/:name":             coreAPIPolicy("delete", "tools", "name"),
+	"GET /api/v1/providers":          coreAPIPolicy("list", "providers", ""),
+	"POST /api/v1/providers":         coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/providers/:name":    coreAPIPolicy("get", "providers", "name"),
+	"PUT /api/v1/providers/:name":    coreAPIPolicy("update", "providers", "name"),
+	"DELETE /api/v1/providers/:name": coreAPIPolicy("delete", "providers", "name"),
+	"GET /api/v1/tools":              coreAPIPolicy("list", "tools", ""),
+	"POST /api/v1/tools":             coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/tools/:name":        coreAPIPolicy("get", "tools", "name"),
+	"PUT /api/v1/tools/:name":        coreAPIPolicy("update", "tools", "name"),
+	"DELETE /api/v1/tools/:name":     coreAPIPolicy("delete", "tools", "name"),
+	// The MCP proxy invokes the Tool's actor with the caller's Tool read
+	// permission, as workers did when they read the Tool and called it.
+	"POST /api/v1/tools/:name/mcp":           coreAPIPolicy("get", "tools", "name"),
+	"DELETE /api/v1/tools/:name/mcp":         coreAPIPolicy("get", "tools", "name"),
 	"GET /api/v1/runtime-pools":              coreAPIPolicy("list", "runtimepools", ""),
 	"GET /api/v1/runtime-pools/:name":        coreAPIPolicy("get", "runtimepools", "name"),
 	"GET /api/v1/agent-runtimes":             coreAPIPolicy("list", "agentruntimes", ""),

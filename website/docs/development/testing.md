@@ -94,13 +94,11 @@ request review, repair, and readiness. These tests do not claim live model execu
 ```bash
 make repository-monitor-fake-e2e         # the fake-GitHub E2E scenarios
 make repository-monitor-validate         # plus generated CLI docs, example manifests, website docs, and workflow syntax
-make repository-monitor-completion-audit # runs the bundle and reports what still needs live validation
 ```
 
 The `Repository Monitor Smoke` GitHub Actions workflow runs the same fake-GitHub script on
-relevant pull requests. The completion audit exits non-zero if local validation fails. Live
-model execution, publication, and GitHub rule enforcement need separate validation against an
-explicitly selected repository.
+relevant pull requests. Live model execution, publication, and GitHub rule enforcement need
+separate validation against an explicitly selected repository.
 
 ## Test structure
 
@@ -148,7 +146,6 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/security_enforcement_test.go` | Non-root execution, read-only filesystem, deny-pattern enforcement, kube-system chat block |
 | `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
 | `test/e2e/workspace_advanced_test.go` | Workspace source/ref/subPath, separate read/publication credential roles, delivery status, and Session behavior |
-| `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
 | `test/e2e/live_copilot_proxy_test.go` | Native `type: ai` Provider compatibility against the separately deployed copilot-proxy service; this is separate from built-in Copilot ACP RuntimePool coverage |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/anthropic_compat_test.go` | Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior, on aimock or the live proxy |

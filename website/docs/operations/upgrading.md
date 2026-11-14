@@ -319,6 +319,15 @@ config/profile kinds instead. Native MCP Tools remain separate and use
 `--substrate-mcp-tools-enabled`; their control credentials are not external ACP
 provider credentials.
 
+Substrate-native workspaces need fully qualified Service names in
+`--controller-url` and `--acp-provider-proxy-base-url`
+(`<service>.<namespace>.svc.<cluster domain>`). The chart and kustomize
+manifests now render them (chart value `clusterDomain`, default
+`cluster.local`). An installation that sets either flag itself to a short
+`<service>.<namespace>.svc` name must change it before using Substrate-native
+workspaces; Core refuses the short form for them and the RuntimePool reports
+`Degraded`. See [Agent Substrate](../concepts/substrate.md#upgrades-and-proof-limits).
+
 The [local upgrade proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh)
 uses actual API objects and a released stock core image. It covers old-shaped
 pools, all retained workspace states, schema pruning, unchanged legacy identities,

@@ -62,6 +62,19 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state := s.sessions[sessionID]
+	if state == nil {
+		unaccepted, mismatch := s.drainCleanedPromptUnacceptedLocked(sessionID, request.Metadata)
+		if mismatch != harnessv2.FenceMatch {
+			s.mu.Unlock()
+			writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+			return
+		}
+		if unaccepted {
+			s.mu.Unlock()
+			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+			return
+		}
+	}
 	if state == nil || state.creating {
 		s.mu.Unlock()
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -155,6 +168,13 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	prompt.genai = s.startInvokeAgent(r.Context(), state, request, now)
+	// Settlement records the span first; this only closes a prompt that never
+	// settled, such as one rejected before the agent accepted it.
+	defer prompt.genai.abandon()
+	if providerProxy != nil {
+		providerProxy.setPromptTelemetry(string(request.Metadata.PromptID), prompt.genai)
+	}
 	// Resume an adapter that exited while idle before this prompt gets any
 	// provider or MCP access. Some agents call the model during
 	// session/resume; with the prompt not yet active the provider proxy
@@ -316,6 +336,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result := <-run.Result
+	prompt.genai.setUsage(result.Usage)
 	if result.Err != nil {
 		stage, rpcCode, rpcService, rpcErrorName := promptExecutionDiagnostic(result.Err)
 		slog.Error(
@@ -1514,6 +1535,39 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	return true, nil
 }
 
+// drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
+// that drain cleanup already retired is provably unaccepted: the pool is still
+// draining, the request carries this supervisor's exact fence for that retired
+// session (runtime instance, supervisor boot, controller epoch, pool identity,
+// session UID and generation, and profile), and neither the operation nor the
+// prompt was ever admitted on it. Such a prompt is rejected as retryable, like
+// any prompt that reaches a draining pool, so the controller can requeue it.
+// A request for that retired session with any other fence gets the
+// non-retryable stale-fence refusal through the returned mismatch, never a
+// retry. Replays of admitted work keep their existing classification. The
+// caller must hold s.mu.
+func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (bool, harnessv2.FenceMismatch) {
+	if !s.drain.Requested {
+		return false, harnessv2.FenceMatch
+	}
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID {
+		return false, harnessv2.FenceMatch
+	}
+	expected := s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration)
+	expected.RuntimeProfileDigest = tombstone.RuntimeProfileDigest
+	if mismatch := harnessv2.CompareFence(expected, metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		return false, mismatch
+	}
+	if tombstoneOperation(tombstone.RuntimeSessionTombstone, metadata.OperationID) != nil {
+		return false, harnessv2.FenceMatch
+	}
+	if _, ok := tombstone.cancellationOperations[metadata.OperationID]; ok {
+		return false, harnessv2.FenceMatch
+	}
+	return tombstone.prompt == nil || tombstone.prompt.metadata.PromptID != metadata.PromptID, harnessv2.FenceMatch
+}
+
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {
 	for i := range tombstone.Operations {
 		if tombstone.Operations[i].OperationID == operationID {
@@ -2158,6 +2212,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, err
 		}
+		if update != nil && update.ToolCall != nil {
+			prompt.genai.observeTool(update.ToolCall, prompt.toolCallNames[update.ToolCall.ToolCallID], event.Timestamp)
+		}
 		if text != "" {
 			messageID := ""
 			if state.profile.ProviderKind == providerKindCodex {
@@ -2546,6 +2603,13 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	// A finisher can run before the stream handler records the agent's usage
+	// (remote-renewal compensation does), and telemetry ends only once, so
+	// keep any usage this result carries first.
+	prompt.genai.setUsage(result.Usage)
+	// Cancellation can settle the prompt first; telemetry follows the
+	// canonical settlement, not this finisher's result.
+	prompt.genai.finishSettlement(settlement)
 	next := state.descriptor.State
 	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
 	if sessionCleanup {

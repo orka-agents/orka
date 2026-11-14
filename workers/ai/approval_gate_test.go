@@ -1352,7 +1352,7 @@ func TestApprovalTargetSpecDigestIncludesMCPStatusEndpoint(t *testing.T) {
 		},
 		Status: corev1alpha1.ToolStatus{
 			Endpoint: "http://actor-a/mcp",
-			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: "actor-a.test"},
+			Actor:    &corev1alpha1.ToolActorStatus{ActorID: "actor-a.tools"},
 		},
 	}
 	first, err := approvalTargetSpecDigest(tool)
@@ -1366,6 +1366,14 @@ func TestApprovalTargetSpecDigestIncludesMCPStatusEndpoint(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("MCP status endpoint change did not affect approval target digest")
+	}
+	tool.Status.Actor.ActorID = "actor-b.tools"
+	third, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() third error = %v", err)
+	}
+	if third == second {
+		t.Fatalf("MCP actor change did not affect approval target digest")
 	}
 }
 

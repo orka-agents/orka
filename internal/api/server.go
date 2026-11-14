@@ -104,10 +104,17 @@ type ServerConfig struct {
 	ConnectorTools            ConnectorToolExecutionConfig
 	// OperatorAccess configures `orka task exec` / `orka task cp`.
 	OperatorAccess OperatorAccessConfig
+	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
+	// Substrate MCP actor Tools through the manager's router identity.
+	SubstrateMCPProxy SubstrateMCPProxyConfig
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
+	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
+	// or RepositoryMonitor they create or edit names.
+	AgentUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -133,12 +140,16 @@ type Server struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+
+	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
+	substrateMCPProxyWriteTimeout time.Duration
 }
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
+	agentUseAuthorization.Store(config.AgentUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -187,14 +198,17 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.handlers.chatTurns = server.chatHandler
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.substrateMCPProxyWriteTimeout = substrateMCPProxyWriteTimeout
 	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -239,7 +253,8 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	return fasthttp.RequestConfig{}
 }
 
-// requestConfig bounds writes on the Responses route as well as provider work.
+// requestConfig bounds writes on the Responses and MCP proxy routes as well as
+// provider and Actor work.
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
@@ -254,6 +269,9 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
 		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	if isSubstrateMCPProxyRoute(header) {
+		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
 	}
 	return config
 }
@@ -380,6 +398,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.GetTask)
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
+	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
@@ -409,6 +428,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+	api.Post("/sessions/:id/cancel", s.handlers.CancelSession)
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
@@ -455,6 +475,10 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
+	// Substrate MCP actors are reachable only through this authenticated
+	// proxy; the manager is the router's sole allowlisted client.
+	api.Post("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
+	api.Delete("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
 
 	// Runtime fabric endpoints
 	api.Get("/runtime-pools", s.handlers.ListRuntimePools)

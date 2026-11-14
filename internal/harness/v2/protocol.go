@@ -263,13 +263,35 @@ const (
 	// DrainReasonToolboxUnavailable drains a supervisor whose pool lost
 	// toolbox admission so its workload can be stopped once idle.
 	DrainReasonToolboxUnavailable = "toolbox_unavailable"
+	// DrainReasonWorkspaceRetirement drains a workspace runtime before a
+	// controller-authorized Stop or Delete. Nothing on the instance is
+	// preserved, so a later termination signal may exit promptly.
+	DrainReasonWorkspaceRetirement = "workspace_retirement"
+	// DrainReasonWorkspaceSuspend drains a workspace runtime before a
+	// controller-authorized data-only suspension.
+	DrainReasonWorkspaceSuspend = "workspace_suspend"
+	// DrainReasonWorkerEviction is self-reported by a supervisor whose host
+	// worker began graceful termination (an upgrade roll, node drain, or Spot
+	// reclaim). The supervisor keeps serving so the controller can drain it
+	// and have the provider suspend its data before the eviction window ends.
+	DrainReasonWorkerEviction = "worker_eviction"
 )
+
+// WorkerEvictionSuspendWindow is the Agent Substrate worker shutdown budget:
+// after a worker Pod receives SIGTERM, each hosted Actor has this long to be
+// suspended before the worker kills it.
+const WorkerEvictionSuspendWindow = 30 * time.Minute
 
 type DrainStatus struct {
 	AcceptingNewSessions bool      `json:"acceptingNewSessions"`
 	Requested            bool      `json:"requested"`
 	RequestedAt          time.Time `json:"requestedAt,omitempty"`
 	Reason               string    `json:"reason,omitempty"`
+	// WorkerEvictionAt is when the supervisor's host worker signalled graceful
+	// termination. It is reported independently of Reason, which keeps the
+	// drain that first closed admission, so Core enforces the eviction deadline
+	// even when the signal arrives during a suspension or capacity drain.
+	WorkerEvictionAt time.Time `json:"workerEvictionAt,omitzero"`
 }
 
 type RuntimeSessionStatus struct {
@@ -484,7 +506,7 @@ func (r StatusResponse) Validate() error {
 			return fmt.Errorf("requested drain requires draining or terminating lifecycle")
 		}
 	} else {
-		if !r.Drain.RequestedAt.IsZero() || r.Drain.Reason != "" {
+		if !r.Drain.RequestedAt.IsZero() || r.Drain.Reason != "" || !r.Drain.WorkerEvictionAt.IsZero() {
 			return fmt.Errorf("inactive drain must not carry request metadata")
 		}
 		if r.Lifecycle == SupervisorLifecycleDraining {

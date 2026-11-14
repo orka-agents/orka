@@ -15,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -958,7 +959,10 @@ func (d *ACPDispatcher) taskCancellationRequested(ctx context.Context, task *cor
 	if err := d.APIReader.Get(ctx, clientObjectKey(task), latest); err != nil {
 		return false, err
 	}
-	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled, nil
+	// A recorded cancel request stops publication at once; the Cancelled
+	// phase follows only when the Task is next reconciled.
+	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
+	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled || requested, nil
 }
 
 //nolint:gocyclo // Reclamation deliberately verifies every durable publication, attempt, effect, owner, and baseline fence together.
@@ -1491,6 +1495,14 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
+	// A requested cancellation ends with the request, which names who
+	// cancelled and why.
+	if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+		message = requested
+	}
+	// An operator-access taint refusal keeps its bounded message so the Task
+	// matches the publication and delivery records and stays distinguishable
+	// from a user cancellation.
 	message = cancelledBeforePublishMessage(status, message)
 	// Execution succeeded before the cancellation settled the publication, so
 	// the projection carries the frozen successful execution identity with the

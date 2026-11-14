@@ -3546,7 +3546,7 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
+func TestReadOnlyAgentRuntimeTypeKeepsOpencode(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
@@ -3555,10 +3555,6 @@ func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
 
 	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() = %#v, %v, want no runtime secret keys", keys, err)
 	}
 }
 

@@ -99,6 +99,7 @@ var _ = BeforeSuite(func() {
 		fakeForgeImage,
 		mockLLMCaptureImage,
 		aimockAuthorityImage,
+		fakeEntraImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -674,6 +675,7 @@ func e2eImageBuilds() []e2eImageBuild {
 		dockerBuild(fakeForgeImage, "test/fixtures/fakeforge/Dockerfile"),
 		dockerBuild(mockLLMCaptureImage, "test/fixtures/aimockcapture/Dockerfile"),
 		dockerBuild(aimockAuthorityImage, "test/fixtures/aimockauthority/Dockerfile"),
+		dockerBuild(fakeEntraImage, "test/fixtures/fakeentra/Dockerfile"),
 	}
 	if gatewayE2EEnabled() {
 		builds = append(builds,

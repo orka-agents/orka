@@ -4003,6 +4003,7 @@ Usage:
   orka session [command]
 
 Available Commands:
+  cancel      Stop a session's current turn
   delete      Delete a session resource
   events      List session execution events
   follow      Follow session execution events
@@ -4022,6 +4023,29 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka session [command] --help" for more information about a command.
+```
+
+## `orka session cancel`
+
+```text
+Stop the session's in-flight chat request, if any, and cancel its
+Pending and Running tasks. The session keeps its history and accepts the next
+message.
+
+Usage:
+  orka session cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the turn is being stopped
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session delete`
@@ -4682,6 +4706,7 @@ Available Commands:
   approvals   List task approvals, or wait for one
   approve     Approve a pending task approval
   artifacts   List artifacts for a task
+  cancel      Stop a running task and keep its history
   children    List child tasks
   cp          Copy one file out of or into a Task's execution workspace (operator debugging)
   create      Create a new task
@@ -4783,6 +4808,29 @@ Usage:
 Flags:
   -h, --help            help for artifacts
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task cancel`
+
+```text
+Stop a Pending or Running task. Unlike delete, cancel keeps the task's
+result, artifacts, plan and events. Cancelling an already cancelled task
+changes nothing.
+
+Usage:
+  orka task cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the task is being cancelled
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
