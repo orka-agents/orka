@@ -404,15 +404,6 @@ func isActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
 	}
 }
 
-func isTerminalScanTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
 func isFailedScanTaskPhase(phase corev1alpha1.TaskPhase) bool {
 	return phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled
 }
@@ -1296,7 +1287,7 @@ func (r *RepositoryScanReconciler) ingestTerminalStageTasks(ctx context.Context,
 	stageTasks := make([]*corev1alpha1.Task, 0, 2)
 	for i := range tasks {
 		task := &tasks[i]
-		if scanTaskRunID(task) != scanID || !isTerminalScanTaskPhase(task.Status.Phase) {
+		if scanTaskRunID(task) != scanID || !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		switch taskSecurityStage(task) {
@@ -1802,7 +1793,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		stage := taskSecurityStage(task)
-		if !isTerminalScanTaskPhase(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		if task.Status.Phase == corev1alpha1.TaskPhaseCancelled && !isScanPipelineStage(stage) {

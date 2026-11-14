@@ -339,6 +339,86 @@ func TestMarshalReviewContextsFailsWhenExcerptsAloneExceedTheBound(t *testing.T)
 	}
 }
 
+// reviewContextFixture writes one 64 KiB Go file per slice so each default
+// review context carries a large excerpt.
+func reviewContextFixture(t *testing.T, count int) (string, []store.ReviewSlice, map[string][]ReviewContextReferenceFile) {
+	t.Helper()
+	root := t.TempDir()
+	body := strings.Repeat("\tvalue := compute(input) // keep\n", 2048)
+	slices := make([]store.ReviewSlice, count)
+	references := make(map[string][]ReviewContextReferenceFile, count)
+	for i := range slices {
+		name := fmt.Sprintf("pkg%03d/file.go", i)
+		writeFile(t, root, name, "package p\n"+body)
+		slices[i] = store.ReviewSlice{ID: fmt.Sprintf("slice_%03d", i), RepositoryScan: "repo", Title: name, Kind: "package", OwnedFiles: []store.ReviewSliceFile{{Path: name}}}
+		references[slices[i].ID] = []ReviewContextReferenceFile{{Path: name, Lines: 2049, Relation: ReferenceRelationSlice}}
+	}
+	return root, slices, references
+}
+
+func TestBuildReviewContextsKeepsDefaultContextsThatFit(t *testing.T) {
+	root, slices, references := reviewContextFixture(t, 4)
+	manifests := make([]ReviewContextManifest, len(slices))
+	for i := range slices {
+		_, manifest, err := BuildReviewContext(root, slices[i], ReviewContextOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.ReferenceFiles = references[slices[i].ID]
+		manifests[i] = manifest
+	}
+	want, err := MarshalReviewContexts(manifests, MaxReviewContextsBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := BuildReviewContexts(root, slices, references, MaxReviewContextsBytes)
+	if err != nil {
+		t.Fatalf("BuildReviewContexts() error = %v", err)
+	}
+	for i := range want {
+		if string(got[i]) != string(want[i]) {
+			t.Fatalf("context %d changed although the default contexts fit the budget", i)
+		}
+	}
+}
+
+func TestBuildReviewContextsScalesExcerptsForManySlices(t *testing.T) {
+	root, slices, references := reviewContextFixture(t, 60)
+	// The default contexts need about 10 MiB; give the run 2 MiB.
+	const budget = 2 << 20
+	encoded, err := BuildReviewContexts(root, slices, references, budget)
+	if err != nil {
+		t.Fatalf("BuildReviewContexts() error = %v", err)
+	}
+	total := 0
+	for i, data := range encoded {
+		total += len(data)
+		manifest, _, err := ParseTrustedReviewContextManifest(data)
+		if err != nil {
+			t.Fatalf("context %d is not a trusted manifest: %v", i, err)
+		}
+		if manifest.SliceID != slices[i].ID || len(manifest.IncludedFiles) != 1 || !manifest.IncludedFiles[0].Truncated {
+			t.Fatalf("context %d = %#v, want its own truncated excerpt", i, manifest.IncludedFiles)
+		}
+		if manifest.PromptBytes >= defaultMaxReviewContextBytes/2 {
+			t.Fatalf("context %d prompt is %d bytes, want a scaled-down excerpt", i, manifest.PromptBytes)
+		}
+		if len(manifest.ReferenceFiles) != 1 {
+			t.Fatalf("context %d dropped its own reference file", i)
+		}
+	}
+	if total > budget {
+		t.Fatalf("contexts total %d bytes, want at most %d", total, budget)
+	}
+}
+
+func TestBuildReviewContextsFailsBelowTheExcerptFloor(t *testing.T) {
+	root, slices, references := reviewContextFixture(t, 60)
+	if _, err := BuildReviewContexts(root, slices, references, 64<<10); err == nil {
+		t.Fatal("BuildReviewContexts() = nil error, want contexts that cannot fit rejected")
+	}
+}
+
 func TestReviewPromptNamesTheLastIndexedRepositoryFile(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	manifest := testReviewContextManifest("slice_inv")

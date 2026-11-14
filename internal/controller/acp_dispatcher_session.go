@@ -1109,14 +1109,20 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 // complete binding: a recovered session may carry only the SessionUID, and
 // retaining a binding without a generation would make the next continuation
 // fail planning instead of recreating the runtime.
-func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding) {
+//
+// A turn that parked is never reusable: its continuation must start from the
+// Session transcript, not from the parked turn's live process.
+func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(
+	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding,
+) {
 	sessionUID := strings.TrimSpace(binding.SessionUID)
 	reusable := task != nil && attempt != nil && sessionUID != "" &&
 		!binding.RecreationRequired &&
 		attempt.ExecutionState == store.PromptExecutionSucceeded &&
 		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
 		task.Spec.SessionRef != nil && task.Annotations[nativeCaptureIntentAnnotation] == "" &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite)
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		!d.turnRequestedPark(ctx, task)
 	if reusable {
 		if binding.Generation > 0 {
 			return

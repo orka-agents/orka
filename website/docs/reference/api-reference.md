@@ -69,6 +69,12 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
+`DELETE /api/v1/tasks/:id`, `GET /api/v1/tasks/:id/result`, and
+`POST /api/v1/tasks/:id/approvals/:approvalID/decision` accept an optional `uid` query
+parameter. When it is set, a Task with that name but a different UID is reported as
+`404 task not found`, so a client never deletes, reads, or decides an approval of a later
+Task that reused the name.
+
 `POST /api/v1/tasks` takes `name`, `namespace`, and a `spec` with the full set of
 [Task](resources.md#task) fields. As a shorthand, common fields — `type`, `agentRef`,
 `prompt`, `image`, `command`, `args`, `env`, `timeout`, `priority`, `retryPolicy`,
@@ -167,7 +173,37 @@ RuntimePools are controller-owned for built-in Codex, OpenCode, Claude, and Copi
 | `/api/v1/agents/:name` | GET | Get agent details |
 | `/api/v1/agents/:name/system-prompt` | GET | Get the system prompt an agent reads from its `systemPrompt.configMapRef` |
 | `/api/v1/agents/:name` | PUT | Update an agent |
+| `/api/v1/agents/:name/spec` | PUT | Replace the spec only if UID and generation still match |
 | `/api/v1/agents/:name` | DELETE | Delete an agent |
+
+### Conditional spec update
+
+`PUT /api/v1/agents/:name/spec?namespace=default` requires `patch` on the named
+Agent, like the legacy PUT. Send the UID and generation from the Agent you last
+read, and the complete desired spec (omitted spec fields are removed):
+
+```json
+{
+  "expectedUID": "the-agent-uid",
+  "expectedGeneration": 3,
+  "spec": {"model": {"provider": "openai", "name": "gpt-4o"}}
+}
+```
+
+All three fields are required. The UID must be nonblank, generation a positive
+integer, and spec a non-null object. Success returns `200` with the updated Agent,
+including its UID and generation. Invalid requests return `400`; existing
+namespace and authorization restrictions still apply. A missing Agent returns
+`404`. A UID or generation mismatch returns `409` with
+`agent UID or generation does not match`, without applying the spec. The same
+expectations are checked on every optimistic-lock retry, so status-only writes
+can retry without accepting a spec edit or same-name replacement. Exhausted
+conflicts return `409` with `agent was modified concurrently` instead.
+
+A timeout or lost response does not prove that the update failed. Read the Agent
+to reconcile before deciding what to do next. Older servers lack this route;
+never fall back to the unconditional PUT when conditional behavior is needed.
+The legacy `PUT /api/v1/agents/:name` retains its existing semantics.
 
 ## Skills
 

@@ -12,6 +12,15 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connections"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Orka creates Tasks for callers it has already authorized, so it may use
+  # every Agent; see --agent-use-authorization-enabled.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents"]
+    verbs: ["use"]
+  # The API binds Agent identities only for callers it has checked for bind.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agentidentities/entra"]
+    verbs: ["bind"]
   # Providers are operator-authored: the controller reads them and manages
   # their finalizer, never creates or deletes one.
   - apiGroups: ["core.orka.ai"]
@@ -270,6 +279,40 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
+# The Task webhook signing Secret lives alone in its own namespace; only the
+# controller can read or change it. create cannot be name-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+  namespace: {{ include "orka.taskWebhookSigningNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "orka.taskWebhookSigningSecretName" . | quote }}]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+  namespace: {{ include "orka.taskWebhookSigningNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
 # Minimal cluster-scoped controller authority. Namespaced workload access is never bound here.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -398,7 +441,7 @@ rules:
     resources: ["tasks/status"]
     verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/approvals"]
+    resources: ["tasks/approvals", "tasks/cancel"]
     verbs: ["update"]
 
   # RepositoryMonitor permissions
@@ -564,7 +607,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]
@@ -653,7 +696,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]

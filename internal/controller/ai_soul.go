@@ -182,8 +182,7 @@ func (r *TaskReconciler) pinAISoulSession(ctx context.Context, task *corev1alpha
 	if prepared != nil {
 		binding = &prepared.Binding
 	}
-	return writer.EnsureSessionSoulWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name,
-		task.Name, string(task.UID), agentcontext.SessionDigest(binding))
+	return writer.EnsureSessionSoulWithLock(ctx, taskSessionOwner(task), agentcontext.SessionDigest(binding))
 }
 
 func (m *SessionManager) validateSoulContext(ctx context.Context, task *corev1alpha1.Task, binding *corev1alpha1.TaskSoulBinding) error {

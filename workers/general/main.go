@@ -26,6 +26,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/security"
 	securityslices "github.com/orka-agents/orka/internal/security/slices"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	"github.com/orka-agents/orka/workers/common"
@@ -342,17 +343,13 @@ func runSecurityMapper(ctx context.Context) error {
 	if headCommit == "" {
 		headCommit = resolvedHeadCommit
 	}
-	manifests := make([]security.ReviewContextManifest, 0, len(slices))
+	contextSlices := make([]store.ReviewSlice, len(slices))
 	for i := range slices {
-		contextSlice := slices[i]
-		contextSlice.ChangedFiles = append([]string(nil), changedFiles...)
-		contextSlice.ChangedLineRanges = append([]security.ChangedLineRange(nil), changedLineRanges...)
-		_, manifest, err := security.BuildReviewContext(workDir, contextSlice, security.ReviewContextOptions{})
-		if err != nil {
-			return fmt.Errorf("build security review context for %s: %w", contextSlice.ID, err)
-		}
-		manifest.ReferenceFiles = references[contextSlice.ID]
-		manifests = append(manifests, manifest)
+		contextSlices[i] = slices[i]
+		// BuildReviewContext only reads these; sharing keeps memory flat
+		// when many slices see a large diff.
+		contextSlices[i].ChangedFiles = changedFiles
+		contextSlices[i].ChangedLineRanges = changedLineRanges
 	}
 	artifact := security.ReviewSlicesArtifact{
 		SchemaVersion:        security.SchemaVersionReviewSlices,
@@ -378,7 +375,7 @@ func runSecurityMapper(ctx context.Context) error {
 	// The contexts share the upload limit with the slices artifact; keep
 	// headroom for the run's other artifacts.
 	const otherArtifactsBytes = 2 << 20
-	encoded, err := security.MarshalReviewContexts(manifests,
+	encoded, err := security.BuildReviewContexts(workDir, contextSlices, references,
 		min(security.MaxReviewContextsBytes, common.MaxArtifactTotalBytes-otherArtifactsBytes-len(data)))
 	if err != nil {
 		return fmt.Errorf("marshal security review contexts: %w", err)

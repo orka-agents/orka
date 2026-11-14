@@ -196,6 +196,12 @@ orka task logs my-task
 orka task delete my-task
 ```
 
+Stop a Task that is still pending or running:
+
+```bash
+orka task cancel my-task --reason "wrong repository"
+```
+
 Create a simple container task from flags:
 
 ```bash
@@ -261,7 +267,8 @@ Common task commands:
 | `orka task plan NAME` | Read autonomous plan state. |
 | `orka task artifacts NAME` | List task artifacts. |
 | `orka task download NAME [FILENAME] --output PATH` | Download task artifact content. |
-| `orka task delete NAME` | Delete/cancel a task. |
+| `orka task cancel NAME [--reason TEXT]` | Stop a Pending or Running task and keep its result, artifacts and events. The Tasks it delegated are cancelled with it, at every depth, including one whose creation lands just after the cancel (it cancels itself before it starts), except children in another namespace when the controller cannot list Tasks cluster-wide, as with namespace-scoped RBAC, and children a native worker created in another namespace, which record no authenticated parent; cancel those directly. A scheduled task is refused; suspend it instead. Requires `update` on `tasks/cancel`. |
+| `orka task delete NAME` | Delete a task and everything it produced; a running task is stopped first. |
 
 ### Following tasks
 
@@ -429,6 +436,7 @@ paginated sessions on Linux and macOS. See
 ```bash
 orka session list -o json
 orka session get SESSION_ID -o json
+orka session cancel SESSION_ID --reason "enough"   # stop the current turn; the session stays usable
 orka session delete SESSION_ID
 
 orka memory create --content "stable project fact" --source cli --tags docs,cli

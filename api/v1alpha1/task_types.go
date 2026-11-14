@@ -40,6 +40,19 @@ const (
 	TaskPhaseCancelled  TaskPhase = "Cancelled"
 )
 
+// IsTerminal reports whether the phase is final: Succeeded, Failed, or
+// Cancelled. Scheduled is not terminal; a recurring parent stays Scheduled.
+// Empty and unknown phases are not terminal, so callers that gate cleanup or
+// accounting on this fail safe by treating the Task as still live.
+func (p TaskPhase) IsTerminal() bool {
+	switch p {
+	case TaskPhaseSucceeded, TaskPhaseFailed, TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // ConcurrencyPolicy describes how the controller will handle concurrent scheduled runs.
 // +kubebuilder:validation:Enum=Allow;Forbid
 type ConcurrencyPolicy string
@@ -536,6 +549,12 @@ type TaskStatus struct {
 	// ChildTasks tracks delegated child tasks (for coordinator agents)
 	// +optional
 	ChildTasks []ChildTaskStatus `json:"childTasks,omitempty"`
+
+	// Wait records a data-only park requested by this Task's agent turn: the
+	// awaited event, its deadline, and the continuation Task that resumes the
+	// Session once the event arrives. Process memory is never preserved.
+	// +optional
+	Wait *TaskWaitStatus `json:"wait,omitempty"`
 
 	// Conditions represent the current state of the Task
 	// +listType=map

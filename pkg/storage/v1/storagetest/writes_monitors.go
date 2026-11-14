@@ -220,6 +220,15 @@ func init() {
 			observe: observeWorkActions,
 		},
 		monitorCase{
+			method: "MarkWorkActionRetryPending",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.CreateWorkAction(t.Context(), catalogWorkAction("action-1", "running", 12)))
+			},
+			args: fixed(storagev1.MarkWorkActionRetryPendingRequest{Namespace: workflowNamespace, ID: "action-1", RunID: "run-2",
+				BlockedReason: "run_signal_failed", Error: "signal failed"}),
+			observe: observeWorkActions,
+		},
+		monitorCase{
 			method:  "CreateActionRecord",
 			args:    rebuiltArgs(func() []any { return []any{catalogActionRecord("raw summary")} }),
 			observe: observeActionRecord,

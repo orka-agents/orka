@@ -100,8 +100,13 @@ const (
 type TaskExecutionReason string
 
 const (
-	// TaskExecutionReasonAtCapacity is a scheduling reason, not a terminal Task phase.
+	// TaskExecutionReasonAtCapacity is a scheduling reason, not a terminal Task
+	// phase. It reports a generic runtime admission retry.
 	TaskExecutionReasonAtCapacity TaskExecutionReason = "AtCapacity"
+	// TaskExecutionReasonWaitingForCapacity reports admission blocked only by
+	// exhausted RuntimePool or provider capacity. It stays retryable and is
+	// bounded by the Task deadline; the WaitingForCapacity condition mirrors it.
+	TaskExecutionReasonWaitingForCapacity TaskExecutionReason = "WaitingForCapacity"
 	// TaskExecutionReasonRuntimeLost classifies accepted or running work lost with
 	// an unprovable terminal result; its outcome must be OutcomeUnknown.
 	TaskExecutionReasonRuntimeLost TaskExecutionReason = "RuntimeLost"

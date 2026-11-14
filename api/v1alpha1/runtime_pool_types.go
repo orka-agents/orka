@@ -81,6 +81,11 @@ const (
 	// RuntimePoolConditionRolloutReady reports whether the immutable runtime
 	// profile has been installed without version skew.
 	RuntimePoolConditionRolloutReady = "RolloutReady"
+	// RuntimePoolConditionWorkerEviction reports a graceful termination of the
+	// worker hosting an execution-workspace runtime (an infrastructure upgrade
+	// roll, node drain, or Spot reclaim) and how the controller is handling it.
+	// It is absent until an eviction is observed.
+	RuntimePoolConditionWorkerEviction = "WorkerEviction"
 )
 
 const (
@@ -95,6 +100,20 @@ const (
 	// not be bound into the runtime Pod. Tasks waiting on the pool fail with the
 	// same reason instead of waiting for a rollout that cannot complete.
 	RuntimePoolReasonToolboxUnavailable = "ToolboxUnavailable"
+	// RuntimePoolReasonEvictionDraining: admission is closed and the runtime is
+	// draining toward a data-only suspension before the eviction window ends.
+	RuntimePoolReasonEvictionDraining = "EvictionDraining"
+	// RuntimePoolReasonEvictionSuspended: the evicted runtime was suspended with
+	// its data and resumes on a new worker.
+	RuntimePoolReasonEvictionSuspended = "EvictionSuspended"
+	// RuntimePoolReasonEvictionDeadlineExceeded: the runtime did not drain before
+	// the eviction window ended. Suspension is never authorized afterward; the
+	// instance is lost, its last checkpoint is retained, and uncertain work is
+	// never replayed.
+	RuntimePoolReasonEvictionDeadlineExceeded = "EvictionDeadlineExceeded"
+	// RuntimePoolReasonEvictionNotSuspendable: the workspace class cannot
+	// preserve data across an eviction, so the instance is lost with its worker.
+	RuntimePoolReasonEvictionNotSuspendable = "EvictionNotSuspendable"
 )
 
 // RuntimePoolTrustDomain identifies the logical same-trust-domain boundary
@@ -226,6 +245,38 @@ type RuntimePoolProfileSpec struct {
 	// +kubebuilder:validation:MaxItems=4
 	// +optional
 	Toolboxes []RuntimePoolToolbox `json:"toolboxes,omitempty"`
+
+	// Skills lists the Agent Skills bound read-only into the runtime Pod and
+	// projected into each session's native skills folder, in declared order.
+	// It is part of Digest. Absent means no skills and leaves the digest of
+	// pre-existing pools unchanged.
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Skills []RuntimePoolSkill `json:"skills,omitempty"`
+}
+
+// RuntimePoolSkill is the frozen projection of one Agent skill.
+type RuntimePoolSkill struct {
+	// Name is the skill folder name in the runtime's native skills folder.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
+	Name string `json:"name"`
+
+	// Image is the digest-pinned skill image.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// Path is the effective folder inside the image, after defaulting.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=9
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$`
+	Path string `json:"path"`
 }
 
 // RuntimePoolToolbox is the frozen projection of one Agent toolbox.

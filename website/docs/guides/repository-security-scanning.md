@@ -294,6 +294,28 @@ metadata is available. Review agents are instructed to focus on newly introduced
 or materially worsened risk; unchanged code can support a finding but should not produce
 old repository-wide findings by itself.
 
+## Large repositories
+
+Each scan Task starts from a source workspace that the Workspace/Publisher builds from
+the whole repository, even when `subPath` is set. By default a workspace may hold up to
+100,000 entries, 64 MiB per file, 96 MiB of file content, and a 100 MiB archive, and a
+larger repository fails its first stage with `repository entry exceeds workspace limits`.
+Raise the limits with the chart's `publisher.workspaceLimits` values, grow
+`publisher.scratchSizeLimit` and the publisher's ephemeral-storage limit to hold the
+fetched objects and the archive, and restart the controller so RuntimePools pick up the
+new archive limit:
+
+```yaml
+publisher:
+  workspaceLimits:
+    maxBytes: 536870912         # 512 MiB of file content
+    maxArtifactBytes: 536870912 # 512 MiB archive
+  scratchSizeLimit: 4Gi
+  resources:
+    limits:
+      ephemeral-storage: 6Gi
+```
+
 ## Safety
 
 - Scan and patch agent Tasks use ACP RuntimePools with private RuntimeSessions; deterministic mapper/container work keeps the native hardened worker path.

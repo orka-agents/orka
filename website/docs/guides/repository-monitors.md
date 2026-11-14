@@ -55,7 +55,6 @@ metadata:
 spec:
   runtime:
     type: claude
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowedTools:
       - Read

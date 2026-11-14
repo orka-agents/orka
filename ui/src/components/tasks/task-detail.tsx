@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CircleStop, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
@@ -13,6 +13,7 @@ import { PRStatusBadge } from './pr-status-badge'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskApprovalPanel } from './task-approval-panel'
+import { activeParkedApprovalId } from '@/lib/parked-approval'
 import { ForkProvenance } from './fork-provenance'
 import { RunTimeline } from './run-timeline'
 import { TaskSchedulePanel } from './task-schedule-panel'
@@ -21,8 +22,8 @@ import { TaskActivity } from './task-activity'
 import { TaskArtifactsPanel } from './task-artifacts-panel'
 import { TaskStatusDetails } from './task-status-details'
 import { TaskYaml } from './task-yaml'
+import { TaskCancelDialog } from './task-cancel-dialog'
 import { ViewSwitch } from './view-switch'
-import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
@@ -33,8 +34,9 @@ import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
-import { isTaskDeleting, isWaitingForApproval } from './task-state'
+import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval, nextCancelTarget } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
+import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -176,6 +178,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
+  // Holds the namespace/uid/name identity the dialog was opened for, like the
+  // armed delete, so a namespace switch or same-name recreation closes it.
+  const [cancelFor, setCancelFor] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
   // switch or same-name/new-uid recreation drops a stale confirm so it can't
@@ -219,9 +224,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
   const overviewActive = activeTab === 'overview' && !taskUnavailable
   const resultActive = activeTab === 'result' && !taskUnavailable
-  const taskRunning = task?.status?.phase === 'Running'
-  const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
-  const traceRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
+  const taskInFlight = isTaskInFlight(task?.status?.phase)
+  const taskTerminal = isTaskTerminal(task?.status?.phase)
+  const traceRefetchInterval = overviewActive && taskInFlight && following ? 5000 : false
   const terminalTraceRefetchKey = useRef<string | null>(null)
   const terminalArtifactRefetchKey = useRef<string | null>(null)
   const { data: trace, refetch: refetchTrace } = useTaskTrace(
@@ -235,18 +240,26 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // A task parked on an approval also loads approvals off the Overview so
   // the Approvals tab can show how many are pending.
   const waitingForApproval = task !== undefined && !taskUnavailable && isWaitingForApproval(task)
+  // A parked turn's Task is terminal, but the sign-off it waits on stays
+  // decidable, so it is loaded and polled like a live approval.
+  const parkedApprovalId = task !== undefined && !taskUnavailable ? activeParkedApprovalId(task) : undefined
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
-    overviewActive || waitingForApproval,
+    overviewActive || waitingForApproval || parkedApprovalId !== undefined,
     approvalRefetchInterval,
-    taskRunning,
-    taskTerminal,
+    // An empty or failed read shows no pending approval, so the parked
+    // sign-off itself keeps the poll going.
+    taskInFlight || parkedApprovalId !== undefined,
+    taskTerminal && !parkedApprovalId,
     task?.metadata.uid,
   )
-  // Terminal tasks reject decisions, so their leftovers are not "pending".
-  const pendingApprovals = taskTerminal ? 0 : (approvalsResp?.approvals ?? []).filter((a) => a.status === 'pending').length
-  const artifactRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
-  const resultArtifactRefetchInterval = resultActive && taskRunning && following ? 5000 : false
+  // Terminal tasks reject decisions, so their leftovers are not "pending";
+  // only the sign-off a parked turn waits on still counts.
+  const pendingApprovals = (approvalsResp?.approvals ?? []).filter(
+    (a) => a.status === 'pending' && (!taskTerminal || a.id === parkedApprovalId),
+  ).length
+  const artifactRefetchInterval = overviewActive && taskInFlight && following ? 5000 : false
+  const resultArtifactRefetchInterval = resultActive && taskInFlight && following ? 5000 : false
   const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
     taskId,
     overviewActive,
@@ -336,7 +349,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           />
           <TaskStatusBadge phase={task.status?.phase} />
           <TaskStateBadges task={task} />
-          <PRStatusBadge annotations={task.metadata.annotations} />
+          <PRStatusBadge receipt={task.status?.delivery?.prReceipt} />
           {relatedTaskName && (
             <p className="w-full text-sm text-muted-foreground">
               {forkSourceName ? 'Forked from' : 'Child of'}{' '}
@@ -347,6 +360,24 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {isTaskCancelling(task) ? (
+            <Button variant="outline" size="sm" disabled title="Cancellation requested">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancelling…
+            </Button>
+          ) : isTaskCancellable(task) && !deleteArmed ? (
+            <Button variant="outline" size="sm" onClick={() => setCancelFor(deleteIdentity)} title="Stop the task and keep its history">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancel task
+            </Button>
+          ) : null}
+          <TaskCancelDialog
+            // Remount per Task identity so a reason or error typed for a
+            // replaced Task is not carried over to its successor.
+            key={deleteIdentity}
+            taskName={task.metadata.name}
+            taskUID={task.metadata.uid}
+            open={cancelFor === deleteIdentity}
+            onOpenChange={(open) => setCancelFor((current) => nextCancelTarget(current, deleteIdentity, open))}
+          />
           {isTaskDeleting(task) ? (
             // The API accepted the delete; finalizers are still running.
             <Button variant="destructive" size="sm" disabled title="Deletion in progress">
@@ -381,7 +412,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               variant="destructive"
               size="sm"
               onClick={() => setConfirmDelete(deleteIdentity)}
-              title={['Succeeded', 'Failed', 'Cancelled'].includes(task.status?.phase ?? '') ? 'Delete task' : 'Delete (cancels a running task)'}
+              title={isTaskTerminal(task.status?.phase) ? 'Delete task' : 'Delete (cancels a running task)'}
             >
               <Trash2 className="mr-2 h-4 w-4" /> Delete
             </Button>
@@ -389,7 +420,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </div>
       </div>
 
-      <TaskExecutionRouteLedger task={task} />
       <TaskSchedulePanel task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
@@ -614,7 +644,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="approvals">
-          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
+          <TaskApprovalPanel
+            taskId={taskId}
+            taskPhase={task.status?.phase}
+            taskUid={task.metadata.uid}
+            parkedApprovalId={parkedApprovalId}
+          />
         </TabsContent>
 
         <TabsContent value="logs">

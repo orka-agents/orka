@@ -47,7 +47,7 @@ describe('ValidationSummary', () => {
   it('rolls up to pass for a clean succeeded task', () => {
     render(
       <ValidationSummary
-        task={task('Succeeded', { resultRef: { configMapName: 'r' } })}
+        task={task('Succeeded', { resultRef: { available: true } })}
         trace={trace()}
         approvals={[]}
         artifacts={[{ filename: 'out.txt' }]}

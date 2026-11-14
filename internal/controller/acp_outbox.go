@@ -339,7 +339,7 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 		}
 		// A terminal Task no longer waits on any approval it was parked on.
 		if waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval); waiting != nil &&
-			waiting.Status == metav1.ConditionTrue && isTerminalTaskPhase(payload.Phase) {
+			waiting.Status == metav1.ConditionTrue && payload.Phase.IsTerminal() {
 			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
 				Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
 				Reason: "Task" + string(payload.Phase), Message: taskTerminalMessage,

@@ -190,11 +190,7 @@ export const taskDeliveryStatusSchema = z.object({
 })
 
 export const resultRefSchema = z.object({
-  // Backend ResultReference serializes as { available: bool }; older callers
-  // referenced ConfigMap fields, so keep them optional for tolerance.
   available: z.boolean().optional(),
-  configMapName: z.string().optional(),
-  key: z.string().optional(),
 })
 
 export const childTaskStatusSchema = z.object({
@@ -295,6 +291,13 @@ const agentExecutionBindingSchema = z.object({
   boundAt: z.string(),
 })
 
+// A data-only parked turn. Only the fields the dashboard reads are listed.
+const taskWaitStatusSchema = z.object({
+  state: z.string().optional(),
+  kind: z.string().optional(),
+  references: z.array(z.string()).optional(),
+})
+
 export const taskStatusSchema = z.preprocess((status, context) => {
   if (status && typeof status === 'object' && 'harnessRuntime' in status) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'status.harnessRuntime is no longer supported' })
@@ -316,6 +319,7 @@ export const taskStatusSchema = z.preprocess((status, context) => {
   childTasks: z.array(childTaskStatusSchema).optional(),
   conditions: z.array(conditionSchema).optional(),
   executionWorkspace: executionWorkspaceStatusSchema.optional(),
+  wait: taskWaitStatusSchema.optional(),
   lastScheduleTime: z.string().optional(),
   nextScheduleTime: z.string().optional(),
 }))

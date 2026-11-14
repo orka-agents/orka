@@ -353,6 +353,9 @@ func createNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryPropos
 	if strings.TrimSpace(proposal.Title) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "title is required")
 	}
+	if err := rejectClientProposalDecision(proposal); err != nil {
+		return err
+	}
 	if err := proposalStore.CreateMemoryProposal(c.Context(), &proposal); err != nil {
 		return memoryStoreError("create memory proposal", "memory proposal", err)
 	}
@@ -608,6 +611,33 @@ func rejectClientRecordedIdentity(body []byte, field string) error {
 			continue
 		}
 		return fiber.NewError(fiber.StatusBadRequest, field+" cannot be set by clients; it is recorded from your identity")
+	}
+	return nil
+}
+
+// rejectClientProposalDecision keeps a new proposal pending: only the review
+// and apply endpoints record a decision and the identity that made it, so a
+// create request cannot skip review or name its own reviewer or applier.
+// Empty values are accepted because older clients send every key.
+func rejectClientProposalDecision(proposal store.MemoryProposal) error {
+	if status := strings.TrimSpace(proposal.Status); status != "" && !strings.EqualFold(status, "pending") {
+		return fiber.NewError(fiber.StatusBadRequest, "status cannot be set by clients; new proposals start pending")
+	}
+	for _, decision := range []struct {
+		field string
+		set   bool
+	}{
+		{"reviewer", strings.TrimSpace(proposal.Reviewer) != ""},
+		{"reviewNote", strings.TrimSpace(proposal.ReviewNote) != ""},
+		{"reviewedAt", proposal.ReviewedAt != nil},
+		// The store treats any nonempty ID, even whitespace, as applied.
+		{"appliedMemoryId", proposal.AppliedMemoryID != ""},
+		{"appliedBy", strings.TrimSpace(proposal.AppliedBy) != ""},
+		{"appliedAt", proposal.AppliedAt != nil},
+	} {
+		if decision.set {
+			return fiber.NewError(fiber.StatusBadRequest, decision.field+" cannot be set by clients; it is recorded by review and apply")
+		}
 	}
 	return nil
 }

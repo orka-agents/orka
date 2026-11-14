@@ -260,7 +260,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			item.SkipReason = reason
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 		}
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorCommandIntentReview); err != nil || cancelled {
+		if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, repositoryMonitorCommandIntentReview); err != nil || cancelled {
 			return true, 0, err
 		}
 		if monitor.Spec.Review.RequireGreenCI {
@@ -309,6 +309,11 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return true, 0, err
 		}
 		if !reconcile {
+			// A halted command must not mark the shared PR item, which the
+			// action it was cancelled for or coalesced into still owns.
+			if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || halted {
+				return true, 0, err
+			}
 			if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 				item.RepairState = repositoryMonitorRepairPhaseFailed
 				item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -316,9 +321,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 					return true, 0, err
 				}
 				return true, 0, r.Store.UpsertMonitorItem(ctx, item)
-			}
-			if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-				return true, 0, err
 			}
 			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
 			if err != nil {
@@ -330,6 +332,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		return r.tryProcessPullRequestUpdateBranchCommand(ctx, monitor, run, command, owner, repository, pr, item)
 	case repositoryMonitorCommandIntentFix, repositoryMonitorCommandIntentFixCI:
+		// As for update_branch: a halted command leaves the PR item alone.
+		if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || halted {
+			return true, 0, err
+		}
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.RepairState = repositoryMonitorRepairPhaseFailed
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -337,9 +343,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 				return true, 0, err
 			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
-		}
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || cancelled {
-			return true, 0, err
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
@@ -444,7 +447,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		if repositoryMonitorUpdateBranchTimedOut(mutation) {
 			return true, 0, r.failRepositoryMonitorUpdateBranch(ctx, monitor, run, command, item, mutation, repositoryMonitorUpdateBranchTimeoutReason)
 		}
-		cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent)
+		cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent)
 		if err != nil {
 			return true, 0, err
 		}
@@ -452,7 +455,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 			return r.waitForRepositoryMonitorUpdateBranch(ctx, monitor, run, command, item, mutation, pr, repositoryMonitorUpdateBranchSubmitting)
 		}
 	case repositoryMonitorAutomergeStateStarted:
-		cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent)
+		cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent)
 		if err != nil || cancelled {
 			return true, 0, err
 		}
@@ -473,7 +476,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 			return true, 0, pendingMutationProjectionError("mutation submission", err)
 		}
-		cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent)
+		cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent)
 		if err != nil {
 			return true, 0, err
 		}
@@ -1435,10 +1438,10 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			}
 			return ingested, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
-		if cancelled, cancelErr := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
+		if cancelled, cancelErr := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
 			return ingested, cancelErr
 		} else if cancelled {
 			completedAt := time.Now()

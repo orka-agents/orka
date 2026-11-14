@@ -1,5 +1,10 @@
 # Orka Helm Chart Values
 
+# Cluster DNS domain. The controller API and provider proxy URLs handed to
+# runtimes use fully qualified Service names under it, because native workspace
+# runtimes (Agent Substrate Actors) cannot resolve "<service>.<namespace>.svc".
+clusterDomain: cluster.local
+
 # Controller configuration
 controller:
   # Fixed execution protocol identity. Only harness-v2 is supported.
@@ -60,12 +65,19 @@ controller:
 
   # Ed25519 keys that sign Task webhook deliveries (spec.webhookURL). The
   # controller reads Secret <fullname>-task-webhook-signing (or
-  # signingSecretName) in the release namespace, creating it and minting the
+  # signingSecretName) in signingNamespace, creating it and minting the
   # "current" key on first use. Rotate by moving "current" to "previous" and
   # writing a new PEM PKCS#8 Ed25519 key to "current". Receivers verify against
   # GET /.well-known/orka/task-webhook-jwks.json on the API service.
   taskWebhooks:
     signingSecretName: ""
+    # Chart-created namespace that holds only the signing Secret, so Task and
+    # Agent secretRefs and worker roles in the release namespace cannot reach
+    # the key. Empty means <release namespace>-task-webhook-signing, so each
+    # release owns its own. Must differ from the release, client, ACP runtime
+    # and agent-host namespaces. Kept on helm uninstall so the key survives a
+    # reinstall.
+    signingNamespace: ""
 
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
@@ -148,6 +160,12 @@ controller:
       # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
       #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
       mountMethod: copy
+    # Skills: Agent Skills (Agent spec.runtime.skills) read from digest-pinned
+    # images and copied into each built-in runtime session's native skills
+    # folder. Off by default. Requires toolboxes.enabled; skills reuse its
+    # allowedRegistries, imagePullSecrets, nodeSelector, and mountMethod.
+    skills:
+      enabled: false
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -173,10 +191,17 @@ controller:
     dispatchEnabled: false
     # Exact provider worker namespaces where Orka independently reads Pod identity.
     workerNamespaces: []
+    # Deliver the provider-proxy token into gateway-enforced native workspaces
+    # whose provider cannot inject it at the egress gateway. Off: such
+    # workspaces fail admission instead.
+    allowProviderTokenInSandbox: false
 
   # Retained in-tree Substrate MCP Tool actors and pools only.
   substrate:
     mcpToolsEnabled: false
+    # Credential provider class the Substrate egress gateway was installed with
+    # (only "k8s.io"). Enables MCP Tool egress credentials; empty fails them closed.
+    egressCredentialProvider: ""
     apiEndpoint: api.ate-system.svc:443
     apiCertFile: ""
     apiKeyFile: ""
@@ -192,8 +217,15 @@ controller:
       privateKeyKey: ""
       bearerTokenKey: ""
       caKey: ""
-    routerUrl: http://atenet-router.ate-system.svc
-    actorDnsSuffix: actors.resources.substrate.ate.dev
+    # Substrate v1 routes Actor traffic only to mTLS clients whose pod-certificate
+    # SPIFFE ID (spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>) is on
+    # atenet-router's --ingress-allowed-spiffe-ids. Enable podCertificate to
+    # project that identity and the Substrate service trust bundle; it replaces
+    # apiCredentials and the explicit API file paths. MCP Tools require it or
+    # another client certificate signed by the podidentity signer.
+    podCertificate:
+      enabled: false
+    routerUrl: https://atenet-router.ate-system.svc:443
     defaultTemplate: ""
     defaultTemplateNamespace: ""
     bootstrapTokenSecretName: ""
@@ -215,6 +247,32 @@ controller:
   # orka CLI work without it, and `orka dashboard` needs it.
   dashboard:
     enabled: false
+
+  # Require the `use` verb on an Agent before a request newly names it.
+  # Off by default, because callers without a `use` grant can no longer
+  # create Tasks, RepositoryScans, RepositoryMonitors, or GatewayBindings that
+  # name the Agent. Running an existing RepositoryMonitor needs only monitor-run
+  # permissions, not `use` on its Agents. Enabling it sets --agent-use-authorization-enabled for API
+  # callers and installs ValidatingAdmissionPolicies for direct Kubernetes
+  # writes. Grant it with a Role rule such as
+  # {apiGroups: [core.orka.ai], resources: [agents], verbs: [use], resourceNames: [<agent>]}.
+  agentUseAuthorization:
+    enabled: false
+
+  # External Agent identities (ADR 0039). Set both Entra values to accept
+  # Agent.spec.identity.entra; an identity-bound Agent also needs
+  # agentUseAuthorization.enabled and a runtime.ceiling.allowedTools.
+  agentIdentity:
+    entra:
+      tenantID: ""
+      blueprintClientID: ""
+      # Entra authority; empty means https://login.microsoftonline.com.
+      # Set a sovereign cloud's login URL here.
+      authority: ""
+      # When tenantID is set, the controller Pod mounts a projected
+      # ServiceAccount token audienced to api://AzureADTokenExchange. Give the
+      # blueprint a federated identity credential that trusts the controller
+      # ServiceAccount's subject and the cluster's OIDC issuer.
 
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
@@ -378,6 +436,17 @@ publisher:
     apiBaseURL: https://api.github.com
     requestTimeout: 15s
     maxResponseBytes: 4194304
+  # Per-checkout source workspace limits. 0 keeps the publisher default:
+  # 100000 entries, 64 MiB per file, 96 MiB expanded, 100 MiB archive. The
+  # controller reads the archive limit at startup, so restart it after a change.
+  workspaceLimits:
+    maxEntries: 0
+    maxFileBytes: 0
+    maxBytes: 0
+    maxArtifactBytes: 0
+  # Scratch volume for fetched Git objects and the archive being built; keep it
+  # well above maxArtifactBytes, and the ephemeral-storage limit above it.
+  scratchSizeLimit: 1Gi
   auth:
     existingSecret: ""
     controllerTokenKey: controller-token
@@ -455,6 +524,15 @@ providerProxy:
   # target ports, or offline renders. DNS access is always added. Gateway
   # ingress and provider credentials remain under your control.
   egress: []
+  # Agent Substrate v1 Actors reach the proxy only through the installation's
+  # egress gateway, so their requests arrive from the gateway Pods rather than
+  # the runtime Pod. Enable this to admit those Pods; the proxy still requires
+  # its token, and Actors reach it only when their egress allowlist names it.
+  substrateEgressGateway:
+    enabled: false
+    namespace: ate-system
+    podLabels:
+      app: atenet-egress
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
   # all authenticated forwarding until both files are valid again.
@@ -501,6 +579,13 @@ workers:
     # existing off/audit callers must satisfy their issuer grants. It does not
     # narrow those grants or OIDC authority. See the chart README.
     rbacProfile: default
+    # ValidatingAdmissionPolicy that holds the AI worker ServiceAccount to the
+    # Secrets, ServiceAccounts and code_exec Jobs Orka itself creates, so it
+    # cannot take on the controller's or another account's identity. Turn it
+    # off only if you run other code as the AI worker ServiceAccount that must
+    # make other writes; that reopens the path to the controller's identity
+    # (and the Task webhook signing key) under the default rbacProfile.
+    identityProtection: true
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"

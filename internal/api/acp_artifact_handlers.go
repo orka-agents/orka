@@ -191,8 +191,10 @@ func acpArtifactStreamingGuard(c fiber.Ctx) error {
 	// without a declared length); it carries its own per-route body-size
 	// configuration and reads a bounded body stream, so the Content-Length
 	// requirement must not reject it. Native imports have their own bounded
-	// stream reader as well, but only the POST migration route is exempt.
-	if isGatewayIngressPath(c.Path()) || (c.Method() == fiber.MethodPost && isNativeSessionImportPath(c.Path())) {
+	// stream reader as well, but only the POST migration route is exempt. The
+	// MCP endpoint reads at most one byte past its own request limit under a
+	// bounded read timeout, so a chunked Streamable HTTP POST is admitted too.
+	if isGatewayIngressPath(c.Path()) || (c.Method() == fiber.MethodPost && (isNativeSessionImportPath(c.Path()) || isMCPEndpointPath(c.Path()))) {
 		return c.Next()
 	}
 	method := c.Method()
