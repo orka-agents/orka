@@ -247,6 +247,10 @@ type PullRequestReconcileResponse struct {
 	Receipt       publisher.PullRequestReceipt `json:"receipt"`
 }
 
+// ErrorCodeDeniedPath is the stable error code for a publication delta that
+// changes, deletes or links a path matching the request's denied paths.
+const ErrorCodeDeniedPath = "denied_path"
+
 type ErrorResponse struct {
 	Code          string `json:"code"`
 	Message       string `json:"message"`

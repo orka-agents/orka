@@ -44,6 +44,9 @@ type ACPMCPAuthenticatedTask struct {
 	AgentName    string
 	SessionName  string
 	Deadline     time.Time
+	// ImprovementRole is the Task's controller-managed improvement role, or
+	// "" when it has none. A proposer may call only its brokered allowlist.
+	ImprovementRole string
 }
 
 type acpMCPAuthenticatedTaskContextKey struct{}
@@ -807,6 +810,13 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusForbidden, "MCP broker operation authorization failed")
 		return
 	}
+	// The proposer allowlist is enforced here, after authentication and
+	// independently of the frozen profile, so a proposer Task whose profile
+	// still lists another brokered tool cannot call it.
+	if !proposerBrokeredToolAllowed(credentials.Task.ImprovementRole, request.Call.ToolName) {
+		writeACPMCPError(w, http.StatusForbidden, "MCP tool is not permitted for an improvement proposer")
+		return
+	}
 	promptCtx := withACPMCPAuthenticatedTask(r.Context(), credentials.Task)
 	if err := b.authorizeMCPPromptAdmission(promptCtx, request); err != nil {
 		writeACPMCPError(w, http.StatusForbidden, "MCP prompt is not active")
@@ -1174,7 +1184,8 @@ func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials
 	}
 	credentials.Task = ACPMCPAuthenticatedTask{
 		Name: task.Name, Namespace: task.Namespace, UID: string(task.UID),
-		ParentTaskID: labels.ParentTaskName(task.Labels, task.Annotations),
+		ParentTaskID:    labels.ParentTaskName(task.Labels, task.Annotations),
+		ImprovementRole: taskImprovementRole(task.Annotations),
 	}
 	if task.Spec.SessionRef != nil {
 		credentials.Task.SessionName = task.Spec.SessionRef.Name

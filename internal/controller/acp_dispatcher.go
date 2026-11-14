@@ -35,6 +35,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	"github.com/orka-agents/orka/internal/protectedset"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -88,6 +89,7 @@ const (
 	acpReservedRetrySessionPreparation   acpReservedRetryStage = "session-preparation"
 	acpReservedRetryReservationResize    acpReservedRetryStage = "reservation-resize"
 	acpReservedRetryWorkspaceLifetime    acpReservedRetryStage = "workspace-lifetime"
+	acpReservedRetryProposerConstraints  acpReservedRetryStage = "proposer-constraints"
 )
 
 // ACPDispatcher owns long-lived v2 prompt streams outside reconcile workers.
@@ -115,7 +117,10 @@ type ACPDispatcher struct {
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	// ProtectedSet is re-read before a reserved proposer attempt starts, so a
+	// protected-set change or outage applies to work that was already queued.
+	ProtectedSet          protectedset.Source
+	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -1030,6 +1035,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
+	}
+	if handled, err := d.rejectProposerBeforeExecution(ctx, task, bound, attemptID, fence); handled {
+		return err
 	}
 	if _, err := d.pullRequestPresentationCapability(runtimeCtx, task); err != nil {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
@@ -2528,6 +2536,7 @@ func acpWorkspaceDeltaLimits(task *corev1alpha1.Task) harnessv2.WorkspaceDeltaLi
 	}
 	limits.AllowedPaths = append([]string(nil), task.Spec.Workspace.AllowedPaths...)
 	limits.DenyRepositoryControlPaths = task.Spec.Workspace.DenyRepositoryControlPaths
+	limits.DeniedPaths = append([]string(nil), task.Spec.Workspace.DeniedPaths...)
 	limits.RejectBinaryFiles = task.Spec.Workspace.RejectBinaryFiles
 	limits.RejectSecretLikeContent = task.Spec.Workspace.RejectSecretLikeContent
 	return limits

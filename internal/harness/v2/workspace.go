@@ -3,9 +3,9 @@ package v2
 import (
 	"bytes"
 	"fmt"
-	"path"
-	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
 // Messages a runtime returns when a workspace delta violates its path limits.
@@ -13,6 +13,7 @@ import (
 const (
 	WorkspaceDeltaDisallowedPathMessage        = "workspace delta contains a disallowed path"
 	WorkspaceDeltaRepositoryControlPathMessage = "workspace delta contains a protected repository-control path"
+	WorkspaceDeltaDeniedPathMessage            = "workspace delta contains a denied path"
 )
 
 type WorkspaceDeltaLimits struct {
@@ -21,8 +22,12 @@ type WorkspaceDeltaLimits struct {
 	MaxChangedFiles            uint32   `json:"maxChangedFiles,omitempty"`
 	AllowedPaths               []string `json:"allowedPaths,omitempty"`
 	DenyRepositoryControlPaths bool     `json:"denyRepositoryControlPaths,omitempty"`
-	RejectBinaryFiles          bool     `json:"rejectBinaryFiles,omitempty"`
-	RejectSecretLikeContent    bool     `json:"rejectSecretLikeContent,omitempty"`
+	// DeniedPaths rejects changed paths matching any of these patterns even
+	// when AllowedPaths matches. A runtime that does not know this field must
+	// refuse the request rather than ignore it.
+	DeniedPaths             []string `json:"deniedPaths,omitempty"`
+	RejectBinaryFiles       bool     `json:"rejectBinaryFiles,omitempty"`
+	RejectSecretLikeContent bool     `json:"rejectSecretLikeContent,omitempty"`
 }
 
 func (l WorkspaceDeltaLimits) Validate() error {
@@ -36,12 +41,16 @@ func (l WorkspaceDeltaLimits) Validate() error {
 		return fmt.Errorf("workspace delta allowed paths exceed limit")
 	}
 	for _, pattern := range l.AllowedPaths {
-		cleaned := strings.TrimPrefix(strings.TrimSpace(pattern), "./")
-		if cleaned == "" || len(cleaned) > 1024 || strings.ContainsAny(cleaned, "\\\x00") || strings.HasPrefix(cleaned, "/") || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		if !workspacedelta.ValidPathPattern(pattern) {
 			return fmt.Errorf("workspace delta allowed path pattern is invalid")
 		}
-		if _, err := path.Match(cleaned, "validation-probe"); err != nil {
-			return fmt.Errorf("workspace delta allowed path pattern is invalid")
+	}
+	if len(l.DeniedPaths) > 256 {
+		return fmt.Errorf("workspace delta denied paths exceed limit")
+	}
+	for _, pattern := range l.DeniedPaths {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
+			return fmt.Errorf("workspace delta denied path pattern is invalid")
 		}
 	}
 	return nil

@@ -662,6 +662,18 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	}
 }
 
+func TestValidateProtectedSetConfigRequiresProvenanceAdmission(t *testing.T) {
+	if err := validateProtectedSetConfig("", false); err != nil {
+		t.Fatalf("unconfigured protected set: %v", err)
+	}
+	if err := validateProtectedSetConfig("orka-protected-set", true); err != nil {
+		t.Fatalf("protected set with provenance admission: %v", err)
+	}
+	if err := validateProtectedSetConfig("orka-protected-set", false); err == nil {
+		t.Fatal("protected set without Task provenance admission must fail closed")
+	}
+}
+
 func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
 	tests := []struct {
 		name      string

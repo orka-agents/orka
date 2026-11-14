@@ -55,6 +55,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/protectedset"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -161,7 +162,11 @@ type TaskReconciler struct {
 	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
-	ACPWorkspaceDispatchEnabled       bool
+	ACPWorkspaceDispatchEnabled bool
+	// ProtectedSet reads the operator-owned protected set. When it names no
+	// ConfigMap, or the ConfigMap is missing or invalid, Tasks marked as an
+	// improvement proposer fail instead of running.
+	ProtectedSet                      protectedset.Source
 	AIWorkerServiceAccountName        string
 	VendorWorkerServiceAccountName    string
 	ContainerWorkerServiceAccountName string
@@ -763,6 +768,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleTransactionTokenPending(ctx, task)
 	}
 
+	// Scheduled children do not inherit the improvement role, so a marked
+	// schedule would run its children without proposer constraints.
+	if role := taskImprovementRole(task.Annotations); role != "" && task.Spec.Schedule != "" {
+		return r.failTask(ctx, task, fmt.Sprintf("%s: a Task with improvement role %q cannot be scheduled", proposerConstraintViolationReason, role))
+	}
+
 	// Scheduled parent Tasks own a recurring fire-time lifecycle; per-run timeout
 	// enforcement begins on the generated child Task rather than at parent creation.
 	if task.Spec.Schedule != "" {
@@ -900,6 +911,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Only the ACP agent path enforces improvement-role constraints, so a
+	// marked Task never runs as a Job.
+	if role := taskImprovementRole(task.Annotations); role != "" {
+		return r.failTask(ctx, task, fmt.Sprintf("%s: a Task with improvement role %q must be an ACP agent Task", proposerConstraintViolationReason, role))
+	}
 	return r.createTaskJob(ctx, task, agent, provider)
 }
 

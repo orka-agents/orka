@@ -1,0 +1,115 @@
+# Example self-improvement protected set for the Orka repository.
+#
+# Apply it in the controller namespace and start the controller with
+# --protected-set-configmap=orka-protected-set and Task provenance admission
+# enabled (the controller refuses to start otherwise). Without a valid protected set,
+# Tasks marked orka.ai/improvement-role: proposer fail with
+# ProposerConstraintViolation instead of running. Change it only through the
+# reviewed deployment configuration.
+#
+# Every file that implements a proposer enforcement point is listed for this
+# repository; a test fails if a file named in the enforcement table of
+# docs/adr/0040-self-improvement-trust-boundaries.md is not covered here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orka-protected-set
+  namespace: orka-system
+data:
+  protectedSet.yaml: |
+    schemaVersion: orka.protectedSet.v1
+    paths:                         # always denied to proposers, in every repository
+      - .github/**
+      - config/rbac/**
+      - charts/**
+    repositories:
+      - repository: github.com/orka-agents/orka
+        paths:                     # added for this repository
+          - internal/evals/**      # graders and the gate
+          - test/evals/**
+          - internal/api/*authoriz*
+          - internal/api/auth*.go                          # authentication
+          - internal/api/context_token*.go                 # transaction and context tokens
+          - Makefile                                       # the test and lint targets CI runs
+          - GNUmakefile                                    # GNU make reads it before Makefile
+          - .golangci.yml
+          - internal/api/server.go                         # route registration
+          - internal/api/eval*.go                          # proposal and decision handlers
+          - internal/api/agent_rollout*.go                 # rollout handler
+          - internal/admission/**
+          - internal/outboundaccess/**
+          - internal/tools/**                              # brokered tool registry and implementations
+          - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
+          - internal/controller/acp_mcp_policy*.go         # compiles the tool policy
+          - internal/controller/acp_runtime_profile*.go    # pins the policy into the profile
+          - internal/controller/acp_dispatcher*.go         # dispatch-time checks
+          - internal/controller/acp_task_queue.go          # calls the dispatch-time check
+          - internal/controller/task_controller.go         # fails marked Tasks outside the ACP path
+          - internal/controller/acp_publication*.go        # sends deniedPaths to the publisher
+          - internal/controller/acp_credentials.go         # credential binding and version checks
+          - internal/controller/acp_workspace.go           # repository identities used to select protected paths
+          - internal/controller/agent_execution_binding*.go # canary routing
+          - internal/controller/evalrun*.go                # evaluator
+          - internal/controller/runtime_pool_*.go          # RuntimePool tokens, credentials, network isolation and startup attestation
+          - internal/controller/repositorymonitor_*.go     # review verdicts, readiness gate, publication and implementation and repair limits
+          - internal/approvals/**                          # human approval records and keys
+          - internal/controller/acp_mcp_approval*.go       # approval holds for brokered tools
+          - internal/api/approval*.go
+          - workers/ai/approval_gate.go
+          - internal/api/*memory*.go                       # memory proposal review and apply
+          - internal/storageclient/memory*.go
+          - internal/contexttoken/**                       # context and transaction tokens
+          - internal/transactiontoken/**
+          - internal/tokenexchange/**
+          - internal/connectors/**                         # connector credential custody
+          - internal/api/*credential*.go
+          - internal/controller/*credential*.go
+          - internal/controller/*authority*.go             # frozen authority and transaction scopes
+          - internal/controller/*identity*.go
+          - internal/gateway/auth.go
+          - internal/gateway/task_identity.go
+          - internal/controller/*authoriz*.go
+          - internal/controller/*_auth.go
+          - internal/taskwebhook/**                        # webhook signing keys
+          - internal/api/*webhook*.go
+          - internal/controller/*webhook*.go
+          - internal/protectedset/**                       # protected-set schema and checks
+          - internal/workspacedelta/**                     # shared deniedPaths matcher
+          - internal/harness/v2/**                         # operation capabilities, credential bootstrap, request digests, deniedPaths to the runtime
+          - internal/acp/**                                # child UID/GID isolation, private session environment, supervisor hardening, adapter pins
+          - internal/labels/labels.go                      # the improvement-role annotation key
+          - internal/publisher/**                          # credential and publication boundary
+          - internal/security/policy.go                    # secret detection in published and returned text
+          - internal/security/secretscan.go
+          - internal/store/**                              # trial, decision and promotion records
+          - pkg/storage/**                                 # the storage contract those records go through
+          - workers/acp/supervisor/**                      # deniedPaths check
+          - go.mod                                         # dependency selection, including replace directives
+          - go.sum
+          - "**/go.work"                                   # workspace replace directives override go.mod without editing it
+          - "**/go.work.sum"
+          - vendor/**                                      # a vendor/modules.txt makes builds use vendored sources by default
+          - "**/Dockerfile*"                               # image recipes for the controller, workers, publisher and runtimes
+          - .dockerignore
+          - workers/acp/images/**                          # ACP runtime images (supervisor)
+          - internal/api/oidc*.go                          # sign-in
+          - internal/api/jwt*.go
+          - internal/providerproxy/**                      # provider credentials
+          - api/v1alpha1/**                                # the fields that carry these rules
+          - cmd/**                                         # flag wiring and Helm chart sources (cmd/build/helmify/static)
+          - config/**                                      # deployment inputs: admission webhooks and policies, manager, network policies
+          - manifest_staging/**                            # generated install manifests and chart
+          - deploy/**                                      # released install manifests
+          - scripts/**                                     # CI and release validation helpers
+          - config/samples/orka_protected_set.yaml         # this declaration
+          - docs/adr/**                                    # the recorded trust boundaries
+          - AGENTS.md
+    caseSets:                      # case ConfigMaps by split
+      - {namespace: orka-evals, name: pr-review-train,   split: train}
+      - {namespace: orka-evals, name: pr-review-heldout, split: heldOut, baselineMonitors: [pr-review]}
+    gate:                          # improvement thresholds, see #994
+      maxInfraErrorPercent: 10
+      maxCandidatesPerBaseline: 3
+      maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
+      minTargetImprovementPoints: 5     # target pass@1 must rise by at least this many points
+      significance: 0.05                # one-sided paired test, divided by maxExperimentsPerHeldOutSet

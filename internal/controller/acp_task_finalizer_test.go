@@ -8,7 +8,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -483,4 +485,47 @@ func readyPromptAttemptReclaimEpochManager() *ControllerEpochManager {
 	epochs.current = &store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "reclaim-controller"}
 	close(epochs.ready)
 	return epochs
+}
+
+// A proposer rejected at queue admission fails before its first PromptAttempt,
+// so deletion must take the no-attempt path instead of deriving an attempt ID
+// from Attempt 0.
+func TestDeletingProposerRejectedBeforeFirstAttempt(t *testing.T) {
+	task := artifactRetentionTask()
+	task.Annotations = map[string]string{labels.AnnotationImprovementRole: labels.ImprovementRoleProposer}
+	task.Spec.Workspace = nil
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+		Reason: proposerConstraintViolationReason, Message: "proposer flows are disabled",
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+	}
+	if !acpTaskTerminalBeforeDurableAttempt(task) {
+		t.Fatal("a proposer rejected before its first attempt was not classified as terminal before a durable attempt")
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	controlStore := &promptAttemptReclaimControlStore{}
+	reconciler := &TaskReconciler{
+		Client:              fake.NewClientBuilder().WithScheme(scheme).Build(),
+		DurableControlStore: controlStore, ControllerEpochManager: readyPromptAttemptReclaimEpochManager(),
+	}
+	ready, err := reconciler.acpTaskDeletionReady(context.Background(), task)
+	if err != nil || !ready {
+		t.Fatalf("acpTaskDeletionReady() = %v, %v, want ready", ready, err)
+	}
+	request, err := reconciler.acpPromptAttemptReclamationRequest(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Mode != store.PromptAttemptReclamationNoAttempt || request.FinalPromptAttemptID != "" {
+		t.Fatalf("request = %#v, want NoAttempt reclamation", request)
+	}
+	if len(controlStore.getAttemptIDs) != 0 {
+		t.Fatalf("deletion read PromptAttempt IDs %#v for a Task that never had one", controlStore.getAttemptIDs)
+	}
 }

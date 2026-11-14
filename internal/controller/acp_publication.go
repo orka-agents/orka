@@ -232,6 +232,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			BranchClaimGeneration: claim.Generation, BaselineOID: baseline.Revision,
 			RemoteBefore: publisherRemoteRef(claim.LastVerified), DeltaArtifactDigest: delta.Artifact.Digest,
 			RelativeRoot:  delta.RelativeRoot,
+			DeniedPaths:   publicationDeniedPaths(workspace),
 			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
@@ -276,7 +277,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			deliveryState = store.PromptDeliveryCredentialBlocked
 		}
 		publicationID := publication.ID
-		if transitionErr := d.transitionPublicationTerminal(ctx, publication, fence, terminalState, "publication preparation failed"); transitionErr != nil {
+		if transitionErr := d.transitionPublicationTerminal(ctx, publication, fence, terminalState, publicationPrepareFailureReason(err)); transitionErr != nil {
 			return acpPublicationResult{PublicationID: publicationID}, transitionErr
 		}
 		publication, err = d.Store.GetPublication(ctx, publicationID)
@@ -634,6 +635,12 @@ func classifyPublisherDeliveryError(reason string, err error) error {
 	state := corev1alpha1.TaskDeliveryStateDeliveryConflict
 	outcome := corev1alpha1.TaskDeliveryOutcomeDeliveryConflict
 	var clientErr *publisherservice.ClientError
+	if errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath {
+		// The publisher re-checks the denied paths the runtime already enforces.
+		// Report its rejection exactly as a runtime rejection so the reason does
+		// not depend on which layer caught the path.
+		return &acpDeliveryError{state: state, outcome: outcome, reason: acpWorkspaceValidationFailedReason, message: harnessv2.WorkspaceDeltaDeniedPathMessage}
+	}
 	if errors.As(err, &clientErr) && (clientErr.StatusCode == 401 || clientErr.StatusCode == 403 || strings.Contains(clientErr.Response.Code, "credential")) {
 		state = corev1alpha1.TaskDeliveryStateCredentialBlocked
 		outcome = corev1alpha1.TaskDeliveryOutcomeCredentialBlocked
@@ -1189,6 +1196,11 @@ func publicationTaskDeliveryStatus(workspace *corev1alpha1.WorkspaceConfig, base
 		status.State, status.Outcome = corev1alpha1.TaskDeliveryStatePublicationOutcomeUnknown, corev1alpha1.TaskDeliveryOutcomePublicationOutcomeUnknown
 	}
 	status.Message = publication.TerminalReason
+	// A denied-path rejection recorded during recovery reads like a
+	// first-time one, which reaches the Task through its delivery error.
+	if publication.State == store.PublicationPreparationFailed && publication.TerminalReason == harnessv2.WorkspaceDeltaDeniedPathMessage {
+		status.Reason = acpWorkspaceValidationFailedReason
+	}
 	return status
 }
 
@@ -1272,6 +1284,16 @@ func workspaceSourceRef(workspace *corev1alpha1.WorkspaceConfig) (string, error)
 		return "", fmt.Errorf("workspace source branch is invalid")
 	}
 	return "refs/heads/" + branch, nil
+}
+
+// publicationDeniedPaths returns the Task's denied path patterns for the
+// publisher to re-check against the delta it prepares, so a runtime that
+// skipped its own check cannot publish a denied path.
+func publicationDeniedPaths(workspace *corev1alpha1.WorkspaceConfig) []string {
+	if workspace == nil || len(workspace.DeniedPaths) == 0 {
+		return nil
+	}
+	return append([]string(nil), workspace.DeniedPaths...)
 }
 
 func publicationBranch(task *corev1alpha1.Task, session *acpTaskSession, workspace *corev1alpha1.WorkspaceConfig) string {

@@ -23,6 +23,10 @@ var (
 	ErrVerificationUnknown     = errors.New("remote publication state could not be observed")
 )
 
+// ErrDeniedPath is an ErrUnsafeDelta whose delta changes, deletes or links a
+// path matching a denied pattern.
+var ErrDeniedPath = fmt.Errorf("%w: workspace delta contains a denied path", ErrUnsafeDelta)
+
 // Error attaches a stable classification to a publisher failure.
 type Error struct {
 	Kind      error

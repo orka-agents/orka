@@ -75,6 +75,7 @@ import (
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/protectedset"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
@@ -143,6 +144,17 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 		// Kubernetes Task writer, so class-backed workspaces must never be
 		// served without it.
 		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the reserved workspace settlement metadata")
+	}
+	return nil
+}
+
+// validateProtectedSetConfig refuses a configured protected set without Task
+// provenance admission. The improvement-role annotation is what marks a Task
+// as a proposer; without the provenance webhook any Task writer could remove
+// it before dispatch and run the Task without proposer constraints.
+func validateProtectedSetConfig(configMap string, provenanceProtected bool) error {
+	if strings.TrimSpace(configMap) != "" && !provenanceProtected {
+		return fmt.Errorf("--protected-set-configmap requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the improvement-role annotation")
 	}
 	return nil
 }
@@ -306,6 +318,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var protectedSetConfigMap string
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -554,6 +567,10 @@ func main() {
 		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envutil.String("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
 		"Physical namespace for managed ACP runtime Pods.")
+	flag.StringVar(&protectedSetConfigMap, "protected-set-configmap", os.Getenv("ORKA_PROTECTED_SET_CONFIGMAP"),
+		"Name of the ConfigMap in the controller namespace that declares the self-improvement protected set "+
+			"(key protectedSet.yaml, schema orka.protectedSet.v1). Empty, missing or invalid disables proposer Tasks. "+
+			"Requires --task-provenance-admission-enabled or --task-provenance-admission-external.")
 	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
@@ -999,6 +1016,10 @@ func main() {
 		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+	if err := validateProtectedSetConfig(protectedSetConfigMap, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "proposer Tasks fail closed without Task provenance admission")
 		os.Exit(1)
 	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
@@ -1746,6 +1767,9 @@ func main() {
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+		ProtectedSet: protectedset.Source{
+			Reader: mgr.GetAPIReader(), Namespace: controlNamespace, Name: strings.TrimSpace(protectedSetConfigMap),
+		},
 
 		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
 		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,
@@ -1761,6 +1785,7 @@ func main() {
 		),
 		OutboundAccessTrust: outboundAccessTrust,
 	}
+	logProtectedSet(taskReconciler.ProtectedSet)
 	if err := taskReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -1786,6 +1811,7 @@ func main() {
 		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
+		ProtectedSet:         taskReconciler.ProtectedSet,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -2630,6 +2656,25 @@ func envBool(name string) bool {
 		os.Exit(1)
 	}
 	return parsed
+}
+
+// logProtectedSet validates the configured protected set at startup and
+// records its digest. A missing or invalid set is not fatal: proposer Tasks
+// fail at dispatch until the set is valid, and every other Task is unaffected.
+func logProtectedSet(source protectedset.Source) {
+	if !source.Configured() {
+		setupLog.Info("no protected set configured; improvement proposer Tasks are disabled")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	set, err := source.Load(ctx)
+	if err != nil {
+		setupLog.Error(err, "protected set is unavailable; improvement proposer Tasks fail until it is valid",
+			"namespace", source.Namespace, "configMap", source.Name)
+		return
+	}
+	setupLog.Info("protected set loaded", "namespace", source.Namespace, "configMap", source.Name, "digest", set.Digest())
 }
 
 func acpControlNamespace(controllerNamespace string) (string, error) {

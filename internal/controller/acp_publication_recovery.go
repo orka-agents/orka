@@ -177,6 +177,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 			BranchClaimGeneration: publication.BranchClaimGeneration, BaselineOID: publication.SourceBaselineSHA,
 			RemoteBefore: publisherRemoteRef(publication.Baseline), DeltaArtifactDigest: publication.ArtifactDigest,
 			RelativeRoot:  strings.TrimSpace(recovery.workspace.SubPath),
+			DeniedPaths:   publicationDeniedPaths(recovery.workspace),
 			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
@@ -201,7 +202,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 			}
 			publicationState := store.PublicationPreparationFailed
 			deliveryState := store.PromptDeliveryConflict
-			reason := "publication preparation failed during recovery"
+			reason := publicationRecoveryPrepareFailureReason(err)
 			if retryableACPExternalEffectError(err) {
 				publicationState = store.PublicationOutcomeUnknown
 				deliveryState = store.PromptDeliveryPublicationOutcomeUnknown
@@ -579,4 +580,33 @@ func (d *ACPDispatcher) recoveryDeliveryTransition(ctx context.Context, attemptI
 		return fmt.Errorf("publication recovery delivery state is %s, want %s", attempt.DeliveryState, from)
 	}
 	return d.transitionDelivery(ctx, attemptID, fence, from, to, operation, "")
+}
+
+// publicationRecoveryPrepareFailureReason is the terminal reason of a
+// preparation that failed during recovery. A publisher denied-path rejection
+// keeps the runtime's denied-path message, as a first-time rejection does, so
+// the Task's delivery message and the monitor's failure classification don't
+// depend on whether a restart happened in between.
+func publicationRecoveryPrepareFailureReason(err error) string {
+	if publisherDeniedPath(err) {
+		return harnessv2.WorkspaceDeltaDeniedPathMessage
+	}
+	return "publication preparation failed during recovery"
+}
+
+// publicationPrepareFailureReason is the terminal reason of a first-time
+// preparation failure. A publisher denied-path rejection is stored with the
+// runtime's denied-path message, so a restart before the Task's delivery
+// error is projected still recovers the WorkspaceValidationFailed reason and
+// the monitor's denied-path classification.
+func publicationPrepareFailureReason(err error) string {
+	if publisherDeniedPath(err) {
+		return harnessv2.WorkspaceDeltaDeniedPathMessage
+	}
+	return "publication preparation failed"
+}
+
+func publisherDeniedPath(err error) bool {
+	var clientErr *publisherservice.ClientError
+	return errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath
 }
