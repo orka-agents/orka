@@ -27,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -114,6 +115,7 @@ func (f ACPMCPToolExecutorFunc) ExecuteACPMCPTool(ctx context.Context, request h
 }
 
 type RegistryACPMCPToolExecutor struct {
+	GatewayService      *gatewayruntime.Service
 	Registry            *tools.Registry
 	Reader              client.Reader
 	KubeClient          kubernetes.Interface
@@ -801,7 +803,11 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
 			}
 		}
-		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
+		if tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+			if err := e.bindGatewayTaskGrant(ctx, request, tool, executor); err != nil {
+				return nil, err
+			}
+		} else if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
 		// The policy this call is classified under is the one it resolves
@@ -958,6 +964,7 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 }
 
 type ACPMCPBrokerDependencies struct {
+	GatewayService *gatewayruntime.Service
 	// ConnectorReadScopes mirrors the API's connector-read scope list for
 	// list_connections on Tasks created by delegated context tokens.
 	ConnectorReadScopes     []string
@@ -1006,6 +1013,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		},
 		Prompts: DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore, PromptLeases: dependencies.PromptLeases},
 		Executor: RegistryACPMCPToolExecutor{
+			GatewayService:          dependencies.GatewayService,
 			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
 			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,

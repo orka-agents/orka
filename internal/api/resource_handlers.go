@@ -87,7 +87,7 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	if spec.HTTP == nil {
 		return false
 	}
-	if spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
+	if spec.HTTP.GatewayTaskPass || spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
 		return true
 	}
 	for name := range spec.HTTP.Headers {
@@ -121,6 +121,12 @@ func validateToolRESTMutation(spec corev1alpha1.ToolSpec) error {
 	}
 	if spec.HTTP == nil {
 		return nil
+	}
+	if spec.HTTP.GatewayTaskPass {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.http.gatewayTaskPass is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
 	}
 	if spec.HTTP.AuthSecretRef != nil {
 		return fiber.NewError(

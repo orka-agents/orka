@@ -667,6 +667,7 @@ func (f *externalACPDispatchFixture) queueTask(
 	uid types.UID,
 	prompt string,
 	sessionRef *corev1alpha1.SessionReference,
+	mutate ...func(*corev1alpha1.Task),
 ) *corev1alpha1.Task {
 	t.Helper()
 	task := &corev1alpha1.Task{
@@ -681,6 +682,9 @@ func (f *externalACPDispatchFixture) queueTask(
 	}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
 		AllowedTools: append([]string{}, f.mcpPolicy.AllowedTools...),
+	}
+	for _, apply := range mutate {
+		apply(task)
 	}
 	if err := f.client.Create(f.ctx, task); err != nil {
 		t.Fatal(err)

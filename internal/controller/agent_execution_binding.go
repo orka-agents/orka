@@ -29,6 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -108,7 +109,8 @@ type agentExecutionSnapshotBody struct {
 	// from the frozen tool policy, the identity of the requester's Connection
 	// at dispatch. Call-time resolution fails closed unless the live
 	// Connection still matches. No token material is ever recorded.
-	Connections []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+	Connections  []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+	GatewayGrant *gatewayruntime.TaskGrant          `json:"gatewayGrant,omitempty"`
 }
 
 // agentExecutionSnapshotConnection is one frozen person-to-provider link.
@@ -472,6 +474,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 	}
 
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	if err != nil {
+		return nil, err
+	}
 	encoded, err := canonicalAgentExecutionSnapshotBody(body)
 	if err != nil {
 		return nil, err
@@ -639,6 +645,10 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 			AllowedTools:        append([]string(nil), agent.Spec.Runtime.DefaultAllowedTools...),
 			AllowBash:           agent.Spec.Runtime.DefaultAllowBash,
 		}
+	}
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	if err != nil {
+		return nil, err
 	}
 	encoded, err := canonicalAgentExecutionSnapshotBody(body)
 	if err != nil {
