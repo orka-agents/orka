@@ -425,9 +425,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		_ = r.cascadeTaskCancellation(ctx, task)
 		return result, err
 	}
-	if err := r.syncACPWaitingForCapacity(ctx, task); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// A deferred finalization records a stop already decided, so it settles
 	// before a later cancel request. A requested cancellation is applied
@@ -451,7 +448,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
 	}
-	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+	if err := r.projectACPTaskAdmissionStatus(ctx, task); err != nil {
 		// A projection that keeps failing must not keep delegated work
 		// running.
 		_ = r.cascadeTaskCancellation(ctx, task)
@@ -473,6 +470,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// projectACPTaskAdmissionStatus projects the execution workspace status and
+// then the WaitingForCapacity condition, which reads the workspace admission
+// conditions that projection just refreshed.
+func (r *TaskReconciler) projectACPTaskAdmissionStatus(ctx context.Context, task *corev1alpha1.Task) error {
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return err
+	}
+	return r.syncACPWaitingForCapacity(ctx, task)
 }
 
 func (r *TaskReconciler) recordTaskLifecycleEvent(
