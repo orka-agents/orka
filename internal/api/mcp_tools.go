@@ -341,27 +341,46 @@ func mcpToolByName(name string) (mcpToolDefinition, bool) {
 }
 
 type mcpToolCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Name      string
+	Arguments json.RawMessage
 	// Task is the 2025-11-25 task augmentation.
-	Task *struct {
-		TTL *int64 `json:"ttl,omitempty"`
-	} `json:"task,omitempty"`
+	Task *mcpTaskAugmentation
+}
+
+type mcpTaskAugmentation struct {
+	TTL *int64 `json:"ttl,omitempty"`
+}
+
+// decodeMCPToolCallParams decodes tools/call params. The sessionless
+// revisions define no params.task: there it is an unknown field, ignored like
+// any other without being held to the 2025-11-25 shape, and selects nothing.
+func decodeMCPToolCallParams(raw json.RawMessage, sessionless bool) (mcpToolCallParams, error) {
+	var wire struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+		Task      json.RawMessage `json:"task,omitempty"`
+	}
+	invalid := newMCPError(mcpCodeInvalidParams, "invalid tools/call params")
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return mcpToolCallParams{}, invalid
+	}
+	params := mcpToolCallParams{Name: wire.Name, Arguments: wire.Arguments}
+	if !sessionless && len(wire.Task) > 0 {
+		if err := json.Unmarshal(wire.Task, &params.Task); err != nil {
+			return mcpToolCallParams{}, invalid
+		}
+	}
+	return params, nil
 }
 
 func (m *mcpServer) callTool(call *mcpCall) (any, error) {
-	var params mcpToolCallParams
-	if err := json.Unmarshal(call.params, &params); err != nil {
-		return nil, newMCPError(mcpCodeInvalidParams, "invalid tools/call params")
+	params, err := decodeMCPToolCallParams(call.params, call.sessionless)
+	if err != nil {
+		return nil, err
 	}
 	tool, ok := mcpToolByName(params.Name)
 	if !ok {
 		return nil, newMCPError(mcpCodeInvalidParams, "unknown tool")
-	}
-	if call.sessionless {
-		// The sessionless revisions define no params.task: there it is an
-		// unknown field, ignored like any other, and selects nothing.
-		params.Task = nil
 	}
 	if tool.Name == mcpToolCreateTask && (params.Task != nil || call.tasksExtension) {
 		return m.createTaskAsMCPTask(call, params)

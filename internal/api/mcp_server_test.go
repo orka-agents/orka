@@ -1760,11 +1760,20 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	}
 	require.True(t, exists(), "cancel_task was refused before it deleted the Task")
 
-	// The sessionless revisions define no params.task: it is an unknown
-	// field, ignored like any other, and the call runs.
-	meta := map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}
+	// A legacy request is held to the 2025-11-25 task shape.
 	response := f.mcpRPC(t, "tools/call", map[string]any{
-		"name": mcpToolCancelTask, "task": map[string]any{}, "arguments": map[string]any{"name": "kept"}, "_meta": meta,
+		"name": mcpToolCancelTask, "task": map[string]any{"ttl": "unlimited"}, "arguments": map[string]any{"name": "kept"},
+	})
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
+	require.True(t, exists())
+
+	// The sessionless revisions define no params.task: it is an unknown
+	// field, ignored like any other without being held to the 2025-11-25
+	// shape, and the call runs.
+	meta := map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}
+	response = f.mcpRPC(t, "tools/call", map[string]any{
+		"name": mcpToolCancelTask, "task": map[string]any{"ttl": "unlimited"}, "arguments": map[string]any{"name": "kept"}, "_meta": meta,
 	})
 	require.Equal(t, http.StatusOK, response.status, response.body)
 	require.Nil(t, response.Error, response.body)
@@ -1961,9 +1970,9 @@ func TestMCPTaskResultReadIsBoundedByTheWait(t *testing.T) {
 func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
-	call := func(name string, capabilities any) map[string]any {
+	call := func(name string, capabilities, task any) map[string]any {
 		response := f.mcpRPC(t, "tools/call", map[string]any{
-			"name": mcpToolCreateTask, "task": map[string]any{"ttl": 60000},
+			"name": mcpToolCreateTask, "task": task,
 			"arguments": map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": name},
 			"_meta":     map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: capabilities},
 		})
@@ -1974,12 +1983,16 @@ func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
 		return result
 	}
 
-	plain := call("plain", map[string]any{})
-	require.Equal(t, "complete", plain["resultType"], "an ordinary tool result")
-	require.NotContains(t, plain, "task", "not the 2025-11-25 CreateTaskResult")
-	require.Equal(t, "plain", plain["structuredContent"].(map[string]any)["task"].(map[string]any)["name"])
+	legacyTask := map[string]any{"ttl": 60000}
+	// A value the 2025-11-25 shape does not accept is still ignored.
+	for name, task := range map[string]any{"plain": legacyTask, "unlimited": map[string]any{"ttl": "unlimited"}, "scalar": "later"} {
+		plain := call(name, map[string]any{}, task)
+		require.Equal(t, "complete", plain["resultType"], "an ordinary tool result")
+		require.NotContains(t, plain, "task", "not the 2025-11-25 CreateTaskResult")
+		require.Equal(t, name, plain["structuredContent"].(map[string]any)["task"].(map[string]any)["name"])
+	}
 
-	extension := call("extension", extensionMeta()[mcpMetaClientCapabilities])
+	extension := call("extension", extensionMeta()[mcpMetaClientCapabilities], legacyTask)
 	require.Equal(t, "task", extension["resultType"], "the extension's task")
 	require.NotContains(t, extension, "task", "not the 2025-11-25 CreateTaskResult")
 	require.Contains(t, extension, "taskId")
