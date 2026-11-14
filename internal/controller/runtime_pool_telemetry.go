@@ -21,7 +21,9 @@ const (
 	runtimePoolTelemetryEndpointEnv        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	runtimePoolTelemetryTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolTelemetryMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	otlpProtocolHTTPProtobuf               = "http/protobuf"
+	// runtimePoolMetricsExporterEnv set to "none" opts out of metrics export.
+	runtimePoolMetricsExporterEnv = "OTEL_METRICS_EXPORTER"
+	otlpProtocolHTTPProtobuf      = "http/protobuf"
 	// otlpHTTPTracesPath and otlpHTTPMetricsPath are the paths OTLP/HTTP
 	// appends to a generic base URL for each signal.
 	otlpHTTPTracesPath  = "/v1/traces"
@@ -236,6 +238,10 @@ func sameOTLPURL(a, b string, httpProtocol bool) bool {
 // accept, so a metrics setting it would reject drops metrics rather than
 // traces. It reports false when metrics are dropped.
 func runtimePoolMetricsTelemetrySignal(getenv func(string) string) (runtimePoolOTLPSignal, bool) {
+	// The standard opt-out wins over any endpoint, including the generic one.
+	if strings.EqualFold(strings.TrimSpace(getenv(runtimePoolMetricsExporterEnv)), "none") {
+		return runtimePoolOTLPSignal{}, false
+	}
 	metrics := runtimePoolOTLPSignal{path: otlpHTTPMetricsPath, scalars: map[string]string{}}
 	endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryMetricsEndpointEnv))
 	if endpoint == "" {

@@ -429,3 +429,25 @@ func TestRuntimePoolTelemetryFitsNativeBudget(t *testing.T) {
 		})
 	}
 }
+
+// The standard OTEL_METRICS_EXPORTER=none opt-out keeps runtime metrics off
+// even when a generic endpoint would otherwise give the supervisor a metrics
+// collector; traces still export.
+func TestRuntimePoolTelemetryHonorsMetricsOptOut(t *testing.T) {
+	for _, protocol := range []string{"", "http/protobuf"} {
+		values := map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc.cluster.local:4318",
+			"OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
+			"OTEL_METRICS_EXPORTER":       " None ",
+		}
+		env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(name string) string { return values[name] }))
+		for name := range env {
+			if strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_METRICS_") || name == "OTEL_EXPORTER_OTLP_ENDPOINT" {
+				t.Fatalf("protocol %q: metrics opt-out still projected %s: %v", protocol, name, env)
+			}
+		}
+		if env["ORKA_ENABLE_TELEMETRY"] != "true" || env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == "" {
+			t.Fatalf("protocol %q: metrics opt-out disabled traces: %v", protocol, env)
+		}
+	}
+}
