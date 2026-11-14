@@ -98,6 +98,22 @@ type ConnectorCredential struct {
 	Version int64
 }
 
+// ConnectorGrant is what custody holds for a Connection, without its
+// material: the consent its tokens came from and the scopes they carry now.
+// A refresh keeps the consent but can narrow the scopes.
+type ConnectorGrant struct {
+	Sequence int64
+	Scopes   []string
+}
+
+// ConnectorGrantReader reports the grant custody holds for a Connection
+// without returning its material, as the sealed record authenticates it. A
+// missing row is ErrNotFound; a tombstoned one is
+// ErrConnectorCustodyTombstoned.
+type ConnectorGrantReader interface {
+	GetConnectorCredentialGrant(ctx context.Context, ref ConnectorCredentialRef) (ConnectorGrant, error)
+}
+
 // ConnectorCredentialStore is the plaintext view of connector custody that
 // the storage client serves. It seals each record's token material under its
 // own data key, itself sealed under the snapshot key, before a provider

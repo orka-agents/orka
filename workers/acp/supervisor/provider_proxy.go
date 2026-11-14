@@ -167,6 +167,12 @@ type providerProxySession struct {
 	drained         chan struct{}
 	closed          bool
 	requestSlots    chan struct{}
+	// telemetry is the GenAI recorder of telemetryPromptID; chats holds its
+	// in-flight model calls by issuance sequence so accounted outcomes reach
+	// their chat spans. Both are nil when GenAI telemetry is disabled.
+	telemetryPromptID string
+	telemetry         *promptGenAI
+	chats             map[uint64]*promptGenAIChat
 }
 
 type providerProxyAuthorization struct {
@@ -385,6 +391,9 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.lastFailureSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
+	// Issuance sequences restart per prompt; a previous prompt's late chat
+	// keeps its own observation but no longer receives accounted outcomes.
+	s.chats = nil
 	s.leaseVersion++
 	version := s.leaseVersion
 	s.gateContext, s.gateCancel = context.WithCancelCause(context.Background())
@@ -711,6 +720,9 @@ func (s *providerProxySession) recordRejectedInferenceRequest(promptID string, c
 }
 
 func (s *providerProxySession) recordInferenceOutcomeLocked(seq uint64, statusCode int, detail string) {
+	if chat := s.chats[seq]; chat != nil {
+		chat.status = statusCode
+	}
 	if statusCode < http.StatusBadRequest {
 		s.inferenceSuccesses++
 		s.lastSuccessSeq = max(s.lastSuccessSeq, seq)
@@ -1048,6 +1060,12 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if requestClass == providerRequestInference {
+		chat := session.startChat(authorization.promptID, inferenceSeq, time.Now().UTC())
+		// Runs before finishRequest cancels requestContext, so a cancelled
+		// request is told apart from one whose outcome was never accounted.
+		defer func() { session.finishChat(inferenceSeq, chat, requestContext.Err() != nil) }()
+	}
 	target := providerproxy.Target(authorization.upstreamBase, suffix, r.URL.RawQuery)
 	upstreamRequest, err := http.NewRequestWithContext(requestContext, r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
@@ -1804,4 +1822,51 @@ func (p *providerProxy) close(ctx context.Context) error {
 	close(done)
 	p.mu.Unlock()
 	return closeErr
+}
+
+// setPromptTelemetry binds the GenAI recorder of the prompt that will own
+// this session's provider requests.
+func (s *providerProxySession) setPromptTelemetry(promptID string, telemetry *promptGenAI) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.telemetryPromptID = strings.TrimSpace(promptID)
+	s.telemetry = telemetry
+	s.chats = nil
+}
+
+// startChat opens a chat observation for one admitted inference request of
+// promptID, or returns nil when GenAI telemetry is disabled.
+func (s *providerProxySession) startChat(promptID string, seq uint64, now time.Time) *promptGenAIChat {
+	if s == nil || seq == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.telemetry == nil || s.telemetryPromptID != strings.TrimSpace(promptID) {
+		return nil
+	}
+	chat := s.telemetry.startChat(now)
+	if s.chats == nil {
+		s.chats = make(map[uint64]*promptGenAIChat)
+	}
+	s.chats[seq] = chat
+	return chat
+}
+
+// finishChat records the chat span with the outcome accounted for its
+// sequence, if any.
+func (s *providerProxySession) finishChat(seq uint64, chat *promptGenAIChat, cancelled bool) {
+	if s == nil || chat == nil {
+		return
+	}
+	s.mu.Lock()
+	status := chat.status
+	if s.chats[seq] == chat {
+		delete(s.chats, seq)
+	}
+	s.mu.Unlock()
+	chat.end(time.Now().UTC(), status, cancelled)
 }

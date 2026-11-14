@@ -46,6 +46,7 @@ POST /api/v1/tasks | create core.orka.ai:tasks
 GET /api/v1/tasks | list core.orka.ai:tasks
 GET /api/v1/tasks/:id | get core.orka.ai:tasks protected
 DELETE /api/v1/tasks/:id | delete core.orka.ai:tasks protected
+POST /api/v1/tasks/:id/cancel | update core.orka.ai:tasks/cancel protected
 GET /api/v1/tasks/:id/logs | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/events | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/stream | get core.orka.ai:tasks protected
@@ -65,6 +66,7 @@ POST /api/v1/sessions/:id/native | create core.orka.ai:sessions; get core.orka.a
 GET /api/v1/sessions/:id/events | get core.orka.ai:sessions protected
 GET /api/v1/sessions/:id/stream | get core.orka.ai:sessions protected
 DELETE /api/v1/sessions/:id | delete core.orka.ai:sessions protected
+POST /api/v1/sessions/:id/cancel | get core.orka.ai:sessions protected; update core.orka.ai:tasks/cancel
 GET /api/v1/gatewayclasses | list gateway.orka.ai:gatewayclasses
 GET /api/v1/gatewayclasses/:name | get gateway.orka.ai:gatewayclasses protected
 GET /api/v1/gateways | list gateway.orka.ai:gateways
@@ -99,6 +101,8 @@ POST /api/v1/tools | create core.orka.ai:tools
 GET /api/v1/tools/:name | get core.orka.ai:tools protected
 PUT /api/v1/tools/:name | update core.orka.ai:tools protected
 DELETE /api/v1/tools/:name | delete core.orka.ai:tools protected
+POST /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
+DELETE /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
 GET /api/v1/runtime-pools | list core.orka.ai:runtimepools
 GET /api/v1/runtime-pools/:name | get core.orka.ai:runtimepools protected
 GET /api/v1/agent-runtimes | list core.orka.ai:agentruntimes

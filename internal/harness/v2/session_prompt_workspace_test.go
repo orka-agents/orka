@@ -558,6 +558,17 @@ func TestCapabilitiesStatusAndDrainContracts(t *testing.T) {
 	if err := status.Validate(); err == nil || !strings.Contains(err.Error(), "active prompt count") {
 		t.Fatalf("inconsistent status count validation = %v", err)
 	}
+	status.Pressure.ActivePrompts = 0
+	status.Drain.WorkerEvictionAt = testNow
+	if err := status.Validate(); err == nil || !strings.Contains(err.Error(), "inactive drain") {
+		t.Fatalf("worker eviction without a requested drain validation = %v", err)
+	}
+	status.Lifecycle = SupervisorLifecycleDraining
+	status.Drain = DrainStatus{Requested: true, RequestedAt: testNow, Reason: DrainReasonWorkspaceSuspend, WorkerEvictionAt: testNow}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("worker eviction during another drain validation = %v", err)
+	}
+	status.Lifecycle, status.Drain = SupervisorLifecycleReady, DrainStatus{AcceptingNewSessions: true}
 
 	drain := DrainRequest{
 		Protocol: ProtocolVersion,

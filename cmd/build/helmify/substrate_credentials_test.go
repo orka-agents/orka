@@ -18,8 +18,9 @@ func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
 		enabled bool
 	}{
 		{"mtls", true},
-		{"bearer", true},
 		{"mtls", false},
+		// Bearer control credentials remain valid for cleanup while MCP Tools
+		// are disabled; enabled Tools also need the router's client certificate.
 		{"bearer", false},
 	} {
 		t.Run(tc.auth+"/enabled="+strconv.FormatBool(tc.enabled), func(t *testing.T) {
@@ -126,6 +127,9 @@ func TestStaticChartRequiresSubstrateServerTrust(t *testing.T) {
 			"apiCAFile=/custom/ca.crt", "--substrate-api-ca-file=/custom/ca.crt"},
 	} {
 		for _, enabled := range []bool{true, false} {
+			if enabled && strings.Contains(tc.name, "bearer") {
+				continue // covered by TestStaticChartMCPToolsRequireRouterClientCertificate
+			}
 			t.Run(tc.name+" enabled="+strconv.FormatBool(enabled), func(t *testing.T) {
 				args := []string{"--set", "controller.substrate.mcpToolsEnabled=" + strconv.FormatBool(enabled),
 					"--show-only", "templates/deployment.yaml"}
@@ -194,5 +198,96 @@ func TestStaticChartExternalWorkerPermissionsAreReadOnly(t *testing.T) {
 	if binding.Namespace != role.Namespace || binding.RoleRef.Name != role.Name || binding.RoleRef.Kind != "Role" ||
 		len(binding.Subjects) != 1 || binding.Subjects[0].Namespace != staticChartTestNamespace {
 		t.Fatal("worker role is not bound to the release controller")
+	}
+}
+
+func TestStaticChartMCPToolsRequireRouterClientCertificate(t *testing.T) {
+	for name, selection := range map[string][]string{
+		"Secret bearer": {
+			"apiCredentials.existingSecret=client", "apiCredentials.bearerTokenKey=token", "apiCredentials.caKey=ca",
+		},
+		"mounted bearer": {"apiBearerTokenFile=/custom/token", "apiCAFile=/custom/ca.crt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := make([]string, 0, 4+2*len(selection))
+			args = append(args, "--set", "controller.substrate.mcpToolsEnabled=true", "--show-only", "templates/deployment.yaml")
+			for _, value := range selection {
+				args = append(args, "--set-string", "controller.substrate."+value)
+			}
+			output, err := helmTemplateStaticChart(t, args...)
+			if err == nil || !strings.Contains(output, "pod-certificate client identity") {
+				t.Fatal("Helm enabled MCP Tools without a router client certificate")
+			}
+		})
+	}
+}
+
+func TestStaticChartProjectsSubstratePodCertificate(t *testing.T) {
+	var deployment appsv1.Deployment
+	rendered := requireHelmRender(t, "--set", "controller.substrate.mcpToolsEnabled=true",
+		"--set", "controller.substrate.podCertificate.enabled=true", "--show-only", "templates/deployment.yaml")
+	if err := yaml.Unmarshal([]byte(rendered), &deployment); err != nil {
+		t.Fatal(err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	for _, arg := range []string{
+		"--substrate-api-cert-file=/run/substrate-client/credential-bundle.pem",
+		"--substrate-api-key-file=/run/substrate-client/credential-bundle.pem",
+		"--substrate-api-ca-file=/run/substrate-server/trust-bundle.pem",
+		"--substrate-router-url=https://atenet-router.ate-system.svc:443",
+	} {
+		if !slices.Contains(container.Args, arg) {
+			t.Errorf("controller is missing %s", arg)
+		}
+	}
+	for _, arg := range container.Args {
+		if strings.Contains(arg, "actor-dns-suffix") || strings.Contains(arg, "session-identity") {
+			t.Errorf("controller renders retired Substrate v0.1.0 flag %s", arg)
+		}
+	}
+	volumes := map[string]corev1.Volume{}
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		volumes[volume.Name] = volume
+	}
+	client := volumes["substrate-client"].Projected
+	if client == nil || len(client.Sources) != 1 || client.Sources[0].PodCertificate == nil ||
+		client.Sources[0].PodCertificate.SignerName != "podidentity.podcert.ate.dev/identity" {
+		t.Fatal("controller does not project the Substrate pod identity")
+	}
+	server := volumes["substrate-server"].Projected
+	if server == nil || len(server.Sources) != 1 || server.Sources[0].ClusterTrustBundle == nil ||
+		server.Sources[0].ClusterTrustBundle.SignerName == nil ||
+		*server.Sources[0].ClusterTrustBundle.SignerName != "servicedns.podcert.ate.dev/identity" {
+		t.Fatal("controller does not project the Substrate service trust bundle")
+	}
+	for _, mount := range container.VolumeMounts {
+		if (mount.Name == "substrate-client" || mount.Name == "substrate-server") && !mount.ReadOnly {
+			t.Fatalf("%s mount is writable", mount.Name)
+		}
+	}
+
+	output, err := helmTemplateStaticChart(t, "--set", "controller.substrate.podCertificate.enabled=true",
+		"--set-string", "controller.substrate.apiBearerTokenFile=/custom/token", "--show-only", "templates/deployment.yaml")
+	if err == nil || !strings.Contains(output, "cannot be combined") {
+		t.Fatal("Helm combined the pod certificate with another control identity")
+	}
+}
+
+func TestStaticChartAdmitsSubstrateEgressGatewayOnlyWhenEnabled(t *testing.T) {
+	base := []string{"--set", "providerProxy.enabled=true",
+		"--set-string", "providerProxy.upstreamBaseURL=https://gateway.example.test",
+		"--set-json",
+		`providerProxy.egress=[{"to":[{"ipBlock":{"cidr":"203.0.113.0/24"}}],` +
+			`"ports":[{"protocol":"TCP","port":443}]}]`,
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml"}
+	if rendered := requireHelmRender(t, base...); strings.Contains(rendered, "atenet-egress") {
+		t.Fatal("provider proxy admits the Substrate egress gateway by default")
+	}
+	enabled := append(slices.Clone(base), "--set", "providerProxy.substrateEgressGateway.enabled=true")
+	rendered := requireHelmRender(t, enabled...)
+	for _, want := range []string{"kubernetes.io/metadata.name: \"ate-system\"", "app: atenet-egress"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("provider proxy ingress is missing %s:\n%s", want, rendered)
+		}
 	}
 }

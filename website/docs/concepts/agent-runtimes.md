@@ -276,6 +276,86 @@ remain available when allowed by policy.
 
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
 
+### Cap what Tasks can request
+
+The `default*` fields are only defaults: a Task can replace them with its own
+`allowedTools`, `allowBash`, or `maxTurns`. To set limits that a Task can
+narrow but never exceed, add a `ceiling`:
+
+```yaml
+spec:
+  runtime:
+    type: claude
+    contractVersion: orka.harness.v2
+    defaultAllowedTools: [Read, Grep]
+    defaultAllowBash: false
+    defaultMaxTurns: 20
+    ceiling:
+      allowedTools: [Read, Grep, Edit]
+      allowBash: false
+      maxTurns: 40
+```
+
+Before a Task is bound, Orka resolves the policy it would run with (the Task's
+override, otherwise the Agent default) and fails the Task if that policy goes
+beyond the ceiling:
+
+| Task asks for | Result |
+| --- | --- |
+| nothing | the Agent defaults: Read, Grep, 20 turns |
+| `allowedTools: [Read]` | Read |
+| `allowedTools: [Read, Write]` | fails: `ceiling does not allow tool "Write"` |
+| `allowBash: true` with `Bash` in `allowedTools` | fails: `ceiling forbids Bash` |
+| `maxTurns: 100` | fails: `ceiling allows at most 40 turns` |
+
+How the check reads a policy:
+
+- **Tools.** The check uses the tools the runtime would actually expose, after
+  `disallowedTools`, the Bash gate, and runtime normalization (such as
+  OpenCode's alias grouping) apply. Tool names ignore case. Brokered and
+  custom tool names count too. For scoped names such as `Bash(git status)`, a
+  bare ceiling entry covers every scope of that tool, but a scoped entry
+  covers only that exact scope, compared case-sensitively. A `disallowedTools` entry narrows
+  the request only when it matches an allowed name exactly, as at dispatch, so
+  `bash` does not remove `Bash`.
+- **No explicit list.** A Task with no allowlist and an Agent with no
+  `defaultAllowedTools` resolve to the full native tool set, less anything
+  `disallowedTools` or `allowBash: false` removes. That usually exceeds a tool
+  ceiling, so set `defaultAllowedTools` within the ceiling. An allowlist of only
+  blank entries is judged the same way, so it can never slip past a ceiling.
+  Likewise,
+  `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
+- **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
+- **Unknown keys.** A key `ceiling` does not define, such as a misspelled
+  `allowedTool`, is rejected rather than dropped, so a typo cannot remove a limit.
+- **Coordination tools.** The `send_message` and `check_messages` tools that
+  Orka injects into delegated child Tasks are not counted against the ceiling.
+  A Task that lists them in its own `allowedTools` is judged on them as usual.
+- **Gateway replies.** Eligible gateway Tasks without an explicit allowlist
+  normally get `reply_in_conversation` implicitly. Under a ceiling, Orka keeps
+  that grant only when the resulting policy still fits: the ceiling must list
+  `reply_in_conversation`, and the native tool set must fit it (OpenCode's
+  default list, or another runtime's set narrowed by `disallowedTools` or
+  `allowBash: false`). Otherwise, include `reply_in_conversation` in an explicit
+  allowlist and in the ceiling.
+- **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
+  already fixes Bash and the turn budget. The check uses the tools the
+  registered AgentRuntime policy exposes, so a tool the registration lists but
+  also denies does not count against the ceiling.
+- **Codex.** Every Codex session can run shell commands. Even a read-only
+  session with only `Glob`, `Grep`, and `Read` runs read commands through the
+  shell. A Codex Task therefore always fails a `ceiling.allowBash: false`, so
+  use another runtime when the ceiling must exclude the shell.
+
+A Task is checked against the Agent generation it binds to. Changing a
+ceiling does not affect Tasks that are already bound. When an Agent's own
+explicit defaults exceed its ceiling, the Agent reports `Ready=False` with the
+reason.
+
+A ceiling limits what callers may request through the Task API. It does not
+stop anyone who can edit the Agent from changing the ceiling, so restrict
+`update` on Agents to the people who own them.
+
 ## Read-only workspace Task
 
 Agent Tasks default to `intent: read` when `workspace.intent` is omitted, but setting it explicitly makes review intent clear.
@@ -442,7 +522,7 @@ immutable images:
 --controller-mode=harness-v2
 --acp-runtime-namespace=orka-runtimes
 --acp-provider-proxy-namespace=orka-system
---acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc:8080
+--acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc.cluster.local:8080
 --acp-codex-runtime-image=<repository>@sha256:<digest>
 --acp-claude-runtime-image=<repository>@sha256:<digest>
 --acp-copilot-runtime-image=<repository>@sha256:<digest>

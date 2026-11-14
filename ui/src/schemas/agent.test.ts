@@ -54,9 +54,23 @@ describe('agentRuntimeSchema', () => {
       defaultAllowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
       defaultAllowBash: true,
       defaultReasoningEffort: 'max',
+      ceiling: { allowedTools: ['Read', 'Edit'], allowBash: false, maxTurns: 80 },
     }
     expect(builtInAgentRuntimeSchema.parse(runtime)).toEqual(runtime)
     expect(agentRuntimeSchema.parse(runtime)).toEqual(runtime)
+  })
+
+  it('keeps an Agent identity binding when a spec round-trips', () => {
+    const spec = {
+      runtime: { type: 'claude', ceiling: { allowedTools: ['Read'] } },
+      identity: { entra: { agentIdentityID: '00000000-0000-0000-0000-000000000001' } },
+    }
+    expect(agentSpecSchema.parse(spec)).toEqual(spec)
+    expect(() => agentSpecSchema.parse({ ...spec, identity: { entra: { agentIdentityID: 'x' }, okta: {} } })).toThrow()
+  })
+
+  it('rejects unknown ceiling fields', () => {
+    expect(() => agentRuntimeSchema.parse({ type: 'claude', ceiling: { allowedTools: [], delegateTo: [] } })).toThrow()
   })
 
   it('rejects removed, ambiguous, or malformed runtime selectors', () => {

@@ -29,6 +29,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
@@ -92,13 +93,15 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		APIInsecureSkipVerify: true,
 		APICertFile:           "/run/substrate-client/credential-bundle.pem",
 		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
-		RouterURL:             "http://atenet-router.ate-system.svc",
-		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+		RouterURL:             "https://atenet-router.ate-system.svc:443",
 	}
 	invalidConfig := validConfig
 	invalidConfig.APIInsecureSkipVerify = false
 	unauthenticatedConfig := validConfig
 	unauthenticatedConfig.APICertFile, unauthenticatedConfig.APIKeyFile = "", ""
+	// Bearer control authentication without the router pod-certificate identity.
+	bearerConfig := unauthenticatedConfig
+	bearerConfig.APIBearerTokenFile = "/var/run/substrate/token"
 
 	pool := func(name string, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.RuntimePool {
 		return &corev1alpha1.RuntimePool{
@@ -169,6 +172,18 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:  validConfig,
 		},
 		{
+			// Pool finalization is control-only and needs no router identity.
+			name:    "existing actor pool accepts bearer control recovery configuration",
+			objects: []client.Object{actorPool("team-a", true)},
+			config:  bearerConfig,
+		},
+		{
+			name:      "existing actor pool and MCP tool require the router identity",
+			objects:   []client.Object{actorPool("team-a", true), mcpTool("team-a", true)},
+			config:    bearerConfig,
+			wantError: "Tool team-a/native-tool requires valid recovery configuration",
+		},
+		{
 			name:      "actor pool outside the watch namespace is not managed",
 			objects:   []client.Object{actorPool("team-b", true)},
 			config:    invalidConfig,
@@ -192,6 +207,13 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:    validConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 			wantError: "parse substrate recovery configuration for existing Tool",
+		},
+		{
+			// Tool finalization builds the router-capable executor.
+			name:      "dedicated MCP tool requires the router pod-certificate identity",
+			objects:   []client.Object{mcpTool("team-a", true)},
+			config:    bearerConfig,
+			wantError: "pod-certificate identity",
 		},
 		{
 			name:    "dedicated MCP tool accepts valid recovery configuration",
@@ -235,6 +257,34 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 				t.Fatalf("validation error = %v, want substring %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateSubstrateStartupConfigRejectsRemovedSettingsUnconditionally(t *testing.T) {
+	_, removedErr := controller.SubstrateConfigFromEnv(func(key string) string {
+		if key == "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX" {
+			return "actors.example"
+		}
+		return ""
+	})
+	if !errors.Is(removedErr, controller.ErrRemovedSubstrateSetting) {
+		t.Fatalf("removed setting error = %v", removedErr)
+	}
+	var empty controller.SubstrateConfig
+	// A workspace-only deployment has MCP Tools disabled and no recovery state.
+	for _, mcpToolsEnabled := range []bool{false, true} {
+		err := validateSubstrateStartupConfig(mcpToolsEnabled, empty, removedErr)
+		if !errors.Is(err, controller.ErrRemovedSubstrateSetting) {
+			t.Fatalf("mcpToolsEnabled=%v: removed setting was not rejected: %v", mcpToolsEnabled, err)
+		}
+	}
+	// Other disabled-only configuration remains a recovery-time concern.
+	parseErr := errors.New("invalid disabled-only duration")
+	if err := validateSubstrateStartupConfig(false, empty, parseErr); err != nil {
+		t.Fatalf("disabled MCP Tools rejected an unrelated configuration error: %v", err)
+	}
+	if err := validateSubstrateStartupConfig(true, empty, parseErr); err == nil {
+		t.Fatal("enabled MCP Tools accepted a configuration parse error")
 	}
 }
 
@@ -860,5 +910,25 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	}
 	if !wiring.collector.NeedLeaderElection() {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
+	}
+}
+
+func TestValidateAgentIdentityProvenance(t *testing.T) {
+	entra := agentidentity.Config{
+		Entra: &agentidentity.EntraConfig{
+			TenantID:          "11111111-1111-1111-1111-111111111111",
+			BlueprintClientID: "22222222-2222-2222-2222-222222222222",
+		},
+		AgentUseAuthorization: true,
+	}
+	err := validateAgentIdentityProvenance(entra, false)
+	if err == nil || !strings.Contains(err.Error(), "Task provenance admission") {
+		t.Fatalf("an issuer without provenance admission: err = %v", err)
+	}
+	if err := validateAgentIdentityProvenance(entra, true); err != nil {
+		t.Fatalf("an issuer with provenance admission: %v", err)
+	}
+	if err := validateAgentIdentityProvenance(agentidentity.Config{AgentUseAuthorization: true}, false); err != nil {
+		t.Fatalf("no issuer needs no provenance admission: %v", err)
 	}
 }
