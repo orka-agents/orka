@@ -4,7 +4,7 @@
   "scripts": [
     {
       "name": "UI Dev",
-      "command": "cd ui && bun run dev",
+      "command": "cd ui && bun run dev --strictPort",
       "icon": "play",
       "stopOnSettle": true,
       "previewUrl": "http://localhost:5173"
