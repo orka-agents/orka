@@ -316,6 +316,8 @@ func main() {
 	var gatewayEnabled bool
 	var connectorsEnabled bool
 	var dashboardEnabled bool
+	var mcpServerEnabled bool
+	var mcpMaxConcurrent int
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
@@ -550,6 +552,10 @@ func main() {
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
+	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
+		"Serve the control-plane MCP endpoint at /mcp on the API port. Every tool runs with the caller's own REST API permissions.")
+	flag.IntVar(&mcpMaxConcurrent, "mcp-max-concurrent", api.DefaultMCPMaxConcurrent,
+		"Max concurrent MCP requests per API replica; waiting tools use a separate pool of half as many wait slots.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
 			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
@@ -2396,6 +2402,7 @@ func main() {
 		},
 		DashboardEnabled:      dashboardEnabled,
 		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
 		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,

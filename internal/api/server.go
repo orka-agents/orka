@@ -108,6 +108,8 @@ type ServerConfig struct {
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// MCP configures the control-plane MCP endpoint (--mcp-server-enabled).
+	MCP MCPServerConfig
 	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
@@ -128,6 +130,7 @@ type Server struct {
 	openaiHandler       *OpenAICompatHandler
 	anthropicHandler    *AnthropicCompatHandler
 	internalHandlers    *InternalHandlers
+	mcpServer           *mcpServer
 	ResultStore         store.ResultStore
 	SessionStore        store.SessionStore
 	PlanStore           store.PlanStore
@@ -247,6 +250,12 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The MCP handler reads its body before taking a concurrency permit;
+	// bound that read so stalled uploads only cost their own connection.
+	var mcpURI fasthttp.URI
+	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
+	}
 	return fasthttp.RequestConfig{}
 }
 
@@ -287,6 +296,12 @@ func (s *Server) setupMiddleware() {
 	// Recovery middleware
 	s.app.Use(recover.New())
 
+	// Before anything reads the request context: an MCP wait's REST replays
+	// end with the wait.
+	if s.config.MCP.Enabled {
+		s.app.Use(adoptMCPReplayDeadline)
+	}
+
 	// Request ID middleware
 	s.app.Use(requestid.New())
 
@@ -302,10 +317,14 @@ func (s *Server) setupMiddleware() {
 	for i, o := range origins {
 		origins[i] = strings.TrimSpace(o)
 	}
+	allowHeaders := allowedCORSHeaders(s.config.ContextTokens)
+	if s.config.MCP.Enabled {
+		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
+	}
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
+		AllowHeaders: allowHeaders,
 	}))
 
 	// Logging middleware
@@ -567,6 +586,16 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
+	// Control-plane MCP endpoint. The route only authenticates; each tool
+	// replays its REST route in process, which authorizes it.
+	if s.config.MCP.Enabled {
+		app := s.app
+		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
+		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
+		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp.Post("", s.mcpServer.Handle)
+	}
+
 	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
@@ -666,7 +695,7 @@ func (s *Server) Start(ctx context.Context) error {
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve. Lower case and without
 // a trailing slash, matched against a normalized path: see routeLookupPath.
-var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known"}
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known", mcpEndpointPath}
 
 // routeLookupPath normalizes path the way the router matches it. Fiber is
 // case-insensitive and non-strict about a trailing slash by default, so
