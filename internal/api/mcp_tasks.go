@@ -236,7 +236,7 @@ func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) (mcpTool
 
 // mcpApprovalInputSchema is the elicitation form for one approval request.
 var mcpApprovalInputSchema = map[string]any{
-	"type": "object",
+	"type": mcpSchemaTypeObject,
 	"properties": map[string]any{
 		mcpFieldDecision: map[string]any{
 			"type": "string", "title": "Decision", "enum": []string{approvalDecisionApprove, approvalDecisionDecline},

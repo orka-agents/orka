@@ -50,6 +50,7 @@ const (
 	mcpMethodHeader           = "Mcp-Method"
 	mcpProtocolVersionHeader  = "Mcp-Protocol-Version"
 	mcpNameHeader             = "Mcp-Name"
+	mcpMethodToolsCall        = "tools/call"
 
 	// DefaultMCPMaxConcurrent bounds concurrent MCP requests per API replica,
 	// like --chat-max-concurrent bounds chat requests.
@@ -488,7 +489,7 @@ func (call *mcpCall) errorStatus(rpcErr *mcpError) int {
 
 // mcpNamedMethods carry the Mcp-Name header, mirroring params.name or
 // params.uri.
-var mcpNamedMethods = []string{"tools/call", "resources/read", "prompts/get"}
+var mcpNamedMethods = []string{mcpMethodToolsCall, "resources/read", "prompts/get"}
 
 // mcpTaskNamedMethods are the io.modelcontextprotocol/tasks methods whose
 // Mcp-Name header mirrors params.taskId, so an intermediary can route every
@@ -619,7 +620,7 @@ func (m *mcpServer) dispatch(call *mcpCall) (any, error) {
 		return map[string]any{}, nil
 	case "tools/list":
 		return map[string]any{mcpFieldTools: mcpToolDefinitions()}, nil
-	case "tools/call":
+	case mcpMethodToolsCall:
 		return m.callTool(call)
 	case "tasks/get":
 		return m.getTask(call)

@@ -106,6 +106,9 @@ type mcpToolResult struct {
 	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
+// mcpSchemaTypeObject is the JSON Schema type of an object.
+const mcpSchemaTypeObject = "object"
+
 // mcpArgumentError is a tool input error the model can correct.
 type mcpArgumentError string
 
@@ -123,7 +126,7 @@ func mutatingToolAnnotations(title string, destructive, idempotent bool) map[str
 }
 
 func objectSchema(required []string, properties map[string]any) map[string]any {
-	schema := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
+	schema := map[string]any{"type": mcpSchemaTypeObject, "properties": properties, "additionalProperties": false}
 	if len(required) > 0 {
 		schema["required"] = required
 	}
@@ -197,7 +200,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 				},
 				"timeout": map[string]any{"type": "string", "maxLength": 32, "description": "Optional Task timeout, for example 30m or 2h."},
 				"workspace": map[string]any{
-					"type": "object",
+					"type": mcpSchemaTypeObject,
 					"description": "Optional repository workspace (Task spec.workspace), e.g. {\"gitRepo\":\"https://github.com/org/repo\",\"branch\":\"main\"}. " +
 						"Credentials are referenced by Secret name only (readCredentialRef, publicationCredentialRef).",
 					"properties": map[string]any{
@@ -206,10 +209,10 @@ func mcpToolDefinitions() []mcpToolDefinition {
 						"branch":                   map[string]any{"type": "string"},
 						"ref":                      map[string]any{"type": "string"},
 						"subPath":                  map[string]any{"type": "string"},
-						"readCredentialRef":        map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}},
+						"readCredentialRef":        map[string]any{"type": mcpSchemaTypeObject, "properties": map[string]any{"name": map[string]any{"type": "string"}}},
 						"publicationGitRepo":       map[string]any{"type": "string"},
-						"publicationCredentialRef": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}},
-						"forgeCredentialRef":       map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}},
+						"publicationCredentialRef": map[string]any{"type": mcpSchemaTypeObject, "properties": map[string]any{"name": map[string]any{"type": "string"}}},
+						"forgeCredentialRef":       map[string]any{"type": mcpSchemaTypeObject, "properties": map[string]any{"name": map[string]any{"type": "string"}}},
 						"pushBranch":               map[string]any{"type": "string"},
 						"prBaseBranch":             map[string]any{"type": "string"},
 						"prTitle":                  map[string]any{"type": "string"},
@@ -218,7 +221,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 					},
 				},
 				mcpFieldSession: map[string]any{
-					"type":        "object",
+					"type":        mcpSchemaTypeObject,
 					"description": "Optional Orka Session to continue (Task spec.sessionRef).",
 					"properties": map[string]any{
 						"name":   map[string]any{"type": "string", "maxLength": 253},
