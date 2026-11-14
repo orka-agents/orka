@@ -11,7 +11,7 @@
     },
     {
       "name": "Setup Worktree",
-      "command": "make ensure-ui-embed && cd ui && bun install --frozen-lockfile",
+      "command": "make ensure-ui-embed",
       "icon": "configure",
       "runOnWorktreeCreate": true
     },
