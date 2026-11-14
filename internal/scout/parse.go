@@ -65,19 +65,25 @@ func ExtractDigest(answer string) ([]byte, error) {
 	if len(answer) > 4*MaxDigestBytes {
 		return nil, fmt.Errorf("answer exceeds %d bytes", 4*MaxDigestBytes)
 	}
-	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	// Markdown ends a line at CRLF, LF or a lone CR, so split on all three:
+	// a fence after a lone CR is still a fence.
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(answer, "\r\n", "\n"), "\r", "\n"), "\n")
+	// Check every line before any block is skipped: a longer backtick fence
+	// closes a three-backtick block in Markdown, so one inside a skipped
+	// block would otherwise hide the next digest block from the count.
 	for _, line := range lines {
-		if trimmed := strings.TrimLeft(line, " \t"); trimmed != line && strings.HasPrefix(trimmed, "```") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed != line && strings.HasPrefix(trimmed, "```") {
 			return nil, errors.New("answer must not contain indented backtick code fences")
+		}
+		if strings.HasPrefix(trimmed, "````") || strings.HasPrefix(trimmed, "~~~") {
+			return nil, errors.New("answer must not contain longer backtick or tilde code fences")
 		}
 	}
 	var body []string
 	found := 0
 	for index := 0; index < len(lines); index++ {
 		line := strings.TrimRight(lines[index], " \t")
-		if trimmed := strings.TrimLeft(line, " "); strings.HasPrefix(trimmed, "````") || strings.HasPrefix(trimmed, "~~~") {
-			return nil, errors.New("answer must not contain longer backtick or tilde code fences")
-		}
 		if !strings.HasPrefix(line, "```") {
 			continue
 		}

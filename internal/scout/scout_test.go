@@ -158,6 +158,8 @@ func TestValidateSourceURL(t *testing.T) {
 		"https://example.com/\"onmouseover", "https://example.com/a\\b", "https://example.com/{x}",
 		"https://127.1/", "https://0x7f.0.0.1/", "https://127.000.000.001/", "https://10.1/",
 		"https://2130706433/", "https://example.0x7f/",
+		"https://[::ffff:127.0.0.1%25eth0]/", "https://[::ffff:10.0.0.1%25lo]/x", "https://[fe80::1%25en0]/",
+		"https://[::ffff:127.0.0.1]/",
 	} {
 		if err := ValidateSourceURL(raw); err == nil {
 			t.Errorf("ValidateSourceURL(%q) = nil, want error", raw)
@@ -400,7 +402,13 @@ func TestExtractDigest(t *testing.T) {
 		"quoted in indented fence": "  ```markdown\n```orka-scout-digest\n" + body + "\n```\n  ```\n",
 		"indented second block":    answer + "\n   ```orka-scout-digest\n{}\n   ```\n",
 		"indented closing fence":   "```text\na\n  ```\n```\n```orka-scout-digest\n" + body + "\n```\n```\n```\n",
-		"oversized":                strings.Repeat("a", 4*MaxDigestBytes+1),
+		// A longer fence closes a three-backtick block in Markdown, so one
+		// inside a skipped block must not hide the next digest block.
+		"longer fence inside skipped block": "```text\n````\n```orka-scout-digest\n" + body + "\n```\n```orka-scout-digest\n{}\n```\n",
+		"tilde fence inside skipped block":  "```text\n~~~\n```\n" + answer,
+		// A lone carriage return ends a line in Markdown too.
+		"longer fence after a lone CR": "```text\nx\r````\n```orka-scout-digest\n" + body + "\n```\n```orka-scout-digest\n{}\n```\n",
+		"oversized":                    strings.Repeat("a", 4*MaxDigestBytes+1),
 	} {
 		if _, err := ExtractDigest(input); err == nil {
 			t.Errorf("ExtractDigest(%s) = nil error, want error", name)

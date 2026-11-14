@@ -301,7 +301,10 @@ func ValidateSourceURL(raw string) error {
 		return errors.New("must use the default https port")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if net.ParseIP(host) != nil || strings.HasPrefix(host, "[") || endsInNumber(host) {
+	// Hostname drops an IPv6 literal's brackets, and net.ParseIP rejects a
+	// zoned literal such as "::ffff:127.0.0.1%eth0", so check the bracketed
+	// form and the characters no DNS name contains as well.
+	if net.ParseIP(host) != nil || strings.HasPrefix(parsed.Host, "[") || strings.ContainsAny(host, ":%") || endsInNumber(host) {
 		return errors.New("must use a DNS host name, not an IP address")
 	}
 	if !strings.Contains(host, ".") || strings.HasSuffix(host, ".") {
