@@ -914,7 +914,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	openEpoch, deletedEpoch, deletingEpoch := epoch("chat-open"), epoch("chat-reused"), epoch("chat-deleting")
 	// The chat is deleted and a new one created under its name: Tasks of
 	// the first must not act for the requester through the second.
-	if err := sessions.DeleteSession(context.Background(), testNS, "chat-reused"); err != nil {
+	if err := sessions.DeleteSession(context.Background(), testNS, "chat-reused", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := sessions.CreateSession(context.Background(), &store.SessionRecord{

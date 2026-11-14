@@ -31,7 +31,7 @@ func TestHandleScheduledTask_InvalidCronPreservesChatTurn(t *testing.T) {
 	ss := r.SessionManager.store
 	turns := ss.(store.SessionTurnCommitter)
 	session := &store.SessionRecord{Namespace: task.Namespace, Name: task.Spec.SessionRef.Name, SessionType: "chat"}
-	_, err := turns.AcquireChatTurn(ctx, session, "parent-turn", time.Now().Add(time.Minute))
+	_, err := turns.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "parent-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)})
 	require.NoError(t, err)
 
 	_, err = r.handlePending(ctx, task)
@@ -43,12 +43,16 @@ func TestHandleScheduledTask_InvalidCronPreservesChatTurn(t *testing.T) {
 	require.Empty(t, got.Messages)
 	require.Zero(t, got.MessageCount)
 	require.Empty(t, got.ActiveTask)
-	_, err = turns.AcquireChatTurn(ctx, session, "competing-turn", time.Now().Add(time.Minute))
+	_, err = turns.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "competing-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)})
 	require.ErrorIs(t, err, store.ErrConflict)
-	require.NoError(t, turns.CommitSessionTurn(ctx, session, "parent-turn", 0, []store.SessionMessage{
-		{Role: "user", Content: "create a scheduled task"},
-		{Role: "assistant", Content: "the schedule was rejected"},
-	}, 7, 11))
+	require.NoError(t, turns.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "parent-turn", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "create a scheduled task"},
+			{Role: "assistant", Content: "the schedule was rejected"},
+		},
+		InputTokens: 7, OutputTokens: 11, Now: time.Now().UTC(),
+	}))
 }
 
 func TestSessionManagerAppendMessagesSkipsUnownedSession(t *testing.T) {
@@ -110,7 +114,7 @@ func TestSessionManagerAppendMessagesFencesOwnershipDuringResultRead(t *testing.
 	session := &store.SessionRecord{Namespace: "default", Name: "session", SessionType: "task"}
 	results := sessionOwnershipChangingResultStore{ResultStore: ss, beforeRead: func() {
 		require.NoError(t, manager.ReleaseLock(ctx, task))
-		_, err := ss.AcquireChatTurn(ctx, session, "new-chat-turn", time.Now().Add(time.Minute))
+		_, err := ss.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{Session: session, TurnID: "new-chat-turn", Now: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)})
 		require.NoError(t, err)
 	}}
 	require.ErrorIs(t, manager.AppendMessages(ctx, task, results), store.ErrConflict)
@@ -118,7 +122,11 @@ func TestSessionManagerAppendMessagesFencesOwnershipDuringResultRead(t *testing.
 	require.NoError(t, err)
 	require.Empty(t, got.Messages)
 	require.Zero(t, got.MessageCount)
-	require.NoError(t, ss.CommitSessionTurn(ctx, session, "new-chat-turn", 0, []store.SessionMessage{
-		{Role: "user", Content: "new request"}, {Role: "assistant", Content: "new response"},
-	}, 7, 11))
+	require.NoError(t, ss.CommitSessionTurn(ctx, store.CommitSessionTurnRequest{
+		Session: session, TurnID: "new-chat-turn", ExpectedMessageCount: 0,
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "new request"}, {Role: "assistant", Content: "new response"},
+		},
+		InputTokens: 7, OutputTokens: 11, Now: time.Now().UTC(),
+	}))
 }

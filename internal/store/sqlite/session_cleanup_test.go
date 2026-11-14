@@ -75,7 +75,7 @@ func TestSessionCleanupIntentBlocksTranscriptAppend(t *testing.T) {
 	}}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("AppendMessages() error = %v, want ErrConflict", err)
 	}
-	if err := s.DeleteSession(ctx, "tenant-a", "chat-pending-delete"); !errors.Is(err, store.ErrConflict) {
+	if err := s.DeleteSession(ctx, "tenant-a", "chat-pending-delete", time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession(pending cleanup) error = %v, want ErrConflict", err)
 	}
 	if _, err := s.GetSessionCleanupIntent(ctx, "tenant-a", "chat-pending-delete"); err != nil {
@@ -88,7 +88,7 @@ func TestExpiredTransientSessionLockDoesNotWedgeDeletion(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	createControlTranscriptSession(t, s, "tenant-a", "chat-expired-lock", now)
-	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-expired-lock", "chat-request-old", "chat-request-old", now.Add(time.Minute)); err != nil {
+	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-expired-lock", "chat-request-old", "chat-request-old", time.Now().UTC(), now.Add(time.Minute)); err != nil {
 		t.Fatalf("AcquireLockUntil(): %v", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -97,7 +97,7 @@ func TestExpiredTransientSessionLockDoesNotWedgeDeletion(t *testing.T) {
 	); err != nil {
 		t.Fatalf("expire transient lock: %v", err)
 	}
-	if err := s.DeleteSession(ctx, "tenant-a", "chat-expired-lock"); err != nil {
+	if err := s.DeleteSession(ctx, "tenant-a", "chat-expired-lock", time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession(after transient lock expiry): %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestExpiredTransientSessionOwnerCannotWriteAfterTakeover(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	createControlTranscriptSession(t, s, "tenant-a", "chat-lock-takeover", now)
-	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-lock-takeover", "owner-a", "owner-a", now.Add(time.Minute)); err != nil {
+	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-lock-takeover", "owner-a", "owner-a", time.Now().UTC(), now.Add(time.Minute)); err != nil {
 		t.Fatalf("AcquireLockUntil(owner A): %v", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -116,17 +116,17 @@ func TestExpiredTransientSessionOwnerCannotWriteAfterTakeover(t *testing.T) {
 	); err != nil {
 		t.Fatalf("expire owner A: %v", err)
 	}
-	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-lock-takeover", "owner-b", "owner-b", now.Add(time.Minute)); err != nil {
+	if err := s.AcquireLockUntil(ctx, "tenant-a", "chat-lock-takeover", "owner-b", "owner-b", time.Now().UTC(), now.Add(time.Minute)); err != nil {
 		t.Fatalf("AcquireLockUntil(owner B): %v", err)
 	}
 	late := []store.SessionMessage{{Role: "assistant", Content: "stale", Timestamp: now}}
-	if err := s.AppendMessagesWithLock(ctx, "tenant-a", "chat-lock-takeover", "owner-a", "owner-a", late); !errors.Is(err, store.ErrConflict) {
+	if err := s.AppendMessagesWithLock(ctx, store.SessionOwnerWrite{Namespace: "tenant-a", Name: "chat-lock-takeover", OwnerName: "owner-a", OwnerUID: "owner-a", Now: time.Now().UTC()}, late); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("AppendMessagesWithLock(stale owner) error = %v, want ErrConflict", err)
 	}
-	if err := s.UpdateTokenCountsWithLock(ctx, "tenant-a", "chat-lock-takeover", "owner-a", "owner-a", 1, 1); !errors.Is(err, store.ErrConflict) {
+	if err := s.UpdateTokenCountsWithLock(ctx, store.SessionOwnerWrite{Namespace: "tenant-a", Name: "chat-lock-takeover", OwnerName: "owner-a", OwnerUID: "owner-a", Now: time.Now().UTC()}, 1, 1); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("UpdateTokenCountsWithLock(stale owner) error = %v, want ErrConflict", err)
 	}
-	if err := s.AppendMessagesWithLock(ctx, "tenant-a", "chat-lock-takeover", "owner-b", "owner-b", []store.SessionMessage{{
+	if err := s.AppendMessagesWithLock(ctx, store.SessionOwnerWrite{Namespace: "tenant-a", Name: "chat-lock-takeover", OwnerName: "owner-b", OwnerUID: "owner-b", Now: time.Now().UTC()}, []store.SessionMessage{{
 		Role: "assistant", Content: "current", Timestamp: now,
 	}}); err != nil {
 		t.Fatalf("AppendMessagesWithLock(current owner): %v", err)

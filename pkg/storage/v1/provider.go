@@ -131,7 +131,13 @@ const (
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
 	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
 	// Revision 6 requires [SessionCreationReader] on state.v1.
-	ContractRevision = 6
+	// Revision 7 split the inbox read into [MessageStore.ListUnreadMessages]
+	// and [MessageStore.ConsumeMessages], bounded by [MaxMessageBatch], made
+	// [MessageStore.SendMessage] write the assigned ID and creation time back,
+	// and made every Session lease decision, and the claim check when
+	// freezing a gateway event's allowed tools, use the time the request
+	// carries.
+	ContractRevision = 7
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
