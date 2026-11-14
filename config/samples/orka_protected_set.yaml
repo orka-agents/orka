@@ -31,6 +31,7 @@ data:
           - internal/api/auth*.go                          # authentication
           - internal/api/context_token*.go                 # transaction and context tokens
           - Makefile                                       # the test and lint targets CI runs
+          - GNUmakefile                                    # GNU make reads it before Makefile
           - .golangci.yml
           - internal/api/server.go                         # route registration
           - internal/api/eval*.go                          # proposal and decision handlers
@@ -85,6 +86,9 @@ data:
           - workers/acp/supervisor/**                      # deniedPaths check
           - go.mod                                         # dependency selection, including replace directives
           - go.sum
+          - "**/go.work"                                   # workspace replace directives override go.mod without editing it
+          - "**/go.work.sum"
+          - vendor/**                                      # a vendor/modules.txt makes builds use vendored sources by default
           - "**/Dockerfile*"                               # image recipes for the controller, workers, publisher and runtimes
           - .dockerignore
           - workers/acp/images/**                          # ACP runtime images (supervisor)

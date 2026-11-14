@@ -664,3 +664,29 @@ func TestRecoveredPublisherDeniedPathRejectionKeepsItsClassification(t *testing.
 		t.Fatalf("recovered rejection reason = %q (delivery %+v), want %q", reason, status, repositoryMonitorPatchPathDenied)
 	}
 }
+
+// A restart between storing a first-time denied-path failure and projecting
+// the Task's delivery error must not lose the denied-path classification.
+func TestFirstTimePublisherDeniedPathRejectionSurvivesRestart(t *testing.T) {
+	denied := &publisherservice.ClientError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Response:   publisherservice.ErrorResponse{Code: publisherservice.ErrorCodeDeniedPath},
+	}
+	reason := publicationPrepareFailureReason(denied)
+	if reason != harnessv2.WorkspaceDeltaDeniedPathMessage {
+		t.Fatalf("first-time reason = %q, want the denied-path message", reason)
+	}
+	if got := publicationPrepareFailureReason(errors.New("boom")); got != "publication preparation failed" {
+		t.Fatalf("first-time reason for another error = %q", got)
+	}
+	publication := &store.Publication{State: store.PublicationPreparationFailed, TerminalReason: reason}
+	status := publicationTaskDeliveryStatus(&corev1alpha1.WorkspaceConfig{}, harnessv2.WorkspaceBaseline{},
+		harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{}}, publication, "")
+	if status.Reason != acpWorkspaceValidationFailedReason || status.Message != harnessv2.WorkspaceDeltaDeniedPathMessage {
+		t.Fatalf("recovered first-time delivery = %+v, want WorkspaceValidationFailed with the denied-path message", status)
+	}
+	task := &corev1alpha1.Task{Status: corev1alpha1.TaskStatus{Delivery: &status}}
+	if got := repositoryMonitorWorkspacePathRejectionReason(task); got != repositoryMonitorPatchPathDenied {
+		t.Fatalf("recovered first-time rejection reason = %q, want %q", got, repositoryMonitorPatchPathDenied)
+	}
+}

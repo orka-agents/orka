@@ -588,9 +588,25 @@ func (d *ACPDispatcher) recoveryDeliveryTransition(ctx context.Context, attemptI
 // the Task's delivery message and the monitor's failure classification don't
 // depend on whether a restart happened in between.
 func publicationRecoveryPrepareFailureReason(err error) string {
-	var clientErr *publisherservice.ClientError
-	if errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath {
+	if publisherDeniedPath(err) {
 		return harnessv2.WorkspaceDeltaDeniedPathMessage
 	}
 	return "publication preparation failed during recovery"
+}
+
+// publicationPrepareFailureReason is the terminal reason of a first-time
+// preparation failure. A publisher denied-path rejection is stored with the
+// runtime's denied-path message, so a restart before the Task's delivery
+// error is projected still recovers the WorkspaceValidationFailed reason and
+// the monitor's denied-path classification.
+func publicationPrepareFailureReason(err error) string {
+	if publisherDeniedPath(err) {
+		return harnessv2.WorkspaceDeltaDeniedPathMessage
+	}
+	return "publication preparation failed"
+}
+
+func publisherDeniedPath(err error) bool {
+	var clientErr *publisherservice.ClientError
+	return errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath
 }

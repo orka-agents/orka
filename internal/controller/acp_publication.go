@@ -277,7 +277,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			deliveryState = store.PromptDeliveryCredentialBlocked
 		}
 		publicationID := publication.ID
-		if transitionErr := d.transitionPublicationTerminal(ctx, publication, fence, terminalState, "publication preparation failed"); transitionErr != nil {
+		if transitionErr := d.transitionPublicationTerminal(ctx, publication, fence, terminalState, publicationPrepareFailureReason(err)); transitionErr != nil {
 			return acpPublicationResult{PublicationID: publicationID}, transitionErr
 		}
 		publication, err = d.Store.GetPublication(ctx, publicationID)
