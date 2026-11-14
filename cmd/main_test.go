@@ -359,7 +359,7 @@ func TestWorkspacePublisherClientFromEnvUsesBoundedFallbackWithoutPublisher(t *t
 	t.Setenv("ORKA_WORKSPACE_PUBLISHER_URL", "")
 	t.Setenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE", "")
 
-	publisherClient, artifactSecret, gotLimit, err := workspacePublisherClientFromEnv()
+	publisherClient, artifactSecret, gotLimit, err := workspacePublisherClientFromEnv(context.Background(), startupRetry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestWorkspacePublisherClientFromEnvNegotiatesWorkspaceArtifactLimit(t *test
 	t.Setenv("ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE", capabilityPath)
 	t.Setenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE", "")
 
-	publisherClient, artifactSecret, gotLimit, err := workspacePublisherClientFromEnv()
+	publisherClient, artifactSecret, gotLimit, err := workspacePublisherClientFromEnv(context.Background(), startupRetry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestWorkspacePublisherClientFromEnvRejectsInvalidArtifactCapability(t *test
 	t.Setenv("ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE", capabilityPath)
 	t.Setenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE", "")
 
-	if _, _, _, err := workspacePublisherClientFromEnv(); err == nil {
+	if _, _, _, err := workspacePublisherClientFromEnv(context.Background(), startupRetry{}); err == nil {
 		t.Fatal("workspacePublisherClientFromEnv() error = nil, want invalid Publisher limit")
 	}
 }
