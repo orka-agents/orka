@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const defaultServer = "http://localhost:8080"
@@ -53,15 +52,18 @@ func newRootCmd() *cobra.Command {
 	}
 
 	// Global flags
-	cmd.PersistentFlags().StringP("server", "s", "", "Orka server URL (default \"http://localhost:8080\")")
-	cmd.PersistentFlags().StringP("token", "t", "", "Bearer token for authentication")
+	cmd.PersistentFlags().StringP("server", "s", "",
+		"Orka server URL, or set "+envServer+" (default: the Orka Service reached through kubeconfig, else \""+defaultServer+"\")")
+	cmd.PersistentFlags().StringP("token", "t", "", tokenFlagUsage)
+	cmd.PersistentFlags().String("token-file", "", "Path to file containing the bearer token (use - for stdin)")
 	cmd.PersistentFlags().String("txn-token", "", "Transaction token to send via Txn-Token header")
 	cmd.PersistentFlags().String(
 		"txn-token-file",
 		"",
 		"Path to file containing a Transaction token (use - for stdin)",
 	)
-	cmd.PersistentFlags().StringP("namespace", "n", "", "Kubernetes namespace (default \"default\")")
+	cmd.PersistentFlags().StringP("namespace", "n", "",
+		"Kubernetes namespace, or set "+envNamespace+" (default: from config, else the namespace the Orka server watches)")
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
 
 	// Register subcommands
@@ -123,62 +125,23 @@ func createServiceAccountToken(serviceAccount, namespace string) (string, error)
 	return token, nil
 }
 
-// kubeContext holds values extracted from the current kubeconfig context.
-type kubeContext struct {
-	token     string
-	namespace string
-}
-
-// extractKubeContext reads the token and namespace from the current kubeconfig context.
-func extractKubeContext(kubeconfigPath string) kubeContext {
-	var kc kubeContext
-	loadingRules := &clientcmd.ClientConfigLoadingRules{}
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	} else {
-		loadingRules = clientcmd.NewDefaultClientConfigLoadingRules()
-	}
-
-	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil)
-
-	rawConfig, err := config.RawConfig()
+// kubeconfigNamespace returns the namespace of the current kubeconfig context,
+// or "" when it sets none. Unlike clientcmd's Namespace, it never substitutes
+// "default".
+func kubeconfigNamespace(kubeconfigPath string) string {
+	raw, err := kubeconfigLoader(kubeconfigPath).RawConfig()
 	if err != nil {
-		return kc
+		return ""
 	}
-
-	contextName := rawConfig.CurrentContext
-	if contextName == "" {
-		return kc
+	if kubeCtx, ok := raw.Contexts[raw.CurrentContext]; ok && kubeCtx != nil {
+		return kubeCtx.Namespace
 	}
-
-	ctx, ok := rawConfig.Contexts[contextName]
-	if !ok {
-		return kc
-	}
-
-	// Extract namespace from context
-	if ctx.Namespace != "" {
-		kc.namespace = ctx.Namespace
-	}
-
-	// Extract token
-	if t, err := extractToken(kubeconfigPath); err == nil && t != "" {
-		kc.token = t
-	}
-
-	return kc
+	return ""
 }
 
 // extractToken reads the bearer token from the current kubeconfig context.
 func extractToken(kubeconfigPath string) (string, error) {
-	loadingRules := &clientcmd.ClientConfigLoadingRules{}
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	} else {
-		loadingRules = clientcmd.NewDefaultClientConfigLoadingRules()
-	}
-
-	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil)
+	config := kubeconfigLoader(kubeconfigPath)
 
 	rawConfig, err := config.RawConfig()
 	if err != nil {

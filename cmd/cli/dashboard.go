@@ -48,26 +48,26 @@ func newDashboardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Open the Orka dashboard in your browser, signed in",
-		Long: "Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in " +
-			"with it. The token goes only to the browser; other orka commands do not use it. The controller serves the " +
-			"dashboard only when it runs with --dashboard-enabled; every other orka command works without it.",
+		Long: "Create a ServiceAccount token (or use --token or --token-file) and open the Orka dashboard in your browser, " +
+			"signed in with it. The token goes only to the browser; other orka commands do not use it. The controller " +
+			"serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			server, _ := cmd.Flags().GetString("server")
-			token, _ := cmd.Flags().GetString("token")
-			ns, _ := cmd.Flags().GetString("namespace")
+			// Only a token given for this command signs the browser in; the
+			// ORKA_TOKEN and config tokens are API credentials.
+			token, err := flagToken(cmd)
+			if err != nil {
+				return err
+			}
 
 			cfg := loadConfig()
-			if server == "" {
-				server = cfg.Server
-			}
+			server := configuredServer(cmd, cfg)
 			if server == "" {
 				server = defaultServer
 			}
+			// The namespace of the ServiceAccount the created token is for.
+			ns := configuredNamespace(cmd, cfg)
 			if ns == "" {
-				ns = cfg.Namespace
-			}
-			if ns == "" {
-				ns = "default"
+				ns = defaultNamespace
 			}
 
 			// Checked before a token is minted, so a server without the
@@ -78,11 +78,10 @@ func newDashboardCmd() *cobra.Command {
 			}
 
 			if token == "" {
-				var err error
 				token, err = serviceAccountTokenFunc(serviceAccount, ns)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
-					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
+					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token or --token-file\n")
 					return err
 				}
 			}

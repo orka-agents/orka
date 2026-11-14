@@ -122,12 +122,13 @@ Most commands accept these global flags:
 
 | Flag | Description |
 | --- | --- |
-| `--server`, `-s` | Orka API server URL. Defaults to `http://localhost:8080`. |
-| `--namespace`, `-n` | Kubernetes namespace. Defaults to `default` unless config or kubeconfig sets one. |
-| `--token`, `-t` | Bearer token for API authentication. Prefer config or kubeconfig over passing real tokens in shell history. |
+| `--server`, `-s` | Orka API server URL. Also read from `ORKA_SERVER`. |
+| `--namespace`, `-n` | Kubernetes namespace. Also read from `ORKA_NAMESPACE`. |
+| `--token`, `-t` | Bearer token for API authentication. Prefer `--token-file` or `ORKA_TOKEN`, which keep the token out of process arguments and shell history. |
+| `--token-file` | Read the bearer token from a file, or `-` for stdin. |
 | `--txn-token` | Transaction token sent with the `Txn-Token` header. |
 | `--txn-token-file` | Read a transaction token from a file, or `-` for stdin. |
-| `--kubeconfig` | Kubeconfig path used for local discovery/token extraction fallback. |
+| `--kubeconfig` | Kubeconfig used to find and port-forward to the Orka Service when no server is set. |
 
 The CLI reads persistent config from `~/.orka/config.yaml`:
 
@@ -139,6 +140,22 @@ orka config view
 ```
 
 `config view` masks the token. Prefer `config set-token --file <path>` or `--file -` over passing real tokens as process arguments. If you use `config set-token <token>` directly, use short-lived tokens and avoid pasting long-lived secrets into shell history.
+
+For a one-off session, or in CI, set the environment instead of the config file:
+
+```bash
+export ORKA_SERVER=http://127.0.0.1:8080
+export ORKA_TOKEN="$(kubectl create token orka-client -n orka-system)"
+orka task list
+```
+
+### How the CLI picks the server, token and namespace
+
+Each setting takes the first source that has a value, so an exported `ORKA_TOKEN`, `ORKA_SERVER` or `ORKA_NAMESPACE` overrides the config file in that shell.
+
+- **Server:** `--server`, then `ORKA_SERVER`, then the config file's server. With none of these, the CLI goes through the current kubeconfig context: it reuses the port-forward it started for that same context while that `kubectl` process is still running, or finds the Orka Service (in the context's namespace, then `orka-system`, `orka` and `default`) and starts `kubectl port-forward` to it. If that fails too, it uses `http://localhost:8080`.
+- **Token:** `--token`, then `--token-file`, then `ORKA_TOKEN`, then the config file's token. Passing both `--token` and `--token-file` is an error. When none is set and the CLI reached the server through the kubeconfig, it sends the kubeconfig user's bearer token. It never sends that token to a server named by `--server`, `ORKA_SERVER` or the config file, or to the `http://localhost:8080` fallback.
+- **Namespace:** `--namespace`, then `ORKA_NAMESPACE`, then the config file's namespace. With none of these, the CLI sends no namespace and the server uses the namespace it watches. The kubeconfig context's namespace only tells the CLI where to look for the Orka Service first. `orka session migrate` needs one of these three.
 
 Validate auth before running larger workflows:
 
@@ -377,7 +394,7 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
-`orka dashboard` creates a ServiceAccount token, or uses `--token`, and opens the dashboard signed in with it, passing the token in the URL fragment. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
+`orka dashboard` creates a ServiceAccount token, or uses `--token` or `--token-file`, and opens the dashboard signed in with it, passing the token in the URL fragment. It ignores `ORKA_TOKEN` and the config file's token. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash
 orka dashboard --service-account orka-client --namespace orka-system

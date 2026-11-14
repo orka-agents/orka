@@ -50,7 +50,9 @@ func runWithoutAmbientCluster(m *testing.M) int {
 			return 1
 		}
 	}
-	for _, key := range []string{"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"} {
+	// The CLI reads these in place of its global flags, so an exported value
+	// would leak a developer's server, token or namespace into every test.
+	for _, key := range []string{"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", envServer, envToken, envNamespace} {
 		if err := os.Unsetenv(key); err != nil {
 			fmt.Fprintln(os.Stderr, "isolate CLI test environment:", err)
 			return 1
