@@ -30,6 +30,7 @@ const (
 	runtimePoolToolboxVolumePrefix     = "toolbox-"
 	runtimePoolToolboxCopyPrefix       = "toolbox-copy-"
 	runtimePoolToolboxHandoffContainer = "toolbox-handoff"
+	runtimePoolToolboxDstFlag          = "--dst"
 
 	// Fixed non-root identities for the toolbox init containers. They differ
 	// from each other and from the 20000-29999 session identity range.
@@ -162,6 +163,14 @@ func applyRuntimePoolToolboxTemplate(template *corev1.PodTemplateSpec, toolboxes
 	case ACPToolboxMountImageVolume:
 		applyRuntimePoolToolboxImageVolumeTemplate(template, runtime, toolboxes)
 	}
+	applyRuntimePoolImagePullPolicy(template, policy)
+	return nil
+}
+
+// applyRuntimePoolImagePullPolicy adds the operator's pull secrets and node
+// selector to a template that binds toolbox or skill images. It runs once per
+// template.
+func applyRuntimePoolImagePullPolicy(template *corev1.PodTemplateSpec, policy ACPToolboxPolicy) {
 	for _, name := range policy.ImagePullSecrets {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -182,7 +191,6 @@ func applyRuntimePoolToolboxTemplate(template *corev1.PodTemplateSpec, toolboxes
 			template.Spec.NodeSelector[key] = value
 		}
 	}
-	return nil
 }
 
 // runtimePoolNodeOSLabel is the fixed Linux node selector every runtime Pod
@@ -207,27 +215,7 @@ func ValidateACPToolboxNodeSelector(selector map[string]string) error {
 }
 
 func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runtime *corev1.Container, toolboxes []harnessv2.RuntimeToolbox) {
-	handoffSize := runtimePoolToolboxHandoffSizeLimit
-	template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
-		Name:         runtimePoolToolboxHandoffVolume,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &handoffSize}},
-	})
-	template.Spec.InitContainers = append(template.Spec.InitContainers, corev1.Container{
-		Name:            runtimePoolToolboxHandoffContainer,
-		Image:           runtime.Image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		// Command and a non-empty Args together replace both the image's
-		// entrypoint and its CMD, so no image default can reach the binary.
-		Command:                  []string{toolbox.SupervisorBinaryPath},
-		Args:                     []string{toolbox.HandoffSubcommand, "--dst", runtimePoolToolboxHandoffMountPath},
-		WorkingDir:               "/",
-		SecurityContext:          runtimePoolToolboxInitSecurityContext(runtimePoolToolboxHandoffUID),
-		Resources:                runtimePoolToolboxInitResources(),
-		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: runtimePoolToolboxHandoffVolume, MountPath: runtimePoolToolboxHandoffMountPath},
-		},
-	})
+	addRuntimePoolToolboxHandoff(template, runtime)
 	for i := range toolboxes {
 		volumeName := runtimePoolToolboxVolumeName(i)
 		volumeSize := runtimePoolToolboxVolumeSizeLimit
@@ -238,7 +226,7 @@ func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runti
 		args := []string{
 			toolbox.CopySubcommand,
 			"--src", toolboxes[i].MountPath,
-			"--dst", runtimePoolToolboxOutputMountPath,
+			runtimePoolToolboxDstFlag, runtimePoolToolboxOutputMountPath,
 		}
 		if len(toolboxes[i].PathEntries) > 0 {
 			args = append(args, "--path-entries", strings.Join(toolboxes[i].PathEntries, ","))
@@ -272,6 +260,32 @@ func applyRuntimePoolToolboxCopyTemplate(template *corev1.PodTemplateSpec, runti
 	addEphemeralStorage(&runtime.Resources, extra)
 }
 
+// addRuntimePoolToolboxHandoff adds the scratch volume and the init container
+// that hand Orka's static copier to the toolbox and skill copy containers.
+func addRuntimePoolToolboxHandoff(template *corev1.PodTemplateSpec, runtime *corev1.Container) {
+	handoffSize := runtimePoolToolboxHandoffSizeLimit
+	template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+		Name:         runtimePoolToolboxHandoffVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &handoffSize}},
+	})
+	template.Spec.InitContainers = append(template.Spec.InitContainers, corev1.Container{
+		Name:            runtimePoolToolboxHandoffContainer,
+		Image:           runtime.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		// Command and a non-empty Args together replace both the image's
+		// entrypoint and its CMD, so no image default can reach the binary.
+		Command:                  []string{toolbox.SupervisorBinaryPath},
+		Args:                     []string{toolbox.HandoffSubcommand, runtimePoolToolboxDstFlag, runtimePoolToolboxHandoffMountPath},
+		WorkingDir:               "/",
+		SecurityContext:          runtimePoolToolboxInitSecurityContext(runtimePoolToolboxHandoffUID),
+		Resources:                runtimePoolToolboxInitResources(),
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: runtimePoolToolboxHandoffVolume, MountPath: runtimePoolToolboxHandoffMountPath},
+		},
+	})
+}
+
 // addEphemeralStorage raises the container's ephemeral-storage request and
 // limit by bytes, leaving absent values absent.
 func addEphemeralStorage(resources *corev1.ResourceRequirements, bytes int64) {
@@ -303,9 +317,15 @@ func applyRuntimePoolToolboxImageVolumeTemplate(template *corev1.PodTemplateSpec
 	// The supervisor runs the unprivileged toolbox check before it serves, so
 	// the startup probe must outlast the check or kubelet restarts the
 	// container before the check can report a classified failure.
+	extendRuntimePoolStartupProbe(runtime, toolbox.ImageVolumeCheckTimeout)
+}
+
+// extendRuntimePoolStartupProbe adds budget for a check the supervisor runs
+// before it serves, keeping the probe's period and timeout.
+func extendRuntimePoolStartupProbe(runtime *corev1.Container, budget time.Duration) {
 	if probe := runtime.StartupProbe; probe != nil && probe.PeriodSeconds > 0 {
 		period := time.Duration(probe.PeriodSeconds) * time.Second
-		probe.FailureThreshold += int32((toolbox.ImageVolumeCheckTimeout + period - 1) / period)
+		probe.FailureThreshold += int32((budget + period - 1) / period)
 	}
 }
 
@@ -313,13 +333,13 @@ func applyRuntimePoolToolboxImageVolumeTemplate(template *corev1.PodTemplateSpec
 // stable ToolboxUnavailable reason. It inspects toolbox init containers (copy
 // mode), the runtime container's own toolbox startup check, and image-volume
 // mount or pull failures. Messages are sanitized before they reach status.
-func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeToolbox, now time.Time) (string, string, bool) {
-	if len(toolboxes) == 0 {
+func runtimePoolToolboxFailure(pods []corev1.Pod, images []runtimePoolBoundImage, now time.Time) (string, string, bool) {
+	if len(images) == 0 {
 		return "", "", false
 	}
 	for i := range pods {
 		for _, status := range pods[i].Status.InitContainerStatuses {
-			if !strings.HasPrefix(status.Name, runtimePoolToolboxVolumePrefix) {
+			if !runtimePoolBoundImageInitContainer(status.Name) {
 				continue
 			}
 			if message, ok := runtimePoolToolboxTerminationFailure(status); ok {
@@ -337,7 +357,7 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 			// keeps the usual retry behavior, not a toolbox failure. Only the
 			// toolbox-copy-* containers run the untrusted image.
 			waiting := status.State.Waiting
-			if waiting == nil || !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) {
+			if waiting == nil || !runtimePoolBoundImageCopyContainer(status.Name) {
 				continue
 			}
 			{
@@ -372,12 +392,12 @@ func runtimePoolToolboxFailure(pods []corev1.Pod, toolboxes []harnessv2.RuntimeT
 				// Kubelet reports a missing or invalid image-volume subPath as
 				// a container config error on some runtimes and as a create
 				// error on others; both are permanent toolbox mount failures.
-				if strings.Contains(waiting.Message, "ImageVolumeMountFailed") || runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes) {
+				if strings.Contains(waiting.Message, "ImageVolumeMountFailed") || runtimePoolMessageMentionsBoundImage(waiting.Message, images) {
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonMountFailed, waiting.Message), true
 				}
 			case podWaitingReasonErrImagePull, podWaitingReasonImagePullBackOff, podWaitingReasonRegistryUnavailable, podWaitingReasonInvalidImageName:
-				if runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes) &&
+				if runtimePoolMessageMentionsBoundImage(waiting.Message, images) &&
 					runtimePoolToolboxPullRetryExpired(&pods[i], status, now) {
 					return corev1alpha1.RuntimePoolReasonToolboxUnavailable,
 						acpToolboxUnavailableMessage(toolbox.ReasonImagePull, waiting.Reason+" "+waiting.Message), true
@@ -403,8 +423,8 @@ type runtimePoolToolboxPullFailure struct {
 // includes scheduling and sandbox delays and is not evidence of a failed pull.
 // Preserve episodes across runtime-specific waiting reasons and missing status;
 // only an observed start/termination or a different restart count retires one.
-func (r *RuntimePoolReconciler) observeRuntimePoolToolboxPullFailures(ctx context.Context, pods []corev1.Pod, toolboxes []harnessv2.RuntimeToolbox) error {
-	if len(toolboxes) == 0 {
+func (r *RuntimePoolReconciler) observeRuntimePoolToolboxPullFailures(ctx context.Context, pods []corev1.Pod, images []runtimePoolBoundImage) error {
+	if len(images) == 0 {
 		return nil
 	}
 	for i := range pods {
@@ -427,8 +447,8 @@ func (r *RuntimePoolReconciler) observeRuntimePoolToolboxPullFailures(ctx contex
 			if waiting == nil || (waiting.Reason != podWaitingReasonErrImagePull && waiting.Reason != podWaitingReasonImagePullBackOff && waiting.Reason != podWaitingReasonRegistryUnavailable) {
 				continue
 			}
-			if !strings.HasPrefix(status.Name, runtimePoolToolboxCopyPrefix) &&
-				(status.Name != runtimeField || !runtimePoolToolboxMessageMentionsToolbox(waiting.Message, toolboxes)) {
+			if !runtimePoolBoundImageCopyContainer(status.Name) &&
+				(status.Name != runtimeField || !runtimePoolMessageMentionsBoundImage(waiting.Message, images)) {
 				continue
 			}
 			if !exists || failure.FirstObserved.IsZero() {
@@ -537,9 +557,41 @@ func runtimePoolToolboxUnexplainedTermination(status corev1.ContainerStatus) (st
 	return acpToolboxUnavailableMessage(toolbox.ReasonCopyFailed, detail), true
 }
 
-func runtimePoolToolboxMessageMentionsToolbox(message string, toolboxes []harnessv2.RuntimeToolbox) bool {
+// runtimePoolBoundImage is one untrusted image a runtime Pod binds, either a
+// toolbox or a skill, with the Pod volume that carries it.
+type runtimePoolBoundImage struct {
+	image  string
+	volume string
+}
+
+// runtimePoolBoundImages lists every toolbox and skill image of a frozen
+// profile with its volume name, so failure classification covers both.
+func runtimePoolBoundImages(toolboxes []harnessv2.RuntimeToolbox, skills []harnessv2.RuntimeSkill) []runtimePoolBoundImage {
+	images := make([]runtimePoolBoundImage, 0, len(toolboxes)+len(skills))
 	for i := range toolboxes {
-		if strings.Contains(message, toolboxes[i].Image) || strings.Contains(message, runtimePoolToolboxVolumeName(i)) {
+		images = append(images, runtimePoolBoundImage{image: toolboxes[i].Image, volume: runtimePoolToolboxVolumeName(i)})
+	}
+	for i := range skills {
+		images = append(images, runtimePoolBoundImage{image: skills[i].Image, volume: runtimePoolSkillVolumeName(i)})
+	}
+	return images
+}
+
+// runtimePoolBoundImageInitContainer reports whether an init container exists
+// only to bind a toolbox or skill (the handoff and the copiers).
+func runtimePoolBoundImageInitContainer(name string) bool {
+	return strings.HasPrefix(name, runtimePoolToolboxVolumePrefix) || strings.HasPrefix(name, runtimePoolSkillCopyPrefix)
+}
+
+// runtimePoolBoundImageCopyContainer reports whether an init container runs an
+// untrusted toolbox or skill image.
+func runtimePoolBoundImageCopyContainer(name string) bool {
+	return strings.HasPrefix(name, runtimePoolToolboxCopyPrefix) || strings.HasPrefix(name, runtimePoolSkillCopyPrefix)
+}
+
+func runtimePoolMessageMentionsBoundImage(message string, images []runtimePoolBoundImage) bool {
+	for i := range images {
+		if strings.Contains(message, images[i].image) || strings.Contains(message, images[i].volume) {
 			return true
 		}
 	}

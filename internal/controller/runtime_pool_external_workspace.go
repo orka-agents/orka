@@ -133,6 +133,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if len(cfg.profile.Toolboxes) > 0 {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "execution-workspace RuntimePools cannot mount toolboxes")
 	}
+	if len(cfg.profile.Skills) > 0 {
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "execution-workspace RuntimePools cannot mount skills")
+	}
 	if w.Spec.Workload != nil && (w.Status.Allocation == nil || w.Status.Allocation.State != workspacev1alpha1.AllocationStopped) {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil {
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
