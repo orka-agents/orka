@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,6 +88,10 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("%s (the Orka API base URL) is required for Substrate MCP tools", workerenv.ControllerURL)
 	}
 
+	ctx, err = withRemoteTraceParent(ctx, os.Getenv("ORKA_TOOL_TRACEPARENT"))
+	if err != nil {
+		return err
+	}
 	execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	result, err := worker.NewToolExecutor().Execute(execCtx, tool, json.RawMessage(args))
@@ -98,4 +104,18 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("tool result = %q, want %q", result, expected)
 	}
 	return nil
+}
+
+// withRemoteTraceParent makes the tool call continue a caller-chosen W3C trace,
+// so a test can find the controller and router spans by a known trace ID.
+func withRemoteTraceParent(ctx context.Context, traceparent string) (context.Context, error) {
+	traceparent = strings.TrimSpace(traceparent)
+	if traceparent == "" {
+		return ctx, nil
+	}
+	ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": traceparent})
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return nil, fmt.Errorf("ORKA_TOOL_TRACEPARENT is not a valid W3C traceparent")
+	}
+	return ctx, nil
 }

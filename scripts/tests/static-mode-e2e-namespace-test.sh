@@ -293,7 +293,10 @@ done
     jq -e --arg namespace "${ORKA_NAMESPACE}" '.metadata.atespace == $namespace' >/dev/null
 )
 mcp_resources="$(awk '/^exercise_mcp\(\) {/,/^}/' "${substrate_script}")"
-[[ "$(grep -Fc 'templateRef: {name: orka-mcp, namespace: orka-system}' <<<"${mcp_resources}")" -eq 2 ]]
+# Every pool and Tool template reference stays in the isolated namespace.
+mcp_template_refs="$(grep -Fc 'templateRef:' <<<"${mcp_resources}")"
+(( mcp_template_refs >= 2 ))
+[[ "$(grep -Fc 'templateRef: {name: orka-mcp, namespace: orka-system}' <<<"${mcp_resources}")" -eq "${mcp_template_refs}" ]]
 if grep -Eq 'get actortemplate|grant_substrate_provider_template_access' "${substrate_script}"; then
   echo 'native Substrate E2E must not use Kubernetes ActorTemplate resources or permissions' >&2
   exit 1

@@ -700,7 +700,7 @@ by an order of magnitude.
 ### Demo 70 — Agent Substrate workspaces (`70-agent-substrate.sh`, archived prototype)
 
 This storyboard records the former in-tree prototype. It is not bootstrapped by
-the current Substrate MCP Tools conformance target.
+the current Substrate conformance target.
 
 **Why this matters.** Orka's execution workspace is provider-neutral. Demo 60
 shows agent-sandbox; Demo 70 shows the *same Orka agent Task API* backed by a
@@ -729,8 +729,9 @@ provider, its profiles, and the selected `ExecutionWorkspaceClass`
 dispatch flags, and use the harness v2 runtime and Workspace/Publisher credential
 contract in the [workspace provider guide](../../docs/development/workspace-provider-authoring.md).
 `make demo-substrate-up` runs `scripts/agent-substrate-e2e.sh` with
-`KEEP_CLUSTER=1` for pooled MCP Tools conformance only. It does not install an
-external ACP provider/class, a codex runtime, a model proxy, or demo credentials.
+`KEEP_CLUSTER=1` for direct exec, data-only checkpoint, and pooled MCP Tools
+conformance only. It does not install an external ACP provider/class, a codex
+runtime, a model proxy, or demo credentials.
 
 **Beats.**
 
@@ -1015,7 +1016,7 @@ hack/demos/
 │   ├── cluster-up.sh      # creates kind cluster, builds + loads Orka image, helm install
 │   ├── cluster-down.sh    # kind delete cluster --name orka-demo
 │   ├── install-agent-sandbox.sh   # upstream operator + SandboxTemplate
-│   ├── install-substrate.sh       # dedicated Substrate MCP Tools conformance cluster
+│   ├── install-substrate.sh       # dedicated Substrate conformance cluster
 │   ├── install-demo-model.sh      # Provider + model/git Secrets for demos 10/20/30/40
 │   ├── demo-env.sh                # sourceable consolidated DEMO_* env for the SDLC demos
 │   └── templates/

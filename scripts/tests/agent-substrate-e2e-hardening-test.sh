@@ -8,8 +8,9 @@ source "${root}/scripts/agent-substrate-e2e.sh"
 
 # The v1 control plane is installed by the pinned ate-setup. Only the shared
 # test identity is a bootstrap owner, only Orka's controller may reach Actors
-# through the router, and egress credential injection stays off. A failed
-# install or rollout stops setup.
+# through the router, and the egress gateway injects credentials only from the
+# default-deny Kubernetes Secret provider. A failed install or rollout stops
+# setup.
 (
   SUBSTRATE_DIR="${test_root}/substrate-checkout"
   mkdir -p "${SUBSTRATE_DIR}"
@@ -26,7 +27,7 @@ source "${root}/scripts/agent-substrate-e2e.sh"
   substrate_install_ate_system
   grep -Fxq 'deploy' "${test_root}/ate-setup-args"
   grep -Fxq -- '--kind' "${test_root}/ate-setup-args"
-  grep -Fxq -- '--credential-provider={"enabled":false}' "${test_root}/ate-setup-args"
+  grep -Fxq -- '--credential-provider={"name":"k8s.io"}' "${test_root}/ate-setup-args"
   grep -Fxq -- '--ateapi-authz-bootstrap-owners=system:serviceaccount:ate-system:ate-client' "${test_root}/ate-setup-args"
   grep -Fxq -- '--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/orka-system/sa/orka-controller-manager' "${test_root}/ate-setup-args"
   if grep -q -- 'egress-gateway' "${test_root}/ate-setup-args"; then
@@ -100,8 +101,79 @@ if grep -Eq 'fixture-header-value|fixture-bootstrap-value|spec-must-not-be-print
   echo 'conformance diagnostics exposed credentials or Pod specs' >&2
   exit 1
 fi
+# The generated upstream credential is redacted like the bootstrap secret.
+printf 'fixture-upstream-value' >"${TMP_ROOT}/upstream-token"
+kubectl() { printf 'upstream said fixture-upstream-value\n'; }
+workload_logs ate-demo -l app=credential-echo >"${test_root}/upstream.log" 2>&1
+grep -Fq 'upstream said' "${test_root}/upstream.log"
+if grep -Fq 'fixture-upstream-value' "${test_root}/upstream.log"; then
+  echo 'conformance diagnostics exposed the upstream credential' >&2
+  exit 1
+fi
+# The injected credential is compared only as a digest of "Bearer <token>".
+[[ "$(expected_injected_digest)" == "$(printf 'Bearer fixture-upstream-value' | sha256sum | cut -d' ' -f1)" ]]
 TMP_ROOT="${saved_run_dir}"
 unset -f kubectl
+
+# Tool calls go only through the orka-api proxy and carry a traceparent only
+# when a trace is requested.
+TOOL_CLIENT_IMAGE=registry.example.test/orka/tool-e2e-client@sha256:fixture
+kubectl() {
+  case "$*" in
+    '-n orka-system apply -f -') cat >"${test_root}/client-job.json" ;;
+    *) return 0 ;;
+  esac
+}
+wait_job() { return 0; }
+run_tool_client fixture-job native-mcp egress-probe 'mcp-e2e-egress:blocked'
+jq -e '.spec.template.spec.containers[0].env | from_entries |
+  .ORKA_CONTROLLER_URL == "http://orka-api.orka-system.svc:8080" and
+  .ORKA_TOOL_NAME == "native-mcp" and .ORKA_TOOL_EXPECT_RESULT == "mcp-e2e-egress:blocked" and
+  (.ORKA_TOOL_ARGS | fromjson) == {message: "egress-probe"} and has("ORKA_TOOL_TRACEPARENT") == false' \
+  <(jq '.spec.template.spec.containers[0].env |= map({key: .name, value: .value}) | .' "${test_root}/client-job.json") >/dev/null
+run_tool_client fixture-trace native-mcp trace-context 'mcp-e2e-trace:abc' '00-abc-def-01'
+jq -e '[.spec.template.spec.containers[0].env[] | select(.name == "ORKA_TOOL_TRACEPARENT")][0].value == "00-abc-def-01"' \
+  "${test_root}/client-job.json" >/dev/null
+unset -f wait_job kubectl
+source "${root}/scripts/agent-substrate-e2e.sh"
+
+# Trace checks read the collector debug exporter. The router span must be the
+# orka-api span's child in the caller's trace; any other parent fails.
+trace_logs() {
+  cat <<LOG
+ResourceSpans #0
+ScopeSpans #0
+Span #0
+    Trace ID       : 0123456789abcdef0123456789abcdef
+    Parent ID      : 1111111111111111
+    ID             : 2222222222222222
+    Name           : POST /api/v1/tools/:name/mcp
+Span #1
+    Trace ID       : 0123456789abcdef0123456789abcdef
+    Parent ID      : $1
+    ID             : 3333333333333333
+    Name           : substrate.router POST
+Span #2
+    Trace ID       : ffffffffffffffffffffffffffffffff
+    Parent ID      :
+    ID             : 4444444444444444
+    Name           : substrate.router POST
+LOG
+}
+trace_parent=2222222222222222
+kubectl() { trace_logs "${trace_parent}"; }
+collector_spans >"${test_root}/spans"
+[[ "$(wc -l <"${test_root}/spans")" == 3 ]]
+grep -Fxq "$(printf 'substrate.router POST\t0123456789abcdef0123456789abcdef\t3333333333333333\t2222222222222222')" "${test_root}/spans"
+log() { :; }
+verify_mcp_trace 0123456789abcdef0123456789abcdef
+trace_parent=9999999999999999
+if verify_mcp_trace 0123456789abcdef0123456789abcdef 2>"${test_root}/error"; then
+  echo 'trace check accepted a router span outside the orka-api span' >&2
+  exit 1
+fi
+grep -Fq 'is not the orka-api span' "${test_root}/error"
+unset -f kubectl log trace_logs
 
 mkdir -p "${test_root}/tools"
 cat >"${test_root}/tools/docker" <<'SH'

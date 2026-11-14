@@ -1,4 +1,4 @@
-name: Agent Substrate MCP E2E
+name: Agent Substrate E2E
 
 on:
   workflow_dispatch: {}
@@ -57,7 +57,8 @@ jobs:
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
       KO_VERSION: v0.18.1
-      # Native MCP tool routing and cleanup run on every change.
+      # Direct exec, data-only checkpoint restore, MCP tool routing, egress
+      # credential injection, trace propagation, and cleanup run on every change.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,5 +88,5 @@ jobs:
           kubectl version --client=true
           ko version
 
-      - name: Run Agent Substrate MCP E2E
+      - name: Run Agent Substrate E2E
         run: bash scripts/agent-substrate-e2e.sh
