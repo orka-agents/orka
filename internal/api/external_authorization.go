@@ -165,6 +165,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/agents/:name":               coreAPIPolicy("get", "agents", "name"),
 	"GET /api/v1/agents/:name/system-prompt": coreAPIPolicy("get", "agents", "name"),
 	"PUT /api/v1/agents/:name":               coreAPIPolicy("patch", "agents", "name"),
+	"PUT /api/v1/agents/:name/spec":          coreAPIPolicy("patch", "agents", "name"),
 	"DELETE /api/v1/agents/:name":            coreAPIPolicy("delete", "agents", "name"),
 	"POST /api/v1/skills":                    coreAPIPolicy("create", "skills", "").inNamespace(apiCreateNamespace),
 	"GET /api/v1/skills":                     coreAPIPolicy("list", "skills", ""),

@@ -1626,7 +1626,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
-	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
@@ -1645,21 +1644,36 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return err
 	}
 
+	return h.updateAgentSpec(c, namespace, req.Spec, nil)
+}
+
+// updateAgentSpec keeps both routes on the same validation and authorization
+// path. Only the conditional route supplies expectations; they never advance
+// when a patch retries after a resourceVersion conflict.
+func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alpha1.AgentSpec, expected *UpdateAgentSpecRequest) error {
+	name := c.Params(apiFieldName)
 	ctx := c.Context()
 	token := contextTokenFromUserInfo(GetUserInfo(c))
+	var reader client.Reader = h.client
+	if expected != nil {
+		reader = h.uncachedReader()
+	}
 
 	var agent *corev1alpha1.Agent
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Agent{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
 			return err
 		}
 		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
 			return err
 		}
 
+		if expected != nil && (string(current.UID) != expected.ExpectedUID || current.Generation != expected.ExpectedGeneration) {
+			return fiber.NewError(fiber.StatusConflict, "agent UID or generation does not match")
+		}
 		patchBase := current.DeepCopy()
-		current.Spec = req.Spec
+		current.Spec = spec
 		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
