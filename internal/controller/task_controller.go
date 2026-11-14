@@ -2903,31 +2903,83 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 				continue
 			}
 			visited[client.ObjectKeyFromObject(child)] = true
-			// Every real child is walked, a deleting one included: its own
-			// cascade may never run, as when its status write or finalizer
-			// keeps failing.
-			parents = append(parents, child)
-			if !child.DeletionTimestamp.IsZero() {
-				continue
+			// A child that parked its turn continues in Tasks it does not
+			// control, so its continuation chain is cancelled with it.
+			members := []*corev1alpha1.Task{child}
+			continuations, chainErr := r.childContinuationChain(ctx, child)
+			if chainErr != nil {
+				errs = append(errs, chainErr)
 			}
-			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
-				continue
+			for _, continuation := range continuations {
+				if !visited[client.ObjectKeyFromObject(continuation)] {
+					visited[client.ObjectKeyFromObject(continuation)] = true
+					members = append(members, continuation)
+				}
 			}
-			if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
-				continue
-			}
-			base := child.DeepCopy()
-			if child.Annotations == nil {
-				child.Annotations = map[string]string{}
-			}
-			child.Annotations[labels.AnnotationCancelRequested] = message
-			if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
-				!apierrors.IsNotFound(err) {
-				errs = append(errs, err)
+			for _, member := range members {
+				// Every real child is walked, a deleting one included: its
+				// own cascade may never run, as when its status write or
+				// finalizer keeps failing.
+				parents = append(parents, member)
+				if err := r.requestDelegatedTaskCancellation(ctx, member, message); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// childContinuationChain returns the continuations a child's parked turns
+// created, each verified against the resumed wait that records it. A link
+// that is gone or no longer verifies ends the chain: nothing past it can run
+// as this child's turn.
+func (r *TaskReconciler) childContinuationChain(ctx context.Context, child *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
+	var chain []*corev1alpha1.Task
+	current := child
+	for range taskwait.MaxChainLength {
+		next, err := taskwait.Continuation(ctx, r.taskMetadataReader(), current)
+		if apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken) {
+			return chain, nil
+		}
+		if err != nil || next == nil {
+			return chain, err
+		}
+		chain = append(chain, next)
+		current = next
+	}
+	return chain, nil
+}
+
+// requestDelegatedTaskCancellation asks a delegated Task to stop: an
+// unfinished Task gets a cancel request, and a parked wait, which a finished
+// turn can still hold, is cancelled so it never starts another turn.
+func (r *TaskReconciler) requestDelegatedTaskCancellation(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if !task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	base := task.DeepCopy()
+	changed := false
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested {
+		if phase := task.Status.Phase; phase == "" || phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning {
+			task.Annotations[labels.AnnotationCancelRequested] = message
+			changed = true
+		}
+	}
+	if taskwait.Active(task.Status.Wait) && strings.TrimSpace(task.Annotations[labels.AnnotationCancelWait]) == "" {
+		task.Annotations[labels.AnnotationCancelWait] = message
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := r.Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // delegatedTaskIndex lists every Task that names a parent, grouped by the

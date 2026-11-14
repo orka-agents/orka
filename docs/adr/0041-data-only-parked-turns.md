@@ -127,6 +127,9 @@ parked turn is that continuation, created by Orka when the awaited event arrives
   nothing resumes.
 - Deleting the parked Task, or setting `orka.ai/cancel-wait`, cancels a non-terminal wait.
   A continuation created in the same window is deleted.
+- Cancelling a coordinator cascades through its parked children. The cascade cancels a
+  finished child's non-terminal wait, sends a cancel request to each continuation in the
+  child's verified chain, and walks what those continuations delegated.
 - An undecided sign-off is closed as cancelled or expired. The store allows one terminal
   event per approval, so a racing human decision either wins (and is delivered) or is
   rejected with a conflict.

@@ -113,6 +113,9 @@ kubectl -n team annotate task release-captain orka.ai/cancel-wait="no longer nee
 kubectl -n team delete task release-captain
 ```
 
+Cancelling a coordinator also cancels the waits of its parked children, and it cancels any
+continuation those children already started.
+
 A cancelled or expired sign-off cannot be decided later. A late decision receives HTTP 409.
 
 ## Waiting for capacity
