@@ -91,6 +91,8 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 		provider := sdktrace.NewTracerProvider(
 			sdktrace.WithResource(supervisorTraceResource),
 			sdktrace.WithBatcher(safeTelemetryExporter{exporter}, sdktrace.WithExportTimeout(supervisorTelemetryTimeout)),
+			// A span ended while panicking would otherwise record the panic value.
+			sdktrace.WithoutPanicRecording(),
 		)
 		telemetry.Tracer = provider.Tracer("orka.acp.supervisor")
 		telemetry.GenAITracer = provider.Tracer(genai.InstrumentationName, trace.WithSchemaURL(genai.SchemaURL))
