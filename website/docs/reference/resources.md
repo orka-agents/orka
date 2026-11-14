@@ -345,7 +345,6 @@ spec:
     inline: "You are a senior software engineer."
   runtime:
     type: claude         # or "codex" / "copilot" / "opencode"
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -359,7 +358,7 @@ spec:
 | --- | --- |
 | `model.name` | Required. A model your gateway lists. |
 | `runtime.type` | `codex`, `claude`, `copilot`, or `opencode`. |
-| `runtime.contractVersion` | `orka.harness.v2`. |
+| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value. |
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |

@@ -79,7 +79,6 @@ kind: AgentRuntime
 metadata:
   name: external-acp
 spec:
-  contractVersion: orka.harness.v2
   deployment:
     mode: external-endpoint
     endpoint: http://external-acp.default.svc.cluster.local:8080

@@ -101,7 +101,7 @@ func (in AgentSpec) MarshalJSON() ([]byte, error) {
 // Unknown fields reach admission so removed fields are rejected.
 // +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || !has(self.contractVersion) || self.contractVersion == oldSelf.contractVersion",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 // +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
 type AgentCLIRuntime struct {
@@ -111,7 +111,9 @@ type AgentCLIRuntime struct {
 
 	// ContractVersion is the harness protocol selector for built-in runtime
 	// types. Only orka.harness.v2 is supported, so an omitted selector means
-	// orka.harness.v2. Once written, the value never changes. runtime.type
+	// orka.harness.v2. A written value never changes to another contract;
+	// clearing it keeps orka.harness.v2, and the controller writes it back, so
+	// reapplying a manifest that dropped the selector succeeds. runtime.type
 	// alone is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
