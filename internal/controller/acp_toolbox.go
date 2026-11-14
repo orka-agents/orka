@@ -196,6 +196,21 @@ func ToolboxImageAllowed(image string, allowed []string) bool {
 // admission checks so a Task never reaches a RuntimePool with toolboxes it
 // cannot bind, even if the Agent was admitted under a different policy.
 func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) string {
+	if reason := agentToolboxUnsupportedReason(task, agent, external); reason != "" {
+		return reason
+	}
+	if len(agentToolboxes(agent)) == 0 {
+		return ""
+	}
+	if err := p.ValidateAgentToolboxes(agent); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// agentToolboxUnsupportedReason reports toolbox combinations no configuration
+// supports, as opposed to toolbox policy validation failures.
+func agentToolboxUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) string {
 	if len(agentToolboxes(agent)) == 0 {
 		return ""
 	}
@@ -204,9 +219,6 @@ func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, age
 		return "runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
 	case taskRequestsExecutionWorkspace(task):
 		return "runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces (including Agent Sandbox and Substrate) cannot mount toolboxes yet" //nolint:staticcheck // Field path begins the user-facing validation message.
-	}
-	if err := p.ValidateAgentToolboxes(agent); err != nil {
-		return err.Error()
 	}
 	return ""
 }

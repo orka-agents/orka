@@ -183,6 +183,98 @@ observing it, or between scrapes, can lose a sample; use durable approval events
 for audits. Pending requests retained across a restart still use their original
 request timestamps when a new decision commits.
 
+## Capability-gap signals
+
+Capability-gap signals count requests Orka could not serve. They are off by
+default: start the controller with `--capability-gap-signals-enabled` (or
+`ORKA_CAPABILITY_GAP_SIGNALS_ENABLED=true`). They do not need OpenTelemetry.
+
+### What Orka already recorded
+
+Before these signals, each kind of gap was either recorded as free text or not
+recorded at all:
+
+| Signal | What Orka already had | Where |
+|---|---|---|
+| Admission rejected as unsupported | Free-text denials with no metric. Webhook denials and CEL rules leave no Orka record. Planning rejections end the Task as `Failed` with the text in `status.message`; a few set `status.execution.reason` (`WorkspaceUnsupported`, `NativeSessionRuntimeUnsupported`). | `internal/admission/*.go`, `api/v1alpha1/*_types.go` (`XValidation`), `internal/controller/agent_execution_plan.go`, `internal/controller/acp_task_queue.go`, `internal/controller/acp_native_session.go` |
+| Missing or denied tool | OpenTelemetry only, behind `--enable-telemetry`: `error.type=tool_not_found` with the tool name replaced by `unknown_tool`, and `RecordRejectedToolCall` with the name replaced by `rejected_tool`. Built-in AI worker `ToolCallFailed` execution events carried the tool name and error text but no typed reason. ACP permission requests denied by frozen tool policy, and supervisor rejections of unlisted MCP tools, were not recorded. | `internal/tools/registry.go`, `workers/ai/main.go`, `internal/controller/acp_dispatcher.go` (`frozenMCPPermissionDecision`), `workers/acp/supervisor/mcp_proxy.go` (`authorizeCall`) |
+| Agent says it can't | Not recorded. An "I can't do that" reply ends the Task as `Succeeded`. Model refusals (`refused`, ACP `stopReason`) are a different thing and are kept only on execution events. | `internal/llm/provider.go`, `internal/harness/v2/eventjournal/mapper.go` |
+| Repeated workaround | Per-Task tool events only (`code_exec`, or the ACP tool kind such as `execute`). Nothing aggregates them. | `workers/ai/main.go`, `internal/harness/v2/eventjournal/mapper.go` |
+| Repeated failed request | Not recorded. `orka_execution_events_appended_total{event_type="TaskFailed"}` counts failures without a reason. | `internal/metrics/metrics.go` |
+
+### What is recorded
+
+| Category | Reason | Source |
+|---|---|---|
+| `unsupported_request` | `runtime`, `contract_version`, `execution_workspace`, `toolboxes`, `prior_task_ref`, `max_turns`, `retry_policy`, `resources`, `placement`, `autonomous_coordination`, `transaction_delegation`, `native_session` | The controller refused an agent Task during execution planning (including an external runtime's `priorTaskRef` rejection during compatibility validation), at the workspace dispatch gate, or at native Session restore. Validation errors and missing configuration are not counted. |
+| `missing_tool` | `not_enabled`, `not_registered` | The built-in AI worker rejected a model's tool call because the Task did not enable it, or no tool had that name. The worker marks the `ToolCallFailed` event with a closed `errorType`; the controller counts it when the event arrives from a managed AI worker Pod. The same event from any other Task is journaled but not counted. |
+| `missing_tool` | `denied_by_policy` | An ACP runtime asked permission to use a tool its frozen tool policy does not allow. |
+
+The Prometheus counter is `orka_capability_gap_signals_total` with labels
+`category`, `reason`, `runtime` and `tool`:
+
+- `runtime` is `native`, `codex`, `claude`, `copilot`, `opencode`, `external` or `unknown`.
+- `tool` is a name from the tool catalog fixed at controller startup (built-in,
+  coordination and brokered tools, plus built-in runtime native tools), `unknown`
+  for any other name, or `none` for `unsupported_request`.
+
+Labels never contain Task names, prompts, completions, tool arguments, error
+messages or user text. Values outside these sets fall back to `other` or `unknown`.
+
+### Weekly summary
+
+`GET /api/v1/capability-gaps?namespace=<ns>` returns the namespace's signals for
+the current UTC day and the six before it. It needs `list` on `tasks` in that
+namespace, like `GET /api/v1/tasks`, and returns `404` while the flag is off.
+A context token must not be limited to particular objects: counts outlive their
+Tasks, so they cannot be filtered per Task.
+
+```json
+{
+  "namespace": "team-a",
+  "from": "2026-10-26T00:00:00Z",
+  "to": "2026-11-01T12:00:00Z",
+  "recordingSince": "2026-10-28T09:14:03Z",
+  "partial": true,
+  "signals": [
+    {"category": "missing_tool", "reason": "denied_by_policy", "runtime": "codex",
+     "tool": "WebFetch", "count": 4, "tasks": ["nightly-triage-x7k2", "nightly-triage-p9q1"]}
+  ]
+}
+```
+
+Each row lists at most five Task names, most recently observed first. A name is
+shown only when the caller could list that Task now and it is still the Task
+that produced the signal; deleted Tasks, and Tasks recreated under the same
+name, drop out but keep their counts. Signals from a Gateway-owned Task count only for callers who
+can read that Gateway, the same check that guards the Task. Ownership recorded
+only in a Task's retained GatewayEvent counts too; a signal whose ownership
+cannot be verified, or names a Gateway without its UIDs, stays out of the
+summary and takes no Gateway slot. Counts belong to
+one namespace incarnation: if a namespace is deleted and recreated with the same
+name, the new one starts empty. Prometheus counts every signal.
+
+The summary is held in controller memory, so it starts empty after a restart or
+leader change. `partial` is `true` when `recordingSince` is after `from`, so a
+reader can tell the window is incomplete. Each day keeps at most 64 namespaces,
+and each namespace keeps at most 16 Gateways per day; a further Gateway replaces
+the least recently seen one. Signals beyond these bounds still count in
+Prometheus. For history across restarts,
+query the counter in your metrics backend, for example
+`increase(orka_capability_gap_signals_total[7d])`.
+
+### Not recorded yet
+
+- **Agent says it can't.** Detecting this needs either reading the agent's reply
+  or a structured way for agents to report a missing capability. Orka has
+  neither yet.
+- **Repeated workaround.** Telling whether a shell command could have been a
+  built-in tool needs the command text, which these signals never read.
+- **Repeated failed request.** Grouping similar requests needs request text.
+- Tool calls rejected inside an ACP runtime Pod before they reach the
+  controller, such as an unlisted MCP tool name, and tool rejections in chat or
+  the compatibility endpoints, which are not Tasks.
+
 ## Trace topology
 
 A delegated Task should appear as one distributed trace:

@@ -253,6 +253,16 @@ var (
 		},
 	)
 
+	// Capability-gap signals are recorded only with --capability-gap-signals-enabled.
+	// Labels are closed enums and catalog tool names; never Task names or user text.
+	CapabilityGapSignalsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_capability_gap_signals_total",
+			Help: "Requests Orka could not serve, by category, reason, runtime, and catalog tool name",
+		},
+		[]string{"category", labelReason, "runtime", "tool"},
+	)
+
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -364,6 +374,7 @@ func init() {
 		RepositoryMonitorReviewsTotal,
 		RepositoryMonitorReviewFindingsTotal,
 		RepositoryMonitorReviewRoundsToPass,
+		CapabilityGapSignalsTotal,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -584,6 +595,17 @@ func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) 
 // request needed before its first passed review.
 func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
+}
+
+// RecordCapabilityGapSignal records one capability-gap signal. Callers pass
+// values already normalized to closed enums and catalog tool names.
+func RecordCapabilityGapSignal(category, reason, runtime, tool string) {
+	CapabilityGapSignalsTotal.WithLabelValues(
+		normalizeMetricLabel(category),
+		normalizeMetricLabel(reason),
+		normalizeMetricLabel(runtime),
+		normalizeMetricLabel(tool),
+	).Inc()
 }
 
 // RecordACPWorkspaceRetentionAction records one retention enforcement action

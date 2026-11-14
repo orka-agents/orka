@@ -68,6 +68,16 @@ type approvalBatchDecision struct {
 	result      string
 	toolResults []llm.Message
 	continueLLM bool
+	// notEnabled is the call that stopped the batch because it names an
+	// approval-required tool the Task did not enable. Only that call is a
+	// rejection; the other calls in the batch were merely skipped.
+	notEnabled *notEnabledToolCall
+}
+
+type notEnabledToolCall struct {
+	toolName string
+	callID   string
+	err      error
 }
 
 func newApprovalGateFromEnv(recorder common.EventRecorder, baseToolCtx *tools.ToolContext) (*approvalGate, error) {
@@ -197,13 +207,11 @@ func (g *approvalGate) preScan(
 		requiresApproval := g.requiresApproval(toolName)
 		if requiresApproval {
 			if _, ok := allowedToolCalls[toolName]; !ok {
+				err := fmt.Errorf("approval-required tool %q is not enabled for this task", toolName)
 				return &approvalBatchDecision{
 					continueLLM: true,
-					toolResults: approvalValidationBatchToolResults(
-						calls,
-						call.ID,
-						fmt.Errorf("approval-required tool %q is not enabled for this task", toolName),
-					),
+					toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+					notEnabled:  &notEnabledToolCall{toolName: toolName, callID: call.ID, err: err},
 				}, nil
 			}
 		}
@@ -1173,6 +1181,10 @@ func processApprovalBatch(
 	if decision, err := gate.preScan(ctx, calls, allowedToolCalls, customTools); err != nil {
 		return messages, "", false, false, err
 	} else if decision != nil {
+		if rejected := decision.notEnabled; rejected != nil {
+			recordToolCallFailed(eventRecorder, rejected.toolName, rejected.callID, rejected.err,
+				notEnabledToolCallErrorType(rejected.toolName, customTools[rejected.toolName]))
+		}
 		return applyApprovalBatchDecision(messages, decision)
 	}
 	if decision, err := handleExplicitRequestApprovalBatch(
