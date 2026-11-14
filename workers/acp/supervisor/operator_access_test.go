@@ -42,6 +42,9 @@ type fakeOperatorProcess struct {
 	signals    []string
 	once       sync.Once
 	unkillable bool
+	// stuck models a leader in uninterruptible I/O: SIGKILL never makes it
+	// exit, so Wait never returns.
+	stuck bool
 }
 
 func newFakeOperatorProcess() *fakeOperatorProcess {
@@ -66,7 +69,9 @@ func (p *fakeOperatorProcess) Kill() bool {
 		return true
 	}
 	p.killed.Store(true)
-	p.finish(137)
+	if !p.stuck {
+		p.finish(137)
+	}
 	return !p.unkillable
 }
 func (p *fakeOperatorProcess) Retire() bool {
@@ -599,6 +604,45 @@ func TestOperatorUnprovenCleanupFailsClosed(t *testing.T) {
 	}
 	if _, status, _ := supervisor.operatorTargetFor(sessionID, harnessv2.MutationMetadata{Fence: fence}); status == 0 {
 		t.Fatal("a poisoned session must not admit operator access")
+	}
+}
+
+// A leader that never exits after SIGKILL must not pin the handler: the exit
+// wait is bounded and cleanup fails the runtime closed, holding the operation.
+func TestOperatorExecLeaderStuckAfterKillFailsClosed(t *testing.T) {
+	previous := operatorLeaderExitGrace
+	operatorLeaderExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { operatorLeaderExitGrace = previous })
+	process := newFakeOperatorProcess()
+	process.stuck, process.unkillable = true, true
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	state := supervisor.sessions[sessionID]
+	state.drainCleanupScheduled = true
+	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
+		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, TimeoutSeconds: 1}), nil)
+	if result.status.Reason != operatoraccess.ExitReasonTimeout || result.status.ExitCode != -1 || !process.killed.Load() {
+		t.Fatalf("stuck leader status: %+v killed=%v", result.status, process.killed.Load())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		poisoned := state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && supervisor.poisoned
+		registrations := len(state.operators)
+		supervisor.mu.Unlock()
+		if poisoned {
+			if registrations != 1 {
+				t.Fatalf("the uncontained operation's registration was released: %d", registrations)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a leader stuck after SIGKILL must fail the runtime closed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(supervisor.operatorState().slots) != 1 {
+		t.Fatal("the uncontained operation's concurrency slot was released")
 	}
 }
 

@@ -37,6 +37,12 @@ const (
 	operatorFileStatusLineBytes     = 1024
 )
 
+// operatorLeaderExitGrace bounds how long a killed operation's leader may take
+// to exit. A leader stuck in uninterruptible I/O never does; the handler then
+// stops waiting and its cleanup fails closed instead of blocking forever.
+// Replaceable in tests.
+var operatorLeaderExitGrace = 10 * time.Second
+
 // operatorAccessStates are the RuntimeSession states that admit operator
 // access. Every validation, publication, finalization, cancellation, and
 // deletion state is refused: the workspace is frozen or its delta is being
@@ -165,12 +171,6 @@ func (s *Server) finishOperation(lease *operatorLease) {
 		// Retire fences off late Kill calls (for example from the input
 		// relay) before the tag is released for reuse below.
 		proven := lease.process.Retire()
-		_, _, _ = lease.process.Wait()
-		for _, closer := range []io.Closer{lease.process.Stdin(), lease.process.Stdout(), lease.process.Stderr()} {
-			if closer != nil {
-				_ = closer.Close()
-			}
-		}
 		if !proven {
 			slog.Error("operator process termination could not be proven; failing the runtime closed",
 				"runtimeSessionID", string(lease.target.sessionID))
@@ -178,8 +178,14 @@ func (s *Server) finishOperation(lease *operatorLease) {
 				s.poisonSession(lease.target.state, "operator process termination could not be proven")
 			}
 			s.poisonPool("operator_cleanup_unproven")
+			// The leader may never exit (uninterruptible I/O), so it is
+			// reaped in the background; everything else stays held.
+			go func() { _, _, _ = lease.process.Wait() }()
+			closeOperatorStreams(lease.process)
 			return
 		}
+		_, _, _ = lease.process.Wait()
+		closeOperatorStreams(lease.process)
 	}
 	if lease.tag != 0 {
 		s.operatorState().releaseTag(lease.tag)
@@ -191,6 +197,14 @@ func (s *Server) finishOperation(lease *operatorLease) {
 	s.mu.Unlock()
 	if lease.releaseSlot != nil {
 		lease.releaseSlot()
+	}
+}
+
+func closeOperatorStreams(process operatorProcess) {
+	for _, closer := range []io.Closer{process.Stdin(), process.Stdout(), process.Stderr()} {
+		if closer != nil {
+			_ = closer.Close()
+		}
 	}
 }
 
@@ -588,11 +602,18 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 		exitCode, signaled, waitErr = process.Wait()
 		close(waited)
 	}()
+	exited := true
 	select {
 	case <-waited:
 	case <-ctx.Done():
 		setReason(operatoraccess.ExitReasonTimeout)
-		<-waited
+		select {
+		case <-waited:
+		case <-time.After(operatorLeaderExitGrace):
+			// The killed leader did not exit; finishOperation fails the
+			// runtime closed and keeps the operation's resources held.
+			exited = false
+		}
 	}
 	// Reap the process group, then give the output pumps a bounded grace to
 	// flush. Readers are closed afterwards so a descendant that escaped the
@@ -613,7 +634,14 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 	}
 
 	reasonMu.Lock()
-	final := operatorFinalStatus(exitCode, signaled, waitErr, reason)
+	var final operatoraccess.Status
+	if exited {
+		final = operatorFinalStatus(exitCode, signaled, waitErr, reason)
+	} else {
+		// The Wait goroutine still owns the exit fields.
+		final = operatorFinalStatus(-1, false, nil, reason)
+		final.Message = "operator process termination could not be proven"
+	}
 	reasonMu.Unlock()
 	if final.Reason != operatoraccess.ExitReasonDisconnect {
 		statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
