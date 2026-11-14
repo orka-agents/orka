@@ -101,6 +101,8 @@ POST /api/v1/tools | create core.orka.ai:tools
 GET /api/v1/tools/:name | get core.orka.ai:tools protected
 PUT /api/v1/tools/:name | update core.orka.ai:tools protected
 DELETE /api/v1/tools/:name | delete core.orka.ai:tools protected
+POST /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
+DELETE /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
 GET /api/v1/runtime-pools | list core.orka.ai:runtimepools
 GET /api/v1/runtime-pools/:name | get core.orka.ai:runtimepools protected
 GET /api/v1/agent-runtimes | list core.orka.ai:agentruntimes
@@ -189,6 +191,7 @@ POST /openai/v1/responses | create core.orka.ai:chats
 GET /openai/v1/models | list core.orka.ai:providers
 POST /anthropic/v1/messages | create core.orka.ai:chats
 GET /anthropic/v1/models | list core.orka.ai:providers
+POST /mcp | identity
 `
 
 type externalAuthorizationCase struct {
@@ -238,6 +241,7 @@ type externalAuthorizationFixture struct {
 	reviews       []authorizationv1.SubjectAccessReviewSpec
 	review        func(*authorizationv1.SubjectAccessReview) error
 	sequence      int
+	config        ServerConfig
 }
 
 func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture {
@@ -332,13 +336,15 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	f.store = testStorageClient(sqlite.NewStore(f.db, ":memory:"))
 	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "protected", Namespace: "default", Content: "protected-content"}))
 	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "protected", Namespace: "default", Type: "memory", Title: "protected-content", Content: "protected-content"}))
-	f.server = NewServer(f.kube, nil, ServerConfig{
+	f.config = ServerConfig{
 		WatchNamespace: "default", EnforceNamespaceIsolation: true, Clientset: f.clientset, APIReader: f.kube,
 		MemoryStore: f.store, MemoryProposalStore: f.store, SecurityStore: f.store, RepositoryMonitorStore: f.store,
 		SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
 		ExecutionEventStore: f.store, GatewayEventStore: f.store, GatewayDeliveryStore: f.store,
 		Chat: ChatConfig{Enabled: true, Provider: "protected", Model: "fixture", MaxDuration: time.Second, MaxIterations: 1, MaxConcurrent: 2},
-	})
+		MCP:  MCPServerConfig{Enabled: true},
+	}
+	f.server = NewServer(f.kube, nil, f.config)
 	return f
 }
 
@@ -394,7 +400,8 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 	}
 	registered := map[string]bool{}
 	for _, route := range f.server.app.GetRoutes(true) {
-		if route.Method == http.MethodHead || (!strings.HasPrefix(route.Path, "/api/v1/") && !strings.HasPrefix(route.Path, "/openai/v1/") && !strings.HasPrefix(route.Path, "/anthropic/v1/")) {
+		if route.Method == http.MethodHead || (!strings.HasPrefix(route.Path, "/api/v1/") && !strings.HasPrefix(route.Path, "/openai/v1/") &&
+			!strings.HasPrefix(route.Path, "/anthropic/v1/") && route.Path != mcpEndpointPath && !strings.HasPrefix(route.Path, mcpEndpointPath+"/")) {
 			continue
 		}
 		key := route.Method + " " + route.Path

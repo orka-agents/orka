@@ -189,3 +189,42 @@ func TestSkillContentHashDeterministic(t *testing.T) {
 		t.Fatalf("hash should be deterministic: %q != %q", h1, h2)
 	}
 }
+
+func TestSkillContentHashFieldBoundaries(t *testing.T) {
+	r := setupSkillReconciler()
+	skillWith := func(inline string, files map[string]string) *corev1alpha1.Skill {
+		return &corev1alpha1.Skill{
+			Spec: corev1alpha1.SkillSpec{
+				Content: corev1alpha1.SkillContent{Inline: inline, Files: files},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		a, b *corev1alpha1.Skill
+	}{
+		{
+			name: "inline and file path",
+			a:    skillWith("a", map[string]string{"bc": "d"}),
+			b:    skillWith("ab", map[string]string{"c": "d"}),
+		},
+		{
+			name: "file path and file content",
+			a:    skillWith("x", map[string]string{"a": "bc"}),
+			b:    skillWith("x", map[string]string{"ab": "c"}),
+		},
+		{
+			name: "file content and next file path",
+			a:    skillWith("x", map[string]string{"a": "b", "c": "d"}),
+			b:    skillWith("x", map[string]string{"a": "bcd"}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if ha, hb := r.computeContentHash(tt.a), r.computeContentHash(tt.b); ha == hb {
+				t.Fatalf("different content produced the same hash %q", ha)
+			}
+		})
+	}
+}

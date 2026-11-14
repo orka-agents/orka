@@ -57,13 +57,13 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -387,8 +387,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
 			log.Error(err, "failed to add finalizer")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -400,8 +399,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			t.Status.Phase = corev1alpha1.TaskPhasePending
 		}); err != nil {
 			log.Error(err, "failed to update initial status")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		_ = r.recordTaskLifecycleEvent(
@@ -447,7 +445,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
 	}
-	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+	if err := r.projectACPTaskAdmissionStatus(ctx, task); err != nil {
 		// A projection that keeps failing must not keep delegated work
 		// running.
 		_ = r.cascadeTaskCancellation(ctx, task)
@@ -469,6 +467,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// projectACPTaskAdmissionStatus projects the execution workspace status and
+// then the WaitingForCapacity condition, which reads the workspace admission
+// conditions that projection just refreshed.
+func (r *TaskReconciler) projectACPTaskAdmissionStatus(ctx context.Context, task *corev1alpha1.Task) error {
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return err
+	}
+	return r.syncACPWaitingForCapacity(ctx, task)
 }
 
 func (r *TaskReconciler) recordTaskLifecycleEvent(
@@ -651,6 +659,12 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		if active, err := r.parkedWaitActive(ctx, task); err != nil || active {
+			// The wait reconciler cancels the wait of a deleting Task and closes
+			// its parked approval in the execution history first, so that history
+			// is erased after that last write and never recreated behind it.
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
 		prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -2886,31 +2900,83 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 				continue
 			}
 			visited[client.ObjectKeyFromObject(child)] = true
-			// Every real child is walked, a deleting one included: its own
-			// cascade may never run, as when its status write or finalizer
-			// keeps failing.
-			parents = append(parents, child)
-			if !child.DeletionTimestamp.IsZero() {
-				continue
+			// A child that parked its turn continues in Tasks it does not
+			// control, so its continuation chain is cancelled with it.
+			members := []*corev1alpha1.Task{child}
+			continuations, chainErr := r.childContinuationChain(ctx, child)
+			if chainErr != nil {
+				errs = append(errs, chainErr)
 			}
-			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
-				continue
+			for _, continuation := range continuations {
+				if !visited[client.ObjectKeyFromObject(continuation)] {
+					visited[client.ObjectKeyFromObject(continuation)] = true
+					members = append(members, continuation)
+				}
 			}
-			if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
-				continue
-			}
-			base := child.DeepCopy()
-			if child.Annotations == nil {
-				child.Annotations = map[string]string{}
-			}
-			child.Annotations[labels.AnnotationCancelRequested] = message
-			if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
-				!apierrors.IsNotFound(err) {
-				errs = append(errs, err)
+			for _, member := range members {
+				// Every real child is walked, a deleting one included: its
+				// own cascade may never run, as when its status write or
+				// finalizer keeps failing.
+				parents = append(parents, member)
+				if err := r.requestDelegatedTaskCancellation(ctx, member, message); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// childContinuationChain returns the continuations a child's parked turns
+// created, each verified against the resumed wait that records it. A link
+// that is gone or no longer verifies ends the chain: nothing past it can run
+// as this child's turn.
+func (r *TaskReconciler) childContinuationChain(ctx context.Context, child *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
+	var chain []*corev1alpha1.Task
+	current := child
+	for range taskwait.MaxChainLength {
+		next, err := taskwait.Continuation(ctx, r.taskMetadataReader(), current)
+		if apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken) {
+			return chain, nil
+		}
+		if err != nil || next == nil {
+			return chain, err
+		}
+		chain = append(chain, next)
+		current = next
+	}
+	return chain, nil
+}
+
+// requestDelegatedTaskCancellation asks a delegated Task to stop: an
+// unfinished Task gets a cancel request, and a parked wait, which a finished
+// turn can still hold, is cancelled so it never starts another turn.
+func (r *TaskReconciler) requestDelegatedTaskCancellation(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if !task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	base := task.DeepCopy()
+	changed := false
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested {
+		if phase := task.Status.Phase; phase == "" || phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning {
+			task.Annotations[labels.AnnotationCancelRequested] = message
+			changed = true
+		}
+	}
+	if taskwait.Active(task.Status.Wait) && strings.TrimSpace(task.Annotations[labels.AnnotationCancelWait]) == "" {
+		task.Annotations[labels.AnnotationCancelWait] = message
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := r.Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // delegatedTaskIndex lists every Task that names a parent, grouped by the
@@ -4110,7 +4176,13 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
 		for i := range childList.Items {
-			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) {
+			// A parked run still owns its unfinished work through its
+			// continuation chain, so it counts as active until the chain's
+			// tail is settled. A resumed wait is itself terminal, and its
+			// continuation may not have a phase yet or be in this cached
+			// list, so the tail is resolved from the authoritative reader.
+			_, settled := r.settledTaskContinuationTail(ctx, &childList.Items[i])
+			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) || !settled {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)
@@ -4221,10 +4293,24 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 		failedLimit = *task.Spec.FailedRunsHistoryLimit
 	}
 
+	// History limits apply to logical runs. A parked run and its
+	// continuations share the parent label, but they are one run: the chain's
+	// head represents it, its tail supplies the outcome, and deleting the head
+	// cascades to every continuation through their owner references.
 	var succeeded, failed []*corev1alpha1.Task
 	for i := range childList.Items {
 		child := &childList.Items[i]
-		switch child.Status.Phase {
+		if r.taskIsLinkedContinuation(ctx, child) {
+			// Counted, and pruned, with the head of its chain.
+			continue
+		}
+		tail, settled := r.settledTaskContinuationTail(ctx, child)
+		if !settled {
+			// Deleting a parked run, or a predecessor whose continuation is
+			// still running, would cancel that unfinished work.
+			continue
+		}
+		switch tail.Status.Phase {
 		case corev1alpha1.TaskPhaseSucceeded:
 			succeeded = append(succeeded, child)
 		case corev1alpha1.TaskPhaseFailed:
@@ -5108,7 +5194,9 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 		return err
 	}
 	// Brokered approvals carry an expiry; one past it no longer blocks.
-	pending := approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC())
+	// A parked sign-off never blocks the running turn: the agent ends the
+	// turn and the decision starts a continuation instead.
+	pending := withoutParkedApprovals(approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC()))
 	if !setWaitingForApprovalCondition(task.DeepCopy(), pending) {
 		return nil
 	}
@@ -5128,6 +5216,53 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
 		return nil
 	})
+}
+
+// settledTaskContinuationTail returns the Task whose outcome represents
+// task's continuation chain, and false while the chain still owns unfinished
+// work through a parked wait or a running continuation. An unresolvable chain
+// is treated as unsettled so cleanup never cancels work it cannot see.
+func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, bool) {
+	if task == nil || task.Status.Wait == nil {
+		return task, true
+	}
+	if taskwait.Active(task.Status.Wait) {
+		return nil, false
+	}
+	if task.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
+		return task, true
+	}
+	tail, err := taskwait.ResolveTail(ctx, uncachedReader(r.APIReader, r.Client), task)
+	if apierrors.IsNotFound(err) {
+		// The continuation is already gone; there is nothing left to protect.
+		return task, true
+	}
+	if err != nil || !taskwait.Settled(tail) {
+		return nil, false
+	}
+	return tail, true
+}
+
+// taskIsLinkedContinuation reports whether task continues a parked Task that
+// verifiably links it, so the predecessor's chain accounts for it. A lookup
+// failure counts as linked: the Task is then neither counted nor pruned.
+func (r *TaskReconciler) taskIsLinkedContinuation(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task == nil || strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) == "" {
+		return false
+	}
+	_, linked, err := taskwait.Predecessor(ctx, uncachedReader(r.APIReader, r.Client), task)
+	return err != nil || linked
+}
+
+func withoutParkedApprovals(pending []approvals.Approval) []approvals.Approval {
+	kept := pending[:0]
+	for _, approval := range pending {
+		if approval.Binding == nil && approval.Action == taskwait.ParkedApprovalAction {
+			continue
+		}
+		kept = append(kept, approval)
+	}
+	return kept
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
@@ -5345,4 +5480,17 @@ func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *c
 		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
 	}
 	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
+}
+
+// parkedWaitActive reports, from an authoritative read, whether task still
+// holds a parked wait that the wait reconciler has not ended yet.
+func (r *TaskReconciler) parkedWaitActive(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	latest := &corev1alpha1.Task{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return latest.UID == task.UID && taskwait.Active(latest.Status.Wait), nil
 }

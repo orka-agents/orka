@@ -38,6 +38,12 @@ func (a WorkspaceClassAuthorizer) AuthorizeCheckpointSource(ctx context.Context,
 	return a.authorizeResource(ctx, namespace, "executionworkspaces", name, caller)
 }
 
+// AuthorizeSecret checks permission to get a Secret that a Tool asks the
+// Substrate egress gateway to inject.
+func (a WorkspaceClassAuthorizer) AuthorizeSecret(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
+	return authorizeVerb(ctx, a.Client, "get", "", "secrets", "egress credential Secret", namespace, name, caller)
+}
+
 func (a WorkspaceClassAuthorizer) authorizeResource(ctx context.Context, namespace, resource, className string, caller authenticationv1.UserInfo) error {
 	return authorizeUse(ctx, a.Client, "workspace.orka.ai", resource, "workspace class", namespace, className, caller)
 }

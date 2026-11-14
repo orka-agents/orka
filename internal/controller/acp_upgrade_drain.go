@@ -414,6 +414,7 @@ type ACPUpgradeDrainCoordinator struct {
 	Barriers            ACPUpgradeDrainBarrierObserver
 	SupervisorClient    RuntimePoolSupervisorClient
 	HTTPClient          *http.Client
+	SubstrateRouter     *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
 	ControllerNamespace string
 	Options             ACPUpgradeDrainOptions
 	Now                 func() time.Time
@@ -929,6 +930,7 @@ func (c *ACPUpgradeDrainCoordinator) supervisorClientForPool(pool *corev1alpha1.
 	reconciler := &RuntimePoolReconciler{
 		SupervisorClient: c.SupervisorClient,
 		HTTPClient:       c.HTTPClient,
+		SubstrateRouter:  c.SubstrateRouter,
 
 		Now: c.Now,
 	}

@@ -62,6 +62,18 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if task == nil || task.Status.AgentExecutionBinding == nil {
 		return ctrl.Result{}, errors.New("immutable v2 execution binding is required before ACP queueing")
 	}
+	if task.Status.Execution == nil || taskExecutionStateTerminal(task.Status.Execution.State) {
+		pending, orphaned, err := r.continuationLinkPending(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if orphaned {
+			return ctrl.Result{}, r.cancelUnlinkedContinuation(ctx, task)
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
 	bound, err := r.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("verify immutable v2 execution before ACP queueing: %w", err)

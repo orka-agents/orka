@@ -1363,7 +1363,9 @@ spec:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
                       types. Only orka.harness.v2 is supported, so an omitted selector means
-                      orka.harness.v2. Once written, the value never changes. runtime.type
+                      orka.harness.v2. A written value never changes to another contract;
+                      clearing it keeps orka.harness.v2, and the controller writes it back, so
+                      reapplying a manifest that dropped the selector succeeds. runtime.type
                       alone is never protocol evidence.
                     enum:
                     - orka.harness.v2
@@ -1410,6 +1412,54 @@ spec:
                     required:
                     - name
                     type: object
+                  skills:
+                    description: |-
+                      Skills lists Agent Skills for the codex, claude, and opencode runtimes;
+                      copilot can't be limited to Orka-provided skills and is rejected. Each
+                      skill folder is read from a digest-pinned image, bound read-only into the
+                      runtime Pod, validated, and copied into every session's native skills
+                      folder, owned by that session's identity. Skills are untrusted prompt input: nothing
+                      in them runs, and keys or constructs with side effects are rejected.
+                      The feature is off by default and the controller restricts images to
+                      the toolbox registry allowlist.
+                    items:
+                      description: |-
+                        AgentRuntimeSkill is one Agent Skill folder (SKILL.md plus optional
+                        supporting files) delivered from a container image.
+                      properties:
+                        image:
+                          description: |-
+                            Image must be a fully qualified reference pinned by digest:
+                            <registry>/<repository>@sha256:<64 hex>.
+                          maxLength: 512
+                          minLength: 1
+                          pattern: ^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$
+                          type: string
+                        name:
+                          description: |-
+                            Name identifies the skill. It must equal the name in the skill's
+                            SKILL.md frontmatter and becomes the skill's folder name in the
+                            runtime's native skills folder.
+                          maxLength: 64
+                          minLength: 1
+                          pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+                          type: string
+                        path:
+                          description: |-
+                            Path is the absolute folder inside the image that holds SKILL.md. It
+                            must be under /skills. Defaults to /skills/<name>.
+                          maxLength: 256
+                          pattern: ^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$
+                          type: string
+                      required:
+                      - image
+                      - name
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   toolboxes:
                     description: |-
                       Toolboxes lists extra command-line tool images for built-in runtimes.
@@ -1472,14 +1522,17 @@ spec:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
                 - message: runtime.contractVersion is immutable once set
-                  rule: '!has(oldSelf.contractVersion) || (has(self.contractVersion)
-                    && self.contractVersion == oldSelf.contractVersion)'
+                  rule: '!has(oldSelf.contractVersion) || !has(self.contractVersion)
+                    || self.contractVersion == oldSelf.contractVersion'
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'
                 - message: runtime.toolboxes are supported only on built-in runtime
                     types; external runtimeRef runtimes cannot mount toolboxes
                   rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)'
+                - message: runtime.skills are supported only on built-in runtime types;
+                    external runtimeRef runtimes cannot receive skills
+                  rule: '!has(self.skills) || self.skills.size() == 0 || has(self.type)'
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

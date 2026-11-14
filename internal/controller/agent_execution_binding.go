@@ -319,7 +319,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			"runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces cannot mount toolboxes yet",
 		))
 	}
+	if len(agentSkills(agent)) > 0 && (strings.TrimSpace(workspaceSessionUID) != "" || taskRequestsExecutionWorkspace(task)) {
+		return nil, permanentACPAgentConfiguration(errors.New(acpSkillsExecutionWorkspaceError))
+	}
 	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
+		return nil, permanentACPAgentConfiguration(errors.New(reason))
+	}
+	if reason := r.ACPToolboxPolicy.agentSkillPlanRejection(task, agent, false); reason != "" {
 		return nil, permanentACPAgentConfiguration(errors.New(reason))
 	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, agent, r.ACPRuntimeImages, configuration)

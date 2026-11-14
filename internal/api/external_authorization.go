@@ -139,16 +139,20 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "memories", "create", ""}).inNamespace(apiBodyThenQueryNamespace).withStoreID(),
 	"POST /api/v1/memory-proposals/:id/archive": coreAPIPolicy("update", "memoryproposals", "id").withStoreID(),
 
-	"GET /api/v1/providers":                  coreAPIPolicy("list", "providers", ""),
-	"POST /api/v1/providers":                 coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/providers/:name":            coreAPIPolicy("get", "providers", "name"),
-	"PUT /api/v1/providers/:name":            coreAPIPolicy("update", "providers", "name"),
-	"DELETE /api/v1/providers/:name":         coreAPIPolicy("delete", "providers", "name"),
-	"GET /api/v1/tools":                      coreAPIPolicy("list", "tools", ""),
-	"POST /api/v1/tools":                     coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/tools/:name":                coreAPIPolicy("get", "tools", "name"),
-	"PUT /api/v1/tools/:name":                coreAPIPolicy("update", "tools", "name"),
-	"DELETE /api/v1/tools/:name":             coreAPIPolicy("delete", "tools", "name"),
+	"GET /api/v1/providers":          coreAPIPolicy("list", "providers", ""),
+	"POST /api/v1/providers":         coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/providers/:name":    coreAPIPolicy("get", "providers", "name"),
+	"PUT /api/v1/providers/:name":    coreAPIPolicy("update", "providers", "name"),
+	"DELETE /api/v1/providers/:name": coreAPIPolicy("delete", "providers", "name"),
+	"GET /api/v1/tools":              coreAPIPolicy("list", "tools", ""),
+	"POST /api/v1/tools":             coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/tools/:name":        coreAPIPolicy("get", "tools", "name"),
+	"PUT /api/v1/tools/:name":        coreAPIPolicy("update", "tools", "name"),
+	"DELETE /api/v1/tools/:name":     coreAPIPolicy("delete", "tools", "name"),
+	// The MCP proxy invokes the Tool's actor with the caller's Tool read
+	// permission, as workers did when they read the Tool and called it.
+	"POST /api/v1/tools/:name/mcp":           coreAPIPolicy("get", "tools", "name"),
+	"DELETE /api/v1/tools/:name/mcp":         coreAPIPolicy("get", "tools", "name"),
 	"GET /api/v1/runtime-pools":              coreAPIPolicy("list", "runtimepools", ""),
 	"GET /api/v1/runtime-pools/:name":        coreAPIPolicy("get", "runtimepools", "name"),
 	"GET /api/v1/agent-runtimes":             coreAPIPolicy("list", "agentruntimes", ""),
@@ -256,6 +260,10 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /openai/v1/models":            coreAPIPolicy("list", "providers", ""),
 	"POST /anthropic/v1/messages":      coreAPIPolicy("create", "chats", ""),
 	"GET /anthropic/v1/models":         coreAPIPolicy("list", "providers", ""),
+	// MCP messages are authenticated here. Each tool call replays its REST
+	// route in process with the caller's credentials, so it is authorized
+	// by that route's policy and handler checks, never by this entry.
+	"POST /mcp": {identityOnly: true},
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has

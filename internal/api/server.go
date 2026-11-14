@@ -101,10 +101,15 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
+	// Substrate MCP actor Tools through the manager's router identity.
+	SubstrateMCPProxy SubstrateMCPProxyConfig
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// MCP configures the control-plane MCP endpoint (--mcp-server-enabled).
+	MCP MCPServerConfig
 	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
@@ -125,6 +130,7 @@ type Server struct {
 	openaiHandler       *OpenAICompatHandler
 	anthropicHandler    *AnthropicCompatHandler
 	internalHandlers    *InternalHandlers
+	mcpServer           *mcpServer
 	ResultStore         store.ResultStore
 	SessionStore        store.SessionStore
 	PlanStore           store.PlanStore
@@ -134,6 +140,9 @@ type Server struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+
+	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
+	substrateMCPProxyWriteTimeout time.Duration
 }
 
 // NewServer creates a new API server
@@ -189,6 +198,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -198,6 +208,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.substrateMCPProxyWriteTimeout = substrateMCPProxyWriteTimeout
 	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -239,10 +250,17 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The MCP handler reads its body before taking a concurrency permit;
+	// bound that read so stalled uploads only cost their own connection.
+	var mcpURI fasthttp.URI
+	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
+	}
 	return fasthttp.RequestConfig{}
 }
 
-// requestConfig bounds writes on the Responses route as well as provider work.
+// requestConfig bounds writes on the Responses and MCP proxy routes as well as
+// provider and Actor work.
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
@@ -254,6 +272,9 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
 		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	if isSubstrateMCPProxyRoute(header) {
+		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
 	}
 	return config
 }
@@ -275,6 +296,12 @@ func (s *Server) setupMiddleware() {
 	// Recovery middleware
 	s.app.Use(recover.New())
 
+	// Before anything reads the request context: an MCP wait's REST replays
+	// end with the wait.
+	if s.config.MCP.Enabled {
+		s.app.Use(adoptMCPReplayDeadline)
+	}
+
 	// Request ID middleware
 	s.app.Use(requestid.New())
 
@@ -290,10 +317,14 @@ func (s *Server) setupMiddleware() {
 	for i, o := range origins {
 		origins[i] = strings.TrimSpace(o)
 	}
+	allowHeaders := allowedCORSHeaders(s.config.ContextTokens)
+	if s.config.MCP.Enabled {
+		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
+	}
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
+		AllowHeaders: allowHeaders,
 	}))
 
 	// Logging middleware
@@ -432,6 +463,10 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
+	// Substrate MCP actors are reachable only through this authenticated
+	// proxy; the manager is the router's sole allowlisted client.
+	api.Post("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
+	api.Delete("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
 
 	// Runtime fabric endpoints
 	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
@@ -551,6 +586,16 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
+	// Control-plane MCP endpoint. The route only authenticates; each tool
+	// replays its REST route in process, which authorizes it.
+	if s.config.MCP.Enabled {
+		app := s.app
+		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
+		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
+		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp.Post("", s.mcpServer.Handle)
+	}
+
 	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
@@ -650,7 +695,7 @@ func (s *Server) Start(ctx context.Context) error {
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve. Lower case and without
 // a trailing slash, matched against a normalized path: see routeLookupPath.
-var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known"}
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known", mcpEndpointPath}
 
 // routeLookupPath normalizes path the way the router matches it. Fiber is
 // case-insensitive and non-strict about a trailing slash by default, so

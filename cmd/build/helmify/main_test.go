@@ -594,7 +594,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	if got := strings.Count(rendered, "--controller-url="); got != 1 {
 		t.Fatalf("controller URL argument count = %d, want 1", got)
 	}
-	if !strings.Contains(rendered, "--controller-url=http://test-orka.orka-test.svc:18080") {
+	if !strings.Contains(rendered, "--controller-url=http://test-orka.orka-test.svc.cluster.local:18080") {
 		t.Fatalf("controller URL does not use service.port:\n%s", rendered)
 	}
 	for _, variable := range []string{
@@ -606,6 +606,13 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("%s does not use service.port", variable)
 		}
+	}
+
+	// Native workspace runtimes resolve only fully qualified Service names,
+	// under the configured cluster domain.
+	custom := requireHelmRender(t, "--set", "service.port=18080", "--set-string", "clusterDomain=corp.example")
+	if !strings.Contains(custom, "--controller-url=http://test-orka.orka-test.svc.corp.example:18080") {
+		t.Fatalf("controller URL does not use clusterDomain:\n%s", custom)
 	}
 
 	service := requireHelmRender(t,
@@ -633,10 +640,16 @@ func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
 		"--set-string", "providerProxy.upstreamBaseURL=http://model-gateway.models.svc:8080/",
 	}
+	custom := requireHelmRender(t, slices.Concat(args, []string{"--set-string", "clusterDomain=corp.example"})...)
+	const customProxyURL = "--acp-provider-proxy-base-url=" +
+		"http://test-orka-provider-auth-proxy.orka-test.svc.corp.example:8080"
+	if !strings.Contains(custom, customProxyURL) {
+		t.Fatal("provider proxy URL does not use clusterDomain")
+	}
 	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
-		"--acp-provider-proxy-base-url=http://test-orka-provider-auth-proxy.orka-test.svc:8080",
+		"--acp-provider-proxy-base-url=http://test-orka-provider-auth-proxy.orka-test.svc.cluster.local:8080",
 		"--acp-provider-proxy-namespace=orka-test",
 		"--upstream-base-url=http://model-gateway.models.svc:8080",
 	} {
@@ -1190,9 +1203,48 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			existingControllerArgs: []string{
 				"--controller-mode=harness-v2",
 				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc.cluster.local:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+			},
+		},
+		{
+			// Earlier releases rendered the short Service name.
+			name: "static harness v2 controller with a short controller URL",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
 				"--controller-url=http://test-orka.orka-test.svc:8080",
 				"--acp-runtime-namespace=orka-runtimes",
 			},
+		},
+		{
+			name: "static harness v2 controller with a custom cluster domain",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc.corp.example:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+			},
+		},
+		{
+			// The cluster domain may itself contain the namespace suffix.
+			name: "static harness v2 controller with a cluster domain repeating the namespace suffix",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc.orka-test.svc.example:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+			},
+		},
+		{
+			name: "static harness v2 controller with an unrecognized controller URL",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svcx:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+			},
+			wantError: "cannot determine the existing harness-v2 chart fullname",
 		},
 		{
 			name:                   "static harness v2 namespace with a deleted controller",
@@ -1220,7 +1272,7 @@ func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
 	staticControllerArgs := []string{
 		"--controller-mode=harness-v2",
 		"--watch-namespace=orka-test",
-		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--controller-url=http://test-orka.orka-test.svc.cluster.local:8080",
 		"--acp-runtime-namespace=orka-runtimes",
 	}
 	tests := []struct {
@@ -1259,7 +1311,7 @@ func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *tes
 	staticControllerArgs := []string{
 		"--controller-mode=harness-v2",
 		"--watch-namespace=orka-test",
-		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--controller-url=http://test-orka.orka-test.svc.cluster.local:8080",
 		"--acp-runtime-namespace=orka-runtimes",
 	}
 	tests := []struct {
@@ -1346,7 +1398,7 @@ func generatedSnapshotUpgradeControllerArgs() []string {
 	return []string{
 		"--controller-mode=harness-v2",
 		"--watch-namespace=orka-test",
-		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--controller-url=http://test-orka.orka-test.svc.cluster.local:8080",
 		"--acp-runtime-namespace=orka-runtimes",
 	}
 }

@@ -43,7 +43,6 @@ runtime profile whose policy digests match it:
 
 ```yaml
 spec:
-  contractVersion: orka.harness.v2
   capabilities:
     mcpPolicy:
       allowedTools: [create-work-order, read-inventory]

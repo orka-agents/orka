@@ -31,7 +31,7 @@ func (s *Server) taskWebhookJWKS(c fiber.Ctx) error {
 			logf.FromContext(ctx).Error(err, "failed to load Task webhook verification keys")
 			c.Set(fiber.HeaderCacheControl, "no-store")
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				apiFieldError: fiber.Map{"code": fiber.StatusServiceUnavailable, "message": "webhook verification keys are unavailable"},
+				apiFieldError: fiber.Map{"code": fiber.StatusServiceUnavailable, apiFieldMessage: "webhook verification keys are unavailable"},
 			})
 		}
 		set = keys.JWKS()

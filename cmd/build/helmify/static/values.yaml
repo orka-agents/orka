@@ -1,5 +1,10 @@
 # Orka Helm Chart Values
 
+# Cluster DNS domain. The controller API and provider proxy URLs handed to
+# runtimes use fully qualified Service names under it, because native workspace
+# runtimes (Agent Substrate Actors) cannot resolve "<service>.<namespace>.svc".
+clusterDomain: cluster.local
+
 # Controller configuration
 controller:
   # Fixed execution protocol identity. Only harness-v2 is supported.
@@ -155,6 +160,12 @@ controller:
       # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
       #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
       mountMethod: copy
+    # Skills: Agent Skills (Agent spec.runtime.skills) read from digest-pinned
+    # images and copied into each built-in runtime session's native skills
+    # folder. Off by default. Requires toolboxes.enabled; skills reuse its
+    # allowedRegistries, imagePullSecrets, nodeSelector, and mountMethod.
+    skills:
+      enabled: false
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -180,10 +191,17 @@ controller:
     dispatchEnabled: false
     # Exact provider worker namespaces where Orka independently reads Pod identity.
     workerNamespaces: []
+    # Deliver the provider-proxy token into gateway-enforced native workspaces
+    # whose provider cannot inject it at the egress gateway. Off: such
+    # workspaces fail admission instead.
+    allowProviderTokenInSandbox: false
 
   # Retained in-tree Substrate MCP Tool actors and pools only.
   substrate:
     mcpToolsEnabled: false
+    # Credential provider class the Substrate egress gateway was installed with
+    # (only "k8s.io"). Enables MCP Tool egress credentials; empty fails them closed.
+    egressCredentialProvider: ""
     apiEndpoint: api.ate-system.svc:443
     apiCertFile: ""
     apiKeyFile: ""
@@ -199,8 +217,15 @@ controller:
       privateKeyKey: ""
       bearerTokenKey: ""
       caKey: ""
-    routerUrl: http://atenet-router.ate-system.svc
-    actorDnsSuffix: actors.resources.substrate.ate.dev
+    # Substrate v1 routes Actor traffic only to mTLS clients whose pod-certificate
+    # SPIFFE ID (spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>) is on
+    # atenet-router's --ingress-allowed-spiffe-ids. Enable podCertificate to
+    # project that identity and the Substrate service trust bundle; it replaces
+    # apiCredentials and the explicit API file paths. MCP Tools require it or
+    # another client certificate signed by the podidentity signer.
+    podCertificate:
+      enabled: false
+    routerUrl: https://atenet-router.ate-system.svc:443
     defaultTemplate: ""
     defaultTemplateNamespace: ""
     bootstrapTokenSecretName: ""
@@ -499,6 +524,15 @@ providerProxy:
   # target ports, or offline renders. DNS access is always added. Gateway
   # ingress and provider credentials remain under your control.
   egress: []
+  # Agent Substrate v1 Actors reach the proxy only through the installation's
+  # egress gateway, so their requests arrive from the gateway Pods rather than
+  # the runtime Pod. Enable this to admit those Pods; the proxy still requires
+  # its token, and Actors reach it only when their egress allowlist names it.
+  substrateEgressGateway:
+    enabled: false
+    namespace: ate-system
+    podLabels:
+      app: atenet-egress
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
   # all authenticated forwarding until both files are valid again.

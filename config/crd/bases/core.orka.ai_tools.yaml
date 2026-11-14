@@ -236,6 +236,110 @@ spec:
                         description: Boot asks Substrate to boot this actor from scratch
                           on first resume.
                         type: boolean
+                      egress:
+                        description: |-
+                          Egress lists the only destinations the actor may reach through the
+                          Substrate egress gateway. The controller compiles it into the actor's
+                          native egress policy before every resume. Empty denies all egress,
+                          including DNS resolution of external names. HTTPS entries are
+                          intercepted by the gateway, so the operator-owned ActorTemplate must
+                          trust the Substrate egress CA bundle; use scheme tls to pass TLS through
+                          without interception.
+                        items:
+                          description: SubstrateActorEgressRule allows one host name
+                            on explicit ports.
+                          properties:
+                            credential:
+                              description: |-
+                                Credential asks the Substrate egress gateway to replace one request
+                                header with a value from a Secret in the Tool's namespace, so the actor
+                                never holds the credential. The actor sends the header with any
+                                placeholder value; requests without it are forwarded unchanged. Requires
+                                the controller's --substrate-egress-credential-provider and a credential
+                                provider namespace grant for the actor's Atespace. The Tool author must
+                                be allowed to get the Secret. With scheme http the credential leaves the
+                                gateway in cleartext; with https the gateway re-originates TLS trusting
+                                only public roots.
+                              properties:
+                                header:
+                                  default: Authorization
+                                  description: |-
+                                    Header is the HTTP request header to replace. Defaults to Authorization.
+                                    Hop-by-hop, routing, framing and cookie headers are rejected.
+                                  maxLength: 128
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                                  type: string
+                                prefix:
+                                  description: Prefix is prepended verbatim to the
+                                    Secret value, for example "Bearer ".
+                                  maxLength: 64
+                                  type: string
+                                secretRef:
+                                  description: SecretRef selects the Secret key in
+                                    the Tool's namespace.
+                                  properties:
+                                    key:
+                                      description: Key is the key within the Secret
+                                      type: string
+                                    name:
+                                      description: Name is the name of the Secret
+                                      type: string
+                                  required:
+                                  - key
+                                  - name
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                            host:
+                              description: |-
+                                Host is a lowercase DNS name, or a DNS name whose leftmost label is "*"
+                                (for example "*.example.com"). Bare "*", IP addresses, CIDRs, ports,
+                                paths and wildcards over a top-level domain are rejected.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^(\*\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$
+                              type: string
+                              x-kubernetes-validations:
+                              - message: egress host must be a DNS name, not an IP
+                                  address
+                                rule: '!self.matches(''^[0-9.]+$'')'
+                            ports:
+                              description: |-
+                                Ports are destination ports. Defaults to 80 for http and 443 for https;
+                                required for tls.
+                              items:
+                                format: int32
+                                maximum: 65535
+                                minimum: 1
+                                type: integer
+                              maxItems: 16
+                              type: array
+                              x-kubernetes-list-type: set
+                            scheme:
+                              description: Scheme is http, https (gateway-intercepted)
+                                or tls (passthrough).
+                              enum:
+                              - http
+                              - https
+                              - tls
+                              type: string
+                          required:
+                          - host
+                          - scheme
+                          type: object
+                          x-kubernetes-validations:
+                          - message: tls egress requires explicit ports
+                            rule: self.scheme != 'tls' || (has(self.ports) && size(self.ports)
+                              > 0)
+                          - message: egress credentials require scheme http or https
+                            rule: '!has(self.credential) || self.scheme != ''tls'''
+                          - message: egress credentials require an exact host
+                            rule: '!has(self.credential) || !self.host.startsWith(''*'')'
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       poolRef:
                         description: PoolRef optionally assigns this tool actor to
                           an Orka SubstrateActorPool.
@@ -361,7 +465,9 @@ spec:
                   MCP actor-backed.
                 properties:
                   actorID:
-                    description: ActorID is the stable provider actor id.
+                    description: |-
+                      ActorID is the stable, Atespace-qualified provider actor id
+                      ("name.atespace"). Orka derives the router target only from this field.
                     type: string
                   poolRef:
                     description: PoolRef is the resolved Orka actor pool.
@@ -378,10 +484,6 @@ spec:
                     description: Provider is the actor provider.
                     maxLength: 253
                     minLength: 1
-                    type: string
-                  routeHost:
-                    description: RouteHost is the HTTP Host value used with the provider
-                      router.
                     type: string
                   templateRef:
                     description: TemplateRef is the resolved actor template.
@@ -460,8 +562,10 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               endpoint:
-                description: Endpoint is the resolved non-secret endpoint used by
-                  workers.
+                description: |-
+                  Endpoint is the resolved non-secret endpoint used by workers. For
+                  Substrate MCP actor Tools it is the Orka API MCP proxy path, relative to
+                  the Orka API base URL; the Substrate router is never exposed.
                 type: string
               error:
                 description: Error is the error message if the tool is unavailable
@@ -571,7 +675,7 @@ spec:
         x-kubernetes-validations:
         - message: a forwarding tool must not share a name with a built-in tool
           rule: '!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name
-            in [''bash'',''edit'',''glob'',''grep'',''read'',''webfetch'',''websearch'',''write'',''check_messages'',''check_pull_request_ci'',''comment_on_issue'',''create_pull_request'',''delegate_task'',''get_issue'',''list_connections'',''list_issues'',''list_pull_requests'',''post_review_comment'',''propose_memory'',''recall_memory'',''remember'',''reply_in_conversation'',''review_pull_request'',''run_validation'',''search_transcript'',''send_message'',''wait_for_tasks'',''web_fetch'',''web_search''])'
+            in [''bash'',''edit'',''glob'',''grep'',''read'',''webfetch'',''websearch'',''write'',''check_messages'',''check_pull_request_ci'',''comment_on_issue'',''create_pull_request'',''delegate_task'',''get_issue'',''list_connections'',''list_issues'',''list_pull_requests'',''park_until'',''post_review_comment'',''propose_memory'',''recall_memory'',''remember'',''reply_in_conversation'',''review_pull_request'',''run_validation'',''search_transcript'',''send_message'',''wait_for_tasks'',''web_fetch'',''web_search''])'
         - message: a forwarding tool that allows writes must have a name of at most
             247 characters
           rule: '!has(self.spec.http) || !has(self.spec.http.forward) || !has(self.spec.http.forward.writes)

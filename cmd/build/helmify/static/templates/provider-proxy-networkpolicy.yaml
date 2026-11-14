@@ -20,6 +20,18 @@ spec:
             matchLabels:
               orka.ai/network-role: provider-client
       ports: [{protocol: TCP, port: 8080}]
+    {{- with .Values.providerProxy.substrateEgressGateway }}
+    {{- if .enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "providerProxy.substrateEgressGateway.namespace is required" .namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- required "providerProxy.substrateEgressGateway.podLabels is required" .podLabels | toYaml | nindent 14 }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:

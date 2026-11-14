@@ -263,3 +263,40 @@ func TestClockMonitorChecksUntilStopped(t *testing.T) {
 		t.Fatal("the monitor did not stop")
 	}
 }
+
+// unreportedClockStore describes the same dataset as the store it wraps but
+// reports no clock.
+type unreportedClockStore struct{ *skewedClockStore }
+
+func (s unreportedClockStore) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	info, err := s.Store.Describe(ctx)
+	info.ObservedAt = time.Time{}
+	return info, err
+}
+
+// When separate bindings describe the same dataset, a response without
+// ObservedAt does not suppress a skew the other binding reports, whichever
+// decides first. The bindings are checked in a fixed order with shared
+// claims, as CheckClocks runs them concurrently.
+func TestClockCheckSkewIsNotSuppressedByAnUnreportedClock(t *testing.T) {
+	for _, unreportedFirst := range []bool{true, false} {
+		client, skewed := newSkewedClockClient(t)
+		skewed.set(storagev1.MaxClockSkew+time.Minute, true, nil)
+		unreported := unreportedClockStore{skewed}
+		order := []storagev1.ProviderDescriber{skewed, unreported}
+		if unreportedFirst {
+			order = []storagev1.ProviderDescriber{unreported, skewed}
+		}
+		claims := &clockClaims{claimed: map[string]bool{}}
+		errs := make([]error, 0, len(order))
+		for _, provider := range order {
+			errs = append(errs, client.checkClock(t.Context(), storagev1.StateContract, provider, claims))
+		}
+		if err := errors.Join(errs...); !errors.Is(err, storagev1.ErrNotReady) {
+			t.Fatalf("unreported first %t: check = %v, want ErrNotReady", unreportedFirst, err)
+		}
+		if err := client.SaveResult(t.Context(), "tenant", "task", []byte("refused")); !errors.Is(err, storagev1.ErrClockSkew) {
+			t.Fatalf("unreported first %t: write = %v, want a clock skew refusal", unreportedFirst, err)
+		}
+	}
+}

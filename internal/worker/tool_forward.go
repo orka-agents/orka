@@ -49,11 +49,11 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	if !e.forwarding {
 		return preparedToolRequest{}, fmt.Errorf("tool %q forwards a command-line client's requests and runs only through an ACP runtime", tool.Name)
 	}
-	httpConfig, routeHost, err := toolHTTPConfig(tool)
+	httpConfig, err := toolHTTPConfig(tool)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
-	if routeHost != "" || tool.Spec.MCP != nil || httpConfig.AuthSecretRef != nil || len(httpConfig.Headers) > 0 ||
+	if tool.Spec.MCP != nil || httpConfig.AuthSecretRef != nil || len(httpConfig.Headers) > 0 ||
 		httpConfig.OutboundAccessPolicyRef == nil {
 		return preparedToolRequest{}, errors.New("a forwarding tool takes its credential only from its outbound access policy")
 	}

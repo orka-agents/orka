@@ -146,10 +146,15 @@ expect_reject "harness v1 registration is rejected" "Unsupported value" <<<"$(
   jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
       | .metadata.name = "v1-runtime" | .spec.contractVersion = "orka.harness.v1"' <<<"${RUNTIME_JSON}"
 )"
-expect_reject "runtime contract is required" "contractVersion" <<<"$(
+expect_accept "omitted runtime contract is accepted" <<<"$(
   jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
       | .metadata.name = "unclassified-runtime" | del(.spec.contractVersion)' <<<"${RUNTIME_JSON}"
 )"
+if [[ "$(k -n "${NAMESPACE}" get agentruntime unclassified-runtime -o jsonpath='{.spec.contractVersion}' 2>/dev/null)" == "orka.harness.v2" ]]; then
+  pass "omitted runtime contract defaults to orka.harness.v2"
+else
+  fail "omitted runtime contract defaults to orka.harness.v2"
+fi
 expect_reject "runtime requires pinned capabilities" "pinned instance" <<<"$(
   jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
       | .metadata.name = "v2-no-caps" | .spec.capabilities = {}' <<<"${RUNTIME_JSON}"
@@ -172,6 +177,15 @@ kind: Agent
 metadata: {name: v2-agent, namespace: ${NAMESPACE}}
 spec:
   runtime: {type: codex, contractVersion: orka.harness.v1}
+  model: {name: gpt-5.2-codex}
+EOF
+
+expect_accept "reapplying a built-in Agent without its selector is accepted" <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata: {name: v2-agent, namespace: ${NAMESPACE}}
+spec:
+  runtime: {type: codex}
   model: {name: gpt-5.2-codex}
 EOF
 

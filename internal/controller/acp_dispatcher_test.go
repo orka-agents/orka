@@ -3436,9 +3436,12 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 
 type dispatcherPublisherServerOptions struct {
 	disablePRPresentation bool
-	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
-	inspectPublish        func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest    func(publisher.PullRequestIntent)
+	// resolvedBaselineOID, when set, is the branch head workspace resolution
+	// reports, for example the commit an earlier turn published.
+	resolvedBaselineOID func() string
+	inspectPrepare      func(publisherservice.PublicationPrepareRequest)
+	inspectPublish      func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest  func(publisher.PullRequestIntent)
 }
 
 //nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
@@ -3473,9 +3476,13 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 			if resolvedRef == defaultACPSourceBranch {
 				resolvedRef = "refs/heads/" + defaultACPSourceBranch
 			}
+			baselineOID := strings.Repeat("1", 40)
+			if len(options) > 0 && options[0].resolvedBaselineOID != nil {
+				baselineOID = options[0].resolvedBaselineOID()
+			}
 			writeDispatcherJSON(w, publisherservice.WorkspaceResolveResponse{
 				OperationID: request.Metadata.OperationID, RequestDigest: testControlDigestForDispatcher("workspace-resolve"),
-				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: strings.Repeat("1", 40),
+				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: baselineOID,
 			})
 		case publisherservice.WorkspacePreparePath:
 			var request publisherservice.WorkspacePrepareRequest
@@ -4800,7 +4807,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
@@ -4888,13 +4895,115 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
-		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity ||
 		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// promptAdmissionWorkspacePool turns the reservation fixture's pool into a
+// dedicated execution-workspace pool in the given lifecycle and admission.
+func promptAdmissionWorkspacePool(
+	t *testing.T, kubeClient client.Client, pool *corev1alpha1.RuntimePool, workspace bool,
+	lifecycle corev1alpha1.RuntimePoolLifecycle, admission corev1alpha1.RuntimePoolAdmissionState, annotations map[string]string,
+) *corev1alpha1.RuntimePool {
+	t.Helper()
+	ctx := context.Background()
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if workspace {
+		current.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: "workspace", UID: "workspace-uid"},
+			Workload:     &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{},
+		}
+	}
+	current.Annotations = annotations
+	if err := kubeClient.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Lifecycle, current.Status.AdmissionState = lifecycle, admission
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	return current.DeepCopy()
+}
+
+// A rate-limited prompt that was never accepted is requeued, not held for
+// capacity on the same exact instance, only when that instance is being
+// replaced: always for external runtimes, and for a dedicated
+// execution-workspace pool only while its current state shows a drain,
+// retirement, or eviction. A Serving and Accepting workspace pool, whose 429
+// means its prompt slot is busy, waits for capacity like a shared pool.
+func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
+	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
+	for _, test := range []struct {
+		name        string
+		external    bool
+		workspace   bool
+		lifecycle   corev1alpha1.RuntimePoolLifecycle
+		admission   corev1alpha1.RuntimePoolAdmissionState
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "shared pool serving", lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "shared pool draining", lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+		{name: "external runtime", external: true, want: true},
+		{name: "workspace pool serving and accepting", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "workspace pool accepting with stale eviction marker", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting, annotations: evicted},
+		{name: "workspace pool draining", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed, want: true},
+		{name: "workspace pool evicted before lifecycle update", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionClosed, annotations: evicted, want: true},
+		{name: "workspace pool closed for another reason", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleStarting, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, _, _ := newRuntimePoolReservationTestFixture(t)
+			target := acpDispatchTarget{external: &corev1alpha1.AgentRuntime{}}
+			if !test.external {
+				target = acpDispatchTarget{pool: promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, test.lifecycle, test.admission, test.annotations)}
+			}
+			if got := dispatcher.promptAdmissionRejectionRequeues(context.Background(), target); got != test.want {
+				t.Fatalf("promptAdmissionRejectionRequeues = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+// A prompt waiting for capacity after a 429 stops waiting once its
+// execution-workspace instance starts retiring, so it can be requeued for the
+// replacement instead of failing when the instance changes. A shared pool
+// keeps waiting.
+func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace bool
+		admission corev1alpha1.RuntimePoolAdmissionState
+		instance  harnessv2.RuntimeInstanceID
+		want      error
+	}{
+		{name: "workspace pool draining", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "workspace pool replaced", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionAccepting, instance: "evicted-pod.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "shared pool draining", admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+			dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+			lifecycle := corev1alpha1.RuntimePoolLifecycleDraining
+			if test.admission == corev1alpha1.RuntimePoolAdmissionAccepting {
+				lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+			}
+			current := promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, lifecycle, test.admission, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, test.instance)
+			if lease != nil || !errors.Is(err, test.want) {
+				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
+			}
+		})
 	}
 }
 
