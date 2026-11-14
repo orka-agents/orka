@@ -87,6 +87,8 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.executionWorkspace.dispatchEnabled` | `false` | Enable class-backed ACP dispatch through registered external providers. |
 | `controller.executionWorkspace.workerNamespaces` | `[]` | Grant core read-only Pod observation in native worker namespaces; provider mutation RBAC is separate. |
 | `controller.substrate.mcpToolsEnabled` | `false` | Enable in-tree native Substrate MCP Tool actors and actor pools. |
+| `controller.substrate.egressCredentialProvider` | `""` | Credential provider class the Substrate egress gateway was installed with (only `k8s.io`). Enables MCP Tool `egress[].credential`; empty fails such Tools closed. |
+| `controller.executionWorkspace.allowProviderTokenInSandbox` | `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway. When false they fail admission. |
 | `controller.substrate.podCertificate.enabled` | `false` | Project the controller's Substrate pod-certificate identity and service trust bundle. Required for MCP Tools unless another podidentity-signed client certificate is configured; the router admits only allowlisted pod certificates. |
 | `providerProxy.substrateEgressGateway.enabled` | `false` | Admit the Agent Substrate v1 egress gateway Pods (`namespace`, `podLabels`) to the provider-auth-proxy. Substrate Actors reach the proxy only through that gateway. |
 | `controller.substrate.routerUrl` | `https://atenet-router.ate-system.svc:443` | Substrate router URL for Actor traffic. Must be `https`. |
@@ -432,7 +434,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
+| `--acp-workspace-allow-provider-token-in-sandbox` | `ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX` env or `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway; when false they fail admission |
 | `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
+| `--substrate-egress-credential-provider` | `ORKA_SUBSTRATE_EGRESS_CREDENTIAL_PROVIDER` env or empty | Credential provider class the Substrate egress gateway was installed with (only `k8s.io`); enables MCP Tool egress credentials, which otherwise fail closed. |
 | `--acp-toolboxes-enabled` | `ORKA_ACP_TOOLBOXES_ENABLED` env or `false` | Let built-in Agents declare `runtime.toolboxes`. Off by default; see [Toolboxes](../guides/toolboxes.md) |
 | `--acp-toolbox-allowed-registries` | `ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES` env or `""` | Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing |
 | `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |

@@ -3847,6 +3847,18 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.substrateActor) || !has(object.spec.mcp.substrateActor.egress) || object.spec.mcp.substrateActor.egress.all(rule,
+
+        !has(rule.credential) ||
+        authorizer.group('')
+          .resource('secrets')
+          .namespace(request.namespace)
+          .name(rule.credential.secretRef.name)
+          .check('get').allowed())
+    message: caller is not authorized to get a Secret referenced by an MCP actor egress
+      credential
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

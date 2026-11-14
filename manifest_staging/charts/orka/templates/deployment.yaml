@@ -410,9 +410,15 @@ spec:
             - --enable-workspace-provider-api=true
             - --acp-workspace-dispatch-enabled=true
             {{- end }}
+            {{- if .Values.controller.executionWorkspace.allowProviderTokenInSandbox }}
+            - --acp-workspace-allow-provider-token-in-sandbox=true
+            {{- end }}
             {{- with .Values.controller.substrate }}
             {{- if .mcpToolsEnabled }}
             - --substrate-mcp-tools-enabled=true
+            {{- end }}
+            {{- if .egressCredentialProvider }}
+            - {{ printf "--substrate-egress-credential-provider=%s" .egressCredentialProvider | quote }}
             {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
             {{- if (.podCertificate | default dict).enabled }}

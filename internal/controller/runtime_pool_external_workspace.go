@@ -349,12 +349,23 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		// A gateway-enforced backend has no Pod network to describe: its
 		// runtime reaches only the allowlisted host names, and Core's routed
 		// supervisor calls enter through the backend router.
-		egress, err := r.externalRuntimeEgress(cfg)
+		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider)
 		if err != nil {
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, err.Error())
 		}
 		request.Runtime.Egress = egress
+		if injected && !slices.Contains(required, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection) {
+			required = append(required, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
+		}
 	} else {
+		if nativeProcess && externalProviderSupportsEgressCredentialInjection(registration) {
+			// Credential injection is a gateway feature; without the egress
+			// allowlist there is no gateway policy to inject from, and the
+			// token would reach the sandbox through the bootstrap instead.
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded,
+				"the workspace provider advertises "+string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)+
+					" without "+string(workspacev1alpha1.WorkspaceFeatureEgressAllowlist)+"; refusing to deliver the provider token into the sandbox")
+		}
 		network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
 		if nativeProcess {
 			// Native infrastructure/router ingress is operator-managed. Freeze only
@@ -691,11 +702,61 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 	return err
 }
 
+// externalRuntimeEgressWithProviderToken compiles the native egress allowlist
+// and selects how the runtime receives the provider-proxy bearer. A provider
+// whose gateway enforces credential injection gets the token injected from
+// Core's private provider Secret, so it never enters the sandbox. Otherwise
+// admission fails closed unless the operator explicitly allowed delivering
+// the token into the sandbox through the sealed bootstrap.
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
+	// An origin that cannot be admitted at all is a configuration error, not
+	// a reason to consider delivering the token into the sandbox: report it
+	// on its own.
+	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
+		return nil, false, err
+	}
+	reason := "the workspace provider does not advertise " + string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
+	if externalProviderSupportsEgressCredentialInjection(registration) {
+		if provider == nil || provider.Namespace == "" || provider.Name == "" {
+			return nil, false, fmt.Errorf("provider proxy token injection requires Core's private provider Secret")
+		}
+		egress, err := r.externalRuntimeEgress(cfg, &externalProviderTokenInjection{namespace: provider.Namespace, name: provider.Name})
+		if err == nil {
+			return egress, true, nil
+		}
+		reason = err.Error()
+	}
+	if !r.AllowProviderTokenInSandbox {
+		return nil, false, fmt.Errorf("provider proxy token injection is unavailable (%s); refusing to deliver the provider token into the sandbox without --acp-workspace-allow-provider-token-in-sandbox", reason)
+	}
+	egress, err := r.externalRuntimeEgress(cfg, nil)
+	return egress, false, err
+}
+
+// externalNativeCredentialBootstrap builds the sealed bootstrap payload for
+// the admitted request. When the request injects the provider-proxy token at
+// the egress gateway, the runtime receives only the public placeholder.
+func externalNativeCredentialBootstrap(request *workspacev1alpha1.WorkloadRequest, auth, provider *corev1.Secret) (harnessv2.CredentialBootstrapRequest, error) {
+	injection, err := externalRuntimeProviderTokenInjection(request)
+	if err != nil {
+		return harnessv2.CredentialBootstrapRequest{}, err
+	}
+	providerToken := string(provider.Data[runtimePoolProviderTokenKey])
+	if injection != nil {
+		if injection.namespace != provider.Namespace || injection.name != provider.Name {
+			return harnessv2.CredentialBootstrapRequest{}, workspaceprovider.ErrStaleIdentity
+		}
+		providerToken = externalProviderTokenEgressPlaceholder
+	}
+	bootstrap := harnessv2.CredentialBootstrapRequest{ControllerToken: string(auth.Data[runtimePoolControllerTokenKey]), CapabilitySecret: string(auth.Data[runtimePoolCapabilitySecretKey]), ProviderToken: providerToken}
+	return bootstrap, bootstrap.Validate()
+}
+
 func (r *RuntimePoolReconciler) seedExternalNativeCredentials(ctx context.Context, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (bool, error) {
 	evidence := w.Status.Allocation.Startup
 	p := evidence.Process
-	request := harnessv2.CredentialBootstrapRequest{ControllerToken: string(auth.Data[runtimePoolControllerTokenKey]), CapabilitySecret: string(auth.Data[runtimePoolCapabilitySecretKey]), ProviderToken: string(provider.Data[runtimePoolProviderTokenKey])}
-	if err := request.Validate(); err != nil {
+	request, err := externalNativeCredentialBootstrap(w.Spec.Workload, auth, provider)
+	if err != nil {
 		return false, err
 	}
 	payload, err := json.Marshal(request)

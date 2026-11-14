@@ -32,6 +32,9 @@ const (
 	EnvSubstrateClaimTimeout          = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
 	EnvSubstrateCommandTimeout        = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
 	EnvSubstrateCleanupPolicy         = "ORKA_SUBSTRATE_CLEANUP_POLICY"
+	// EnvSubstrateEgressCredentialProvider names the credential provider class
+	// the Substrate egress gateway was installed with.
+	EnvSubstrateEgressCredentialProvider = "ORKA_SUBSTRATE_EGRESS_CREDENTIAL_PROVIDER"
 )
 
 const (
@@ -67,6 +70,10 @@ type SubstrateConfig struct {
 	ClaimTimeout          time.Duration
 	CommandTimeout        time.Duration
 	CleanupPolicy         corev1alpha1.WorkspaceCleanupPolicy
+	// EgressCredentialProvider is the credential provider class the egress
+	// gateway was installed with (only "k8s.io"). Empty disables MCP Tool
+	// egress credentials: Tools that request one fail closed.
+	EgressCredentialProvider string
 	// EgressPolicyPropagation is how long the egress gateway may apply rules
 	// other than an Actor's stored policy: after the policy is replaced, and
 	// after the Actor is created under a name a deleted Actor may have had.
@@ -168,6 +175,7 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateCleanupPolicy)); value != "" {
 		cfg.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(value)
 	}
+	cfg.EgressCredentialProvider = strings.TrimSpace(getenv(EnvSubstrateEgressCredentialProvider))
 
 	return cfg.WithDefaults(), nil
 }
@@ -235,6 +243,9 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 	}
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")
+	}
+	if provider := strings.TrimSpace(cfg.EgressCredentialProvider); provider != "" && provider != workspace.SubstrateKubernetesSecretsCredentialProvider {
+		return fmt.Errorf("substrate egress credential provider %q is unsupported; only %q is", provider, workspace.SubstrateKubernetesSecretsCredentialProvider)
 	}
 	if cfg.EgressPolicyPropagation < 0 {
 		return fmt.Errorf("substrate egress policy propagation must not be negative")
