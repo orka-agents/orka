@@ -149,3 +149,26 @@ func TestTaskCompletionEndsWithAResultAboveTheLimit(t *testing.T) {
 		require.Equal(t, "stop; task result exceeds the 10485760 byte limit and was not stored", current.Status.Message)
 	})
 }
+
+// A log cut at the stdout read limit is refused whole: the cut can land on a
+// base64 boundary inside the result line, leaving a prefix that decodes below
+// the result limit and would otherwise be stored as the whole result.
+func TestStdoutResultLogCutAtTheReadLimitIsRefused(t *testing.T) {
+	result := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("r"), 3000))
+	prefix := strings.Repeat("d", 100) + "\n" + workerenv.ResultStdoutPrefix
+	log := prefix + result + "\n"
+	// The read stops inside the result line, on a base64 quantum, so the
+	// first limit bytes end in a result prefix that still decodes.
+	limit := int64(len(prefix) + 2000)
+	decoded, ok, err := extractStdoutTaskResult(log[:limit])
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, decoded, 1500)
+
+	// A reader that requests limit+1 bytes sees the longer log and refuses it.
+	_, err = boundedStdoutResultLog(log[:limit+1], limit)
+	require.ErrorIs(t, err, store.ErrTooLarge)
+	got, err := boundedStdoutResultLog(log[:limit], limit)
+	require.NoError(t, err)
+	require.Equal(t, log[:limit], got)
+}

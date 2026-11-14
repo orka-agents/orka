@@ -3583,9 +3583,34 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 	return r.readPodLogsWithOptions(ctx, task, fullPodLogOptions(), true)
 }
 
+// readStdoutResultPodLogs reads the log a stdout result is extracted from. It
+// reads one byte past stdoutResultLogLimitBytes so a log cut at the limit is
+// refused rather than searched: the cut can fall inside the result line and
+// leave a base64 prefix that still decodes, or drop the result line entirely.
 func (r *TaskReconciler) readStdoutResultPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
-	return r.readPodLogsWithOptions(ctx, task, stdoutResultPodLogOptions(), false)
+	opts := stdoutResultPodLogOptions()
+	limit := *opts.LimitBytes + 1
+	opts.LimitBytes = &limit
+	logs, err := r.readPodLogsWithOptions(ctx, task, opts, false)
+	if err != nil {
+		return "", err
+	}
+	return boundedStdoutResultLog(logs, stdoutResultLogLimitBytes)
 }
+
+// boundedStdoutResultLog refuses a log read past limit, which a reader that
+// requested limit+1 bytes sees as a longer log.
+func boundedStdoutResultLog(logs string, limit int64) (string, error) {
+	if int64(len(logs)) > limit {
+		return "", errStdoutResultLogTooLarge
+	}
+	return logs, nil
+}
+
+// errStdoutResultLogTooLarge reports a stdout result log longer than
+// stdoutResultLogLimitBytes. The log does not shrink on retry, so like an
+// oversized result it is permanent.
+var errStdoutResultLogTooLarge = fmt.Errorf("%w: task log exceeds the %d byte stdout result read limit", store.ErrTooLarge, stdoutResultLogLimitBytes)
 
 func fullPodLogOptions() corev1.PodLogOptions {
 	limit := podLogLimitBytes
