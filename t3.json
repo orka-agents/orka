@@ -23,6 +23,26 @@
       "name": "Lint",
       "command": "make lint-fix",
       "icon": "lint"
+    },
+    {
+      "name": "Generate",
+      "command": "make manifests generate",
+      "icon": "build"
+    },
+    {
+      "name": "Kind Up",
+      "command": ".agents/skills/kindctl/bin/kindctl create",
+      "icon": "configure"
+    },
+    {
+      "name": "Kind Deploy",
+      "command": ".agents/skills/kindctl/bin/kindctl exec -- sh -c '.agents/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh --cluster \"$(basename \"$KUBECONFIG\" .kubeconfig)\"'",
+      "icon": "build"
+    },
+    {
+      "name": "Kind Down",
+      "command": ".agents/skills/kindctl/bin/kindctl delete",
+      "icon": "configure"
     }
   ]
 }
