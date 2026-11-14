@@ -105,6 +105,11 @@ func TestEligibilityRejectsInputsAContinuationCannotInherit(t *testing.T) {
 	if err := Eligibility(base); err != nil {
 		t.Fatalf("eligible Task rejected: %v", err)
 	}
+	withAgent := base.DeepCopy()
+	withAgent.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Agent: &corev1alpha1.AgentExecutionAgentRef{Name: "reviewer"}}
+	if err := Eligibility(withAgent); err != nil {
+		t.Fatalf("Task bound to an Agent without an identity rejected: %v", err)
+	}
 	cases := map[string]func(*corev1alpha1.Task){
 		"no session":  func(task *corev1alpha1.Task) { task.Spec.SessionRef = nil },
 		"no append":   func(task *corev1alpha1.Task) { task.Spec.SessionRef.Append = false },
@@ -117,6 +122,16 @@ func TestEligibilityRejectsInputsAContinuationCannotInherit(t *testing.T) {
 		},
 		"bad index": func(task *corev1alpha1.Task) {
 			task.Annotations = map[string]string{labels.AnnotationContinuationIndex: "x"}
+		},
+		"identity-bound Agent": func(task *corev1alpha1.Task) {
+			task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Agent: &corev1alpha1.AgentExecutionAgentRef{
+				Name: "reviewer", Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: "reviewer"},
+			}}
+		},
+		"Delegated identity": func(task *corev1alpha1.Task) {
+			task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Agent: &corev1alpha1.AgentExecutionAgentRef{
+				Name: "reviewer", Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: "reviewer", ActsForRequester: true},
+			}}
 		},
 	}
 	for name, mutate := range cases {

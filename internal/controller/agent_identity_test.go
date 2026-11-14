@@ -446,6 +446,28 @@ func TestAgentExecutionIdentityRefusesAFork(t *testing.T) {
 	}
 }
 
+// A parked turn's continuation is created by the controller, so its creation
+// was never checked for an identity its Agent gained while the turn waited.
+func TestAgentExecutionIdentityRefusesAContinuation(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r := &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(),
+		Identity: testIdentityConfig(),
+	}
+	for name, objectMeta := range map[string]metav1.ObjectMeta{
+		"continuation label":      {Labels: map[string]string{labels.LabelContinuationOf: "parked"}},
+		"continuation annotation": {Annotations: map[string]string{labels.AnnotationContinuationOfUID: "parked-uid"}},
+	} {
+		objectMeta.Name, objectMeta.Namespace, objectMeta.CreationTimestamp = "parked-resume-0123456789", testNS, metav1.Now()
+		continuation := &corev1alpha1.Task{
+			ObjectMeta: objectMeta,
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+		}
+		_, err := r.agentExecutionIdentity(context.Background(), continuation, agent)
+		requirePermanentIdentityRefusal(t, name, err, "continuation cannot use identity-bound Agent")
+	}
+}
+
 func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err        error

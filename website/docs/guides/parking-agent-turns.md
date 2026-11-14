@@ -40,6 +40,7 @@ A Task can park only when all of these hold:
 | The Task is not a gateway conversation turn (`promptIncluded`/`throughMessageID`) | The gateway starts the next turn itself. |
 | No `spec.transaction` | A continuation cannot inherit a transaction token. Orka fails closed rather than re-issue one. |
 | No `spec.schedule` or `spec.priorTaskRef` | Neither can be inherited safely by a later turn. |
+| The Task's Agent is not identity-bound | Orka, not the requester, creates the continuation, so it cannot re-prove the identity delegation. A continuation whose Agent gained an identity while the turn waited is refused too. |
 | The chain has fewer than 32 continuations | Bounds runaway park loops. |
 
 ## What the agent calls
@@ -148,7 +149,8 @@ phase `Pending` with a `WaitingForCapacity` reason instead of failing.
   `issues` and `pull_request` events, and they go to repository monitors, not to Tasks.
   Until review and check events are routed to Tasks, park on a `timer` and check again with
   `check_pull_request_ci`.
-- Gateway conversations, transaction-bound Tasks, and external `runtimeRef` agents.
+- Gateway conversations, transaction-bound Tasks, Tasks of identity-bound Agents, and external
+  `runtimeRef` agents.
 
 The design and its safety boundaries are recorded in
 [ADR 0041](https://github.com/orka-agents/orka/blob/main/docs/adr/0041-data-only-parked-turns.md).

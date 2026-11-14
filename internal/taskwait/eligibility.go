@@ -91,10 +91,22 @@ func Eligibility(task *corev1alpha1.Task) error {
 		return wrap("scheduled Tasks cannot park")
 	case task.Spec.PriorTaskRef != nil:
 		return wrap("Tasks that apply a prior Task's diff cannot park")
+	case boundToAgentIdentity(task):
+		return wrap("Tasks bound to an identity-bound Agent cannot park; a continuation cannot prove the identity delegation its parked turn was checked for")
 	case ChainIndex(task) >= MaxChainLength:
 		return wrap("this Task's continuation chain is at its limit")
 	}
 	return nil
+}
+
+// boundToAgentIdentity reports whether the Task's binding froze an Agent
+// identity. A continuation is created by the controller, not the requester,
+// so it cannot re-prove the delegation: a Delegated identity would restart its
+// maximum age at the wake, and a delegated child loses the parent control its
+// identity requires.
+func boundToAgentIdentity(task *corev1alpha1.Task) bool {
+	binding := task.Status.AgentExecutionBinding
+	return binding != nil && binding.Agent != nil && binding.Agent.Identity != nil
 }
 
 func wrap(message string) error {

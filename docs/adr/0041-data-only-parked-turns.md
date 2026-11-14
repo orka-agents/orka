@@ -47,7 +47,10 @@ parked turn is that continuation, created by Orka when the awaited event arrives
   attempt, prompt, and operation digest.
 - Parking is refused for Tasks without an appending `sessionRef`, gateway conversation
   turns, transaction-bound Tasks (a continuation cannot safely inherit a TxToken),
-  scheduled or prior-diff Tasks, and chains already 32 continuations long.
+  scheduled or prior-diff Tasks, Tasks bound to an Agent identity (the controller creates
+  the continuation, so it cannot re-prove the delegation, and admission refuses a
+  continuation whose Agent gained an identity while it waited), and chains already 32
+  continuations long.
 
 ### Arm only at an idle boundary
 
