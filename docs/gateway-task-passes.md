@@ -12,6 +12,8 @@ Configure `--gateway-task-pass-credentials-file` with a controller-only mounted 
 
 A marked Tool uses `http.gatewayTaskPass: true` and a fixed HTTPS POST URL exactly `<authenticated-gateway-origin>/v1/task-tools/<toolName>`. It cannot configure headers, authSecretRef, outbound policy, body auth, MCP, forwarding, query parameters or URL interpolation. Generic health probes are skipped; readiness is checked under Task authority per call. The existing Gateway endpoint policy governs issuance and execution transport; redirects are refused.
 
+Expose a marked Tool by setting `brokeredToolClass` and listing it in the Agent's `runtime.defaultAllowedTools`. Codex cannot enforce a narrower native tool list, so outside read-intent workspaces a Codex Agent must also allow every Codex native tool (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`) with `defaultAllowBash: true`; otherwise the Task fails before execution.
+
 ## Gateway contract
 
 For each call the controller makes HTTPS `POST /v1/task-passes` at the frozen origin, authenticated only by the dedicated target credential. The JSON body contains:
