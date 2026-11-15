@@ -33,7 +33,12 @@ resolve_source() (
                 if test -L "$candidate"; then
                     links=$((links + 1))
                     test "$links" -le 40 || fail "too many source symlinks"
-                    target=$(readlink "$candidate")
+                    # Keep trailing newlines until validation; command substitution
+                    # would otherwise validate a different target than cp preserves.
+                    target=$(readlink -n "$candidate" && printf '.') || fail "cannot read source symlink: $candidate"
+                    target=${target%.}
+                    case "$target" in *'
+'*) fail "source symlink target must not contain newlines" ;; esac
                     case "$target" in /*) resolved= ;; esac
                     pending=$target${pending:+/$pending}
                 else

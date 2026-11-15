@@ -22,7 +22,8 @@ shebang, or prove that an interpreter/shared library can run. Internal venv
 symlinks remain symlinks when copied; their targets outside the overlay remain
 in the inherited source image.
 
-Symlinked overlay roots or parent directories are rejected. An `agent.yaml`
+Symlinked overlay roots or parent directories and newline-containing symlink
+targets encountered during validation are rejected. An `agent.yaml`
 symlink may point within `/agent`, but an external target is rejected because
 normalizing its metadata would require changing a fifth tree. These restrictions
 are narrower than the old shell's behavior for unusual source-image layouts.

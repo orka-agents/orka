@@ -94,6 +94,28 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(os.readlink(self.overlay / "opt/agentkit/bin/agentkit-serve"), "/usr/local/bin/python")
 
+    def test_executable_symlink_with_trailing_newlines_is_rejected(self):
+        serve = self.root / "opt/agentkit/bin/agentkit-serve"
+        serve.unlink()
+        for index, target in enumerate(("/usr/local/bin/python\n", "/usr/local/bin/python\n\n", "python\n")):
+            with self.subTest(target=target):
+                self.overlay = Path(self.temp.name) / f"prepared-{index}"
+                serve.symlink_to(target)
+                try:
+                    result = self.prepare()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(self.overlay.exists())
+                finally:
+                    serve.unlink()
+
+    def test_config_symlink_with_trailing_newline_is_rejected(self):
+        config = self.root / "agent/agent.yaml"
+        config.rename(self.root / "agent/config.yaml")
+        config.symlink_to("config.yaml\n")
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.overlay.exists())
+
     def test_missing_optional_directories_are_created_with_original_modes(self):
         (self.root / "sessions/existing").unlink()
         (self.root / "sessions").rmdir()
