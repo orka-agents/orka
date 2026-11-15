@@ -101,6 +101,14 @@ func writeKubeconfig(t *testing.T, dir string, config *clientcmdapi.Config) stri
 	return path
 }
 
+// kubeconfigNamespace, extractToken and kubeconfigIdentity read the current
+// context of the kubeconfig at path.
+func kubeconfigNamespace(path string) string { return currentKubeconfigContext(path).namespace }
+
+func extractToken(path string) (string, error) { return currentKubeconfigContext(path).token() }
+
+func kubeconfigIdentity(path string) string { return currentKubeconfigContext(path).identity }
+
 func TestKubeconfigNamespace_WithNamespace(t *testing.T) {
 	dir := t.TempDir()
 
@@ -213,7 +221,8 @@ func TestExtractToken_WithTokenFile(t *testing.T) {
 	dir := t.TempDir()
 
 	tokenFile := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenFile, []byte("file-token"), 0o600); err != nil {
+	// A token file usually ends in a newline, which is not part of the token.
+	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

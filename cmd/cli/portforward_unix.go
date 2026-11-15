@@ -14,20 +14,68 @@ import (
 	"syscall"
 )
 
-// processStartMark is not recorded here: the owner and command line of a
-// process identify the forward.
-func processStartMark(int) string { return "" }
+// readsProcFS is whether this system's processes are read from /proc rather
+// than with ps.
+const readsProcFS = runtime.GOOS == "linux"
 
-// portForwardProcessRunning reports whether the cached PID is a process of the
-// current user running the kubectl port-forward the CLI started.
+// processStartMark returns when process pid started, or "" when it cannot be
+// read. A later process that reuses the PID has a different mark. On Linux it
+// is the start time in clock ticks since boot from /proc; elsewhere it is ps's
+// lstart, to the second.
+func processStartMark(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	if !readsProcFS {
+		return psStartMark(pid)
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	// The command name in parentheses can hold spaces and parentheses, so
+	// fields are counted after the last ')'. The first is field 3, state, and
+	// starttime is field 22.
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return ""
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) < 20 {
+		return ""
+	}
+	return fields[19]
+}
+
+// psStartMark reads when process pid started with ps, or "" when it cannot.
+func psStartMark(pid int) string {
+	ps := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid))
+	// lstart is in local time and the locale's format; fix both so the mark
+	// does not change with the shell's settings.
+	ps.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC")
+	out, err := ps.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(string(out)), " ")
+}
+
+// portForwardProcessRunning reports whether the cached PID is still the
+// process the CLI started: a process of the current user, running the kubectl
+// command line the CLI started, created when that process was.
 func portForwardProcessRunning(cached *portForwardCache) bool {
+	if cached.ProcessStart == "" {
+		return false
+	}
 	uid, args, ok := processOwnerAndArgs(cached.PID)
-	return ok && isOwnPortForward(uid, args, cached)
+	// The start time is read last: if the PID was reused after the command
+	// line was read, the mark is the new process's and does not match.
+	return ok && isOwnPortForward(uid, args, cached) && processStartMark(cached.PID) == cached.ProcessStart
 }
 
 // processOwnerAndArgs returns the user ID and command line of process pid.
 func processOwnerAndArgs(pid int) (int, []string, bool) {
-	if runtime.GOOS != "linux" {
+	if !readsProcFS {
 		return psOwnerAndArgs(pid)
 	}
 	// Read the command line before the owner: if the PID is reused in

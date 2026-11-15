@@ -245,26 +245,34 @@ func TestLoadPortForwardCacheInvalidJSON(t *testing.T) {
 	}
 }
 
+// clearPortForwardCache removes only the forward for the command's context and
+// namespace.
 func TestClearPortForwardCache(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	kubeconfig := writeTokenKubeconfig(t, "clear", "")
-	identity := kubeconfigIdentity(kubeconfig)
-
-	// Save then clear
-	cache := &portForwardCache{
-		Port:        12345,
-		PID:         1,
-		Service:     "svc",
-		Namespace:   "ns",
-		KubeContext: identity,
+	kc := currentKubeconfigContext(kubeconfig)
+	keys := map[string]string{}
+	for _, ns := range []string{"team-a", "team-b"} {
+		keys[ns] = kubeTarget{kubeconfigContext: kc, selectedNamespace: ns}.cacheKey()
+		savePortForwardCache(&portForwardCache{Port: 12345, PID: 1, Service: "svc", Namespace: ns, KubeContext: keys[ns]})
 	}
-	savePortForwardCache(cache)
 
-	clearPortForwardCache(kubeconfig)
+	root := newRootCmd()
+	root.SetArgs([]string{"--kubeconfig", kubeconfig, "--namespace", "team-a"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		clearPortForwardCache(cmd)
+		return nil
+	}
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
 
-	if _, err := os.Stat(portForwardCachePath(identity)); !os.IsNotExist(err) {
-		t.Error("expected the context's forward cache to be removed after clear")
+	if _, err := os.Stat(portForwardCachePath(keys["team-a"])); !os.IsNotExist(err) {
+		t.Error("expected the forward cache for the selected namespace to be removed after clear")
+	}
+	if _, err := os.Stat(portForwardCachePath(keys["team-b"])); err != nil {
+		t.Errorf("the forward cache for another namespace was removed: %v", err)
 	}
 }
 
@@ -460,7 +468,7 @@ func TestNewClientFromCmd_FallbackDefaultServer(t *testing.T) {
 }
 
 func TestBuildRESTConfig_BadPath(t *testing.T) {
-	_, err := buildRESTConfig("/nonexistent/kubeconfig")
+	_, err := currentKubeconfigContext("/nonexistent/kubeconfig").clientConfig().ClientConfig()
 	if err == nil {
 		t.Error("expected error for nonexistent kubeconfig")
 	}
@@ -535,14 +543,15 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 	}
 
 	// Save a port-forward cache pointing to our test server, started for the
-	// same kubeconfig context by a process that still holds the port.
+	// same kubeconfig context and namespace by a process that still holds the
+	// port.
 	trustCachedForwards(t)
 	savePortForwardCache(&portForwardCache{
 		Port:        port,
 		PID:         1,
 		Service:     "orka-api",
 		Namespace:   "orka-system",
-		KubeContext: kubeconfigIdentity(kubePath),
+		KubeContext: kubeTarget{kubeconfigContext: currentKubeconfigContext(kubePath), selectedNamespace: "ns"}.cacheKey(),
 	})
 
 	root := newRootCmd()

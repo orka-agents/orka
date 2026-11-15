@@ -14,13 +14,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/orka-agents/orka/internal/cli/client"
@@ -109,8 +112,8 @@ func (s *agentListServer) port(t *testing.T) int {
 // tests never need a cluster or kubectl.
 func stubKubeconfigTransport(
 	t *testing.T,
-	discover func(kubeconfigPath, ns string) (string, string),
-	forward func(kubeconfigPath, ns, svc string, isolateInterrupt bool) (int, int, func(), error),
+	discover func(target kubeTarget) (string, string),
+	forward func(kc kubeconfigContext, ns, svc string, isolateInterrupt bool) (int, int, func(), error),
 ) {
 	t.Helper()
 	origDiscover, origForward := discoverServiceFn, startPortForwardFn
@@ -121,11 +124,11 @@ func stubKubeconfigTransport(
 func failDiscovery(t *testing.T) {
 	t.Helper()
 	stubKubeconfigTransport(t,
-		func(string, string) (string, string) {
+		func(kubeTarget) (string, string) {
 			t.Error("unexpected Service discovery")
 			return "", ""
 		},
-		func(string, string, string, bool) (int, int, func(), error) {
+		func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
 			t.Error("unexpected port-forward")
 			return 0, 0, nil, os.ErrInvalid
 		})
@@ -206,11 +209,11 @@ func TestKubeconfigTokenIsNotSentToTheDefaultServer(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	discovered := false
 	stubKubeconfigTransport(t,
-		func(string, string) (string, string) {
+		func(kubeTarget) (string, string) {
 			discovered = true
 			return "", ""
 		},
-		func(string, string, string, bool) (int, int, func(), error) {
+		func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
 			t.Error("unexpected port-forward")
 			return 0, 0, nil, os.ErrInvalid
 		})
@@ -229,8 +232,8 @@ func TestKubeconfigTokenIsNotSentWhenThePortForwardFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	forwarded := false
 	stubKubeconfigTransport(t,
-		func(string, string) (string, string) { return "orka-system", "orka" },
-		func(string, string, string, bool) (int, int, func(), error) {
+		func(kubeTarget) (string, string) { return "orka-system", "orka" },
+		func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
 			forwarded = true
 			return 0, 0, nil, os.ErrDeadlineExceeded
 		})
@@ -247,41 +250,86 @@ func TestKubeconfigTokenIsNotSentWhenThePortForwardFails(t *testing.T) {
 
 // When the CLI reaches Orka by discovering its Service and port-forwarding
 // through the kubeconfig, it authenticates as the kubeconfig user. Discovery
-// looks in the context's namespace first, but the request names no namespace:
-// the server uses the one it watches, whatever the context or the Service's
-// namespace is.
+// looks in the selected namespace first, then in the context's. Requests name
+// only the selected namespace: without one, the server uses the one it
+// watches, whatever the context or the Service's namespace is. Each namespace
+// selection keeps its own cached forward.
 func TestDiscoveredServiceUsesKubeconfigToken(t *testing.T) {
-	for _, contextNamespace := range []string{"", "team-a"} {
-		t.Run("context namespace "+strconv.Quote(contextNamespace), func(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		contextNamespace string
+		args             []string
+		env, config      string
+		selected         string
+		wantSearch       []string
+	}{
+		{name: "no namespace", wantSearch: []string{"orka-system", "orka", "default"}},
+		{name: "context namespace", contextNamespace: "team-a", wantSearch: []string{"team-a", "orka-system", "orka", "default"}},
+		{
+			name: "--namespace", contextNamespace: "team-a", args: []string{"--namespace", "team-b"}, selected: "team-b",
+			wantSearch: []string{"team-b", "team-a", "orka-system", "orka", "default"},
+		},
+		{name: envNamespace, env: "team-b", selected: "team-b", wantSearch: []string{"team-b", "orka-system", "orka", "default"}},
+		{name: "config namespace", config: "team-b", selected: "team-b", wantSearch: []string{"team-b", "orka-system", "orka", "default"}},
+		{
+			name: "selected namespace is the context's", contextNamespace: "orka-system", args: []string{"-n", "orka-system"},
+			selected: "orka-system", wantSearch: []string{"orka-system", "orka", "default"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			if tc.env != "" {
+				t.Setenv(envNamespace, tc.env)
+			}
+			if tc.config != "" {
+				require.NoError(t, saveConfig(orkaConfig{Namespace: tc.config}))
+			}
 			api := newAgentListServer(t)
-			kubeconfig := writeTokenKubeconfig(t, "discovered", contextNamespace)
-			var searched string
+			kubeconfig := writeTokenKubeconfig(t, "discovered", tc.contextNamespace)
+			var searched []string
+			var forwardedThrough kubeconfigContext
 			stubKubeconfigTransport(t,
-				func(path, ns string) (string, string) {
-					require.Equal(t, kubeconfig, path)
-					searched = ns
+				func(target kubeTarget) (string, string) {
+					require.Equal(t, kubeconfig, target.path)
+					require.Equal(t, "discovered", target.name)
+					searched = target.discoveryNamespaces()
 					return "orka-system", "orka"
 				},
-				func(path, ns, svc string, _ bool) (int, int, func(), error) {
-					require.Equal(t, kubeconfig, path)
+				func(kc kubeconfigContext, ns, svc string, _ bool) (int, int, func(), error) {
+					forwardedThrough = kc
 					require.Equal(t, "orka-system", ns)
 					require.Equal(t, "orka", svc)
-					return api.port(t), 4242, func() {}, nil
+					// This process stands in for kubectl, so it has a start time.
+					return api.port(t), os.Getpid(), func() {}, nil
 				})
 
-			require.NoError(t, executeCLI(t, "--kubeconfig", kubeconfig, "agent", "list"))
+			require.NoError(t, executeCLI(t, append([]string{"--kubeconfig", kubeconfig, "agent", "list"}, tc.args...)...))
 			got := api.only(t)
 			require.Equal(t, "Bearer "+kubeconfigBearer, got.authorization)
-			require.False(t, got.hasNamespace, "namespace = %q, want the server to choose", got.namespace)
-			require.Equal(t, contextNamespace, searched)
+			require.Equal(t, tc.selected != "", got.hasNamespace)
+			require.Equal(t, tc.selected, got.namespace)
+			require.Equal(t, tc.wantSearch, searched)
+			require.Equal(t, currentKubeconfigContext(kubeconfig), forwardedThrough)
 
 			identity := kubeconfigIdentity(kubeconfig)
 			require.NotEmpty(t, identity)
-			cached := loadPortForwardCache(identity)
+			key := kubeTarget{kubeconfigContext: forwardedThrough, selectedNamespace: tc.selected}.cacheKey()
+			cached := loadPortForwardCache(key)
 			require.NotNil(t, cached)
-			require.Equal(t, identity, cached.KubeContext)
-			require.Equal(t, 4242, cached.PID)
+			require.Equal(t, key, cached.KubeContext)
+			require.Equal(t, os.Getpid(), cached.PID)
+			require.Equal(t, processStartMark(os.Getpid()), cached.ProcessStart)
+			if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+				require.NotEmpty(t, cached.ProcessStart, "the forward's start time was not recorded")
+			}
+			require.Equal(t, []string{
+				"kubectl", "--kubeconfig", kubeconfig, "--context", "discovered",
+				"port-forward", "-n", "orka-system", "svc/orka", fmt.Sprintf("%d:8080", api.port(t)),
+			}, cached.Command)
+			if tc.selected != "" {
+				require.NotEqual(t, identity, key)
+				require.Nil(t, loadPortForwardCache(identity), "a forward found for one namespace was cached for none")
+			}
 		})
 	}
 }
@@ -293,8 +341,10 @@ func TestDiscoveredServicePrefersConfiguredToken(t *testing.T) {
 	t.Setenv(envToken, "env-token")
 	api := newAgentListServer(t)
 	stubKubeconfigTransport(t,
-		func(string, string) (string, string) { return "orka-system", "orka" },
-		func(string, string, string, bool) (int, int, func(), error) { return api.port(t), 4242, func() {}, nil })
+		func(kubeTarget) (string, string) { return "orka-system", "orka" },
+		func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
+			return api.port(t), 4242, func() {}, nil
+		})
 
 	require.NoError(t, executeCLI(t, "--kubeconfig", writeTokenKubeconfig(t, "discovered", ""), "agent", "list"))
 	require.Equal(t, "Bearer env-token", api.only(t).authorization)
@@ -333,6 +383,8 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 		// cache writes the stale forward for the current kubeconfig.
 		cache   func(t *testing.T, kubeconfig string, port int)
 		process bool
+		// namespace is passed as --namespace when set.
+		namespace string
 	}{
 		{
 			name: "forward process gone", kubeconfig: currentKubeconfig, process: false,
@@ -340,6 +392,44 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
 					KubeContext: kubeconfigIdentity(kubeconfig),
+				})
+			},
+		},
+		{
+			// Discovery searched another namespace first for that forward, so
+			// it can reach another installation.
+			name: "other context namespace", kubeconfig: currentKubeconfig, process: true,
+			cache: func(t *testing.T, kubeconfig string, port int) {
+				config, err := clientcmd.LoadFromFile(kubeconfig)
+				require.NoError(t, err)
+				original := *config.Contexts["current"]
+				config.Contexts["current"].Namespace = "team-a"
+				require.NoError(t, clientcmd.WriteToFile(*config, kubeconfig))
+				savePortForwardCache(&portForwardCache{
+					Port: port, PID: 4242, Service: "orka", Namespace: "team-a",
+					KubeContext: kubeconfigIdentity(kubeconfig),
+				})
+				config.Contexts["current"] = &original
+				require.NoError(t, clientcmd.WriteToFile(*config, kubeconfig))
+			},
+		},
+		{
+			name: "no namespace selected for the forward", kubeconfig: currentKubeconfig, process: true, namespace: "team-b",
+			cache: func(t *testing.T, kubeconfig string, port int) {
+				savePortForwardCache(&portForwardCache{
+					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
+					KubeContext: kubeconfigIdentity(kubeconfig),
+				})
+			},
+		},
+		{
+			name: "other namespace selected for the forward", kubeconfig: currentKubeconfig, process: true, namespace: "team-b",
+			cache: func(t *testing.T, kubeconfig string, port int) {
+				savePortForwardCache(&portForwardCache{
+					Port: port, PID: 4242, Service: "orka", Namespace: "team-a",
+					KubeContext: kubeTarget{
+						kubeconfigContext: currentKubeconfigContext(kubeconfig), selectedNamespace: "team-a",
+					}.cacheKey(),
 				})
 			},
 		},
@@ -384,84 +474,262 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 			stubPortForwardProcess(t, func(*portForwardCache) bool { return tc.process })
 			discovered := false
 			stubKubeconfigTransport(t,
-				func(string, string) (string, string) {
+				func(kubeTarget) (string, string) {
 					discovered = true
 					return "", ""
 				},
-				func(string, string, string, bool) (int, int, func(), error) {
+				func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
 					t.Error("unexpected port-forward")
 					return 0, 0, nil, os.ErrInvalid
 				})
 
-			c, err := resolveWith(t, "--kubeconfig", kubeconfig)
+			args := []string{"--kubeconfig", kubeconfig}
+			if tc.namespace != "" {
+				args = append(args, "--namespace", tc.namespace)
+			}
+			c, err := resolveWith(t, args...)
 			require.NoError(t, err)
 			require.True(t, discovered, "the CLI reused a forward it cannot trust")
 			require.Equal(t, defaultServer, c.BaseURL)
 			require.Empty(t, c.Token)
-			require.Empty(t, c.Namespace)
+			require.Equal(t, tc.namespace, c.Namespace)
 		})
 	}
 }
 
+// The CLI reads the current context once. Switching contexts while it
+// discovers the Service does not move the port-forward, its cache entry or the
+// bearer token to the new context.
+func TestContextSwitchWhileConnectingKeepsTheFirstContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	config := clientcmdapi.NewConfig()
+	for _, name := range []string{"a", "b"} {
+		config.Contexts[name] = &clientcmdapi.Context{Cluster: "cluster-" + name, AuthInfo: "user-" + name}
+		config.Clusters["cluster-"+name] = &clientcmdapi.Cluster{Server: "https://" + name + ".k8s.invalid"}
+		config.AuthInfos["user-"+name] = &clientcmdapi.AuthInfo{Token: "token-" + name}
+	}
+	config.CurrentContext = "a"
+	kubeconfig := writeKubeconfig(t, dir, config)
+	contextA := currentKubeconfigContext(kubeconfig)
+	require.NotEmpty(t, contextA.identity)
+
+	api := newAgentListServer(t)
+	stubKubeconfigTransport(t,
+		func(target kubeTarget) (string, string) {
+			require.Equal(t, "a", target.name)
+			// Switch contexts and change context a's credential: the CLI
+			// keeps the kubeconfig it read.
+			config.CurrentContext = "b"
+			config.AuthInfos["user-a"].Token = "token-a-changed"
+			writeKubeconfig(t, dir, config)
+			return "orka-system", "orka"
+		},
+		func(kc kubeconfigContext, _, _ string, _ bool) (int, int, func(), error) {
+			require.Equal(t, contextA, kc)
+			return api.port(t), 4242, func() {}, nil
+		})
+
+	require.NoError(t, executeCLI(t, "--kubeconfig", kubeconfig, "agent", "list"))
+	require.Equal(t, "Bearer token-a", api.only(t).authorization)
+	cached := loadPortForwardCache(contextA.identity)
+	require.NotNil(t, cached, "the forward through context a was not cached for it")
+	require.Contains(t, strings.Join(cached.Command, " "), "--context a ")
+
+	contextB := currentKubeconfigContext(kubeconfig)
+	require.Equal(t, "b", contextB.name)
+	require.NotEqual(t, contextA.identity, contextB.identity)
+	require.Nil(t, loadPortForwardCache(contextB.identity), "the forward through context a was cached for context b")
+}
+
+// kubectl reads the kubeconfig again when it starts. If the context the CLI
+// read no longer reaches the same cluster, or cannot be read, the CLI stops
+// that forward and sends the context's token nowhere. A change that cannot
+// move kubectl to another cluster keeps the forward.
+func TestContextRedefinedWhileConnectingDropsTheForward(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*clientcmdapi.Config)
+		drop   bool
+	}{
+		{name: "another server", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].Server = "https://other.k8s.invalid"
+		}},
+		{name: "another CA", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].CertificateAuthorityData = []byte("other-ca")
+		}},
+		{name: "another CA file", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].CertificateAuthority = "/tmp/other-ca.crt"
+		}},
+		{name: "another proxy", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].ProxyURL = "socks5://127.0.0.1:1080"
+		}},
+		{name: "another TLS server name", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].TLSServerName = "api.internal"
+		}},
+		{name: "TLS verification off", drop: true, change: func(c *clientcmdapi.Config) {
+			c.Clusters["cluster-a"].InsecureSkipTLSVerify = true
+		}},
+		{name: "context removed", drop: true, change: func(c *clientcmdapi.Config) { delete(c.Contexts, "a") }},
+		{name: "another namespace", change: func(c *clientcmdapi.Config) { c.Contexts["a"].Namespace = "team-b" }},
+		{name: "another token", change: func(c *clientcmdapi.Config) { c.AuthInfos["user-a"].Token = "token-a-changed" }},
+		{name: "another user", change: func(c *clientcmdapi.Config) {
+			c.AuthInfos["user-b"] = &clientcmdapi.AuthInfo{Token: "token-b"}
+			c.Contexts["a"].AuthInfo = "user-b"
+		}},
+		{name: "cluster entry renamed", change: func(c *clientcmdapi.Config) {
+			c.Clusters["renamed"] = c.Clusters["cluster-a"]
+			delete(c.Clusters, "cluster-a")
+			c.Contexts["a"].Cluster = "renamed"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			dir := t.TempDir()
+			config := clientcmdapi.NewConfig()
+			config.CurrentContext = "a"
+			config.Contexts["a"] = &clientcmdapi.Context{Cluster: "cluster-a", AuthInfo: "user-a", Namespace: "team-a"}
+			config.Clusters["cluster-a"] = &clientcmdapi.Cluster{Server: "https://a.k8s.invalid"}
+			config.AuthInfos["user-a"] = &clientcmdapi.AuthInfo{Token: "token-a"}
+			kubeconfig := writeKubeconfig(t, dir, config)
+			contextA := currentKubeconfigContext(kubeconfig)
+
+			stopped := false
+			stubKubeconfigTransport(t,
+				func(kubeTarget) (string, string) {
+					tc.change(config)
+					writeKubeconfig(t, dir, config)
+					return "orka-system", "orka"
+				},
+				func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
+					return 4321, os.Getpid(), func() { stopped = true }, nil
+				})
+
+			c, err := resolveWith(t, "--kubeconfig", kubeconfig)
+			require.NoError(t, err)
+			if tc.drop {
+				require.True(t, stopped, "the forward was not stopped")
+				require.Equal(t, defaultServer, c.BaseURL)
+				require.Empty(t, c.Token)
+				require.Nil(t, loadPortForwardCache(contextA.identity), "the forward was cached")
+				return
+			}
+			require.False(t, stopped, "the forward was stopped")
+			require.Equal(t, portForwardURL(4321), c.BaseURL)
+			require.Equal(t, "token-a", c.Token)
+			require.NotNil(t, loadPortForwardCache(contextA.identity), "the forward was not cached")
+		})
+	}
+}
+
+// kubectl names the kubeconfig the user gave and the context the CLI read, so
+// it forwards through that context whatever the current one is when it starts.
+func TestPortForwardCommand(t *testing.T) {
+	forward := []string{"port-forward", "-n", "orka-system", "svc/orka", "4321:8080"}
+	for _, tc := range []struct {
+		name string
+		kc   kubeconfigContext
+		want []string
+	}{
+		{
+			name: "kubeconfig and context", kc: kubeconfigContext{path: "/tmp/kc", name: "admin@prod"},
+			want: append([]string{"kubectl", "--kubeconfig", "/tmp/kc", "--context", "admin@prod"}, forward...),
+		},
+		{
+			name: "default kubeconfig", kc: kubeconfigContext{name: "admin@prod"},
+			want: append([]string{"kubectl", "--context", "admin@prod"}, forward...),
+		},
+		{name: "no context", kc: kubeconfigContext{}, want: append([]string{"kubectl"}, forward...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, portForwardCommand(tc.kc, "orka-system", "orka", 4321))
+		})
+	}
+}
+
+// Only the kubectl command line the CLI started counts as its forward.
 func TestIsPortForwardCommand(t *testing.T) {
-	forward := []string{"kubectl", "port-forward", "-n", "orka-system", "svc/orka", "4321:8080"}
-	withKubeconfig := []string{"/usr/bin/kubectl", "--kubeconfig", "/tmp/kc", "port-forward", "-n", "orka-system", "svc/orka", "4321:8080"}
+	want := portForwardCommand(kubeconfigContext{path: "/tmp/kc", name: "prod"}, "orka-system", "orka", 4321)
+	with := func(index int, value string) []string {
+		args := slices.Clone(want)
+		args[index] = value
+		return args
+	}
+	last := len(want) - 1
 	for _, tc := range []struct {
 		name string
 		args []string
 		want bool
 	}{
-		{name: "forward", args: forward, want: true},
-		{name: "with kubeconfig", args: withKubeconfig, want: true},
-		{name: "other port", args: []string{"kubectl", "port-forward", "-n", "orka-system", "svc/orka", "4322:8080"}},
-		{name: "other service", args: []string{"kubectl", "port-forward", "-n", "orka-system", "svc/other", "4321:8080"}},
-		{name: "other namespace", args: []string{"kubectl", "port-forward", "-n", "team-a", "svc/orka", "4321:8080"}},
-		{name: "unrelated", args: []string{"python3", "-m", "http.server", "4321"}},
+		{name: "forward", args: want, want: true},
+		{name: "kubectl by its full path", args: with(0, "/usr/local/bin/kubectl"), want: true},
+		{name: "other program", args: with(0, "python3")},
+		{name: "kubectl arguments to a shell", args: append([]string{"sh", "-c", "sleep 30; :"}, want...)},
+		{name: "other kubeconfig", args: with(2, "/tmp/other")},
+		{name: "other context", args: with(4, "staging")},
+		{name: "current context", args: append([]string{"kubectl", "--kubeconfig", "/tmp/kc"}, want[5:]...)},
+		{name: "other namespace", args: with(last-2, "team-a")},
+		{name: "other service", args: with(last-1, "svc/other")},
+		{name: "other port", args: with(last, "4322:8080")},
+		{name: "extra argument", args: append(slices.Clone(want), "--address=0.0.0.0")},
+		{name: "missing argument", args: want[:last]},
 		{name: "empty", args: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, isPortForwardCommand(tc.args, 4321, "orka-system", "orka"))
+			require.Equal(t, tc.want, isPortForwardCommand(tc.args, want))
 		})
 	}
+	require.False(t, isPortForwardCommand(want, nil), "a cache entry without a command line matched")
 }
 
-// isPortForwardProcess reads the real command line of a live process. A
-// process whose arguments match the forward counts; once it exits, or for
-// any other process, nothing is reused.
+// isPortForwardProcess reads the real command line and start time of a live
+// process. Only the process the cache entry recorded counts: the same command
+// line, started at the recorded time. Once it exits, nothing is reused.
 func TestIsPortForwardProcess(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skipf("reading process command lines is not supported on %s", runtime.GOOS)
 	}
-	cmd := startFakePortForward(t, "orka-system", "orka", 4321)
+	command := portForwardCommand(kubeconfigContext{path: "/tmp/kc", name: "prod"}, "orka-system", "orka", 4321)
+	cmd := startFakePortForward(t, command)
 	pid := cmd.Process.Pid
-	forward := func(pid, port int) *portForwardCache {
-		return &portForwardCache{PID: pid, Port: port, Namespace: "orka-system", Service: "orka"}
+	mark := processStartMark(pid)
+	require.NotEmpty(t, mark)
+	forward := func(pid int, command []string, mark string) *portForwardCache {
+		return &portForwardCache{
+			PID: pid, Port: 4321, Namespace: "orka-system", Service: "orka", Command: command, ProcessStart: mark,
+		}
 	}
 
-	require.Eventually(t, func() bool { return isPortForwardProcess(forward(pid, 4321)) },
-		5*time.Second, 50*time.Millisecond)
-	require.False(t, isPortForwardProcess(forward(pid, 4322)))
-	require.False(t, isPortForwardProcess(forward(os.Getpid(), 4321)))
-	require.False(t, isPortForwardProcess(forward(0, 4321)))
+	// Linux can show an empty command line for a moment after the process
+	// starts, so wait for the real one before checking what does not match.
+	require.Eventually(t, func() bool {
+		return isPortForwardProcess(forward(pid, command, mark))
+	}, 5*time.Second, 20*time.Millisecond)
+	require.False(t, isPortForwardProcess(forward(pid, command, mark+"0")), "another start time matched")
+	require.False(t, isPortForwardProcess(forward(pid, command, "")), "a missing start time matched")
+	otherContext := slices.Clone(command)
+	otherContext[4] = "staging"
+	require.False(t, isPortForwardProcess(forward(pid, otherContext, mark)))
+	require.False(t, isPortForwardProcess(forward(os.Getpid(), command, processStartMark(os.Getpid()))))
+	require.False(t, isPortForwardProcess(forward(0, command, mark)))
 
 	require.NoError(t, cmd.Process.Kill())
 	_ = cmd.Wait()
-	require.False(t, isPortForwardProcess(forward(pid, 4321)))
+	require.False(t, isPortForwardProcess(forward(pid, command, mark)))
 }
 
-// startFakePortForward starts a process whose command line is kubectl's for a
-// forward of namespace/service on localPort, and stops it when the test ends.
-func startFakePortForward(t *testing.T, namespace, service string, localPort int) *exec.Cmd {
+// fakeKubectlEnv makes this test binary sleep instead of running tests; see
+// startFakePortForward.
+const fakeKubectlEnv = "ORKA_CLI_TEST_FAKE_KUBECTL"
+
+// startFakePortForward starts a process whose command line is command, a
+// kubectl port-forward's, and stops it when the test ends. The process is this
+// test binary, which only sleeps when fakeKubectlEnv is set.
+func startFakePortForward(t *testing.T, command []string) *exec.Cmd {
 	t.Helper()
-	sh, err := exec.LookPath("sh")
+	self, err := os.Executable()
 	require.NoError(t, err)
-	// sh runs the script with the remaining arguments as $0 and $1..., so its
-	// command line carries the forward's arguments; "; :" keeps sh from
-	// replacing itself with sleep.
-	cmd := &exec.Cmd{
-		Path: sh,
-		Args: append([]string{"kubectl", "-c", "sleep 30; :"}, portForwardArgs(namespace, service, localPort)...),
-	}
+	cmd := &exec.Cmd{Path: self, Args: command, Env: append(os.Environ(), fakeKubectlEnv+"=1")}
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
@@ -472,11 +740,11 @@ func startFakePortForward(t *testing.T, namespace, service string, localPort int
 
 // A forward run by another user is not trusted, even with the same arguments.
 func TestIsOwnPortForward(t *testing.T) {
-	cached := &portForwardCache{PID: 4242, Port: 4321, Namespace: "orka-system", Service: "orka"}
-	args := append([]string{"kubectl"}, portForwardArgs("orka-system", "orka", 4321)...)
-	require.True(t, isOwnPortForward(os.Getuid(), args, cached))
-	require.False(t, isOwnPortForward(os.Getuid()+1, args, cached))
-	require.False(t, isOwnPortForward(os.Getuid(), args[:len(args)-1], cached))
+	command := portForwardCommand(kubeconfigContext{name: "prod"}, "orka-system", "orka", 4321)
+	cached := &portForwardCache{PID: 4242, Port: 4321, Namespace: "orka-system", Service: "orka", Command: command}
+	require.True(t, isOwnPortForward(os.Getuid(), command, cached))
+	require.False(t, isOwnPortForward(os.Getuid()+1, command, cached))
+	require.False(t, isOwnPortForward(os.Getuid(), command[:len(command)-1], cached))
 }
 
 func TestPortForwardURLMatchesTheCheckedAddress(t *testing.T) {
@@ -484,7 +752,8 @@ func TestPortForwardURLMatchesTheCheckedAddress(t *testing.T) {
 }
 
 // The identity changes with anything that changes which cluster a port-forward
-// reaches, and not with the context's namespace or the user's credential.
+// reaches or where discovery looks first, the context's namespace, and not with
+// the user's credential.
 func TestKubeconfigIdentityDistinguishesContexts(t *testing.T) {
 	base := func() *clientcmdapi.Config {
 		config := clientcmdapi.NewConfig()
@@ -507,7 +776,7 @@ func TestKubeconfigIdentityDistinguishesContexts(t *testing.T) {
 		change func(*clientcmdapi.Config)
 		same   bool
 	}{
-		{name: "context namespace", same: true, change: func(c *clientcmdapi.Config) {
+		{name: "context namespace", change: func(c *clientcmdapi.Config) {
 			c.Contexts["admin@kubernetes"].Namespace = "team-a"
 		}},
 		{name: "user token", same: true, change: func(c *clientcmdapi.Config) { c.AuthInfos["admin"].Token = "token-b" }},
@@ -697,6 +966,7 @@ func TestCredentialFileAndOtherStdinReaders(t *testing.T) {
 				want string
 			}{
 				"a piped prompt":      {args: []string{"run"}, want: "orka run uses for the prompt"},
+				"an empty prompt":     {args: []string{"run", ""}, want: "orka run uses for the prompt"},
 				"orka task exec -i":   {args: []string{"task", "exec", "my-task", "-i", "--", "cat"}, want: "orka task exec -i or -t passes to the command"},
 				"orka task exec -t":   {args: []string{"task", "exec", "my-task", "-t", "--", "cat"}, want: "orka task exec -i or -t passes to the command"},
 				"orka task cp from -": {args: []string{"task", "cp", "-", "my-task:notes.txt"}, want: "orka task cp uses for the file to copy in"},
@@ -839,7 +1109,7 @@ func TestDiscoverServiceWithoutNamespace(t *testing.T) {
 	config.Clusters["c"] = &clientcmdapi.Cluster{Server: kube.URL, InsecureSkipTLSVerify: true}
 	config.AuthInfos["u"] = &clientcmdapi.AuthInfo{Token: kubeconfigBearer}
 
-	ns, name := discoverService(writeKubeconfig(t, t.TempDir(), config), "")
+	ns, name := discoverService(kubeTarget{kubeconfigContext: currentKubeconfigContext(writeKubeconfig(t, t.TempDir(), config))})
 	require.Equal(t, "orka-system", ns)
 	require.Equal(t, "orka-api", name)
 	mu.Lock()
@@ -848,6 +1118,46 @@ func TestDiscoverServiceWithoutNamespace(t *testing.T) {
 	for _, path := range paths {
 		require.NotContains(t, path, "/namespaces//", "discovery queried an empty namespace")
 	}
+}
+
+// Discovery asks the cluster of the context the CLI read, even when the
+// kubeconfig's current context has changed since.
+func TestDiscoverServiceUsesTheContextItRead(t *testing.T) {
+	var asked sync.Map
+	cluster := func(name string) *httptest.Server {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			asked.Store(name, true)
+			if r.URL.Path == "/api/v1/namespaces/team-"+name+"/services/orka-api" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	config := clientcmdapi.NewConfig()
+	servers := map[string]string{}
+	for _, name := range []string{"a", "b"} {
+		servers[name] = cluster(name).URL
+		config.Contexts[name] = &clientcmdapi.Context{Cluster: name, AuthInfo: "u", Namespace: "team-" + name}
+		config.Clusters[name] = &clientcmdapi.Cluster{Server: servers[name], InsecureSkipTLSVerify: true}
+	}
+	config.AuthInfos["u"] = &clientcmdapi.AuthInfo{Token: kubeconfigBearer}
+	dir := t.TempDir()
+	config.CurrentContext = "a"
+	contextA := currentKubeconfigContext(writeKubeconfig(t, dir, config))
+	// Switch contexts and point context a's cluster at b's server: the CLI
+	// keeps the kubeconfig it read.
+	config.CurrentContext = "b"
+	config.Clusters["a"].Server = servers["b"]
+	writeKubeconfig(t, dir, config)
+
+	ns, name := discoverService(kubeTarget{kubeconfigContext: contextA})
+	require.Equal(t, "team-a", ns)
+	require.Equal(t, "orka-api", name)
+	_, askedB := asked.Load("b")
+	require.False(t, askedB, "discovery asked a server the kubeconfig named after the CLI read it")
 }
 
 // ORKA_NAMESPACE chooses the namespace as --namespace does, so a manifest

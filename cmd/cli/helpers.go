@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/transport"
 
 	"github.com/orka-agents/orka/internal/cli/client"
@@ -70,18 +71,21 @@ type portForwardCache struct {
 	PID       int    `json:"pid"`
 	Service   string `json:"service"`
 	Namespace string `json:"namespace"`
-	// KubeContext is the kubeconfigIdentity of the context the forward goes
-	// through. The CLI reuses the forward only for that same context.
+	// KubeContext is the kubeTarget cacheKey the forward was started for: the
+	// kubeconfig context and the namespaces discovery searched first. The CLI
+	// reuses the forward only for that same key.
 	KubeContext string `json:"kubeContext,omitempty"`
-	// ProcessStart is when the forward's process was created, where the CLI
-	// identifies the process that way rather than by its command line.
+	// Command is the kubectl command line the CLI started the forward with.
+	Command []string `json:"command,omitempty"`
+	// ProcessStart is when the forward's process was created, so a later
+	// process that reuses its PID is not mistaken for it.
 	ProcessStart string `json:"processStart,omitempty"`
 	Timestamp    int64  `json:"timestamp"`
 }
 
-// portForwardCachePath returns the cache file for the kubeconfig context with
-// the given kubeconfigIdentity, so each context keeps its own forward. It
-// returns "" when there is no identity or home directory.
+// portForwardCachePath returns the cache file for the given kubeTarget
+// cacheKey, so each context and namespace selection keeps its own forward. It
+// returns "" when there is no key or home directory.
 func portForwardCachePath(identity string) string {
 	if len(identity) < 16 {
 		return ""
@@ -93,8 +97,8 @@ func portForwardCachePath(identity string) string {
 	return filepath.Join(home, configDir, "portforward-"+identity[:16]+".json")
 }
 
-// loadPortForwardCache returns the unexpired forward cached for the context
-// with the given kubeconfigIdentity, or nil.
+// loadPortForwardCache returns the unexpired forward cached for the given
+// kubeTarget cacheKey, or nil.
 func loadPortForwardCache(identity string) *portForwardCache {
 	path := portForwardCachePath(identity)
 	if path == "" {
@@ -129,10 +133,10 @@ func savePortForwardCache(cache *portForwardCache) {
 	os.WriteFile(path, data, 0o600) //nolint:errcheck
 }
 
-// clearPortForwardCache forgets the forward cached for the current context of
-// the kubeconfig at kubeconfigPath.
-func clearPortForwardCache(kubeconfigPath string) {
-	if path := portForwardCachePath(kubeconfigIdentity(kubeconfigPath)); path != "" {
+// clearPortForwardCache forgets the forward cached for what cmd would connect
+// through now: the current kubeconfig context and the selected namespace.
+func clearPortForwardCache(cmd *cobra.Command) {
+	if path := portForwardCachePath(commandKubeTarget(cmd, loadConfig()).cacheKey()); path != "" {
 		os.Remove(path) //nolint:errcheck
 	}
 }
@@ -162,18 +166,20 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 //
 // The server is --server, ORKA_SERVER or the config file. Without one, the CLI
 // reaches Orka through the current kubeconfig context: a cached port-forward
-// started for that same context, or a new one to the discovered Service.
-// Otherwise it falls back to defaultServer.
+// started for that same context and namespace selection, or a new one to the
+// discovered Service. Otherwise it falls back to defaultServer.
 //
 // The token is --token, --token-file, ORKA_TOKEN or the config file. Only when
 // none is set and the server was reached through the kubeconfig does the CLI
 // send the kubeconfig user's bearer token, so that credential never goes to a
-// server named some other way.
+// server named some other way. The token comes from the same context the
+// port-forward goes through, even if the current context changes meanwhile.
 //
 // The namespace is --namespace, ORKA_NAMESPACE or the config file. Otherwise it
-// stays empty and the server uses the namespace it watches. The kubeconfig
-// context's namespace only tells discovery where to look first: it belongs to
-// the cluster, not to the Orka installation.
+// stays empty and the server uses the namespace it watches. Discovery looks for
+// the Service in the selected namespace first, then in the kubeconfig
+// context's: the context's namespace belongs to the cluster, not to the Orka
+// installation, so requests never carry it.
 func resolveClient(cmd *cobra.Command, server string) (*client.Client, error) {
 	c, _, err := resolveClientWithTunnel(cmd, server, false)
 	return c, err
@@ -195,26 +201,35 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 	if err != nil {
 		return nil, closeTunnel, err
 	}
-	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	ns := configuredNamespace(cmd, cfg)
 
-	viaKubeconfig := false
 	if server == "" {
-		server, closeTunnel = connectThroughKubeconfig(kubeconfigPath, ownTunnel)
-		viaKubeconfig = server != ""
+		target := commandKubeTarget(cmd, cfg)
+		server, closeTunnel = connectThroughKubeconfig(target, ownTunnel)
+		if server != "" && token == "" {
+			if kubeToken, err := target.token(); err == nil {
+				token = kubeToken
+			}
+		}
 	}
 	if server == "" {
 		server = defaultServer
-	}
-	if token == "" && viaKubeconfig {
-		if kubeToken, err := extractToken(kubeconfigPath); err == nil {
-			token = kubeToken
-		}
 	}
 
 	c := client.NewWithNamespace(server, token, ns)
 	c.TxnToken = txnToken
 	return c, closeTunnel, nil
+}
+
+// commandKubeTarget is what cmd connects through when no server is named: the
+// current context of the --kubeconfig file (or the default kubeconfig), read
+// once, and the namespace selected by --namespace, ORKA_NAMESPACE or cfg.
+func commandKubeTarget(cmd *cobra.Command, cfg orkaConfig) kubeTarget {
+	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
+	return kubeTarget{
+		kubeconfigContext: currentKubeconfigContext(kubeconfigPath),
+		selectedNamespace: configuredNamespace(cmd, cfg),
+	}
 }
 
 // configuredServer returns the server named by --server, ORKA_SERVER or the
@@ -360,15 +375,15 @@ func rejectStdinCredential(cmd *cobra.Command, use string) error {
 	return nil
 }
 
-// connectThroughKubeconfig reaches the Orka API through the current kubeconfig
-// context, reusing a cached port-forward started for that context or starting
-// a new one to the Service discovered from it. It returns the local server URL,
-// or "" when no Service could be reached, and the function that stops a new
-// port-forward when ownTunnel is set (see newClientWithTunnel).
-func connectThroughKubeconfig(kubeconfigPath string, ownTunnel bool) (string, func()) {
+// connectThroughKubeconfig reaches the Orka API through target's kubeconfig
+// context, reusing a cached port-forward started for the same target or
+// starting a new one to the Service discovered through it. It returns the local
+// server URL, or "" when no Service could be reached, and the function that
+// stops a new port-forward when ownTunnel is set (see newClientWithTunnel).
+func connectThroughKubeconfig(target kubeTarget, ownTunnel bool) (string, func()) {
 	closeTunnel := func() {}
-	identity := kubeconfigIdentity(kubeconfigPath)
-	if cached := loadPortForwardCache(identity); cached != nil && portForwardProcessFn(cached) {
+	key := target.cacheKey()
+	if cached := loadPortForwardCache(key); cached != nil && portForwardProcessFn(cached) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cached.Port), 500*time.Millisecond)
 		if err == nil {
 			conn.Close() //nolint:errcheck
@@ -391,14 +406,25 @@ func connectThroughKubeconfig(kubeconfigPath string, ownTunnel bool) (string, fu
 			fmt.Fprint(os.Stderr, "\r\033[2K")
 		}
 	}
-	svcNS, svcName := discoverServiceFn(kubeconfigPath, kubeconfigNamespace(kubeconfigPath))
+	svcNS, svcName := discoverServiceFn(target)
 	if svcName == "" {
 		clearIndicator()
 		return "", closeTunnel
 	}
-	localPort, pid, cleanup, err := startPortForwardFn(kubeconfigPath, svcNS, svcName, ownTunnel)
+	localPort, pid, cleanup, err := startPortForwardFn(target.kubeconfigContext, svcNS, svcName, ownTunnel)
 	if err != nil {
 		clearIndicator()
+		return "", closeTunnel
+	}
+	// kubectl read the kubeconfig itself before it started forwarding. If the
+	// context no longer reaches the cluster the CLI read, or cannot be read,
+	// the forward may reach one the CLI's token is not for, so drop it. kubectl
+	// was given the namespace, so a change to the context's namespace does not
+	// matter.
+	if now := readKubeconfigContext(target.path, target.name); now.cluster != target.cluster {
+		cleanup()
+		clearIndicator()
+		fmt.Fprintln(os.Stderr, "The kubeconfig changed while connecting; not using the port-forward")
 		return "", closeTunnel
 	}
 	if ownTunnel {
@@ -419,7 +445,8 @@ func connectThroughKubeconfig(kubeconfigPath string, ownTunnel bool) (string, fu
 		PID:          pid,
 		Service:      svcName,
 		Namespace:    svcNS,
-		KubeContext:  identity,
+		KubeContext:  key,
+		Command:      portForwardCommand(target.kubeconfigContext, svcNS, svcName, localPort),
 		ProcessStart: processStartMark(pid),
 	})
 	clearIndicator()
@@ -456,47 +483,43 @@ func isPortForwardProcess(cached *portForwardCache) bool {
 // isOwnPortForward reports whether a process owned by uid and running args is
 // the forward described by cached, started by this user.
 func isOwnPortForward(uid int, args []string, cached *portForwardCache) bool {
-	return uid == os.Getuid() && isPortForwardCommand(args, cached.Port, cached.Namespace, cached.Service)
+	return uid == os.Getuid() && isPortForwardCommand(args, cached.Command)
 }
 
-// isPortForwardCommand reports whether args is the command line startPortForward
-// runs for namespace/service on localPort.
-func isPortForwardCommand(args []string, localPort int, namespace, service string) bool {
-	want := portForwardArgs(namespace, service, localPort)
-	for i := 0; i+len(want) <= len(args); i++ {
-		if slices.Equal(args[i:i+len(want)], want) {
-			return true
-		}
+// isPortForwardCommand reports whether args, the command line of a process, is
+// want, the kubectl command line the CLI started. Only the base name of the
+// program is compared, since a kubectl wrapper can re-execute it by its full
+// path. The arguments are compared split on whitespace, as ps reports them.
+func isPortForwardCommand(args, want []string) bool {
+	if len(args) == 0 || len(want) == 0 || filepath.Base(args[0]) != filepath.Base(want[0]) {
+		return false
 	}
-	return false
+	return slices.Equal(strings.Fields(strings.Join(args[1:], " ")), strings.Fields(strings.Join(want[1:], " ")))
 }
 
-// portForwardArgs are the kubectl arguments that forward localPort to the
-// Orka API port of namespace/service.
-func portForwardArgs(namespace, service string, localPort int) []string {
-	return []string{"port-forward", "-n", namespace, "svc/" + service, fmt.Sprintf("%d:8080", localPort)}
+// portForwardCommand is the kubectl command line that forwards localPort to the
+// Orka API port of namespace/service through kc. It names kc's context, so
+// kubectl uses that context whatever the current one is when it starts.
+func portForwardCommand(kc kubeconfigContext, namespace, service string, localPort int) []string {
+	command := []string{"kubectl"}
+	if kc.path != "" {
+		command = append(command, "--kubeconfig", kc.path)
+	}
+	if kc.name != "" {
+		command = append(command, "--context", kc.name)
+	}
+	return append(command, "port-forward", "-n", namespace, "svc/"+service, fmt.Sprintf("%d:8080", localPort))
 }
 
-// discoverService finds the Orka service in the cluster.
-// Returns the namespace and service name, or empty strings if not found.
-func discoverService(kubeconfigPath, defaultNS string) (string, string) {
-	restConfig, err := buildRESTConfig(kubeconfigPath)
+// discoverService finds the Orka Service through target's kubeconfig context,
+// looking in target's discovery namespaces in order. It returns the namespace
+// and Service name, or empty strings if none is found.
+func discoverService(target kubeTarget) (string, string) {
+	restConfig, err := target.clientConfig().ClientConfig()
 	if err != nil {
 		return "", ""
 	}
-
-	// Try the user's namespace first, then well-known orka namespaces
-	var namespacesToTry []string
-	if defaultNS != "" {
-		namespacesToTry = append(namespacesToTry, defaultNS)
-	}
-	for _, ns := range []string{"orka-system", cliProgramName, defaultNamespace} {
-		if ns != defaultNS {
-			namespacesToTry = append(namespacesToTry, ns)
-		}
-	}
-
-	for _, ns := range namespacesToTry {
+	for _, ns := range target.discoveryNamespaces() {
 		if name := discoverOrkaService(restConfig, ns); name != "" {
 			return ns, name
 		}
@@ -504,12 +527,12 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 	return "", ""
 }
 
-// startPortForward starts a kubectl port-forward to the Orka service.
-// Returns the local port, the process PID, a cleanup function, and any error.
-// With isolateInterrupt the port-forward does not receive the interrupt a
-// terminal sends to the CLI's foreground process group on Ctrl-C; only the
-// cleanup function stops it.
-func startPortForward(kubeconfigPath, namespace, service string, isolateInterrupt bool) (int, int, func(), error) {
+// startPortForward starts a kubectl port-forward to the Orka service through
+// kc's context. It returns the local port, the process PID, a cleanup function,
+// and any error. With isolateInterrupt the port-forward does not receive the
+// interrupt a terminal sends to the CLI's foreground process group on Ctrl-C;
+// only the cleanup function stops it.
+func startPortForward(kc kubeconfigContext, namespace, service string, isolateInterrupt bool) (int, int, func(), error) {
 	// Find a free port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -518,12 +541,8 @@ func startPortForward(kubeconfigPath, namespace, service string, isolateInterrup
 	localPort := listener.Addr().(*net.TCPAddr).Port
 	listener.Close() //nolint:errcheck
 
-	args := portForwardArgs(namespace, service, localPort)
-	if kubeconfigPath != "" {
-		args = append([]string{"--kubeconfig", kubeconfigPath}, args...)
-	}
-
-	cmd := exec.Command("kubectl", args...)
+	command := portForwardCommand(kc, namespace, service, localPort)
+	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Stderr = nil
 	cmd.Stdout = nil
 	if isolateInterrupt {
@@ -664,47 +683,185 @@ func checkServiceExists(httpClient *http.Client, host, namespace, name string) b
 	return resp.StatusCode == http.StatusOK
 }
 
-// buildRESTConfig builds a Kubernetes REST config from kubeconfig.
-func buildRESTConfig(kubeconfigPath string) (*rest.Config, error) {
-	return kubeconfigLoader(kubeconfigPath).ClientConfig()
-}
-
-// kubeconfigLoader loads the kubeconfig at kubeconfigPath, or the default
+// kubeconfigLoadingRules load the kubeconfig at kubeconfigPath, or the default
 // kubeconfig ($KUBECONFIG, then ~/.kube/config) when the path is empty.
-func kubeconfigLoader(kubeconfigPath string) clientcmd.ClientConfig {
-	loadingRules := &clientcmd.ClientConfigLoadingRules{}
+func kubeconfigLoadingRules(kubeconfigPath string) *clientcmd.ClientConfigLoadingRules {
 	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	} else {
-		loadingRules = clientcmd.NewDefaultClientConfigLoadingRules()
+		return &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}
 	}
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil)
+	return clientcmd.NewDefaultClientConfigLoadingRules()
 }
 
-// kubeconfigIdentity identifies the current kubeconfig context by a digest of
-// its name, its cluster and user names, the file the cluster comes from and
-// how the cluster is reached: server, proxy and TLS settings. Two contexts that
-// differ in any of these get separate port-forwards. It returns "" when the
-// kubeconfig has no usable current context.
-func kubeconfigIdentity(kubeconfigPath string) string {
-	raw, err := kubeconfigLoader(kubeconfigPath).RawConfig()
-	if err != nil || raw.CurrentContext == "" {
-		return ""
+// kubeconfigLoader loads the kubeconfig at kubeconfigPath with the context
+// named kubeContext, or with its current context when kubeContext is "".
+func kubeconfigLoader(kubeconfigPath, kubeContext string) clientcmd.ClientConfig {
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		kubeconfigLoadingRules(kubeconfigPath), &clientcmd.ConfigOverrides{CurrentContext: kubeContext})
+}
+
+// kubeconfigContext is the current context of a kubeconfig, read once. Service
+// discovery and the kubeconfig bearer token use the kubeconfig as read then,
+// and kubectl and the port-forward cache use this context by name, so
+// switching contexts while the CLI connects cannot pair one cluster's
+// port-forward with another context's credential.
+type kubeconfigContext struct {
+	path      string // the --kubeconfig flag; "" means $KUBECONFIG or ~/.kube/config
+	name      string // "" when the kubeconfig sets no current context
+	namespace string // the context's namespace
+	// identity is a digest of the context's name and namespace, its cluster and
+	// user names, the file the cluster comes from and how the cluster is
+	// reached: server, proxy and TLS settings. Two contexts that differ in any
+	// of these get separate port-forwards. It is "" when the kubeconfig has no
+	// usable current context, and then no port-forward is cached.
+	identity string
+	// cluster is a digest of the part of the identity that decides where
+	// kubectl connects: the cluster's source file, server, proxy and TLS
+	// settings. It is "" whenever identity is.
+	cluster string
+	// config is the kubeconfig as read, with relative paths resolved, or nil
+	// when it sets no current context.
+	config *clientcmdapi.Config
+}
+
+// currentKubeconfigContext reads the current context of the kubeconfig at
+// kubeconfigPath.
+func currentKubeconfigContext(kubeconfigPath string) kubeconfigContext {
+	return readKubeconfigContext(kubeconfigPath, "")
+}
+
+// readKubeconfigContext reads the context called name in the kubeconfig at
+// kubeconfigPath, or its current context when name is "".
+func readKubeconfigContext(kubeconfigPath, name string) kubeconfigContext {
+	kc := kubeconfigContext{path: kubeconfigPath}
+	raw, err := kubeconfigLoader(kubeconfigPath, "").RawConfig()
+	if name == "" {
+		name = raw.CurrentContext
 	}
-	kubeCtx, ok := raw.Contexts[raw.CurrentContext]
+	if err != nil || name == "" {
+		return kc
+	}
+	kc.name = name
+	kc.config = &raw
+	kubeCtx, ok := raw.Contexts[kc.name]
 	if !ok || kubeCtx == nil {
-		return ""
+		return kc
 	}
+	kc.namespace = kubeCtx.Namespace
 	cluster, ok := raw.Clusters[kubeCtx.Cluster]
 	if !ok || cluster == nil || cluster.Server == "" {
-		return ""
+		return kc
 	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		raw.CurrentContext, kubeCtx.Cluster, kubeCtx.AuthInfo,
+	clusterFields := []string{
 		resolvedPath(cluster.LocationOfOrigin), cluster.Server, cluster.ProxyURL, cluster.TLSServerName,
 		strconv.FormatBool(cluster.InsecureSkipTLSVerify),
 		cluster.CertificateAuthority, string(cluster.CertificateAuthorityData),
-	}, "\x00")))
+	}
+	clusterSum := sha256.Sum256([]byte(strings.Join(clusterFields, "\x00")))
+	kc.cluster = hex.EncodeToString(clusterSum[:])
+	sum := sha256.Sum256([]byte(strings.Join(append([]string{
+		kc.name, kubeCtx.Namespace, kubeCtx.Cluster, kubeCtx.AuthInfo,
+	}, clusterFields...), "\x00")))
+	kc.identity = hex.EncodeToString(sum[:])
+	return kc
+}
+
+// clientConfig is kc's context in the kubeconfig as read, whatever the file
+// holds now. With no context it loads the kubeconfig with client-go's
+// fallbacks, such as in-cluster configuration.
+func (kc kubeconfigContext) clientConfig() clientcmd.ClientConfig {
+	if kc.config == nil {
+		return kubeconfigLoader(kc.path, kc.name)
+	}
+	return clientcmd.NewNonInteractiveClientConfig(*kc.config, kc.name, &clientcmd.ConfigOverrides{}, kubeconfigLoadingRules(kc.path))
+}
+
+// token returns the bearer token of kc's user.
+func (kc kubeconfigContext) token() (string, error) {
+	if kc.name == "" {
+		return "", fmt.Errorf("no current context set in kubeconfig")
+	}
+	config := kc.clientConfig()
+	rawConfig, err := config.RawConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	ctx, ok := rawConfig.Contexts[kc.name]
+	if !ok || ctx == nil {
+		return "", fmt.Errorf("context %q not found in kubeconfig", kc.name)
+	}
+
+	authInfo, ok := rawConfig.AuthInfos[ctx.AuthInfo]
+	if !ok || authInfo == nil {
+		return "", fmt.Errorf("user %q not found in kubeconfig", ctx.AuthInfo)
+	}
+
+	if authInfo.Token != "" {
+		return authInfo.Token, nil
+	}
+
+	if authInfo.TokenFile != "" {
+		data, err := os.ReadFile(authInfo.TokenFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read token file %q: %w", authInfo.TokenFile, err)
+		}
+		// client-go trims the file the same way.
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	if authInfo.Exec != nil {
+		restConfig, err := config.ClientConfig()
+		if err != nil {
+			return "", fmt.Errorf("failed to get REST config for exec-based auth: %w", err)
+		}
+		if restConfig.BearerToken != "" {
+			return restConfig.BearerToken, nil
+		}
+	}
+
+	if authInfo.AuthProvider != nil {
+		restConfig, err := config.ClientConfig()
+		if err != nil {
+			return "", fmt.Errorf("failed to get REST config for auth provider: %w", err)
+		}
+		if restConfig.BearerToken != "" {
+			return restConfig.BearerToken, nil
+		}
+	}
+
+	return "", fmt.Errorf("no token, token file, exec, or auth provider found for user %q", ctx.AuthInfo)
+}
+
+// kubeTarget is what the CLI connects through when no server is named: a
+// kubeconfig context and the namespace the user selected, if any.
+type kubeTarget struct {
+	kubeconfigContext
+	// selectedNamespace is --namespace, ORKA_NAMESPACE or the config file's
+	// namespace, or "" when none is set.
+	selectedNamespace string
+}
+
+// discoveryNamespaces are the namespaces discovery searches for the Orka
+// Service, in order: the selected namespace, the context's namespace, then the
+// namespaces Orka is usually installed in.
+func (t kubeTarget) discoveryNamespaces() []string {
+	var namespaces []string
+	for _, ns := range []string{t.selectedNamespace, t.namespace, "orka-system", cliProgramName, defaultNamespace} {
+		if ns != "" && !slices.Contains(namespaces, ns) {
+			namespaces = append(namespaces, ns)
+		}
+	}
+	return namespaces
+}
+
+// cacheKey names t's port-forward cache entry: its context's identity, and the
+// selected namespace when one is set, since both change which Service
+// discovery finds. It is "" when the context has no identity.
+func (t kubeTarget) cacheKey() string {
+	if t.identity == "" || t.selectedNamespace == "" {
+		return t.identity
+	}
+	sum := sha256.Sum256([]byte(t.identity + "\x00" + t.selectedNamespace))
 	return hex.EncodeToString(sum[:])
 }
 

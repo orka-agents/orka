@@ -35,8 +35,9 @@ func newRunCmd() *cobra.Command {
   Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Without a prompt argument, run reads the prompt from piped stdin,
-			// so a credential cannot come from stdin too.
-			if len(args) == 0 {
+			// so a credential cannot come from stdin too. The prompt is empty
+			// on the same condition as below, so "" counts as no prompt.
+			if strings.Join(args, " ") == "" {
 				if stdinStat, err := os.Stdin.Stat(); err == nil && stdinStat.Mode()&os.ModeCharDevice == 0 {
 					if err := rejectStdinCredential(cmd, "orka run uses for the prompt; pass the prompt as an argument"); err != nil {
 						return err
@@ -49,8 +50,7 @@ func newRunCmd() *cobra.Command {
 			cfg, err := c.GetChatConfig(context.Background())
 			if err != nil {
 				// Clear stale cache and re-discover
-				kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
-				clearPortForwardCache(kubeconfigPath)
+				clearPortForwardCache(cmd)
 				c = newClientFromCmd(cmd)
 				cfg, err = c.GetChatConfig(context.Background())
 				if err != nil {
