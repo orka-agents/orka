@@ -91,6 +91,28 @@ func runAuthSessions(t *testing.T, newProvider StateFactory) {
 		require.Nil(t, old.RevokedAt, "a failed renewal leaves the old session live")
 	})
 
+	t.Run("an ended session's ID and hash stay taken while it is stored", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		require.NoError(t, p.CreateAuthSession(ctx, testAuthSession("ended", "hash-ended", now)))
+		require.NoError(t, p.CreateAuthSession(ctx, testAuthSession("live", "hash-live", now)))
+		// Revoking prunes nothing, so the ended session is still stored.
+		require.NoError(t, p.RevokeAuthSession(ctx, "ended", now))
+		later := now.Add(time.Minute)
+
+		require.ErrorIs(t, p.CreateAuthSession(ctx, testAuthSession("other", "hash-ended", later)), storagev1.ErrConflict,
+			"reusing an ended session's hash would make its token valid again")
+		require.ErrorIs(t, p.CreateAuthSession(ctx, testAuthSession("ended", "hash-other", later)), storagev1.ErrConflict)
+		require.ErrorIs(t, p.RenewAuthSession(ctx, "live", testAuthSession("next", "hash-ended", later), later),
+			storagev1.ErrConflict)
+
+		ended, err := p.GetAuthSessionByHash(ctx, "hash-ended")
+		require.NoError(t, err, "a refused write prunes nothing")
+		require.NotNil(t, ended.RevokedAt, "the ended session stays revoked")
+		live, err := p.GetAuthSessionByHash(ctx, "hash-live")
+		require.NoError(t, err)
+		require.Nil(t, live.RevokedAt, "a refused renewal leaves its session live")
+	})
+
 	t.Run("sessions stay bounded", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		for i := range storagev1.MaxAuthSessionsPerSubject + 2 {

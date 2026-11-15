@@ -74,6 +74,11 @@ func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession
 		return fmt.Errorf("create sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Pruning would drop an ended session with the same ID or hash, so the
+	// stored rows are checked first.
+	if err := requireAuthSessionUnused(ctx, tx, session); err != nil {
+		return fmt.Errorf("create sign-in session: %w", err)
+	}
 	if err := pruneAuthSessions(ctx, tx, session.CreatedAt); err != nil {
 		return err
 	}
@@ -88,6 +93,21 @@ func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession
 		return fmt.Errorf("bound sign-in sessions: %w", err)
 	}
 	return tx.Commit()
+}
+
+// requireAuthSessionUnused returns ErrConflict when a stored session, ended or
+// not, has the session's ID or token hash: reusing an ended session's hash
+// would make its token valid again.
+func requireAuthSessionUnused(ctx context.Context, tx taskDataExecutor, session store.AuthSession) error {
+	var taken int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_sessions WHERE id = ? OR token_hash = ?`,
+		session.ID, session.TokenHash).Scan(&taken); err != nil {
+		return err
+	}
+	if taken != 0 {
+		return fmt.Errorf("%w: the sign-in session ID or token hash is already stored", store.ErrConflict)
+	}
+	return nil
 }
 
 // pruneAuthSessions drops sessions that ended before now: nothing accepts or
@@ -158,6 +178,9 @@ func (s *Store) renewAuthSession(ctx context.Context, id string, next store.Auth
 		return fmt.Errorf("renew sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireAuthSessionUnused(ctx, tx, next); err != nil {
+		return fmt.Errorf("renew sign-in session: %w", err)
+	}
 	if err := pruneAuthSessions(ctx, tx, at); err != nil {
 		return err
 	}
