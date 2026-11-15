@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,14 @@ var version = "dev"
 func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.Execute(); err != nil {
+		if exitErr, ok := errors.AsType[*operatorExitError](err); ok {
+			// A remote command's own status is passed through; only Orka-side
+			// outcomes (timeouts, limits, refusals) print a message.
+			if exitErr.code != 0 && !strings.HasPrefix(exitErr.message, "command exited with status") {
+				fmt.Fprintln(os.Stderr, "Error:", exitErr.message)
+			}
+			os.Exit(exitErr.code)
+		}
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

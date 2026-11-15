@@ -134,6 +134,21 @@ upgrading:
 - The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
   fields are unchanged.
 
+## The class admin role no longer grants every verb {#class-admin-role}
+
+This affects installs from the raw installer (`deploy/orka.yaml`); the Helm chart does
+not ship this role.
+
+`orka-workspace-executionworkspaceclass-admin-role` used to grant `*` on
+ExecutionWorkspaceClasses. It now lists its verbs: `create`, `delete`,
+`deletecollection`, `get`, `list`, `patch`, `update`, `watch`, and `use`. Anyone bound
+to it can still manage classes and select them for Tasks.
+
+The role no longer grants `operator-access`, the verb required to opt a class into
+`orka task exec` and `orka task cp`. Grant that verb separately to whoever should
+enable operator access; see
+[Operator workspace access](../guides/operator-workspace-access.md).
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database

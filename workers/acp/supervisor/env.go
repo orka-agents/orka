@@ -350,8 +350,12 @@ func LoadConfigFromEnv() (Config, error) {
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
 		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
-		Provider:                          providerCaps,
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		// Built-in supervisors serve operator access; whether a session may
+		// use it is decided by the controller-side API's class opt-in,
+		// SubjectAccessReview, and session-state gates.
+		SupportsOperatorAccess: operatorAccessSupported(providerKind, os.Geteuid()),
+		Provider:               providerCaps,
+		WorkspaceGovernance:    harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envutil.String(EnvListenAddress, ":8080"),
@@ -1523,4 +1527,17 @@ func nativeInstructionProjection(provider, prompt string) *acp.InstructionProjec
 	default:
 		return nil
 	}
+}
+
+// operatorAccessPlatform reports whether tagged-process containment and the
+// file helper exist on this platform. Replaceable in tests.
+var operatorAccessPlatform = runtime.GOOS == "linux"
+
+// operatorAccessSupported reports whether this supervisor can serve operator
+// access. Operator commands run with exactly one supplementary tag group,
+// which only a root supervisor can assign; a non-root supervisor's children
+// inherit its own groups, so the exec helper would refuse every launch.
+// Outside Linux no tag can be proven free and no operation can be contained.
+func operatorAccessSupported(providerKind string, euid int) bool {
+	return operatorAccessPlatform && euid == 0 && !isExternalACPProvider(providerKind)
 }
