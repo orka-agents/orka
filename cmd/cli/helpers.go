@@ -484,15 +484,16 @@ func isPortForwardProcess(cached *portForwardCache) bool {
 }
 
 // recordsCurrentForward reports whether cached records the port-forward this
-// CLI starts for its Service and port: the same kubectl arguments from
+// CLI starts for its Service and port: kubectl with the same arguments from
 // port-forward on, so listening only on 127.0.0.1. An entry an older CLI wrote
 // for another command line is not reused. The kubeconfig file and context the
 // command names are already fixed by the cache key, which does not depend on
-// how the kubeconfig was named.
+// how the kubeconfig was named. The arguments are matched from the end because
+// a kubeconfig path or context can itself be named port-forward.
 func recordsCurrentForward(cached *portForwardCache) bool {
 	want := portForwardCommand(kubeconfigContext{}, cached.Namespace, cached.Service, cached.Port)
-	at := slices.Index(cached.Command, want[1])
-	return at >= 0 && slices.Equal(cached.Command[at:], want[1:])
+	at := len(cached.Command) - len(want) + 1
+	return at >= 1 && cached.Command[0] == want[0] && slices.Equal(cached.Command[at:], want[1:])
 }
 
 // isOwnPortForward reports whether a process owned by uid and running args is

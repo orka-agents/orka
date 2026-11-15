@@ -972,18 +972,31 @@ func TestCachedForwardRunsTheCurrentCommandLine(t *testing.T) {
 		t.Skipf("reading process command lines is not supported on %s", runtime.GOOS)
 	}
 	for _, tc := range []struct {
-		name   string
-		older  bool
-		naming string
+		name        string
+		older       bool
+		naming      string
+		contextName string
 	}{
 		{name: "current command line"},
 		{name: "kubeconfig named by a relative path", naming: "relative"},
 		{name: "kubeconfig from KUBECONFIG", naming: "env"},
+		{name: "kubeconfig named port-forward", naming: "port-forward"},
+		{name: "context named port-forward", contextName: "port-forward"},
 		{name: "without --address", older: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			kubeconfig := writeTokenKubeconfig(t, "discovered", "")
+			contextName := "discovered"
+			if tc.contextName != "" {
+				contextName = tc.contextName
+			}
+			kubeconfig := writeTokenKubeconfig(t, contextName, "")
+			if tc.naming == "port-forward" {
+				// The command names the kubeconfig as the flag did.
+				t.Chdir(filepath.Dir(kubeconfig))
+				require.NoError(t, os.Rename(kubeconfig, "port-forward"))
+				kubeconfig = "port-forward"
+			}
 			target := kubeTarget{kubeconfigContext: currentKubeconfigContext(kubeconfig)}
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
@@ -1036,8 +1049,9 @@ func TestCachedForwardRunsTheCurrentCommandLine(t *testing.T) {
 	}
 }
 
-// Only an entry recording the port-forward this CLI starts, from port-forward
-// on, is reused; the kubeconfig and context it names are part of the cache key.
+// Only an entry recording kubectl with the arguments this CLI starts it with,
+// from port-forward on, is reused; the kubeconfig and context it names are
+// part of the cache key, and either can be named port-forward.
 func TestRecordsCurrentForward(t *testing.T) {
 	current := portForwardCommand(kubeconfigContext{path: "/tmp/kc", name: "prod"}, "orka-system", "orka", 4321)
 	entry := func(command []string) *portForwardCache {
@@ -1055,6 +1069,10 @@ func TestRecordsCurrentForward(t *testing.T) {
 		{name: "current", command: current, want: true},
 		{name: "kubeconfig named another way", command: slices.Concat([]string{"kubectl", "--kubeconfig", "kc", "--context", "prod"}, forward), want: true},
 		{name: "default kubeconfig", command: portForwardCommand(kubeconfigContext{}, "orka-system", "orka", 4321), want: true},
+		{name: "context named port-forward", command: portForwardCommand(kubeconfigContext{path: "/tmp/kc", name: "port-forward"}, "orka-system", "orka", 4321), want: true},
+		{name: "kubeconfig named port-forward", command: portForwardCommand(kubeconfigContext{path: "port-forward"}, "orka-system", "orka", 4321), want: true},
+		{name: "not kubectl", command: slices.Concat([]string{"sh"}, forward)},
+		{name: "no program", command: forward},
 		{name: "without --address", command: slices.Delete(slices.Clone(current), address, address+2)},
 		{name: "another address", command: otherAddress},
 		{name: "another port", command: portForwardCommand(kubeconfigContext{}, "orka-system", "orka", 4322)},
