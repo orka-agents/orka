@@ -250,8 +250,10 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 	}
 
 	c := client.NewWithNamespace(server, token, ns)
-	if session && token != "" {
-		// A session goes only to its own server: never through a redirect.
+	if token != "" && (session || strings.HasPrefix(token, sessionTokenPrefix)) {
+		// A session goes only to its own server: never through a redirect,
+		// which can reach another port of the same host with it. One passed
+		// with --token is a session as much as a saved one.
 		c.HTTPClient = noRedirectClient
 	}
 	if txnToken == "" && txnTokenFile != "" {

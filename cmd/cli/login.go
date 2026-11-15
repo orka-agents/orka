@@ -19,6 +19,9 @@ import (
 )
 
 const (
+	// sessionTokenPrefix starts every Orka session token, as the API issues
+	// them, so one passed with --token is treated as a session too.
+	sessionTokenPrefix = "orka_s_"
 	// tokenKindGitHubSession marks a configured token as an Orka session
 	// from orka login, which renews itself and belongs to one server.
 	tokenKindGitHubSession = "github-session"

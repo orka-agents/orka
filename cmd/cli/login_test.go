@@ -380,6 +380,8 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = runLoginCLI(t, "host", "status")
+	// A session passed explicitly is not sent through a redirect either.
+	_, _ = runLoginCLI(t, "host", "status", "--server", orka.URL, "--token", "orka_s_explicit")
 	if leaked {
 		t.Fatal("a redirect carried credentials to another origin")
 	}
