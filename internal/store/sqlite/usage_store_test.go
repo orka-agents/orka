@@ -904,6 +904,22 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.Len(t, tasks, 3)
 	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 1)
 	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+	// A turn that started after the cut-off is not read either: this one
+	// would not decode, and the lookup's limit does not count it.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		"team", "later", "later", at.Add(time.Hour).UnixNano(), `{"namespace":"team","taskUID":"later","sessionName":"ahp-one","startedAt":5}`)
+	require.NoError(t, err)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, at, 3)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 100)
+	require.Error(t, err, "without a cut-off the later turn is read")
+	// The Unix epoch is a cut-off too, before every turn here.
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Unix(0, 0), 100)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
+	_, err = s.db.ExecContext(ctx, `DELETE FROM usage_tasks WHERE namespace = 'team' AND task_uid = 'later'`)
+	require.NoError(t, err)
 	// An earlier namespace of the same name stays out.
 	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
 		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
