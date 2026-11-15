@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +36,11 @@ func testProductionBrokerGatewayTaskPass(t *testing.T, scenario string) {
 	var issued []childPassRequest
 	var called, idempotency []string
 	var afterIssue func()
+	observations := func() ([]childPassRequest, []string, []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(issued), slices.Clone(called), slices.Clone(idempotency)
+	}
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -148,10 +154,9 @@ func testProductionBrokerGatewayTaskPass(t *testing.T, scenario string) {
 			}
 			return false
 		}, 5*time.Second, time.Millisecond)
-		mu.Lock()
-		require.Empty(t, issued, "approval must precede all pass issuance")
-		require.Empty(t, called)
-		mu.Unlock()
+		passes, calls, _ := observations()
+		require.Empty(t, passes, "approval must precede all pass issuance")
+		require.Empty(t, calls)
 		content, err := json.Marshal(map[string]string{"approvalID": pending.ID, "taskUID": string(task.UID), "actor": "reviewer"})
 		require.NoError(t, err)
 		_, err = f.persistence.AppendExecutionEvent(f.ctx, &store.ExecutionEvent{Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name, Type: events.ExecutionEventTypeApprovalApproved, ToolCallID: pending.ID, Summary: "reviewer decision", Content: content})
@@ -175,24 +180,23 @@ func testProductionBrokerGatewayTaskPass(t *testing.T, scenario string) {
 		require.False(t, result.IsError)
 	}
 	assertExternalPolicyEffect(t, f, request, wantEffect)
-	mu.Lock()
-	require.Len(t, issued, wantIssued)
+	passes, calls, keys := observations()
+	require.Len(t, passes, wantIssued)
 	if child {
-		require.Equal(t, string(parent.UID), issued[0].TaskUID)
-		require.Empty(t, issued[0].ParentTaskUID)
+		require.Equal(t, string(parent.UID), passes[0].TaskUID)
+		require.Empty(t, passes[0].ParentTaskUID)
 		if !cancelAncestor {
-			require.Equal(t, string(task.UID), issued[1].TaskUID)
-			require.Equal(t, string(parent.UID), issued[1].ParentTaskUID)
+			require.Equal(t, string(task.UID), passes[1].TaskUID)
+			require.Equal(t, string(parent.UID), passes[1].ParentTaskUID)
 		}
 	}
 	if cancelAncestor {
-		require.Empty(t, called)
-		require.Empty(t, idempotency)
+		require.Empty(t, calls)
+		require.Empty(t, keys)
 	} else {
-		require.Equal(t, []string{"Bearer fixture-pass-" + string(task.UID)}, called, "only the leaf executes a tool")
-		require.Equal(t, []string{string(request.Metadata.OperationID)}, idempotency, "idempotency belongs to the authenticated child operation")
+		require.Equal(t, []string{"Bearer fixture-pass-" + string(task.UID)}, calls, "only the leaf executes a tool")
+		require.Equal(t, []string{string(request.Metadata.OperationID)}, keys, "idempotency belongs to the authenticated child operation")
 	}
-	mu.Unlock()
 	replay := receiveExternalPolicyMCPResponse(t, f.ctx, startExternalPolicyMCPCall(t, f, broker, request))
 	require.Equal(t, 200, replay.Code, replay.Body.String())
 	var replayed harnessv2.MCPBrokerCallResponse
@@ -200,13 +204,12 @@ func testProductionBrokerGatewayTaskPass(t *testing.T, scenario string) {
 	require.True(t, replayed.Replayed)
 	require.JSONEq(t, string(result.Result), string(replayed.Result))
 	assertExternalPolicyEffect(t, f, request, wantEffect)
-	mu.Lock()
-	require.Len(t, issued, wantIssued, "exact replay must not reissue any pass")
+	passes, calls, _ = observations()
+	require.Len(t, passes, wantIssued, "exact replay must not reissue any pass")
 	if cancelAncestor {
-		require.Empty(t, called)
+		require.Empty(t, calls)
 	} else {
-		require.Len(t, called, 1, "replay must not repeat the write")
+		require.Len(t, calls, 1, "replay must not repeat the write")
 	}
-	mu.Unlock()
 	finishExternalPolicyTask(t, f, task, held, taskDone, "safe result", false)
 }
