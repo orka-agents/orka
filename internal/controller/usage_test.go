@@ -197,3 +197,30 @@ func TestUsageRetainsTheRequesterButReportsOmitIt(t *testing.T) {
 	require.NotContains(t, string(encoded), "requester")
 	require.NotContains(t, string(encoded), "ahpTurn")
 }
+
+// Only AHP usage is shown by who requested it, so an ordinary Task's
+// requester is not kept past the Task; a Task in an AHP session, or an AHP
+// turn, keeps it.
+func TestUsageRetainsTheRequesterOfAHPTasksOnly(t *testing.T) {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"}
+	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+	for name, test := range map[string]struct {
+		session string
+		labels  map[string]string
+		want    *store.UsageRequester
+	}{
+		"ordinary":      {want: nil},
+		"other session": {session: "team-session", want: nil},
+		"AHP session":   {session: " ahp-session", want: alice},
+		"AHP turn":      {labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}, want: alice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default", UID: "task-uid", Labels: test.labels},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, RequestedBy: requester}}
+			if test.session != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: test.session}
+			}
+			require.Equal(t, test.want, usageTaskSnapshot(task).Requester)
+		})
+	}
+}

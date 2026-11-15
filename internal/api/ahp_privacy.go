@@ -30,7 +30,7 @@ import (
 
 // ahpNamePrefix starts the name of every Orka Session AHP creates, and so of
 // every Task an AHP turn creates.
-const ahpNamePrefix = "ahp-"
+const ahpNamePrefix = labels.AHPNamePrefix
 
 // ahpSessionName returns a session name as the controller reads it, without
 // surrounding space, and whether it is an AHP session's. Checks read names
