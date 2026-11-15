@@ -728,9 +728,9 @@ func TestCredentialFromStdinWithCommandsThatLeaveStdinFree(t *testing.T) {
 	} {
 		for name, args := range map[string][]string{
 			"a prompt argument":               {"run", "fix bugs"},
-			"orka task exec without -i or -t": {"task", "exec", "my-task", "--", "true"},
+			"orka task exec without -i or -t": {"task", "exec", "my-task", "--quiet", "--", "true"},
 			"orka task cp from the task to -": {"task", "cp", "my-task:notes.txt", "-"},
-			"orka task cp from a local file":  {"task", "cp", localFile, "my-task:notes.txt"},
+			"orka task cp from a local file":  {"task", "cp", "--quiet", localFile, "my-task:notes.txt"},
 		} {
 			t.Run(tc.flag+" - with "+name, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
@@ -741,6 +741,11 @@ func TestCredentialFromStdinWithCommandsThatLeaveStdinFree(t *testing.T) {
 					mu.Lock()
 					seen = append(seen, r.Header.Get(tc.header))
 					mu.Unlock()
+					if r.URL.Path == "/api/v1/chat/config" {
+						// Disabled chat ends orka run after one request.
+						_ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+						return
+					}
 					http.NotFound(w, r)
 				}))
 				t.Cleanup(server.Close)
