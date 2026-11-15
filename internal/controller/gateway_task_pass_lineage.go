@@ -95,6 +95,9 @@ func gatewayPassActive(task, child *corev1alpha1.Task) bool {
 	if task.Status.Phase == corev1alpha1.TaskPhaseRunning && task.Status.ExecutionOutcome == nil {
 		return true
 	}
+	if _, cancelled := taskWaitCancellation(task); cancelled {
+		return false
+	}
 	wait, execution := task.Status.Wait, task.Status.Execution
 	if child == nil || child.Namespace != task.Namespace || task.Status.Phase != corev1alpha1.TaskPhaseSucceeded || wait == nil || execution == nil ||
 		wait.State != corev1alpha1.TaskWaitStateWaiting || wait.Kind != corev1alpha1.TaskWaitKindTasks || wait.Attempt != execution.Attempt || wait.PromptID != execution.PromptID ||

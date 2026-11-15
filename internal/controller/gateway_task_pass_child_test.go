@@ -286,6 +286,7 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 		change func(*corev1alpha1.Task)
 	}{
 		{"cancel-request", func(p *corev1alpha1.Task) { p.Annotations[labels.AnnotationCancelRequested] = "stop" }},
+		{"cancel-wait", func(p *corev1alpha1.Task) { p.Annotations[labels.AnnotationCancelWait] = "stop" }},
 		{"failed", func(p *corev1alpha1.Task) { p.Status.Phase = corev1alpha1.TaskPhaseFailed }},
 		{"root-link", func(p *corev1alpha1.Task) {
 			p.Annotations[gatewayruntime.TaskGatewayEventAnnotation] = "different-event"
@@ -332,8 +333,9 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	g.Lock()
 	g.afterIssue = func() {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(parent), parent))
-		parent.Annotations[labels.AnnotationCancelRequested] = "stop"
-		require.NoError(t, r.Update(t.Context(), parent))
+		require.NoError(t, r.requestDelegatedTaskCancellation(t.Context(), parent, "stop"))
+		require.Empty(t, parent.Annotations[labels.AnnotationCancelRequested], "a completed parked turn gets only cancel-wait")
+		require.Equal(t, "stop", parent.Annotations[labels.AnnotationCancelWait])
 	}
 	g.Unlock()
 	require.Error(t, execute())
@@ -342,6 +344,7 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	g.Unlock()
 	// Deletion independently stops the child, even with a live waiting parent.
 	delete(parent.Annotations, labels.AnnotationCancelRequested)
+	delete(parent.Annotations, labels.AnnotationCancelWait)
 	require.NoError(t, r.Update(t.Context(), parent))
 	require.NoError(t, r.Delete(t.Context(), child))
 	g.Lock()
