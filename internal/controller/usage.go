@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -62,10 +63,13 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 		result.GatewayOwner = &store.UsageGatewayOwner{Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID,
 			Name: owner.GatewayName, UID: owner.GatewayUID}
 	}
-	if requester := task.Spec.RequestedBy; requester != nil {
+	result.AHPTurn = task.Labels[labels.LabelAHPTurn] == labels.LabelAHPTurnValue
+	// Only AHP usage is shown by who requested it, so only an AHP Task's
+	// requester outlives the Task: an ordinary Task's identity stays with it.
+	ahpSession := strings.HasPrefix(strings.TrimSpace(result.SessionName), labels.AHPNamePrefix)
+	if requester := task.Spec.RequestedBy; requester != nil && (result.AHPTurn || ahpSession) {
 		result.Requester = &store.UsageRequester{Issuer: requester.Issuer, Subject: requester.Subject}
 	}
-	result.AHPTurn = task.Labels[labels.LabelAHPTurn] == labels.LabelAHPTurnValue
 	return result
 }
 
