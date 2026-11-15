@@ -236,10 +236,12 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 				if ownTunnel {
 					closeTunnel = cleanup
 				} else {
-					// Register cleanup for interrupt
+					// Register cleanup for interrupt before returning: an
+					// interrupt that arrives before a goroutine registers
+					// would otherwise leave the port-forward running.
+					c := make(chan os.Signal, 1)
+					signal.Notify(c, os.Interrupt)
 					go func() {
-						c := make(chan os.Signal, 1)
-						signal.Notify(c, os.Interrupt)
 						<-c
 						cleanup()
 					}()
