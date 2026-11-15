@@ -145,6 +145,25 @@ func cachedPortForwardServer() string {
 	return fmt.Sprintf("http://localhost:%d", cached.Port)
 }
 
+// sessionToken reports whether token is an Orka session, saved by orka login
+// or passed with --token, which then goes only to its own server and never
+// through a redirect, which can reach another port of the same host with it.
+// A session passed with --token crosses the network only as a saved one does:
+// over https, or over http only to this machine; otherwise the command stops.
+func sessionToken(token string, saved bool, server string) bool {
+	if token == "" {
+		return false
+	}
+	if saved {
+		return true
+	}
+	if !strings.HasPrefix(token, sessionTokenPrefix) {
+		return false
+	}
+	cobra.CheckErr(sessionServerAllowed(server))
+	return true
+}
+
 // newClientWithTunnel is newClientFromCmdWithServer for a command that handles
 // interrupts itself. A port-forward this call starts normally ends on the
 // first interrupt. With ownTunnel the caller decides instead: no interrupt
@@ -249,18 +268,8 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 		server = defaultServer
 	}
 
-	if !session && strings.HasPrefix(token, sessionTokenPrefix) {
-		// A session passed with --token crosses the network only as a saved
-		// one does: over https, or over http only to this machine.
-		if err := sessionServerAllowed(server); err != nil {
-			cobra.CheckErr(err)
-		}
-	}
 	c := client.NewWithNamespace(server, token, ns)
-	if token != "" && (session || strings.HasPrefix(token, sessionTokenPrefix)) {
-		// A session goes only to its own server: never through a redirect,
-		// which can reach another port of the same host with it. One passed
-		// with --token is a session as much as a saved one.
+	if sessionToken(token, session, server) {
 		c.HTTPClient = noRedirectClient
 	}
 	if txnToken == "" && txnTokenFile != "" {
