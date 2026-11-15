@@ -50,9 +50,12 @@ type orkaConfig struct {
 	TokenKind      string     `yaml:"tokenKind,omitempty"`
 	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
 	SessionServer  string     `yaml:"sessionServer,omitempty"`
-	// SessionLogin is the GitHub login the session signed in. A renewal
-	// keeps it, so a successor is told from another person's session.
+	// SessionLogin is the GitHub login the session signed in, for display.
 	SessionLogin string `yaml:"sessionLogin,omitempty"`
+	// SessionSubject is the numeric GitHub user ID the session signed in.
+	// A renewal keeps it, so a successor is told from another person's
+	// session: a login can be renamed and reused, the ID cannot.
+	SessionSubject string `yaml:"sessionSubject,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.

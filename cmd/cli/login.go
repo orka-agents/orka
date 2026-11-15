@@ -58,6 +58,7 @@ type sessionView struct {
 	Token      string    `json:"token"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	Login      string    `json:"login"`
+	Subject    string    `json:"subject"`
 	Namespace  string    `json:"namespace"`
 	Connection string    `json:"connection"`
 	AgentHost  bool      `json:"agentHost"`
@@ -131,7 +132,7 @@ func newLoginCmd() *cobra.Command {
 			if err := updateConfig(func(cfg *orkaConfig) error {
 				cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
 				expires := session.ExpiresAt
-				cfg.SessionServer, cfg.TokenExpiresAt, cfg.SessionLogin = server, &expires, session.Login
+				cfg.SessionServer, cfg.TokenExpiresAt, cfg.SessionLogin, cfg.SessionSubject = server, &expires, session.Login, session.Subject
 				return nil
 			}); err != nil {
 				return fmt.Errorf("save the session: %w", err)
@@ -185,7 +186,7 @@ func newLogoutCmd() *cobra.Command {
 				!strings.Contains(err.Error(), "HTTP 401") {
 				return fmt.Errorf("end the session: %w", err)
 			}
-			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer, cfg.SessionLogin = "", "", nil, "", ""
+			cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer, cfg.SessionLogin, cfg.SessionSubject = "", "", nil, "", "", ""
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
@@ -284,10 +285,13 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 }
 
 // holdsSession reports whether saved holds a session of the same person from
-// the same server as read: read's own, or its successor from a renewal.
+// the same server as read: read's own, or its successor from a renewal. The
+// person is their GitHub user ID: another account may sign in meanwhile under
+// a login this person used before.
 func holdsSession(saved, read orkaConfig) bool {
 	return saved.TokenKind == tokenKindGitHubSession && saved.Token != "" &&
-		saved.SessionServer == read.SessionServer && saved.SessionLogin == read.SessionLogin
+		saved.SessionServer == read.SessionServer &&
+		read.SessionSubject != "" && saved.SessionSubject == read.SessionSubject
 }
 
 // sessionEndsSoon reports a session in its renewal window. One that already

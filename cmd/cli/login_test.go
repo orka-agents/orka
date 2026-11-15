@@ -69,7 +69,7 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/github":
 			json.NewDecoder(r.Body).Decode(&signedIn) //nolint:errcheck
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "namespace": "orka-system", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"token": "orka_s_session", "expiresAt": time.Now().Add(12 * time.Hour), "login": "alice", "subject": "1001", "namespace": "orka-system", "connection": "github-alice", "agentHost": true}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == agentHostAPIPath:
 			if r.Header.Get("Authorization") != "Bearer orka_s_session" {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -105,7 +105,7 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 	}
 	cfg := loadConfig()
 	if cfg.Server != orka.URL || cfg.SessionServer != orka.URL || cfg.Token != "orka_s_session" || cfg.TokenKind != tokenKindGitHubSession ||
-		cfg.TokenExpiresAt == nil || cfg.Namespace != "orka-system" || cfg.SessionLogin != "alice" {
+		cfg.TokenExpiresAt == nil || cfg.Namespace != "orka-system" || cfg.SessionLogin != "alice" || cfg.SessionSubject != "1001" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
@@ -154,7 +154,7 @@ current-context: x
 	}))
 	defer orka.Close()
 	soon := time.Now().Add(time.Hour)
-	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon, Namespace: "orka-system"}); err != nil {
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &soon, Namespace: "orka-system"}); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runLoginCLI(t, "host", "status")
@@ -202,9 +202,9 @@ func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
 	}))
 	defer orka.Close()
 	soon := time.Now().Add(time.Hour)
-	alice := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_alice", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon, SessionLogin: "alice"}
+	alice := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_alice", TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &soon, SessionLogin: "alice"}
 	bob := alice
-	bob.Token, bob.SessionLogin = "orka_s_bob", "bob"
+	bob.Token, bob.SessionLogin, bob.SessionSubject = "orka_s_bob", "bob", "1002"
 	if err := saveConfig(bob); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +212,15 @@ func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	if got := configuredSession(cmd, orka.URL, alice); got != "orka_s_alice" || renewals != 0 {
 		t.Fatalf("token = %q after %d renewals, want alice's own session and no renewal", got, renewals)
+	}
+	// Another account that took over alice's former login is not alice.
+	renamed := alice
+	renamed.Token, renamed.SessionSubject = "orka_s_renamed", "1003"
+	if err := saveConfig(renamed); err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredSession(cmd, orka.URL, alice); got != "orka_s_alice" || renewals != 0 {
+		t.Fatalf("token = %q after %d renewals, want alice's own session: an equal login names no one", got, renewals)
 	}
 	successor := alice
 	later := time.Now().Add(12 * time.Hour)
@@ -242,7 +251,7 @@ func TestConcurrentCommandsRenewASessionOnce(t *testing.T) {
 	}))
 	defer orka.Close()
 	soon := time.Now().Add(time.Hour)
-	cfg := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon}
+	cfg := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &soon}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -282,21 +291,21 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	// Logout ends the session at the server that issued it, wherever the
 	// configured server points now.
 	if err := saveConfig(orkaConfig{Server: "https://elsewhere.example", SessionServer: orka.URL, Token: "orka_s_session",
-		TokenKind: tokenKindGitHubSession, TokenExpiresAt: &later}); err != nil {
+		TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runLoginCLI(t, "logout")
 	if err != nil || ended != "Bearer orka_s_session" || !strings.Contains(out, "Signed out") {
 		t.Fatalf("logout: %v %q, ended with %q", err, out, ended)
 	}
-	if cfg := loadConfig(); cfg.Token != "" || cfg.TokenKind != "" || cfg.SessionServer != "" || cfg.SessionLogin != "" {
+	if cfg := loadConfig(); cfg.Token != "" || cfg.TokenKind != "" || cfg.SessionServer != "" || cfg.SessionLogin != "" || cfg.SessionSubject != "" {
 		t.Fatalf("config = %+v", cfg)
 	}
 
 	// A session whose saved server would carry it in the clear is not sent.
 	ended = ""
 	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: "http://orka.example.com", Token: "orka_s_session",
-		TokenKind: tokenKindGitHubSession, TokenExpiresAt: &later}); err != nil {
+		TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runLoginCLI(t, "logout"); err == nil || ended != "" {
@@ -309,7 +318,7 @@ func TestSetTokenReplacesASession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	later := time.Now().Add(10 * time.Hour)
 	if err := saveConfig(orkaConfig{Server: "https://orka.example", SessionServer: "https://orka.example", Token: "orka_s_session",
-		TokenKind: tokenKindGitHubSession, TokenExpiresAt: &later}); err != nil {
+		TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runLoginCLI(t, "config", "set-token", "static-token"); err != nil {
@@ -366,7 +375,7 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	defer signedIn.Close()
 	_, _ = runLoginCLI(t, "login", "--server", signedIn.URL, "--no-open", "--timeout", "2s")
 	later := time.Now().Add(10 * time.Hour)
-	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_session", TokenKind: tokenKindGitHubSession,
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_session", TokenKind: tokenKindGitHubSession, SessionSubject: "1001",
 		TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +403,7 @@ func TestConfigWritesWaitForARenewal(t *testing.T) {
 	}))
 	defer orka.Close()
 	soon := time.Now().Add(time.Hour)
-	cfg := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon}
+	cfg := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &soon}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +470,7 @@ func TestLogoutWaitsForARenewal(t *testing.T) {
 	}))
 	defer orka.Close()
 	later := time.Now().Add(10 * time.Hour)
-	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession,
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, SessionSubject: "1001",
 		TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +484,7 @@ func TestLogoutWaitsForARenewal(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_successor", TokenKind: tokenKindGitHubSession,
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_successor", TokenKind: tokenKindGitHubSession, SessionSubject: "1001",
 		TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +550,7 @@ func TestLoginWarnsBeforeReplacingASavedToken(t *testing.T) {
 		warns bool
 	}{
 		{name: "token set by hand", saved: orkaConfig{Server: orka.URL, Token: "oidc-token", Namespace: "team-a"}, warns: true},
-		{name: "session", saved: orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession,
+		{name: "session", saved: orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_old", TokenKind: tokenKindGitHubSession, SessionSubject: "1001",
 			TokenExpiresAt: &later, SessionLogin: "alice"}},
 		{name: "nothing saved", saved: orkaConfig{Server: orka.URL}},
 	} {
@@ -649,7 +658,7 @@ func TestATruncatedAnswerSavesNoSession(t *testing.T) {
 	}))
 	defer orka.Close()
 	soon := time.Now().Add(time.Hour)
-	held := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_held", TokenKind: tokenKindGitHubSession, TokenExpiresAt: &soon}
+	held := orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_held", TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &soon}
 	if err := saveConfig(held); err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +733,7 @@ func TestLogoutKeepsTheSessionWhenTheServerCannotAnswer(t *testing.T) {
 	}))
 	defer orka.Close()
 	later := time.Now().Add(10 * time.Hour)
-	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_live", TokenKind: tokenKindGitHubSession,
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_live", TokenKind: tokenKindGitHubSession, SessionSubject: "1001",
 		TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
 	}

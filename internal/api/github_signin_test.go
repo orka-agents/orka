@@ -194,7 +194,7 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	h.identity = nil
 	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
 	if status != http.StatusCreated || !strings.HasPrefix(session.Token, sessionTokenPrefix) || session.Login != "alice" ||
-		session.Namespace != connectorTestNamespace || !session.AgentHost {
+		session.Subject != signInTestUserID || session.Namespace != connectorTestNamespace || !session.AgentHost {
 		t.Fatalf("sign-in: %d %+v", status, session)
 	}
 	wantName := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
@@ -916,7 +916,8 @@ func TestSessionRenewsOnceAndSignsOut(t *testing.T) {
 		t.Fatalf("renew = %d %s", resp.StatusCode, raw)
 	}
 	var renewed SessionResponse
-	if err := json.Unmarshal(raw, &renewed); err != nil || renewed.Token == session.Token || !strings.HasPrefix(renewed.Token, sessionTokenPrefix) {
+	if err := json.Unmarshal(raw, &renewed); err != nil || renewed.Token == session.Token || !strings.HasPrefix(renewed.Token, sessionTokenPrefix) ||
+		renewed.Subject != session.Subject {
 		t.Fatalf("renewed = %+v, %v", renewed, err)
 	}
 	if err := h.asSession(session.Token); err == nil {

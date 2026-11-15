@@ -175,11 +175,14 @@ type githubSignInRequest struct {
 
 // SessionResponse is a new session token, shown once.
 type SessionResponse struct {
-	Token      string    `json:"token"`
-	ExpiresAt  time.Time `json:"expiresAt"`
-	Login      string    `json:"login"`
-	Namespace  string    `json:"namespace"`
-	Connection string    `json:"connection,omitempty"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Login     string    `json:"login"`
+	// Subject is the person's numeric GitHub user ID. Unlike the login,
+	// which can be renamed and reused, it tells one person from another.
+	Subject    string `json:"subject"`
+	Namespace  string `json:"namespace"`
+	Connection string `json:"connection,omitempty"`
 	// AgentHost says Orka provisions an agent host for this link.
 	AgentHost bool `json:"agentHost"`
 }
@@ -340,7 +343,7 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not renew the session")
 	}
 	return c.Status(fiber.StatusCreated).JSON(SessionResponse{
-		Token: token, ExpiresAt: next.ExpiresAt, Login: next.Username, Namespace: next.Namespace, Connection: name,
+		Token: token, ExpiresAt: next.ExpiresAt, Login: next.Username, Subject: next.Subject, Namespace: next.Namespace, Connection: name,
 	})
 }
 
@@ -377,7 +380,8 @@ func (h *Handlers) issueSession(ctx context.Context, ui *UserInfo) (SessionRespo
 	if err := h.githubSignIn.Sessions.CreateAuthSession(ctx, session); err != nil {
 		return SessionResponse{}, fiber.NewError(fiber.StatusInternalServerError, "could not store the session")
 	}
-	return SessionResponse{Token: token, ExpiresAt: session.ExpiresAt, Login: session.Username, Namespace: session.Namespace}, nil
+	return SessionResponse{Token: token, ExpiresAt: session.ExpiresAt, Login: session.Username, Subject: session.Subject,
+		Namespace: session.Namespace}, nil
 }
 
 func (h *Handlers) newSession(ui *UserInfo) (string, store.AuthSession, error) {
