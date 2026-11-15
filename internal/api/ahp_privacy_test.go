@@ -729,6 +729,53 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.Equal(t, []int{1}, recording.limits, "only room for the report's own row")
 }
 
+// Placeholders for a session's observations whose Task rows the report did not
+// load are not rows the lookup returns again: they leave its limit alone, and a
+// retained row one stands for is a new record against the budget.
+func TestAHPUsageSessionLookupDoesNotCountPlaceholders(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	recording := &limitRecordingStore{Store: sqlite.NewStore(db, ":memory:")}
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, uid := range []string{"loaded", "turn-0", "turn-1", "turn-2"} {
+		require.NoError(t, recording.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: uid,
+			TaskName: uid, SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start}))
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: recording})
+	report := func(extra int) int {
+		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
+		// Five turns whose rows retention pruned, and one, turn-0, whose row
+		// the report did not select: each gets a placeholder.
+		for _, uid := range []string{"gone-0", "gone-1", "gone-2", "gone-3", "gone-4", "turn-0"} {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", TaskUID: uid, TaskName: uid,
+				CounterID: "counter-" + uid, SessionName: "ahp-shared", ObservedAt: start})
+		}
+		// The report's own records leave room for exactly the three turns it
+		// did not load.
+		for i := range usageMaxRecords - 10 + extra {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+				SessionName: "team-session", ObservedAt: start})
+		}
+		recording.limits = nil
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+			return handlers.filterUsageTaskAccess(c, data, start.Add(time.Hour))
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		return response.StatusCode
+	}
+	require.Equal(t, http.StatusOK, report(0))
+	require.Equal(t, []int{3 + 1}, recording.limits, "only the loaded row widens the limit, not the placeholders")
+	require.Equal(t, http.StatusUnprocessableEntity, report(1),
+		"turn-0's retained row is a new record, though a placeholder stands for it")
+}
+
 // A report that the session lookup takes exactly to its record limit is not
 // refused because the lookup also returns a row the report already loaded.
 func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
