@@ -489,14 +489,20 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		By("creating an arithmetic Agent and returning inventory without delegation")
+		By("creating an arithmetic Agent and returning inventory before allowlisting")
 		submitTask(bootstrapTask, "Use create_agent with role 'dynamic' and systemPrompt "+
 			"'You answer arithmetic questions with just the number.'. Return its generated Agent name and namespace "+
 			"as inventory. Do not delegate or delete the Agent. "+marker)
 		created = waitForCreatedAgent(bootstrapTask, 3*time.Minute)
 		if e2eMockOpenAI {
-			injectMockLLMFixtures(coordinationMockText(marker, "e2e-coord-adv-dynagent-hold-1",
-				fmt.Sprintf("Inventory: Agent %s/%s. No delegation was attempted.", namespace, created)))
+			// Probe the runtime boundary even when the prompt forbids delegation.
+			injectMockLLMFixtures(
+				coordinationMockToolCall(marker, "e2e-coord-adv-dynagent-hold-1", "delegate_task",
+					map[string]any{"agent": created, "agentNamespace": namespace, "prompt": "This child must not be created."}),
+				coordinationMockText(marker, "spec.coordination.allowedAgents",
+					fmt.Sprintf("Inventory: Agent %s/%s. Empty-policy delegation was refused.", namespace, created)),
+			)
+			expectCoordinationToolResult(marker, "delegate_task", "spec.coordination.allowedAgents", time.Minute)
 		}
 		Expect(waitForTaskCompletion(bootstrapTask, 10*time.Minute)).To(Equal("Succeeded"))
 		output, err := utils.Run(exec.Command("kubectl", "get", "tasks", "-n", namespace,
