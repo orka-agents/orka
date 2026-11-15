@@ -44,7 +44,7 @@ signed-in person's host may do.
    polls GitHub, and never holds the client secret.
 3. It sends the GitHub access and refresh tokens to `POST /api/v1/auth/github` once.
    The endpoint is unauthenticated and every attempt spends the App's GitHub rate
-   limit, so attempts are rate-limited per client and overall before the body is read;
+   limit, so each API server rate-limits attempts per client and overall before the body is read;
    one over the limit gets `429` with `Retry-After`. Orka then:
    - checks with the check-token API that the token was issued to its own app, so a
      token another app obtained cannot sign in;
