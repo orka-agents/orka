@@ -342,6 +342,9 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 		{Namespace: namespace, TaskUID: "padded-legacy-in-bobs", SessionName: " ahp-live"},
 		// A private fork of a turn with no session of its own.
 		{Namespace: namespace, TaskUID: "alice-sessionless-fork", AHPTurn: true, Requester: requester("alice")},
+		// A delegate_task child of Alice's turn inherits its AHP-turn mark
+		// and requester but continues no session, and has an ordinary name.
+		{Namespace: namespace, TaskUID: "alice-delegated-child", TaskName: "worker", AHPTurn: true, Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "unknown-sessionless-turn", AHPTurn: true},
 		// A requester recorded without an identity names no one.
 		{Namespace: namespace, TaskUID: "empty-requester", SessionName: "ahp-empty", Requester: &store.UsageRequester{}},
@@ -388,12 +391,12 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 		return hidden
 	}
 	require.Equal(t, with("reused-bob"), hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"}))
-	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork", "chat-created-alice"),
+	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}))
 	require.Empty(t, hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"}))
 	// A person the API server signs in itself carries no issuer and subject,
 	// so no AHP usage is theirs.
-	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork", "chat-created-alice"),
+	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}))
 }
 
