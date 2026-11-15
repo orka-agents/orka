@@ -2343,6 +2343,65 @@ func TestAHPBackendShowsAPermissionRequestHeldWhileLiveUpdatesLagged(t *testing.
 	require.NoError(t, json.Unmarshal(ready, &action))
 	require.Equal(t, "tool-held", action.ToolCallId)
 	require.NotNil(t, action.ConfirmationTitle, "the held request is shown for the person's decision")
+	// Its input is never stored and its live event was lost, so the person
+	// cannot see what it would run: it can only be denied.
+	require.Nil(t, action.ToolInput)
+	require.Len(t, action.Options, 1)
+	require.Equal(t, ahptypes.ConfirmationOptionKindDeny, action.Options[0].Kind)
+	require.NotNil(t, action.ConfirmationTitle.Plain)
+	require.Contains(t, *action.ConfirmationTitle.Plain, ahpDenyOnlyNote)
+
+	confirm := func(approved bool) {
+		_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
+			Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-held", Approved: approved,
+		}})
+		require.NoError(t, err)
+	}
+	confirm(true)
+	reopened := waitForActionType(t, chatSub, "chat/toolCallReady")
+	require.NoError(t, json.Unmarshal(reopened, &action))
+	require.Len(t, action.Options, 1, "an approval it did not offer is refused and the request asked again")
+	env.mu.Lock()
+	require.Empty(t, env.decisions, "nothing was approved")
+	env.mu.Unlock()
+	confirm(false)
+	require.Eventually(t, func() bool {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		return len(env.decisions) == 1 && strings.HasSuffix(env.decisions[0], "approval-held decline")
+	}, 5*time.Second, 20*time.Millisecond, "the denial reaches the Task")
+}
+
+// A held request the turn missed is shown with Allow when the call's own
+// updates already reported its input.
+func TestAHPBackendOffersApprovalForARecoveredRequestWithKnownInput(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "manual")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	userKey := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "run the tests"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, ahpTestSession, &record))
+	env.waitForTask(record.OrkaSession + "-t1")
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(userKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+	turn.mu.Lock()
+	call := turn.startTool("tool-known", "bash", "Run the tests")
+	call.input = json.RawMessage(`{"command":"go test ./..."}`)
+	turn.onApprovalFrom(&liveevents.Approval{ID: "approval-known", State: liveevents.ApprovalPending, ToolCallID: "tool-known",
+		ToolName: "bash", Title: "Run the tests"}, true)
+	turn.mu.Unlock()
+	ready := waitForActionType(t, chatSub, "chat/toolCallReady")
+	var action ahptypes.ChatToolCallReadyAction
+	require.NoError(t, json.Unmarshal(ready, &action))
+	require.Len(t, action.Options, 2)
+	require.NotNil(t, action.ToolInput)
+	require.Contains(t, *action.ToolInput.Inline, "go test")
 }
 
 // ahpConfigEmitter records the session config changes the backend shows.
@@ -2872,4 +2931,104 @@ func TestAHPBackendRetriesDrainingAWaitingMessage(t *testing.T) {
 		var tasks corev1alpha1.TaskList
 		return env.kube.List(ctx, &tasks) == nil && len(tasks.Items) == 1
 	}, 5*time.Second, 10*time.Millisecond, "the waiting message runs once the store takes it off")
+}
+
+// ahpFailingChannelStore fails reads of channel states while armed.
+type ahpFailingChannelStore struct {
+	store.AHPStore
+	armed atomic.Bool
+}
+
+func (s *ahpFailingChannelStore) GetAHPChannelState(ctx context.Context, userKey, channel string) (store.AHPChannelState, error) {
+	if s.armed.Load() {
+		return store.AHPChannelState{}, errors.New("the store refused the read")
+	}
+	return s.AHPStore.GetAHPChannelState(ctx, userKey, channel)
+}
+
+// Recovery that could not read a chat to end its unstarted turn runs again,
+// so the turn does not stay shown as running until the next restart.
+func TestAHPBackendRetriesEndingAnUnstartedTurnItCouldNotRead(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	require.NoError(t, env.backend.emitterFor(alice).Emit(ctx, chat, ahpUserTurn("turn-lost", "run me")))
+	failing := &ahpFailingChannelStore{AHPStore: env.backend.store}
+	failing.armed.Store(true)
+	env.backend.store = failing
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+
+	env.backend.recoverTurns(ctx, alice)
+	require.Eventually(t, func() bool {
+		env.backend.mu.Lock()
+		defer env.backend.mu.Unlock()
+		return !env.backend.recovered[alice.UserKey]
+	}, 5*time.Second, 10*time.Millisecond, "a recovery that could not read the chat is eligible again")
+
+	failing.armed.Store(false)
+	env.backend.recoverTurns(ctx, alice)
+	require.Eventually(t, func() bool {
+		state, err := ahphost.ChannelState(ctx, failing.AHPStore, alice.UserKey, chat)
+		return err == nil && state.Chat.ActiveTurn == nil
+	}, 5*time.Second, 10*time.Millisecond, "the retry ends the turn that never started")
+}
+
+// ahpFlakyResultStore fails a number of result reads before answering.
+type ahpFlakyResultStore struct {
+	store.ResultStore
+	failures atomic.Int32
+}
+
+func (s *ahpFlakyResultStore) GetResult(ctx context.Context, namespace, taskName string) ([]byte, error) {
+	if s.failures.Add(-1) >= 0 {
+		return nil, errors.New("the store refused the read")
+	}
+	return s.ResultStore.GetResult(ctx, namespace, taskName)
+}
+
+// A turn's stored result is read again after a failed read; one that cannot
+// be read at all is not settled silently.
+func TestAHPTurnRetriesReadingItsResult(t *testing.T) {
+	previous := ahpResultReadDelays
+	ahpResultReadDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { ahpResultReadDelays = previous })
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	results := sqlite.NewStore(db, ":memory:")
+	require.NoError(t, results.SaveResult(t.Context(), ahpTestNamespace, "turn-task", []byte("the answer")))
+	flaky := &ahpFlakyResultStore{ResultStore: results}
+	turn := &ahpTurn{b: &ahpBackend{h: &Handlers{resultStore: flaky}}, ctx: t.Context()}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: ahpTestNamespace, Name: "turn-task"}}
+
+	flaky.failures.Store(2)
+	data, err := turn.readResult(task)
+	require.NoError(t, err)
+	require.Equal(t, "the answer", string(data), "two failed reads are retried")
+
+	flaky.failures.Store(3)
+	_, err = turn.readResult(task)
+	require.Error(t, err, "a read that keeps failing is reported")
+}
+
+// Only models of Agents the person may use are offered.
+func TestAHPAgentChoicesFollowAgentUseAuthorization(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(
+		ahpTestAgent("a-denied-claude", corev1alpha1.AgentRuntimeClaude, "shared"),
+		ahpTestAgent("b-allowed-claude", corev1alpha1.AgentRuntimeClaude, "shared"),
+		ahpTestAgent("c-denied-codex", corev1alpha1.AgentRuntimeCodex, "codex-only"),
+	).Build()
+	clientset, _ := agentUseClientset(ahpTestNamespace + "/b-allowed-claude")
+	backend := &ahpBackend{h: NewHandlers(HandlersConfig{Client: kube, APIReader: kube, KubeClient: clientset})}
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Username: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	choices, err := backend.agentChoices(t.Context(), alice)
+	require.NoError(t, err)
+	require.Equal(t, []ahpAgentChoice{{Agent: "b-allowed-claude", Runtime: corev1alpha1.AgentRuntimeClaude, Model: "shared"}}, choices,
+		"a model is offered through an Agent the person may use, and not through one they may not")
 }

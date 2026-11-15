@@ -422,7 +422,8 @@ type ahpAgentChoice struct {
 }
 
 // agentChoices lists the built-in-runtime Agents in the user's namespace, one
-// per runtime and model. Each turn's Task is authorized when it is created.
+// per runtime and model, through Agents the person may use. Each turn's Task
+// is authorized again when it is created.
 func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Principal) ([]ahpAgentChoice, error) {
 	var agents corev1alpha1.AgentList
 	if err := b.h.client.List(ctx, &agents, client.InNamespace(principal.Namespace)); err != nil {
@@ -443,6 +444,12 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 		}
 		key := string(runtime) + "\x00" + agent.Spec.Model.Name
 		if seen[key] {
+			continue
+		}
+		// A model is offered only through an Agent the person may use, so
+		// one they cannot start a turn with is never shown as enabled.
+		if err := authorizeAgentUse(ctx, b.h.clientset, ahpPrincipalUserInfo(principal), agent.Namespace, agent.Name,
+			"AHPSession", ""); err != nil {
 			continue
 		}
 		seen[key] = true

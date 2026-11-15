@@ -118,6 +118,10 @@ type ahpToolCall struct {
 	// input is the call's input as last reported, by its permission request
 	// or its updates; a confirmation shows it.
 	input json.RawMessage
+	// denyOnly marks a held request reloaded from its record without the
+	// call's input, which is never stored: the person cannot see what they
+	// would approve, so it can only be denied.
+	denyOnly bool
 }
 
 func ahpTurnKey(userKey, session string) string { return userKey + "\x00" + session }
@@ -850,6 +854,12 @@ func (t *ahpTurn) completeTool(id string, call *ahpToolCall, success bool, title
 // onApproval shows a held permission request as a confirmation, and settles
 // the confirmation when the request ends without the client's answer.
 func (t *ahpTurn) onApproval(approval *liveevents.Approval) {
+	t.onApprovalFrom(approval, false)
+}
+
+// onApprovalFrom shows a permission request, recovered from its record when
+// the turn missed its live event.
+func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) {
 	id := approval.ToolCallID
 	if id == "" {
 		id = "approval-" + approval.ID
@@ -869,11 +879,12 @@ func (t *ahpTurn) onApproval(approval *liveevents.Approval) {
 		if len(approval.Input) > 0 {
 			call.input = approval.Input
 		}
+		call.denyOnly = recovered && len(call.input) == 0
 		title := approval.Title
 		if title == "" {
 			title = call.title
 		}
-		t.askForConfirmation(id, title, call.input)
+		t.askForConfirmation(id, title, call.input, call.denyOnly)
 	default:
 		call := t.tools[id]
 		if call == nil {
@@ -917,20 +928,27 @@ func (t *ahpTurn) recoverApprovals() {
 		if held.ExpiresAt != nil {
 			approval.ExpiresAt = *held.ExpiresAt
 		}
-		t.onApproval(approval)
+		t.onApprovalFrom(approval, true)
 	}
 }
 
 // askForConfirmation shows a tool call as waiting for the person's decision,
-// with the call's input when it is known, so they see what they decide on.
-func (t *ahpTurn) askForConfirmation(id, title string, input json.RawMessage) {
+// with the call's input when it is known, so they see what they decide on. A
+// denyOnly request offers only Deny.
+func (t *ahpTurn) askForConfirmation(id, title string, input json.RawMessage, denyOnly bool) {
+	options := []ahptypes.ConfirmationOption{
+		{Id: ahpOptionApprove, Label: "Allow", Kind: ahptypes.ConfirmationOptionKindApprove},
+		{Id: ahpOptionDeny, Label: "Deny", Kind: ahptypes.ConfirmationOptionKindDeny},
+	}
+	confirmation := title
+	if denyOnly {
+		options = options[1:]
+		confirmation = strings.TrimSpace(title + " " + ahpDenyOnlyNote)
+	}
 	ready := &ahptypes.ChatToolCallReadyAction{
 		Type: ahptypes.ActionTypeChatToolCallReady, TurnId: t.id, ToolCallId: id,
-		InvocationMessage: ahptypes.StringOrMarkdown{Plain: &title}, ConfirmationTitle: &ahptypes.StringOrMarkdown{Plain: &title},
-		Options: []ahptypes.ConfirmationOption{
-			{Id: ahpOptionApprove, Label: "Allow", Kind: ahptypes.ConfirmationOptionKindApprove},
-			{Id: ahpOptionDeny, Label: "Deny", Kind: ahptypes.ConfirmationOptionKindDeny},
-		},
+		InvocationMessage: ahptypes.StringOrMarkdown{Plain: &title}, ConfirmationTitle: &ahptypes.StringOrMarkdown{Plain: &confirmation},
+		Options: options,
 	}
 	if len(input) > 0 {
 		inline := string(input)
@@ -938,6 +956,9 @@ func (t *ahpTurn) askForConfirmation(id, title string, input json.RawMessage) {
 	}
 	t.chat(ahptypes.StateAction{Value: ready})
 }
+
+// ahpDenyOnlyNote explains a request offered only for denial.
+const ahpDenyOnlyNote = "(Orka cannot show this call's input after missing its live update, so it can only be denied; the agent can ask again.)"
 
 func ahpOptionAllows(approval *liveevents.Approval) bool {
 	for _, option := range approval.Options {
@@ -964,6 +985,13 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 	call := t.tools[toolCallID]
 	approval := ""
 	if call != nil {
+		if approved && call.denyOnly && call.approval != "" {
+			// The person was not shown what they would approve.
+			log.Info("an AHP approval of a request offered only for denial was refused", "namespace", t.session.Namespace, "task", t.task)
+			t.askForConfirmation(toolCallID, call.title, call.input, true)
+			t.mu.Unlock()
+			return
+		}
 		approval, call.approval = call.approval, ""
 	}
 	t.mu.Unlock()
@@ -986,7 +1014,7 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 		return
 	}
 	call.approval = approval
-	t.askForConfirmation(toolCallID, call.title, call.input)
+	t.askForConfirmation(toolCallID, call.title, call.input, call.denyOnly)
 }
 
 // recordDiffs keeps the reported file edits and lists them in the session's
@@ -1044,36 +1072,49 @@ func ahpLines(text string) []string {
 	return strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 }
 
+// showStoredAnswer shows the turn's stored result when the turn did not see
+// its whole answer stream live. The caller holds t.mu.
+func (t *ahpTurn) showStoredAnswer(task *corev1alpha1.Task) {
+	missed := t.journalMissed.Load()
+	if (t.streamedText && !t.lagged && !missed) || task.Status.ResultRef == nil || !task.Status.ResultRef.Available || t.b.h.resultStore == nil {
+		return
+	}
+	// The stored result is whole, like a live final answer, and gets the
+	// same pattern redaction before anyone sees it. After live updates
+	// fell behind it is the turn's answer, in a part of its own beside
+	// the text that streamed, and the reply the conversation keeps.
+	data, err := t.readResult(task)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		// Without the stored answer the turn would end with a partial
+		// reply and nothing saying so.
+		t.text(fmt.Sprintf("\n\nOrka could not read this turn's full answer; it is the result of Task %s.", task.Name))
+	}
+	if err == nil {
+		answer := executionevents.RedactExecutionEventText(string(data))
+		// The newest text shown may already be the whole answer: streamed
+		// before live updates fell behind, or by the process before a
+		// restart. It is not shown twice, and stays the reply the
+		// conversation keeps.
+		newest, known := t.shownPart, !missed
+		if t.streamedText {
+			newest, known = t.partText, !t.partOver && !missed
+		}
+		if whole := strings.TrimSpace(answer); whole != "" && known && strings.TrimSpace(newest) == whole {
+			t.reply = ahpTail(whole, ahpExchangeMax)
+		} else {
+			if t.lagged || missed {
+				t.textPart, t.reply = "", ""
+			}
+			t.text(answer)
+		}
+	}
+}
+
 // settle ends the turn from its Task's terminal phase.
 func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	missed := t.journalMissed.Load()
-	if (!t.streamedText || t.lagged || missed) && task.Status.ResultRef != nil && task.Status.ResultRef.Available && t.b.h.resultStore != nil {
-		// The stored result is whole, like a live final answer, and gets the
-		// same pattern redaction before anyone sees it. After live updates
-		// fell behind it is the turn's answer, in a part of its own beside
-		// the text that streamed, and the reply the conversation keeps.
-		if data, err := t.b.h.resultStore.GetResult(t.ctx, task.Namespace, task.Name); err == nil {
-			answer := executionevents.RedactExecutionEventText(string(data))
-			// The newest text shown may already be the whole answer: streamed
-			// before live updates fell behind, or by the process before a
-			// restart. It is not shown twice, and stays the reply the
-			// conversation keeps.
-			newest, known := t.shownPart, !missed
-			if t.streamedText {
-				newest, known = t.partText, !t.partOver && !missed
-			}
-			if whole := strings.TrimSpace(answer); whole != "" && known && strings.TrimSpace(newest) == whole {
-				t.reply = ahpTail(whole, ahpExchangeMax)
-			} else {
-				if t.lagged || missed {
-					t.textPart, t.reply = "", ""
-				}
-				t.text(answer)
-			}
-		}
-	}
+	t.showStoredAnswer(task)
 	t.finishPlan()
 	for _, id := range t.order {
 		if call := t.tools[id]; call != nil && !call.completed {
@@ -1120,6 +1161,31 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		}})
 	}
 	t.finishSession()
+}
+
+// ahpResultReadDelays are the waits before each retry of reading a turn's
+// stored result after a failed read.
+var ahpResultReadDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
+
+// readResult reads the turn's stored result, retrying a failed read a few
+// times: the answer is lost from the chat if it cannot be read now.
+func (t *ahpTurn) readResult(task *corev1alpha1.Task) ([]byte, error) {
+	data, err := t.b.h.resultStore.GetResult(t.ctx, task.Namespace, task.Name)
+	for _, delay := range ahpResultReadDelays {
+		if err == nil || errors.Is(err, store.ErrNotFound) {
+			break
+		}
+		select {
+		case <-t.ctx.Done():
+			return nil, t.ctx.Err()
+		case <-time.After(delay):
+		}
+		data, err = t.b.h.resultStore.GetResult(t.ctx, task.Namespace, task.Name)
+	}
+	if err != nil {
+		log.Info("read an AHP turn's result", "namespace", task.Namespace, "task", task.Name, "reason", err.Error())
+	}
+	return data, err
 }
 
 // failureMessage adds the runtime's own reason to a failed turn's message.
@@ -1224,7 +1290,12 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			// what waits, off the caller.
 			go func() {
 				ctx := context.WithoutCancel(ctx)
-				b.endUnstartedTurn(ctx, principal, record)
+				if !b.endUnstartedTurn(ctx, principal, record) {
+					// The chat could not be read: a later call scans again.
+					b.mu.Lock()
+					delete(b.recovered, principal.UserKey)
+					b.mu.Unlock()
+				}
 				// A message queued while the session was idle can be left
 				// behind when the previous leader stopped before running it.
 				// Run what waits: a message whose sender is gone is reported
@@ -1267,18 +1338,29 @@ func ahpLastMarkdown(parts []ahptypes.ResponsePart) string {
 // endUnstartedTurn ends a turn clients were shown started that the session
 // never recorded: the previous leader stopped after the turn's start was
 // journaled but before it ran. A turn this process holds a slot for is about
-// to be recorded, and is left alone.
-func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Principal, record ahpSession) {
+// to be recorded, and is left alone. It reports false when the chat's state
+// could not be read, so nothing is known about its turn.
+func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Principal, record ahpSession) bool {
 	key := ahpTurnKey(principal.UserKey, record.Session)
 	b.mu.Lock()
 	_, reserved := b.reserved[key]
 	b.mu.Unlock()
 	if reserved || b.activeTurn(principal.UserKey, record.Session) != nil {
-		return
+		return true
 	}
 	state, err := ahphost.ChannelState(ctx, b.store, principal.UserKey, record.Chat)
-	if err != nil || state.Chat == nil || state.Chat.ActiveTurn == nil {
-		return
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.Is(err, store.ErrNotFound) || errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		// No state, or one no later read can decode either: nothing to end.
+		return true
+	}
+	if err != nil {
+		log.Info("read an AHP chat to end a turn that did not start", "chat", record.Chat, "reason", err.Error())
+		return false
+	}
+	if state.Chat == nil || state.Chat.ActiveTurn == nil {
+		return true
 	}
 	turn := state.Chat.ActiveTurn
 	started, err := time.Parse(time.RFC3339Nano, turn.StartedAt)
@@ -1287,6 +1369,7 @@ func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Pri
 	}
 	b.emitTurnError(ctx, b.emitterFor(principal), record, turn.Id, started, "TurnNotStarted",
 		"the turn did not start before Orka restarted; send it again")
+	return true
 }
 
 // nextGeneration moves a session to a new Orka Session for another model. A
