@@ -206,11 +206,16 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 
 	if server == "" {
 		target := commandKubeTarget(cmd, cfg)
+		// Read the context's token, including a tokenFile, before connecting,
+		// so a token written to that file meanwhile, perhaps for another
+		// context, does not go through this context's port-forward.
+		var kubeToken string
+		if token == "" {
+			kubeToken, _ = target.token()
+		}
 		server, closeTunnel = connectThroughKubeconfig(target, ownTunnel)
 		if server != "" && token == "" {
-			if kubeToken, err := target.token(); err == nil {
-				token = kubeToken
-			}
+			token = kubeToken
 		}
 	}
 	if server == "" {

@@ -553,6 +553,35 @@ func TestContextSwitchWhileConnectingKeepsTheFirstContext(t *testing.T) {
 	require.Nil(t, loadPortForwardCache(contextB.identity), "the forward through context a was cached for context b")
 }
 
+// The CLI reads a kubeconfig user's tokenFile with the context, before it
+// connects, so a token written to that file while it connects, for example for
+// another context, does not go through this context's port-forward.
+func TestKubeconfigTokenFileIsReadBeforeConnecting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("token-a\n"), 0o600))
+	config := clientcmdapi.NewConfig()
+	config.Contexts["a"] = &clientcmdapi.Context{Cluster: "cluster-a", AuthInfo: "user-a"}
+	config.Clusters["cluster-a"] = &clientcmdapi.Cluster{Server: "https://a.k8s.invalid"}
+	config.AuthInfos["user-a"] = &clientcmdapi.AuthInfo{TokenFile: tokenFile}
+	config.CurrentContext = "a"
+	kubeconfig := writeKubeconfig(t, dir, config)
+
+	api := newAgentListServer(t)
+	stubKubeconfigTransport(t,
+		func(kubeTarget) (string, string) {
+			require.NoError(t, os.WriteFile(tokenFile, []byte("token-b\n"), 0o600))
+			return "orka-system", "orka"
+		},
+		func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
+			return api.port(t), 4242, func() {}, nil
+		})
+
+	require.NoError(t, executeCLI(t, "--kubeconfig", kubeconfig, "agent", "list"))
+	require.Equal(t, "Bearer token-a", api.only(t).authorization)
+}
+
 // kubectl reads the kubeconfig again when it starts. If the context the CLI
 // read no longer reaches the same cluster, or cannot be read, the CLI stops
 // that forward and sends the context's token nowhere. A change that cannot
