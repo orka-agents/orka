@@ -83,12 +83,22 @@ func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 	temp := t.TempDir()
 	for name, contents := range map[string]string{
 		"Dockerfile": "FROM scratch\n" +
+			"COPY --chown=123:456 inherited/ /\n" +
 			"COPY --chmod=0755 serve /opt/agentkit/bin/agentkit-serve\n" +
 			"COPY agent.yaml /agent/agent.yaml\n",
 		"serve":      "composition-only placeholder; not an executable runtime\n",
 		"agent.yaml": "name: composition-fixture\n",
 	} {
 		if err := os.WriteFile(filepath.Join(temp, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"usr", "usr/share", "usr/share/licenses"} {
+		path := filepath.Join(temp, "inherited", name)
+		if err := os.MkdirAll(path, 0o751); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o751); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -121,6 +131,18 @@ func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 			t.Errorf("close exported rootfs: %v", err)
 		}
 	}()
+	wantMetadata := map[string]struct {
+		uid, gid int
+		mode     int64
+	}{
+		"agent":                           {0, 0, 0o555},
+		"agent/agent.yaml":                {0, 0, 0o444},
+		"sessions":                        {0, 0, 0o711},
+		"opt/agentkit/bin/agentkit-serve": {0, 0, 0o755},
+		"usr":                             {123, 456, 0o751},
+		"usr/share":                       {123, 456, 0o751},
+		"usr/share/licenses":              {123, 456, 0o751},
+	}
 	reader := tar.NewReader(file)
 	for {
 		header, err := reader.Next()
@@ -130,8 +152,19 @@ func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.TrimPrefix(header.Name, "./") == "bin/sh" {
+		name := strings.TrimSuffix(strings.TrimPrefix(header.Name, "./"), "/")
+		if name == "bin/sh" {
 			t.Fatal("composed scratch runtime unexpectedly contains /bin/sh")
 		}
+		if want, ok := wantMetadata[name]; ok {
+			if header.Uid != want.uid || header.Gid != want.gid || header.Mode != want.mode {
+				t.Errorf("%s metadata = %d:%d %04o; want %d:%d %04o", name,
+					header.Uid, header.Gid, header.Mode, want.uid, want.gid, want.mode)
+			}
+			delete(wantMetadata, name)
+		}
+	}
+	if len(wantMetadata) != 0 {
+		t.Errorf("exported runtime is missing paths: %v", wantMetadata)
 	}
 }
