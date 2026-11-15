@@ -210,7 +210,11 @@ token. The same operations are available over the API; see the
   labelled with that runtime, and turns on that model run there: for example an Agent with
   `runtime.type: claude` and `model.name: claude-sonnet-5` is offered as
   `claude-sonnet-5 (Claude Code)`. Models the person's token could not run are not
-  offered. A model several runtimes serve is offered once, on the first of Copilot CLI,
+  offered. With `--agent-use-authorization-enabled`, a model is offered only through an
+  Agent the person may `use`. An AHP connection token keeps no OIDC group claims, since it
+  lives far longer than the sign-in that minted it and a group removed since would still
+  grant access, so grant AHP users `use` on Agents by user, `<issuer>#<subject>`, not
+  through an OIDC group. A model several runtimes serve is offered once, on the first of Copilot CLI,
   Claude Code, Codex and OpenCode that serves it.
 - **Projects.** The person adds a repository by its https URL. Each turn's Task clones
   it in its own workspace; with workspaces on, the person's workspace has a checkout too.
