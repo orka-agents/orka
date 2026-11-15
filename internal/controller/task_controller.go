@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -1215,15 +1216,9 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	// Enforce allowedAgents
 	if task.Spec.AgentRef != nil {
 		allowed := false
-		childAgentNS := task.Spec.AgentRef.Namespace
-		if childAgentNS == "" {
-			childAgentNS = task.Namespace
-		}
+		childAgentNS := cmp.Or(task.Spec.AgentRef.Namespace, task.Namespace)
 		for _, a := range coord.AllowedAgents {
-			allowedNS := a.Namespace
-			if allowedNS == "" {
-				allowedNS = parentAgent.Namespace
-			}
+			allowedNS := cmp.Or(a.Namespace, parentAgent.Namespace)
 			if a.Name == task.Spec.AgentRef.Name && allowedNS == childAgentNS {
 				allowed = true
 				break

@@ -368,6 +368,8 @@ func TestDelegateTaskTool_AllowedAgentNamespaces(t *testing.T) {
 	}{
 		{"bare same namespace", "researcher", defaultNamespace, defaultNamespace, true},
 		{"qualified same namespace", "default/researcher", defaultNamespace, defaultNamespace, true},
+		{"qualified omitted namespace defaults to parent", "default/researcher", "", "", true},
+		{"qualified omitted namespace cannot match catalog", "catalog/researcher", "", "", false},
 		{"qualified cross namespace", "catalog/researcher", testAgentCatalogNS, defaultNamespace, true},
 		{"bare cannot grant cross namespace", "researcher", testAgentCatalogNS, defaultNamespace, false},
 		{"bare cannot follow child namespace", "researcher", testAgentCatalogNS, testAgentCatalogNS, false},
@@ -383,6 +385,9 @@ func TestDelegateTaskTool_AllowedAgentNamespaces(t *testing.T) {
 			t.Setenv(envOrkaCoordinationAllowedAgents, tt.policy)
 			agent := researcherAgent()
 			agent.Namespace = tt.agentNS
+			if agent.Namespace == "" {
+				agent.Namespace = defaultNamespace
+			}
 			kube := newFakeClient(parentTask(), agent)
 			args, err := json.Marshal(DelegateTaskArgs{Agent: agent.Name, AgentNamespace: tt.agentNS, TaskNamespace: tt.taskNS, Prompt: "Investigate"})
 			if err != nil {

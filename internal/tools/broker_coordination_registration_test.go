@@ -412,6 +412,8 @@ func TestBrokeredDelegateTaskAllowedAgentNamespaces(t *testing.T) {
 		{"empty denies", []corev1alpha1.AllowedAgent{}, brokerTestNamespace, brokerTestNamespace, false},
 		{"implicit same namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, brokerTestNamespace, brokerTestNamespace, true},
 		{"explicit same namespace", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: brokerTestNamespace}}, brokerTestNamespace, brokerTestNamespace, true},
+		{"omitted target namespace defaults to parent", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: brokerTestNamespace}}, brokerTestNamespace, "", true},
+		{"omitted target namespace cannot match catalog", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: "catalog"}}, brokerTestNamespace, "", false},
 		{"explicit cross namespace", []corev1alpha1.AllowedAgent{{Name: "researcher", Namespace: "catalog"}}, brokerTestNamespace, "catalog", true},
 		{"implicit cannot grant cross namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, brokerTestNamespace, "catalog", false},
 		{"defaults to parent Agent namespace", []corev1alpha1.AllowedAgent{{Name: "researcher"}}, "catalog", "catalog", true},
@@ -427,6 +429,9 @@ func TestBrokeredDelegateTaskAllowedAgentNamespaces(t *testing.T) {
 			coordinator.Spec.Coordination.AllowedAgents = tt.allowed
 			parent.Spec.AgentRef.Namespace = tt.coordinatorNS
 			researcher.Namespace = tt.targetNS
+			if researcher.Namespace == "" {
+				researcher.Namespace = parent.Namespace
+			}
 			researcher.Labels = map[string]string{labels.LabelCreatedBy: "create_agent", labels.LabelParentTask: parent.Name}
 			kube := newFakeClient(parent, coordinator, researcher)
 			ctx := WithToolContext(context.Background(), &ToolContext{

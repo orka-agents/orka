@@ -1388,6 +1388,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker delegate_task workspace",
 			limits: []string{"worker/delegate_task.workspace.intent enum=read|write", "worker/delegate_task.workspace.prBody maxLength=32768", "worker/delegate_task.workspace.prTitle maxLength=256"},
 			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaCoordinationAllowedAgents, "default/coder")
 				call := func() (Tool, context.Context) { return workerTool("delegate_task", evalDelegateCluster()) }
 				base := `{"agent":"coder","prompt":"p","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
 				pr := func(field string, n int) string {
@@ -2002,6 +2003,9 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	t.Setenv(envOrkaControllerURL, stub.URL)
 	t.Setenv(workerenv.ServiceAccountToken, "eval-token")
+	if label == "worker" && name == "delegate_task" {
+		t.Setenv(envOrkaCoordinationAllowedAgents, "default/eval")
+	}
 	maps.Copy(args, evalArgumentSemanticValues(label, name, stub.URL))
 	forgeTools := []string{"create_pull_request", "check_pull_request_ci", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "check_pr_review_marker", "list_issues", "list_pull_requests", "get_issue", "comment_on_issue"}
 	if slices.Contains(forgeTools, name) {
