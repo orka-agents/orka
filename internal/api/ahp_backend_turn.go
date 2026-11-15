@@ -1262,8 +1262,14 @@ func (b *ahpBackend) forgetTurn(turn *ahpTurn) {
 }
 
 // recoverTurns settles turns a previous leader left running, once per user,
-// from their Tasks.
+// from their Tasks. It holds the user's lifecycle lock, which disposing of,
+// creating and starting a turn in a session also hold, so the sessions it
+// reads stay as read until their turns are registered, and a concurrent
+// caller waits until the turns are live. It must not be called with the
+// host's lock held: work under the lifecycle lock emits through that lock.
 func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Principal) {
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
 	b.mu.Lock()
 	if b.recovered[principal.UserKey] || b.emitterFor == nil {
 		b.mu.Unlock()
@@ -1285,9 +1291,9 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			continue
 		}
 		if record.ActiveTurn == "" {
-			// The host lists agents, and so recovers, while it holds the
-			// user's lock, which ending a turn emits through: end it, and run
-			// what waits, off the caller.
+			// Ending a turn emits through the host's lock, and running what
+			// waits takes the lifecycle lock this holds: do both off the
+			// caller.
 			go func() {
 				ctx := context.WithoutCancel(ctx)
 				if !b.endUnstartedTurn(ctx, principal, record) {

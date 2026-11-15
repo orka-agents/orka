@@ -68,6 +68,17 @@ type RootContributor interface {
 	RootExtensions(ctx context.Context, principal Principal) (meta, config map[string]json.RawMessage, err error)
 }
 
+// ConnectionPreparer is a backend that picks up, for a user, what an earlier
+// process left running before one of their connections is served, such as a
+// turn and the approvals it holds. The host calls it whenever a connection
+// initializes or reconnects, whichever channels the client then subscribes
+// to: a client that never subscribes to the root, which lists agents, must
+// still find its sessions' turns live. It runs outside the user's lock and
+// must return quickly; repeated calls should do nothing.
+type ConnectionPreparer interface {
+	PrepareConnection(ctx context.Context, principal Principal)
+}
+
 // ErrUnknownExtension is returned by an ExtensionHandler for a method it does not serve.
 var ErrUnknownExtension = errors.New("unknown extension method")
 
@@ -220,6 +231,19 @@ func (r *Registry) rootExtensions(ctx context.Context, principal Principal) (map
 		}
 	}
 	return meta, config, nil
+}
+
+// prepareConnection lets every backend pick up what an earlier process left
+// running for the principal.
+func (r *Registry) prepareConnection(ctx context.Context, principal Principal) {
+	if r == nil {
+		return
+	}
+	for _, backend := range r.list() {
+		if preparer, ok := backend.(ConnectionPreparer); ok {
+			preparer.PrepareConnection(ctx, principal)
+		}
+	}
 }
 
 // extension routes an extensions/ method to the first backend that serves it.

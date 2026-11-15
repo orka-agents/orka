@@ -458,10 +458,28 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 	return choices, nil
 }
 
+// The host recovers a user's turns when they connect, not only once a client
+// lists agents.
+var _ ahphost.ConnectionPreparer = (*ahpBackend)(nil)
+
+// PrepareConnection settles, once per user, the turns a previous leader left
+// running, so a client that subscribes only to a session or chat sees them,
+// and the approvals they hold, live: listing agents alone recovered them.
+func (b *ahpBackend) PrepareConnection(ctx context.Context, principal ahphost.Principal) {
+	b.recoverTurns(ctx, principal)
+}
+
 // Agents lists one AHP agent offering every model the user has an Agent for,
 // each labelled with the runtime that runs it.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
-	b.recoverTurns(ctx, principal)
+	// The host lists agents with its lock held, which recovery must not wait
+	// under. Connections recover first; this retries a recovery that failed.
+	b.mu.Lock()
+	recovered := b.recovered[principal.UserKey]
+	b.mu.Unlock()
+	if !recovered {
+		go b.recoverTurns(context.WithoutCancel(ctx), principal)
+	}
 	b.workspaces.warm(principal)
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {

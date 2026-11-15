@@ -401,21 +401,27 @@ const ahpTerminalRecordSession = `read -r stat < /proc/$$/stat; set -- ${stat##*
 // still hold the session ID, which Linux then cannot reuse, so stop kills
 // them. It reads /proc with shell builtins, so a workspace image needs no
 // more than sh: pkill is not one of its requirements.
+//
+// Disposing of a terminal ends its stream, whose end stops the session too,
+// so two runs can race on the file; rm -f still fails when the file goes
+// between its check and its unlink. drop succeeds once the file is gone,
+// whichever run removed it.
 const ahpStopSessionScript = `file=$1 mode=$2
 shift 2
+drop() { rm -f "$file" 2>/dev/null || [ ! -e "$file" ]; }
 [ -f "$file" ] || exit 0
 read -r sid started < "$file" || :
-case "$sid" in ''|*[!0-9]*) rm -f "$file"; exit 0;; esac
+case "$sid" in ''|*[!0-9]*) drop; exit 0;; esac
 for live do
   read -r other _ < "$live" 2>/dev/null || continue
-  if [ "$other" = "$sid" ]; then rm -f "$file"; exit 0; fi
+  if [ "$other" = "$sid" ]; then drop; exit 0; fi
 done
 if read -r line < "/proc/$sid/stat" 2>/dev/null; then
   # Fields after the parenthesized command: the start time is the 20th.
   set -- ${line##*) }
-  if [ -z "$started" ] || [ "${20}" != "$started" ]; then rm -f "$file"; exit 0; fi
+  if [ -z "$started" ] || [ "${20}" != "$started" ]; then drop; exit 0; fi
 elif [ "$mode" != stop ]; then
-  rm -f "$file"
+  drop
   exit 0
 fi
 for stat in /proc/[0-9]*/stat; do
@@ -426,7 +432,7 @@ for stat in /proc/[0-9]*/stat; do
   pid=${stat#/proc/}
   kill -KILL "${pid%/stat}" 2>/dev/null || :
 done
-rm -f "$file"`
+drop`
 
 // Terminals lists the user's running shells.
 func (b *ahpBackend) Terminals(_ context.Context, principal ahphost.Principal) ([]ahptypes.TerminalInfo, error) {
