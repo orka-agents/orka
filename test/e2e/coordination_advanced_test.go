@@ -411,39 +411,42 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		Expect(phase).To(BeElementOf("Succeeded", "Failed"))
 	})
 
-	// ── Test 4: create_agent + delete_agent tools ──
+	// ── Test 4: dynamic Agent inventory, explicit delegation, and owner cleanup ──
 
-	It("should dynamically create and delete an agent via coordination tools", func() {
+	It("should delegate to an explicitly allowed dynamic agent and preserve its creator-owned lifecycle", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
 		const (
-			coordName    = "e2e-coord-adv-dynagent-coord"
-			taskName     = "e2e-coord-adv-dynagent-task"
-			dynamicAgent = "e2e-dynamic-agent"
+			coordName     = "e2e-coord-adv-dynagent-coord"
+			taskName      = "e2e-coord-adv-dynagent-task"
+			bootstrapTask = "e2e-coord-adv-dynagent-bootstrap"
+			marker        = "[e2e:coord-adv-dynagent]"
+			delegateMark  = "[e2e:coord-adv-dynagent-delegate]"
 		)
 
-		defer func() {
-			cmd := exec.Command("kubectl", "delete", "task", taskName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "tasks", "-l",
-				fmt.Sprintf("orka.ai/parent-task=%s", taskName), "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", coordName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", dynamicAgent, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		}()
+		var created string
+		DeferCleanup(func() {
+			for _, parent := range []string{taskName, bootstrapTask} {
+				cmd := exec.Command("kubectl", "delete", "tasks", "-l",
+					fmt.Sprintf("orka.ai/parent-task=%s", parent), "-n", namespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "task", parent, "-n", namespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			}
+			for _, agent := range []string{coordName, created} {
+				if agent != "" {
+					_, _ = utils.Run(exec.Command("kubectl", "delete", "agent", agent,
+						"-n", namespace, "--ignore-not-found"))
+				}
+			}
+		})
 
-		DeferCleanup(func() { dumpDebugInfo(taskName) })
+		DeferCleanup(func() {
+			dumpDebugInfo(bootstrapTask)
+			dumpDebugInfo(taskName)
+		})
 
-		By("creating a coordinator agent with dynamic agent in allowedAgents")
-		allowedAgents := fmt.Sprintf(`, "allowedAgents": [{"name": "%s"}, {"name": "%s"}]`, coordAdvWorker, dynamicAgent)
-		if e2eMockOpenAI {
-			// create_agent names agents <task>-<role>-<hash>, so only a
-			// coordinator without an allowlist can delegate to the agent the
-			// script creates.
-			allowedAgents = ""
-		}
+		By("creating a bootstrap coordinator without delegation permission")
 		coordManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
@@ -454,21 +457,19 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 				"coordination": {
 					"enabled": true,
 					"maxDepth": 2,
-					"maxConcurrentChildren": 3%s
+					"maxConcurrentChildren": 3,
+					"allowedAgents": []
 				}
 			}
-		}`, coordName, namespace, coordAdvProvider, model, allowedAgents)
+		}`, coordName, namespace, coordAdvProvider, model)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(coordManifest)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating a task that creates, delegates to, and deletes a dynamic agent")
-		const marker = "[e2e:coord-adv-dynagent]"
-		prompt := fmt.Sprintf(`1. Create a new agent called '%s' using the create_agent tool with provider '%s' and model '%s'. 2. Delegate 'What is 10+10? Reply with just the number.' to '%s'. 3. Wait for the result. 4. Delete the agent '%s' using delete_agent. 5. Report the result and confirm cleanup. %s`,
-			dynamicAgent, coordAdvProvider, model, dynamicAgent, dynamicAgent, marker)
-		taskManifest := fmt.Sprintf(`{
+		submitTask := func(name, prompt string) {
+			taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {"name": "%s", "namespace": "%s"},
@@ -476,69 +477,115 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 				"type": "ai",
 				"agentRef": {"name": "%s"},
 				"ai": {
-					"prompt": "%s",
+					"prompt": %q,
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, taskName, namespace, coordName, prompt, model, coordAdvProvider)
+		}`, name, namespace, coordName, prompt, model, coordAdvProvider)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = stringReader(taskManifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		}
 
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = stringReader(taskManifest)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-
-		var created, child string
+		By("creating an arithmetic Agent and returning inventory without delegation")
+		submitTask(bootstrapTask, "Use create_agent with role 'dynamic' and systemPrompt "+
+			"'You answer arithmetic questions with just the number.'. Return its generated Agent name and namespace "+
+			"as inventory. Do not delegate or delete the Agent. "+marker)
+		created = waitForCreatedAgent(bootstrapTask, 3*time.Minute)
 		if e2eMockOpenAI {
-			By("scripting the coordinator to delegate to, wait for, and delete the agent it created")
-			created = waitForCreatedAgent(taskName, 3*time.Minute)
+			injectMockLLMFixtures(coordinationMockText(marker, "e2e-coord-adv-dynagent-hold-1",
+				fmt.Sprintf("Inventory: Agent %s/%s. No delegation was attempted.", namespace, created)))
+		}
+		Expect(waitForTaskCompletion(bootstrapTask, 10*time.Minute)).To(Equal("Succeeded"))
+		output, err := utils.Run(exec.Command("kubectl", "get", "tasks", "-n", namespace,
+			"-l", "orka.ai/parent-task="+bootstrapTask, "-o", "jsonpath={.items[*].metadata.name}"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(output)).To(BeEmpty(), "bootstrap must not delegate")
+
+		By("explicitly allowing only the observed Agent name and namespace for a new Job")
+		// A running Job's delegation policy is frozen. Keep the bootstrap Task
+		// alive as the Agent's owner and submit a new Task after updating policy.
+		patch := fmt.Sprintf(`{"spec":{"coordination":{"allowedAgents":[{"name":%q,"namespace":%q}]}}}`,
+			created, namespace)
+		_, err = utils.Run(exec.Command("kubectl", "patch", "agent", coordName, "-n", namespace,
+			"--type=merge", "-p", patch))
+		Expect(err).NotTo(HaveOccurred())
+		if e2eMockOpenAI {
 			injectMockLLMFixtures(
-				coordinationMockToolCall(marker, "e2e-coord-adv-dynagent-hold-1", "delegate_task", map[string]any{
-					"agent": created, "prompt": "[e2e:coord-adv-sum] What is 10+10? Reply with just the number.",
-				}),
-				coordinationMockToolCall(marker, "E2E-SUM-20", "delete_agent", map[string]any{"name": created}),
-				coordinationMockText(marker, created, "The dynamic agent answered 20 and was cleaned up."),
+				map[string]any{
+					"match": map[string]any{"userMessage": delegateMark, "hasToolResult": false},
+					"response": map[string]any{"toolCalls": []map[string]any{{"name": "delegate_task",
+						"arguments": map[string]any{"agent": created, "agentNamespace": namespace,
+							"prompt": "[e2e:coord-adv-sum] What is 10+10? Reply with just the number."}}}},
+				},
+				coordinationMockToolCall(delegateMark, `"taskName"`, "wait_for_tasks",
+					map[string]any{"tasks": []string{"e2e-coord-adv-dynagent-hold-2"}, "timeout": "30s"}),
+				coordinationMockToolCall(delegateMark, "E2E-SUM-20", "delete_agent",
+					map[string]any{"name": created, "namespace": namespace}),
+				coordinationMockText(delegateMark, "not owned by current task",
+					"The dynamic agent answered 20. Deletion was refused; creator-Task cleanup is still required."),
 			)
-			child = waitForCoordinationChild(taskName, "[e2e:coord-adv-sum]", 3*time.Minute)
-			injectMockLLMFixtures(coordinationMockToolCall(marker, "e2e-coord-adv-dynagent-hold-2",
+		}
+
+		By("delegating from a new Task and observing the existing delete_agent refusal")
+		// The child-only mock marker must not appear in the coordinator prompt:
+		// file fixtures precede injected fixtures and would answer it directly.
+		submitTask(taskName, fmt.Sprintf("Delegate 'What is 10+10? Reply with just the number.' "+
+			"to Agent '%s' in namespace '%s'. Wait for its result. Then attempt delete_agent for that Agent "+
+			"and report any refusal; leave lifecycle cleanup to its creator Task. %s",
+			created, namespace, delegateMark))
+		childMarker := ""
+		if e2eMockOpenAI {
+			childMarker = "[e2e:coord-adv-sum]"
+		}
+		child := waitForCoordinationChild(taskName, childMarker, 3*time.Minute)
+		if e2eMockOpenAI {
+			injectMockLLMFixtures(coordinationMockToolCall(delegateMark, "e2e-coord-adv-dynagent-hold-2",
 				"wait_for_tasks", map[string]any{"tasks": []string{child}, "timeout": "5m"}))
 		}
+		Expect(waitForTaskCompletion(taskName, 10*time.Minute)).To(Equal("Succeeded"))
 
-		By("waiting for child task to be created for dynamic agent")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "tasks", "-l",
-				fmt.Sprintf("orka.ai/parent-task=%s", taskName),
-				"-o", "jsonpath={.items[*].metadata.name}", "-n", namespace)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(strings.TrimSpace(output)).NotTo(BeEmpty())
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
-
-		By("waiting for coordinator to reach terminal phase")
-		phase := waitForTaskCompletion(taskName, 10*time.Minute)
-		Expect(phase).To(BeElementOf("Succeeded", "Failed"))
-
-		By("verifying the dynamic agent was cleaned up")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "agent", dynamicAgent,
-				"-n", namespace, "--ignore-not-found", "-o", "jsonpath={.metadata.name}")
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(strings.TrimSpace(output)).To(BeEmpty(),
-				"Dynamic agent should have been deleted")
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
-
+		By("verifying the observed Agent served the child")
+		output, err = utils.Run(exec.Command("kubectl", "get", "task", child, "-n", namespace,
+			"-o", "jsonpath={.spec.agentRef.name}"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(Equal(created))
+		waitForTaskPhase(child, "Succeeded", time.Minute)
 		if e2eMockOpenAI {
-			By("verifying the created agent served the delegated child")
-			Expect(phase).To(Equal("Succeeded"))
-			output, err := utils.Run(exec.Command("kubectl", "get", "task", child, "-n", namespace,
-				"-o", "jsonpath={.spec.agentRef.name}"))
+			apiBaseURL, cancelPF, portForwardCmd, err := startControllerAPIPortForward(18090)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal(created))
-			waitForTaskPhase(child, "Succeeded", time.Minute)
-			expectCoordinationToolResult(marker, "wait_for_tasks", "E2E-SUM-20", time.Minute)
-			expectMockLLMToolResult(marker, "delete_agent", time.Minute)
+			defer stopPortForward(cancelPF, portForwardCmd)
+			token, err := serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			result := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, child))
+			Expect(result).To(BeElementOf("20", "E2E-SUM-20: 20"))
+			inventory := fetchTaskResultSummaryViaAPI(apiBaseURL, token, bootstrapTask)
+			Expect(inventory).To(And(ContainSubstring(created), ContainSubstring(namespace)))
+			expectCoordinationToolResult(delegateMark, "wait_for_tasks", "E2E-SUM-20", time.Minute)
+			expectCoordinationToolResult(delegateMark, "delete_agent", "not owned by current task", time.Minute)
 		}
+
+		By("verifying the non-owner did not delete the bootstrap Task's Agent")
+		creatorUID, err := utils.Run(exec.Command("kubectl", "get", "task", bootstrapTask, "-n", namespace,
+			"-o", "jsonpath={.metadata.uid}"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(creatorUID).NotTo(BeEmpty())
+		output, err = utils.Run(exec.Command("kubectl", "get", "agent", created, "-n", namespace,
+			"-o", "jsonpath={.metadata.ownerReferences[?(@.kind=='Task')].uid}"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(Equal(creatorUID))
+
+		By("deleting the creator Task and waiting for its actual Agent to be garbage-collected")
+		_, err = utils.Run(exec.Command("kubectl", "delete", "task", bootstrapTask, "-n", namespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			output, err := utils.Run(exec.Command("kubectl", "get", "agent", created,
+				"-n", namespace, "--ignore-not-found", "-o", "jsonpath={.metadata.name}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(BeEmpty(), "creator deletion must collect the generated Agent")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 	})
 
 	// ── Test 5: Internal messaging API (structural – no LLM) ──
