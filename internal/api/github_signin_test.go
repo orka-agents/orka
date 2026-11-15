@@ -151,6 +151,8 @@ func newSignInHarness(t *testing.T) *connectorTestHarness {
 		GitHub:      githubauth.Client{APIURL: fakeGitHub(t, nil).URL},
 	}
 	h.handlers.watchNamespace = connectorTestNamespace
+	// Tests sign in more often than a person does; the limit has its own test.
+	h.handlers.signInLimiter = nil
 	h.app.Get("/api/v1/auth/config", h.handlers.GetAuthConfig)
 	h.app.Post("/api/v1/auth/github", h.handlers.SignInWithGitHub)
 	h.app.Post("/api/v1/auth/session/renew", h.handlers.RenewSession)
@@ -1072,5 +1074,39 @@ func TestSessionLookupFailureIsNotAnInvalidToken(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// Sign-in is unauthenticated, and each attempt spends the GitHub App's rate
+// limit: a client that keeps trying is refused before its token is checked.
+func TestGitHubSignInIsRateLimitedBeforeTheTokenCheck(t *testing.T) {
+	h := newSignInHarness(t)
+	upstream, err := url.Parse(fakeGitHub(t, nil).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	var checks atomic.Int32
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checks.Add(1)
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(counting.Close)
+	h.handlers.githubSignIn.GitHub = githubauth.Client{APIURL: counting.URL}
+	h.handlers.signInLimiter = newGatewayIngressLimiterWithLimits(100, 100, 0.001, 2, 16, time.Minute)
+	body := map[string]any{"accessToken": "ghu_not_ours"}
+	for i := range 2 {
+		if status, _ := h.signIn(body); status != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status %d, want 401", i+1, status)
+		}
+	}
+	if got := checks.Load(); got != 2 {
+		t.Fatalf("GitHub was asked %d times, want 2", got)
+	}
+	if status, _ := h.signIn(body); status != http.StatusTooManyRequests {
+		t.Fatalf("third attempt: status %d, want 429", status)
+	}
+	if got := checks.Load(); got != 2 {
+		t.Fatalf("a refused attempt asked GitHub: %d checks", got)
 	}
 }

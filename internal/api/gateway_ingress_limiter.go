@@ -22,6 +22,25 @@ const (
 	gatewayIngressClientTTL   = 10 * time.Minute
 )
 
+// GitHub sign-in checks each submitted token with GitHub as the App, whose
+// hourly rate limit renewal and invites share. A sign-in makes at most two
+// such checks, so the global rate allows at most 3,600 an hour however many
+// clients call; a person signs in rarely, so one client gets a few attempts
+// a minute.
+const (
+	githubSignInGlobalRate  = rate.Limit(0.5)
+	githubSignInGlobalBurst = 30
+	githubSignInClientRate  = rate.Limit(0.1)
+	githubSignInClientBurst = 5
+	githubSignInMaxClients  = 1024
+	githubSignInClientTTL   = 10 * time.Minute
+)
+
+func newGitHubSignInLimiter() *gatewayIngressLimiter {
+	return newGatewayIngressLimiterWithLimits(githubSignInGlobalRate, githubSignInGlobalBurst,
+		githubSignInClientRate, githubSignInClientBurst, githubSignInMaxClients, githubSignInClientTTL)
+}
+
 type gatewayIngressClientLimiter struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time

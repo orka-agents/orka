@@ -43,7 +43,9 @@ signed-in person's host may do.
 2. The CLI runs the device flow against GitHub itself. It shows the code and the URL,
    polls GitHub, and never holds the client secret.
 3. It sends the GitHub access and refresh tokens to `POST /api/v1/auth/github` once.
-   Orka then:
+   The endpoint is unauthenticated and every attempt spends the App's GitHub rate
+   limit, so attempts are rate-limited per client and overall before the body is read;
+   one over the limit gets `429` with `Retry-After`. Orka then:
    - checks with the check-token API that the token was issued to its own app, so a
      token another app obtained cannot sign in;
    - redeems the refresh token once, requires the access token GitHub returns to be its

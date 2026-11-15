@@ -196,6 +196,15 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	if !cfg.Enabled || cfg.Sessions == nil || !h.connectors.Enabled {
 		return fiber.NewError(fiber.StatusNotImplemented, "GitHub sign-in is not enabled on this controller")
 	}
+	// Each attempt checks its token with GitHub as the App, before anything
+	// authenticates the caller: without a limit, anyone who reaches the API
+	// could spend the App's GitHub rate limit, which renewal and invites
+	// share, and lock everyone out of signing in. It runs before the body is
+	// read.
+	if h.signInLimiter != nil && !h.signInLimiter.Allow(c.IP(), time.Now()) {
+		c.Set(fiber.HeaderRetryAfter, "10")
+		return fiber.NewError(fiber.StatusTooManyRequests, "too many sign-in attempts; try again shortly")
+	}
 	var req githubSignInRequest
 	if err := decodeStrictJSON(c.Body(), &req); err != nil {
 		return err
