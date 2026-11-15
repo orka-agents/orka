@@ -55,7 +55,8 @@ type InviteResponse struct {
 }
 
 // githubInvites holds invites in memory: one lasts as long as its device
-// code, and the API is served by one controller.
+// code. Only the API server that created an invite has it, so invites need a
+// single controller replica.
 type githubInvites struct {
 	mu      sync.Mutex
 	invites map[string]*InviteResponse

@@ -287,7 +287,10 @@ Then it links the account, and the host starts. The invited person needs only a 
 Copilot app. They cannot manage the host themselves, so keep idle suspension off for them, or
 wake their hosts. If they later run `orka login`, they reach the same link and host. An invite
 is single-use, lasts as long as its code (15 minutes), and does not survive a controller
-restart. Running the command again starts another invite with a new code. Invites need
+restart. The API server that creates an invite holds it in memory, so invites work only with
+one controller replica (`controller.replicas: 1`, the default): with more, a later request
+for the invite can reach a replica that does not have it. Running the command again starts
+another invite with a new code. Invites need
 `controller.githubSignIn.createHosts` on, since they exist to give someone a host.
 
 - The provider needs no tools. A dedicated GitHub App with only the permissions the host
