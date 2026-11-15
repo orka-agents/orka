@@ -574,5 +574,5 @@ func (d *ACPDispatcher) nativeCaptureWorkspaceUnsupported(ctx context.Context, t
 		delivery = latest.Status.Delivery
 	}
 	return attempt.DeliveryState == store.PromptDeliveryReadOnlyWorkspaceModified ||
-		delivery != nil && delivery.Reason == "WorkspaceValidationFailed", nil
+		delivery != nil && delivery.Reason == acpWorkspaceValidationFailedReason, nil
 }

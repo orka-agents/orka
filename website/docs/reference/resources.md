@@ -906,7 +906,7 @@ spec:
 | `issueWorkflow.implementation.maxActive` | int32 | No | Concurrently active implementation jobs per monitor. Defaults to `2`. |
 | `issueWorkflow.implementation.maxAttemptsPerIssue` | int32 | No | Implementation attempts per issue. Defaults to `2`. |
 | `issueWorkflow.implementation.maxChangedFiles` | int32 | No | Files allowed in one implementation patch. Defaults to `12`. |
-| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation patches may touch. |
+| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation and pull request repair patches may touch. Repository control paths are always denied. |
 | `repair.enabled` | bool | No | Enables automatic, bounded pull request repair. Requires `agents.repairer` and the publication credentials. |
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |
