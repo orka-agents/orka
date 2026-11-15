@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 )
 
 // TestMain keeps the CLI tests away from the developer's real cluster and home
@@ -21,11 +20,9 @@ import (
 // CLI, so a test could leave one running against a real cluster and cache it in
 // the real ~/.orka. Tests that need either pass --kubeconfig or set HOME.
 func TestMain(m *testing.M) {
-	if os.Getenv(fakeKubectlEnv) != "" {
-		// startFakePortForward runs this binary as a stand-in for a kubectl
-		// port-forward; it only has to stay alive until the test stops it.
-		time.Sleep(time.Minute)
-		os.Exit(0)
+	if mode := os.Getenv(fakeKubectlEnv); mode != "" {
+		// Tests run this binary as a stand-in for a kubectl port-forward.
+		os.Exit(fakeKubectl(mode, os.Args[1:]))
 	}
 	os.Exit(runWithoutAmbientCluster(m))
 }

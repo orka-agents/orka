@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -383,7 +384,7 @@ func rejectStdinCredential(cmd *cobra.Command, use string) error {
 func connectThroughKubeconfig(target kubeTarget, ownTunnel bool) (string, func()) {
 	closeTunnel := func() {}
 	key := target.cacheKey()
-	if cached := loadPortForwardCache(key); cached != nil && portForwardProcessFn(cached) {
+	if cached := loadPortForwardCache(key); cached != nil && recordsCurrentForward(cached) && portForwardProcessFn(cached) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cached.Port), 500*time.Millisecond)
 		if err == nil {
 			conn.Close() //nolint:errcheck
@@ -414,6 +415,7 @@ func connectThroughKubeconfig(target kubeTarget, ownTunnel bool) (string, func()
 	localPort, pid, cleanup, err := startPortForwardFn(target.kubeconfigContext, svcNS, svcName, ownTunnel)
 	if err != nil {
 		clearIndicator()
+		fmt.Fprintf(os.Stderr, "Could not port-forward to %s in %s: %v\n", svcName, svcNS, err)
 		return "", closeTunnel
 	}
 	// kubectl read the kubeconfig itself before it started forwarding. If the
@@ -462,13 +464,14 @@ func portForwardURL(localPort int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", localPort)
 }
 
-// discoverServiceFn, startPortForwardFn and portForwardProcessFn reach the
-// cluster or inspect local processes; tests replace them to avoid needing a
-// cluster and kubectl.
+// discoverServiceFn, startPortForwardFn, portForwardProcessFn and
+// freeLocalPortFn reach the cluster or inspect local processes and ports; tests
+// replace them to avoid needing a cluster and kubectl.
 var (
 	discoverServiceFn    = discoverService
 	startPortForwardFn   = startPortForward
 	portForwardProcessFn = isPortForwardProcess
+	freeLocalPortFn      = freeLocalPort
 )
 
 // isPortForwardProcess reports whether the cached forward's process is still
@@ -478,6 +481,18 @@ var (
 // reused.
 func isPortForwardProcess(cached *portForwardCache) bool {
 	return cached.PID > 0 && portForwardProcessRunning(cached)
+}
+
+// recordsCurrentForward reports whether cached records the port-forward this
+// CLI starts for its Service and port: the same kubectl arguments from
+// port-forward on, so listening only on 127.0.0.1. An entry an older CLI wrote
+// for another command line is not reused. The kubeconfig file and context the
+// command names are already fixed by the cache key, which does not depend on
+// how the kubeconfig was named.
+func recordsCurrentForward(cached *portForwardCache) bool {
+	want := portForwardCommand(kubeconfigContext{}, cached.Namespace, cached.Service, cached.Port)
+	at := slices.Index(cached.Command, want[1])
+	return at >= 0 && slices.Equal(cached.Command[at:], want[1:])
 }
 
 // isOwnPortForward reports whether a process owned by uid and running args is
@@ -499,7 +514,10 @@ func isPortForwardCommand(args, want []string) bool {
 
 // portForwardCommand is the kubectl command line that forwards localPort to the
 // Orka API port of namespace/service through kc. It names kc's context, so
-// kubectl uses that context whatever the current one is when it starts.
+// kubectl uses that context whatever the current one is when it starts. kubectl
+// listens only on 127.0.0.1, the address the CLI sends requests to: with its
+// default, localhost, it keeps running when it can listen on ::1 but not on
+// 127.0.0.1, where another program could then be listening.
 func portForwardCommand(kc kubeconfigContext, namespace, service string, localPort int) []string {
 	command := []string{"kubectl"}
 	if kc.path != "" {
@@ -508,7 +526,8 @@ func portForwardCommand(kc kubeconfigContext, namespace, service string, localPo
 	if kc.name != "" {
 		command = append(command, "--context", kc.name)
 	}
-	return append(command, "port-forward", "-n", namespace, "svc/"+service, fmt.Sprintf("%d:8080", localPort))
+	return append(command, "port-forward", "--address", "127.0.0.1", "-n", namespace, "svc/"+service,
+		fmt.Sprintf("%d:8080", localPort))
 }
 
 // discoverService finds the Orka Service through target's kubeconfig context,
@@ -527,56 +546,194 @@ func discoverService(target kubeTarget) (string, string) {
 	return "", ""
 }
 
+// portForwardReadyTimeout is how long startPortForward waits for kubectl to
+// report that it is forwarding; tests lengthen it.
+var portForwardReadyTimeout = 3 * time.Second
+
 // startPortForward starts a kubectl port-forward to the Orka service through
 // kc's context. It returns the local port, the process PID, a cleanup function,
 // and any error. With isolateInterrupt the port-forward does not receive the
 // interrupt a terminal sends to the CLI's foreground process group on Ctrl-C;
 // only the cleanup function stops it.
+//
+// The forward is ready only once kubectl reports that it listens on the port.
+// Another local program can take the port after the CLI finds it free and
+// before kubectl listens on it. kubectl then cannot listen and exits without
+// reporting the port, so the CLI does not mistake that program for the forward.
 func startPortForward(kc kubeconfigContext, namespace, service string, isolateInterrupt bool) (int, int, func(), error) {
-	// Find a free port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	localPort, err := freeLocalPortFn()
 	if err != nil {
 		return 0, 0, nil, fmt.Errorf("find free port: %w", err)
 	}
-	localPort := listener.Addr().(*net.TCPAddr).Port
-	listener.Close() //nolint:errcheck
+
+	output, progress, removeOutput, err := portForwardOutput()
+	if err != nil {
+		return 0, 0, nil, err
+	}
 
 	command := portForwardCommand(kc, namespace, service, localPort)
 	cmd := exec.Command(command[0], command[1:]...)
-	cmd.Stderr = nil
-	cmd.Stdout = nil
+	// kubectl's errors go to the same file, so a failure can say why.
+	cmd.Stderr = output
+	cmd.Stdout = output
 	if isolateInterrupt {
 		isolateFromTerminalInterrupt(cmd)
 	}
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	output.Close() //nolint:errcheck
+	if err != nil {
+		progress.Close() //nolint:errcheck
+		removeOutput()
 		return 0, 0, nil, fmt.Errorf("start port-forward: %w", err)
 	}
+	exited := make(chan struct{})
+	go func() {
+		cmd.Wait() //nolint:errcheck
+		close(exited)
+	}()
 
 	cleanup := func() {
-		if cmd.Process != nil {
-			cmd.Process.Kill() //nolint:errcheck
+		cmd.Process.Kill() //nolint:errcheck
+		// Windows removes the output only once kubectl no longer has it open.
+		select {
+		case <-exited:
+		case <-time.After(2 * time.Second):
 		}
+		removeOutput()
 	}
 
-	// Wait for port-forward to be ready
-	ready := false
-	for range 30 {
-		time.Sleep(100 * time.Millisecond)
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", localPort), 200*time.Millisecond)
-		if err == nil {
-			conn.Close() //nolint:errcheck
-			ready = true
-			break
-		}
-	}
-
-	if !ready {
+	err = waitForForwarding(progress, localPort, exited, portForwardReadyTimeout)
+	progress.Close() //nolint:errcheck
+	if err != nil {
 		cleanup()
-		return 0, 0, nil, fmt.Errorf("port-forward not ready after 3s")
+		return 0, 0, nil, err
 	}
 
 	return localPort, cmd.Process.Pid, cleanup, nil
+}
+
+// freeLocalPort finds a port on 127.0.0.1 that nothing listens on.
+func freeLocalPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close() //nolint:errcheck
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+// portForwardOutput creates the file kubectl writes its standard output to and
+// opens it again for the CLI to read. kubectl outlives the CLI and writes a
+// line for every connection, so it cannot write to a pipe, which breaks when the
+// CLI exits. Where an open file can be removed, the file is removed at once and
+// its space is freed when kubectl exits. Windows cannot remove an open file:
+// there remove deletes it after kubectl has stopped, and a forward that
+// outlives the CLI leaves it in the temporary directory.
+func portForwardOutput() (output, progress *os.File, remove func(), err error) {
+	output, err = os.CreateTemp("", "orka-port-forward-*.out")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create port-forward output: %w", err)
+	}
+	name := output.Name()
+	progress, err = os.Open(name)
+	if err == nil {
+		// Read the file kubectl writes, even if something replaced it by name.
+		err = sameFile(output, progress)
+		if err != nil {
+			progress.Close() //nolint:errcheck
+		}
+	}
+	if err != nil {
+		output.Close()  //nolint:errcheck
+		os.Remove(name) //nolint:errcheck
+		return nil, nil, nil, fmt.Errorf("open port-forward output: %w", err)
+	}
+	removed := os.Remove(name) == nil
+	return output, progress, func() {
+		if !removed {
+			removed = os.Remove(name) == nil
+		}
+	}, nil
+}
+
+// sameFile returns an error unless a and b are open on the same file.
+func sameFile(a, b *os.File) error {
+	aInfo, err := a.Stat()
+	if err != nil {
+		return err
+	}
+	bInfo, err := b.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(aInfo, bInfo) {
+		return fmt.Errorf("%s was replaced", a.Name())
+	}
+	return nil
+}
+
+// waitForForwarding waits for kubectl to write, to the output progress reads,
+// that it listens on 127.0.0.1:localPort. It gives up once exited is closed,
+// when kubectl has exited, or after timeout, with an error that ends with the
+// last line kubectl wrote.
+func waitForForwarding(progress io.Reader, localPort int, exited <-chan struct{}, timeout time.Duration) error {
+	var seen []byte
+	failed := func(reason string) error {
+		if last := lastLine(seen); last != "" {
+			return fmt.Errorf("%s: %s", reason, last)
+		}
+		return errors.New(reason)
+	}
+	deadline := time.After(timeout)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-exited:
+		case <-deadline:
+			more, _ := io.ReadAll(progress)
+			seen = append(seen, more...)
+			return failed(fmt.Sprintf("kubectl port-forward did not report forwarding within %s", timeout))
+		case <-tick.C:
+		}
+		more, _ := io.ReadAll(progress)
+		seen = append(seen, more...)
+		select {
+		case <-exited:
+			// Read what kubectl wrote before it exited.
+			more, _ := io.ReadAll(progress)
+			seen = append(seen, more...)
+			return failed("kubectl port-forward exited before it was forwarding")
+		default:
+		}
+		if forwardingReported(seen, localPort) {
+			return nil
+		}
+	}
+}
+
+// lastLine returns the last non-empty line of output, shortened to 300 bytes.
+func lastLine(output []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if len(last) > 300 {
+		last = last[:300] + "…"
+	}
+	return last
+}
+
+// forwardingReported reports whether output, what kubectl port-forward has
+// written so far, has the line kubectl writes once it listens on
+// 127.0.0.1:localPort.
+func forwardingReported(output []byte, localPort int) bool {
+	want := fmt.Sprintf("Forwarding from 127.0.0.1:%d -> ", localPort)
+	for line := range strings.Lines(string(output)) {
+		if strings.HasPrefix(line, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverOrkaService finds the Orka API service in the given namespace.

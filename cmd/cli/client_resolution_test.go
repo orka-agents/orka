@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,7 +166,8 @@ func resolveWith(t *testing.T, args ...string) (*client.Client, error) {
 	root := newRootCmd()
 	root.SetOut(new(bytes.Buffer))
 	root.SetErr(new(bytes.Buffer))
-	root.SetArgs(args)
+	// Never nil: cobra would then parse the test binary's own arguments.
+	root.SetArgs(append([]string{}, args...))
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
 		c, err := resolveClient(cmd, "")
 		resolved = c
@@ -324,7 +326,7 @@ func TestDiscoveredServiceUsesKubeconfigToken(t *testing.T) {
 			}
 			require.Equal(t, []string{
 				"kubectl", "--kubeconfig", kubeconfig, "--context", "discovered",
-				"port-forward", "-n", "orka-system", "svc/orka", fmt.Sprintf("%d:8080", api.port(t)),
+				"port-forward", "--address", "127.0.0.1", "-n", "orka-system", "svc/orka", fmt.Sprintf("%d:8080", api.port(t)),
 			}, cached.Command)
 			if tc.selected != "" {
 				require.NotEqual(t, identity, key)
@@ -367,6 +369,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 		savePortForwardCache(&portForwardCache{
 			Port: api.port(t), PID: 4242, Service: "orka", Namespace: "orka-system",
 			KubeContext: kubeconfigIdentity(kubeconfig),
+			Command:     portForwardCommand(currentKubeconfigContext(kubeconfig), "orka-system", "orka", api.port(t)),
 		})
 
 		require.NoError(t, executeCLI(t, "--kubeconfig", kubeconfig, "agent", "list"))
@@ -377,6 +380,11 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 	})
 
 	currentKubeconfig := func(t *testing.T) string { return writeTokenKubeconfig(t, "current", "") }
+	// Each entry records the command the CLI starts now, so it is turned down
+	// only for the reason its case names.
+	recorded := func(namespace string, port int) []string {
+		return portForwardCommand(kubeconfigContext{}, namespace, "orka", port)
+	}
 	for _, tc := range []struct {
 		name       string
 		kubeconfig func(t *testing.T) string
@@ -391,7 +399,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 			cache: func(t *testing.T, kubeconfig string, port int) {
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
-					KubeContext: kubeconfigIdentity(kubeconfig),
+					KubeContext: kubeconfigIdentity(kubeconfig), Command: recorded("orka-system", port),
 				})
 			},
 		},
@@ -407,7 +415,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 				require.NoError(t, clientcmd.WriteToFile(*config, kubeconfig))
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "team-a",
-					KubeContext: kubeconfigIdentity(kubeconfig),
+					KubeContext: kubeconfigIdentity(kubeconfig), Command: recorded("team-a", port),
 				})
 				config.Contexts["current"] = &original
 				require.NoError(t, clientcmd.WriteToFile(*config, kubeconfig))
@@ -418,7 +426,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 			cache: func(t *testing.T, kubeconfig string, port int) {
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
-					KubeContext: kubeconfigIdentity(kubeconfig),
+					KubeContext: kubeconfigIdentity(kubeconfig), Command: recorded("orka-system", port),
 				})
 			},
 		},
@@ -430,6 +438,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 					KubeContext: kubeTarget{
 						kubeconfigContext: currentKubeconfigContext(kubeconfig), selectedNamespace: "team-a",
 					}.cacheKey(),
+					Command: recorded("team-a", port),
 				})
 			},
 		},
@@ -439,6 +448,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
 					KubeContext: kubeconfigIdentity(writeTokenKubeconfig(t, "other", "")),
+					Command:     recorded("orka-system", port),
 				})
 			},
 		},
@@ -447,6 +457,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 			cache: func(t *testing.T, _ string, port int) {
 				data, err := json.Marshal(portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system", Timestamp: time.Now().Unix(),
+					Command: recorded("orka-system", port),
 				})
 				require.NoError(t, err)
 				dir := filepath.Join(os.Getenv("HOME"), configDir)
@@ -461,7 +472,7 @@ func TestCachedPortForwardIsReusedOnlyForTheSameKubeContext(t *testing.T) {
 			cache: func(t *testing.T, kubeconfig string, port int) {
 				savePortForwardCache(&portForwardCache{
 					Port: port, PID: 4242, Service: "orka", Namespace: "orka-system",
-					KubeContext: kubeconfigIdentity(kubeconfig),
+					KubeContext: kubeconfigIdentity(kubeconfig), Command: recorded("orka-system", port),
 				})
 			},
 		},
@@ -625,7 +636,7 @@ func TestContextRedefinedWhileConnectingDropsTheForward(t *testing.T) {
 // kubectl names the kubeconfig the user gave and the context the CLI read, so
 // it forwards through that context whatever the current one is when it starts.
 func TestPortForwardCommand(t *testing.T) {
-	forward := []string{"port-forward", "-n", "orka-system", "svc/orka", "4321:8080"}
+	forward := []string{"port-forward", "--address", "127.0.0.1", "-n", "orka-system", "svc/orka", "4321:8080"}
 	for _, tc := range []struct {
 		name string
 		kc   kubeconfigContext
@@ -671,6 +682,8 @@ func TestIsPortForwardCommand(t *testing.T) {
 		{name: "other namespace", args: with(last-2, "team-a")},
 		{name: "other service", args: with(last-1, "svc/other")},
 		{name: "other port", args: with(last, "4322:8080")},
+		{name: "other address", args: with(slices.Index(want, "--address")+1, "0.0.0.0")},
+		{name: "default address", args: slices.Delete(slices.Clone(want), slices.Index(want, "--address"), slices.Index(want, "--address")+2)},
 		{name: "extra argument", args: append(slices.Clone(want), "--address=0.0.0.0")},
 		{name: "missing argument", args: want[:last]},
 		{name: "empty", args: nil},
@@ -718,18 +731,391 @@ func TestIsPortForwardProcess(t *testing.T) {
 	require.False(t, isPortForwardProcess(forward(pid, command, mark)))
 }
 
-// fakeKubectlEnv makes this test binary sleep instead of running tests; see
-// startFakePortForward.
+// fakeKubectlEnv makes this test binary stand in for kubectl port-forward
+// instead of running tests; its value is one of the fakeKubectl modes.
 const fakeKubectlEnv = "ORKA_CLI_TEST_FAKE_KUBECTL"
+
+// fakeKubectlStateFile names the file a fake kubectl writes, once it listens,
+// the local port from its arguments and its PID to.
+const fakeKubectlStateFile = "ORKA_CLI_TEST_FAKE_KUBECTL_STATE_FILE"
+
+const (
+	// fakeKubectlSleep only stays alive until the test stops it.
+	fakeKubectlSleep = "sleep"
+	// fakeKubectlForward behaves like kubectl port-forward --address
+	// 127.0.0.1: it listens there and reports it, or exits if it cannot.
+	fakeKubectlForward = "forward"
+	// fakeKubectlSilent listens on 127.0.0.1 without reporting it.
+	fakeKubectlSilent = "silent"
+)
+
+// fakeKubectl runs a fake kubectl port-forward in mode with args, its
+// arguments, and returns its exit code. It reads the local port from the last
+// argument, as in 4321:8080.
+func fakeKubectl(mode string, args []string) int {
+	if mode == fakeKubectlSleep {
+		time.Sleep(time.Minute)
+		return 0
+	}
+	if len(args) == 0 {
+		return 2
+	}
+	port, _, _ := strings.Cut(args[len(args)-1], ":")
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer listener.Close() //nolint:errcheck
+	if path := os.Getenv(fakeKubectlStateFile); path != "" {
+		if err := os.WriteFile(path, fmt.Appendf(nil, "%s %d", port, os.Getpid()), 0o600); err != nil {
+			return 2
+		}
+	}
+	if mode == fakeKubectlForward {
+		fmt.Printf("Forwarding from 127.0.0.1:%s -> 8080\n", port)
+	}
+	time.Sleep(time.Minute)
+	return 0
+}
+
+// useFakeKubectl puts a kubectl that runs fakeKubectl in mode first on PATH and
+// returns the file it writes its state to. The fake is this test binary,
+// started through a symbolic link named kubectl.
+func useFakeKubectl(t *testing.T, mode string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake kubectl is a symbolic link to the test binary")
+	}
+	self, err := os.Executable()
+	require.NoError(t, err)
+	bin := t.TempDir()
+	require.NoError(t, os.Symlink(self, filepath.Join(bin, "kubectl")))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(fakeKubectlEnv, mode)
+	state := filepath.Join(t.TempDir(), "state")
+	t.Setenv(fakeKubectlStateFile, state)
+	// The fake reports, exits or listens as soon as it runs, which a loaded
+	// machine can delay.
+	setPortForwardReadyTimeout(t, 30*time.Second)
+	return state
+}
+
+// setPortForwardReadyTimeout makes startPortForward wait up to timeout for the
+// rest of the test.
+func setPortForwardReadyTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	orig := portForwardReadyTimeout
+	portForwardReadyTimeout = timeout
+	t.Cleanup(func() { portForwardReadyTimeout = orig })
+}
+
+// fakeKubectlState reads the local port and PID a fake kubectl wrote to state.
+func fakeKubectlState(t *testing.T, state string) (int, int) {
+	t.Helper()
+	data, err := os.ReadFile(state)
+	require.NoError(t, err, "the fake kubectl never listened")
+	var port, pid int
+	_, err = fmt.Sscanf(string(data), "%d %d", &port, &pid)
+	require.NoError(t, err)
+	return port, pid
+}
+
+// takePort listens on a free port on 127.0.0.1 for the rest of the test, as
+// another program would, makes it the port the CLI finds free, and returns the
+// number of connections accepted on it.
+func takePort(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := new(atomic.Int32)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	port := listener.Addr().(*net.TCPAddr).Port
+	orig := freeLocalPortFn
+	freeLocalPortFn = func() (int, error) { return port, nil }
+	t.Cleanup(func() { freeLocalPortFn = orig })
+	return accepted
+}
+
+// requirePortFree checks that nothing listens on 127.0.0.1:port any more, so
+// the process that did was stopped.
+func requirePortFree(t *testing.T, port int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return false
+		}
+		_ = listener.Close()
+		return true
+	}, 5*time.Second, 20*time.Millisecond, "the fake kubectl still listens on port %d", port)
+}
+
+// startPortForward uses a forward only once kubectl reports that it listens on
+// 127.0.0.1, and stops a kubectl that does not.
+func TestStartPortForwardWaitsForKubectlToListen(t *testing.T) {
+	t.Run("forwarding", func(t *testing.T) {
+		state := useFakeKubectl(t, fakeKubectlForward)
+		tmp := t.TempDir()
+		t.Setenv("TMPDIR", tmp)
+
+		port, pid, cleanup, err := startPortForward(kubeconfigContext{name: "a"}, "orka-system", "orka", false)
+		require.NoError(t, err)
+		t.Cleanup(cleanup)
+		wantPort, wantPID := fakeKubectlState(t, state)
+		require.Equal(t, wantPort, port)
+		require.Equal(t, wantPID, pid)
+		// kubectl keeps writing to its output, which is already removed.
+		entries, err := os.ReadDir(tmp)
+		require.NoError(t, err)
+		require.Empty(t, entries, "kubectl's output was left in the temporary directory")
+
+		cleanup()
+		requirePortFree(t, port)
+	})
+
+	// Another program took the port the CLI found free, so kubectl cannot
+	// listen there and exits. The CLI never connects to that program.
+	t.Run("port taken", func(t *testing.T) {
+		useFakeKubectl(t, fakeKubectlForward)
+		accepted := takePort(t)
+
+		_, _, _, err := startPortForward(kubeconfigContext{name: "a"}, "orka-system", "orka", false)
+		require.ErrorContains(t, err, "exited before it was forwarding")
+		require.ErrorContains(t, err, "address already in use", "kubectl's own error is not shown")
+		require.Zero(t, accepted.Load(), "the CLI connected to the program holding the port")
+	})
+
+	t.Run("not reported", func(t *testing.T) {
+		useFakeKubectl(t, fakeKubectlSilent)
+		// This waits out the timeout, by which time the fake normally listens.
+		// A loaded machine may start it later, so the test does not require it.
+		setPortForwardReadyTimeout(t, 5*time.Second)
+		var port int
+		orig := freeLocalPortFn
+		freeLocalPortFn = func() (int, error) {
+			var err error
+			port, err = orig()
+			return port, err
+		}
+		t.Cleanup(func() { freeLocalPortFn = orig })
+
+		_, _, _, err := startPortForward(kubeconfigContext{name: "a"}, "orka-system", "orka", false)
+		require.ErrorContains(t, err, "did not report forwarding")
+		requirePortFree(t, port)
+	})
+}
+
+// The kubeconfig token goes through a new port-forward only once kubectl
+// reports that it listens on the port, never to another program that took it.
+func TestKubeconfigTokenOnlyThroughAReportedForward(t *testing.T) {
+	setup := func(t *testing.T) string {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+		orig := discoverServiceFn
+		discoverServiceFn = func(kubeTarget) (string, string) { return "orka-system", "orka" }
+		t.Cleanup(func() { discoverServiceFn = orig })
+		return writeTokenKubeconfig(t, "discovered", "")
+	}
+
+	t.Run("forwarding", func(t *testing.T) {
+		state := useFakeKubectl(t, fakeKubectlForward)
+		kubeconfig := setup(t)
+
+		c, err := resolveWith(t, "--kubeconfig", kubeconfig)
+		require.NoError(t, err)
+		port, pid := fakeKubectlState(t, state)
+		t.Cleanup(func() {
+			if process, err := os.FindProcess(pid); err == nil {
+				_ = process.Kill()
+			}
+		})
+		require.Equal(t, portForwardURL(port), c.BaseURL)
+		require.Equal(t, kubeconfigBearer, c.Token)
+		cached := loadPortForwardCache(currentKubeconfigContext(kubeconfig).identity)
+		require.NotNil(t, cached)
+		require.Equal(t, pid, cached.PID)
+		require.Contains(t, strings.Join(cached.Command, " "), " port-forward --address 127.0.0.1 ")
+	})
+
+	t.Run("port taken", func(t *testing.T) {
+		useFakeKubectl(t, fakeKubectlForward)
+		accepted := takePort(t)
+		kubeconfig := setup(t)
+
+		c, err := resolveWith(t, "--kubeconfig", kubeconfig)
+		require.NoError(t, err)
+		require.Equal(t, defaultServer, c.BaseURL)
+		require.Empty(t, c.Token)
+		require.Nil(t, loadPortForwardCache(currentKubeconfigContext(kubeconfig).identity), "the forward was cached")
+		require.Zero(t, accepted.Load(), "the CLI connected to the program holding the port")
+	})
+}
+
+// A cached forward is reused only while its process runs the command line that
+// started it and that command line is the one this CLI starts for that forward
+// now, so not one an older CLI started without --address, which may hold only
+// ::1 while another program holds 127.0.0.1. How the kubeconfig was named does
+// not matter.
+func TestCachedForwardRunsTheCurrentCommandLine(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("reading process command lines is not supported on %s", runtime.GOOS)
+	}
+	for _, tc := range []struct {
+		name   string
+		older  bool
+		naming string
+	}{
+		{name: "current command line"},
+		{name: "kubeconfig named by a relative path", naming: "relative"},
+		{name: "kubeconfig from KUBECONFIG", naming: "env"},
+		{name: "without --address", older: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			kubeconfig := writeTokenKubeconfig(t, "discovered", "")
+			target := kubeTarget{kubeconfigContext: currentKubeconfigContext(kubeconfig)}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			port := listener.Addr().(*net.TCPAddr).Port
+
+			command := portForwardCommand(target.kubeconfigContext, "orka-system", "orka", port)
+			if tc.older {
+				address := slices.Index(command, "--address")
+				command = slices.Delete(slices.Clone(command), address, address+2)
+			}
+			process := startFakePortForward(t, command).Process
+			entry := &portForwardCache{
+				PID: process.Pid, Port: port, Namespace: "orka-system", Service: "orka",
+				KubeContext: target.cacheKey(), Command: command,
+			}
+			// Linux can show an empty command line for a moment after the
+			// process starts.
+			require.Eventually(t, func() bool {
+				entry.ProcessStart = processStartMark(entry.PID)
+				return isPortForwardProcess(entry)
+			}, 5*time.Second, 20*time.Millisecond)
+			savePortForwardCache(entry)
+			stubKubeconfigTransport(t,
+				func(kubeTarget) (string, string) { return "", "" },
+				func(kubeconfigContext, string, string, bool) (int, int, func(), error) {
+					t.Error("unexpected port-forward")
+					return 0, 0, nil, os.ErrInvalid
+				})
+
+			args := []string{"--kubeconfig", kubeconfig}
+			switch tc.naming {
+			case "relative":
+				t.Chdir(filepath.Dir(kubeconfig))
+				args = []string{"--kubeconfig", filepath.Base(kubeconfig)}
+			case "env":
+				t.Setenv("KUBECONFIG", kubeconfig)
+				args = []string{}
+			}
+			c, err := resolveWith(t, args...)
+			require.NoError(t, err)
+			if tc.older {
+				require.Equal(t, defaultServer, c.BaseURL)
+				require.Empty(t, c.Token)
+				return
+			}
+			require.Equal(t, portForwardURL(port), c.BaseURL)
+			require.Equal(t, kubeconfigBearer, c.Token)
+		})
+	}
+}
+
+// Only an entry recording the port-forward this CLI starts, from port-forward
+// on, is reused; the kubeconfig and context it names are part of the cache key.
+func TestRecordsCurrentForward(t *testing.T) {
+	current := portForwardCommand(kubeconfigContext{path: "/tmp/kc", name: "prod"}, "orka-system", "orka", 4321)
+	entry := func(command []string) *portForwardCache {
+		return &portForwardCache{Port: 4321, Namespace: "orka-system", Service: "orka", Command: command}
+	}
+	forward := current[slices.Index(current, "port-forward"):]
+	address := slices.Index(current, "--address")
+	otherAddress := slices.Clone(current)
+	otherAddress[address+1] = "0.0.0.0"
+	for _, tc := range []struct {
+		name    string
+		command []string
+		want    bool
+	}{
+		{name: "current", command: current, want: true},
+		{name: "kubeconfig named another way", command: slices.Concat([]string{"kubectl", "--kubeconfig", "kc", "--context", "prod"}, forward), want: true},
+		{name: "default kubeconfig", command: portForwardCommand(kubeconfigContext{}, "orka-system", "orka", 4321), want: true},
+		{name: "without --address", command: slices.Delete(slices.Clone(current), address, address+2)},
+		{name: "another address", command: otherAddress},
+		{name: "another port", command: portForwardCommand(kubeconfigContext{}, "orka-system", "orka", 4322)},
+		{name: "another Service", command: portForwardCommand(kubeconfigContext{}, "orka-system", "other", 4321)},
+		{name: "extra argument", command: append(slices.Clone(current), "--pod-running-timeout=1s")},
+		{name: "none recorded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, recordsCurrentForward(entry(tc.command)))
+		})
+	}
+}
+
+// The CLI reads kubectl's output only through a handle on the file kubectl
+// writes.
+func TestSameFile(t *testing.T) {
+	dir := t.TempDir()
+	open := func(name string) *os.File {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			require.NoError(t, os.WriteFile(path, nil, 0o600))
+		}
+		f, err := os.Open(path)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	require.NoError(t, sameFile(open("a"), open("a")))
+	require.Error(t, sameFile(open("a"), open("b")))
+}
+
+// Only the line kubectl writes once it listens on 127.0.0.1 and the port counts.
+func TestForwardingReported(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{name: "forwarding", output: "Forwarding from 127.0.0.1:4321 -> 8080\n", want: true},
+		{name: "after another line", output: "warning\nForwarding from 127.0.0.1:4321 -> 8080\n", want: true},
+		{name: "nothing yet", output: ""},
+		{name: "ipv6 only", output: "Forwarding from [::1]:4321 -> 8080\n"},
+		{name: "another port", output: "Forwarding from 127.0.0.1:43210 -> 8080\n"},
+		{name: "another address", output: "Forwarding from 0.0.0.0:4321 -> 8080\n"},
+		{name: "not at the start of a line", output: "echo Forwarding from 127.0.0.1:4321 -> 8080\n"},
+		{name: "a connection", output: "Handling connection for 4321\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, forwardingReported([]byte(tc.output), 4321))
+		})
+	}
+}
 
 // startFakePortForward starts a process whose command line is command, a
 // kubectl port-forward's, and stops it when the test ends. The process is this
-// test binary, which only sleeps when fakeKubectlEnv is set.
+// test binary, which only sleeps when fakeKubectlEnv is fakeKubectlSleep.
 func startFakePortForward(t *testing.T, command []string) *exec.Cmd {
 	t.Helper()
 	self, err := os.Executable()
 	require.NoError(t, err)
-	cmd := &exec.Cmd{Path: self, Args: command, Env: append(os.Environ(), fakeKubectlEnv+"=1")}
+	cmd := &exec.Cmd{Path: self, Args: command, Env: append(os.Environ(), fakeKubectlEnv+"="+fakeKubectlSleep)}
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()

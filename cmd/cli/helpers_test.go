@@ -552,6 +552,7 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 		Service:     "orka-api",
 		Namespace:   "orka-system",
 		KubeContext: kubeTarget{kubeconfigContext: currentKubeconfigContext(kubePath), selectedNamespace: "ns"}.cacheKey(),
+		Command:     portForwardCommand(currentKubeconfigContext(kubePath), "orka-system", "orka-api", port),
 	})
 
 	root := newRootCmd()
