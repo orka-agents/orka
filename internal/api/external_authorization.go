@@ -358,6 +358,32 @@ func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {
 	}
 }
 
+// githubSessionRoutes are the identity-only routes a GitHub sign-in session
+// may reach: those that act on the caller's own sign-in, links, agent host
+// and AHP tokens. The control-plane MCP endpoint is identity-only because
+// each tool call is authorized as the REST route it replays, but it is not
+// a session's.
+var githubSessionRoutes = map[string]bool{
+	"GET /api/v1/auth/validate":                true,
+	"GET /api/v1/auth/whoami":                  true,
+	"GET /api/v1/connectors":                   true,
+	"GET /api/v1/connections":                  true,
+	"POST /api/v1/connections":                 true,
+	"GET /api/v1/connections/:name":            true,
+	"PUT /api/v1/connections/:name":            true,
+	"DELETE /api/v1/connections/:name":         true,
+	"POST /api/v1/connections/:name/authorize": true,
+	"POST /api/v1/connections/:name/complete":  true,
+	"POST /api/v1/auth/session/renew":          true,
+	"DELETE /api/v1/auth/session":              true,
+	"GET /api/v1/agent-hosts/me":               true,
+	"POST /api/v1/agent-hosts/me/wake":         true,
+	"DELETE /api/v1/agent-hosts/me":            true,
+	"POST /api/v1/ahp-tokens":                  true,
+	"GET /api/v1/ahp-tokens":                   true,
+	"DELETE /api/v1/ahp-tokens/:id":            true,
+}
+
 func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	policy, ok := externalAPIPolicies[route]
 	if !ok || (!policy.identityOnly && len(policy.permissions) == 0) {
@@ -369,8 +395,9 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	}
 	// A GitHub sign-in session reaches only routes that act on the caller's
 	// own links, host and AHP tokens; everything else needs OIDC or
-	// Kubernetes credentials.
-	if ui.AuthType == AuthTypeGitHubSession && !policy.identityOnly {
+	// Kubernetes credentials. Being identity-only is not enough: a route
+	// opts in, so one added later is closed to sessions until it does.
+	if ui.AuthType == AuthTypeGitHubSession && (!policy.identityOnly || !githubSessionRoutes[route]) {
 		return fiber.NewError(fiber.StatusForbidden, "a GitHub sign-in session reaches only your own links, agent host and AHP tokens")
 	}
 	// Direct OIDC validation and transaction tokens have their own contracts.

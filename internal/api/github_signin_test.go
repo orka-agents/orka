@@ -1003,7 +1003,9 @@ func TestGitHubSessionsReachOnlyIdentityRoutes(t *testing.T) {
 	})
 	app.Get("/api/v1/tasks", handlers.authorizeExternalRoute("GET /api/v1/tasks"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 	app.Get("/api/v1/connections", handlers.authorizeExternalRoute("GET /api/v1/connections"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
-	for path, want := range map[string]int{"/api/v1/tasks": http.StatusForbidden, "/api/v1/connections": http.StatusOK} {
+	// The MCP endpoint is identity-only, but it is not a session's.
+	app.Get("/mcp", handlers.authorizeExternalRoute("POST /mcp"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
+	for path, want := range map[string]int{"/api/v1/tasks": http.StatusForbidden, "/api/v1/connections": http.StatusOK, "/mcp": http.StatusForbidden} {
 		resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
 		if err != nil {
 			t.Fatal(err)
@@ -1011,6 +1013,19 @@ func TestGitHubSessionsReachOnlyIdentityRoutes(t *testing.T) {
 		if resp.StatusCode != want {
 			t.Fatalf("%s: %d, want %d", path, resp.StatusCode, want)
 		}
+	}
+}
+
+// Every route a session may reach is an identity-only route that exists.
+func TestGitHubSessionRoutesAreIdentityOnly(t *testing.T) {
+	for route := range githubSessionRoutes {
+		policy, ok := externalAPIPolicies[route]
+		if !ok || !policy.identityOnly {
+			t.Fatalf("%s is not an identity-only route", route)
+		}
+	}
+	if githubSessionRoutes["POST /mcp"] {
+		t.Fatal("the MCP endpoint is not a session's")
 	}
 }
 
