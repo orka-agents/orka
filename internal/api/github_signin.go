@@ -201,7 +201,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	// could spend the App's GitHub rate limit, which renewal and invites
 	// share, and lock everyone out of signing in. It runs before the body is
 	// read.
-	if h.signInLimiter != nil && !h.signInLimiter.Allow(c.IP(), time.Now()) {
+	if h.signInLimiter != nil && !h.signInLimiter.AllowClientFirst(c.IP(), time.Now()) {
 		c.Set(fiber.HeaderRetryAfter, "10")
 		return fiber.NewError(fiber.StatusTooManyRequests, "too many sign-in attempts; try again shortly")
 	}

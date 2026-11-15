@@ -22,13 +22,15 @@ const (
 	gatewayIngressClientTTL   = 10 * time.Minute
 )
 
-// GitHub sign-in checks each submitted token with GitHub as the App, whose
-// hourly rate limit renewal and invites share. A sign-in makes at most two
-// such checks, so the global rate allows at most 3,600 an hour however many
-// clients call; a person signs in rarely, so one client gets a few attempts
-// a minute.
+// GitHub sign-in spends the App's GitHub rate limit, which renewal and
+// invites share, typically 5,000 requests an hour. One sign-in makes at most
+// four App-authenticated calls: it checks the submitted token, the token its
+// refresh token yields, and the token custody already holds, and revokes a
+// minted token it does not keep. The global rate allows at most 900 sign-ins,
+// 3,600 such calls, an hour, plus its burst, however many clients call; a
+// person signs in rarely, so one client gets a few attempts a minute.
 const (
-	githubSignInGlobalRate  = rate.Limit(0.5)
+	githubSignInGlobalRate  = rate.Limit(0.25)
 	githubSignInGlobalBurst = 30
 	githubSignInClientRate  = rate.Limit(0.1)
 	githubSignInClientBurst = 5
@@ -99,6 +101,35 @@ func (l *gatewayIngressLimiter) Allow(key string, now time.Time) bool {
 	}
 	entry.lastSeen = now
 	return entry.limiter.AllowN(now, 1)
+}
+
+// AllowClientFirst is Allow that spends global capacity only on a request
+// its client's limit admits: a client over its own limit cannot drain what
+// every other client shares. A request the global limit then refuses gives
+// its client's token back.
+func (l *gatewayIngressLimiter) AllowClientFirst(key string, now time.Time) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry := l.clients[key]
+	if entry == nil {
+		l.evictStaleOrOldest(now)
+		entry = &gatewayIngressClientLimiter{limiter: rate.NewLimiter(l.clientRate, l.burst)}
+		l.clients[key] = entry
+	}
+	entry.lastSeen = now
+	reservation := entry.limiter.ReserveN(now, 1)
+	if !reservation.OK() || reservation.DelayFrom(now) > 0 {
+		reservation.CancelAt(now)
+		return false
+	}
+	if !l.global.AllowN(now, 1) {
+		reservation.CancelAt(now)
+		return false
+	}
+	return true
 }
 
 func (l *gatewayIngressLimiter) evictStaleOrOldest(now time.Time) {
