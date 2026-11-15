@@ -581,6 +581,7 @@ func (c *conn) initialize(ctx context.Context, id, raw json.RawMessage) (any, er
 		return nil, err
 	}
 	c.host.sweepOnce(ctx, c.principal)
+	c.host.cfg.Backends.prepareConnection(ctx, c.principal)
 	if !validClientID(params.ClientId) {
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "a valid clientId is required")
 	}
@@ -667,6 +668,7 @@ func (c *conn) reconnect(ctx context.Context, id, raw json.RawMessage) (any, err
 		return nil, err
 	}
 	c.host.sweepOnce(ctx, c.principal)
+	c.host.cfg.Backends.prepareConnection(ctx, c.principal)
 	record, err := c.host.cfg.Store.GetAHPClient(ctx, params.ClientId)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && record.UserKey != c.principal.UserKey) {
 		return nil, rpcErr(ahptypes.ErrorCodeNotFound, "unknown client; initialize again")

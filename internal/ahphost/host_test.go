@@ -40,6 +40,24 @@ type fakeBackend struct {
 	seen     []Principal
 	// onAgents runs once, while the root snapshot is taken under the hub lock.
 	onAgents func()
+	// prepared lists the principals whose connections were prepared.
+	prepared []Principal
+}
+
+func (f *fakeBackend) PrepareConnection(_ context.Context, principal Principal) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prepared = append(f.prepared, principal)
+}
+
+func (f *fakeBackend) preparedSubjects() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	subjects := make([]string, 0, len(f.prepared))
+	for _, principal := range f.prepared {
+		subjects = append(subjects, principal.Subject)
+	}
+	return subjects
 }
 
 func (f *fakeBackend) Name() string { return "fake" }
@@ -789,6 +807,26 @@ func mustPrincipal(t *testing.T, env *testEnv, token string) Principal {
 	principal, err := env.tokens.Verify(context.Background(), token)
 	require.NoError(t, err)
 	return principal
+}
+
+// Every connection that initializes or reconnects is prepared by the backend,
+// as its user, whichever channels it subscribes to: a client that never
+// subscribes to the root, which lists agents, still gets what an earlier
+// process left running picked up.
+func TestConnectionsArePreparedWithoutTheRoot(t *testing.T) {
+	env := newTestEnv(t, store.AHPJournalLimits{})
+	alice := env.mint("alice")
+	ctx := ctx5(t)
+
+	first := env.connect(alice.Token)
+	init, err := first.Initialize(ctx, "laptop", []string{"0.9.0"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"alice"}, env.backend.preparedSubjects(), "initialize prepares the connection")
+
+	again := env.connect(alice.Token)
+	_, err = again.Reconnect(ctx, "laptop", init.ServerSeq, []string{"ahp-session:/one"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"alice", "alice"}, env.backend.preparedSubjects(), "reconnect prepares the connection")
 }
 
 func TestReconnectRules(t *testing.T) {

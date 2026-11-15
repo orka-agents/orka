@@ -2171,6 +2171,47 @@ func testAHPRecoveredAnswer(t *testing.T, streamed, answer, want string) {
 	require.Equal(t, answer, record.History[len(record.History)-1].Reply)
 }
 
+// A client that reconnects after a restart and subscribes only to its chat,
+// never to the root that lists agents, still finds the turn recovered: its
+// connection recovers it, so the turn settles instead of waiting unseen.
+func TestAHPBackendRecoversTurnsForAClientThatSkipsTheRoot(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "wake me"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+
+	// The leader stops before it settles the turn; the Task then succeeds.
+	env.backend.forgetTurn(turn)
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("done")))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, task))
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	require.NoError(t, env.kube.Status().Update(ctx, task))
+
+	again := env.connectWith("alice", "client-alice-again")
+	_, chatSub, err := again.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	waitForActionType(t, chatSub, "chat/turnComplete")
+	require.Eventually(t, func() bool {
+		var settled ahpSession
+		return env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &settled) == nil && settled.ActiveTurn == ""
+	}, 5*time.Second, 20*time.Millisecond, "the recovered turn settled")
+}
+
 // A waiting message whose start could not be shown goes back on the queue,
 // even when the store refuses that at first, and is tried again: nothing else
 // would start it until another turn ends.
