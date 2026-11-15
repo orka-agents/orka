@@ -114,9 +114,12 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                    client.Reader
-	Scheme                       *runtime.Scheme
-	JobBuilder                   *JobBuilder
+	APIReader  client.Reader
+	Scheme     *runtime.Scheme
+	JobBuilder *JobBuilder
+	// TaskProvenanceProtected is the existing built-in/external admission declaration.
+	// Child gateway grants require it; root grants do not.
+	TaskProvenanceProtected      bool
 	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier

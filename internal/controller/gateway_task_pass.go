@@ -25,6 +25,7 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		}
 	}
 	var names []string
+	var passTools []*corev1alpha1.Tool
 	for _, descriptor := range configuration.ToolPolicy.Tools {
 		if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
 			continue
@@ -39,10 +40,51 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		if err := workerexecutor.ValidateGatewayTaskPassTool(tool); err != nil {
 			return nil, permanentACPAgentConfiguration(err)
 		}
+		passTools = append(passTools, tool)
+		names = append(names, tool.Name)
+	}
+	if len(names) > 0 && namesDelegatingTask(task) {
+		if !r.TaskProvenanceProtected {
+			return nil, permanentACPAgentConfiguration(errors.New("child gateway task passes require Task provenance admission"))
+		}
+		reader := uncachedReader(r.APIReader, r.Client)
+		parent, err := gatewayPassParent(ctx, reader, task)
+		if err != nil {
+			if errors.Is(err, errDelegationChainBroken) {
+				return nil, permanentACPAgentConfiguration(err)
+			}
+			return nil, err
+		}
+		inherited, err := loadGatewayPassSnapshot(ctx, reader, r.AgentExecutionSnapshots, parent)
+		if err != nil {
+			return nil, err
+		}
+		if inherited == nil {
+			return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		}
+		chain, err := gatewayPassChain(ctx, reader, r.AgentExecutionSnapshots, r.GatewayService, parent, inherited, "", task)
+		if err != nil {
+			return nil, err
+		}
+		copy := *inherited
+		for _, ancestor := range chain {
+			if wait := ancestor.task.Status.Wait; ancestor.task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && wait != nil {
+				for _, deadline := range []time.Time{wait.Deadline.Time, taskWaitChainDeadline(ancestor.task)} {
+					if deadline.Before(copy.Deadline) {
+						copy.Deadline = deadline
+					}
+				}
+			}
+		}
+		copy.Parent = &gatewayruntime.TaskGrantParent{Namespace: parent.Namespace, Name: parent.Name, UID: string(parent.UID), SnapshotDigest: parent.Status.AgentExecutionBinding.Snapshot.Digest}
+		copy.Tools = slices.Clone(inherited.Tools)
+		grant = &copy
+		names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(inherited.Tools, name) })
+	}
+	for _, tool := range passTools {
 		if grant == nil || grant.GrantRef == "" || tool.Spec.HTTP.URL != protocol.TaskToolURL(grant.Endpoint, tool.Name) {
 			return nil, permanentACPAgentConfiguration(errors.New("gateway task pass requires a bound root and matching gateway endpoint"))
 		}
-		names = append(names, tool.Name)
 	}
 	if grant == nil {
 		return nil, nil
@@ -95,11 +137,30 @@ func (e RegistryACPMCPToolExecutor) bindGatewayTaskGrant(ctx context.Context, re
 	if err != nil {
 		return err
 	}
+	validate := func(callCtx context.Context) error {
+		if grant.Parent != nil && !e.TaskProvenanceProtected {
+			return errors.New("child gateway task passes require Task provenance admission")
+		}
+		_, err := gatewayPassChain(callCtx, e.Reader, e.AgentExecutionSnapshots, e.GatewayService, task, grant, tool.Name, nil)
+		return err
+	}
 	executor.SetGatewayTaskPass(func(callCtx context.Context, _ *corev1alpha1.Tool) (string, error) {
-		return e.GatewayService.TaskPass(callCtx, task, grant, tool.Name)
+		if err := validate(callCtx); err != nil {
+			return "", err
+		}
+		chain, err := gatewayPassChain(callCtx, e.Reader, e.AgentExecutionSnapshots, e.GatewayService, task, grant, tool.Name, nil)
+		if err != nil {
+			return "", err
+		}
+		var pass string
+		for _, c := range slices.Backward(chain) {
+			pass, err = e.GatewayService.TaskPass(callCtx, c.task, c.grant, validate)
+			if err != nil {
+				return "", err
+			}
+		}
+		return pass, nil
 	}, httpClient)
-	executor.SetSendGate(func(callCtx context.Context) error {
-		return e.GatewayService.ValidateTaskGrant(callCtx, task, grant, tool.Name)
-	})
+	executor.SetSendGate(validate)
 	return nil
 }

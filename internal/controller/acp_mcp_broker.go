@@ -115,14 +115,15 @@ func (f ACPMCPToolExecutorFunc) ExecuteACPMCPTool(ctx context.Context, request h
 }
 
 type RegistryACPMCPToolExecutor struct {
-	GatewayService      *gatewayruntime.Service
-	Registry            *tools.Registry
-	Reader              client.Reader
-	KubeClient          kubernetes.Interface
-	HTTPClient          *http.Client
-	OutboundAccess      outboundaccess.Resolver
-	TransactionExchange *workerexecutor.TransactionExchangeConfig
-	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	TaskProvenanceProtected bool
+	GatewayService          *gatewayruntime.Service
+	Registry                *tools.Registry
+	Reader                  client.Reader
+	KubeClient              kubernetes.Interface
+	HTTPClient              *http.Client
+	OutboundAccess          outboundaccess.Resolver
+	TransactionExchange     *workerexecutor.TransactionExchangeConfig
+	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
 	// SubstrateMCPRouter reaches Substrate MCP actors in-process with the
 	// manager's router identity, the same path the Orka API MCP proxy uses.
 	// Nil makes brokered Substrate MCP Tools fail closed.
@@ -964,7 +965,8 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 }
 
 type ACPMCPBrokerDependencies struct {
-	GatewayService *gatewayruntime.Service
+	TaskProvenanceProtected bool
+	GatewayService          *gatewayruntime.Service
 	// ConnectorReadScopes mirrors the API's connector-read scope list for
 	// list_connections on Tasks created by delegated context tokens.
 	ConnectorReadScopes     []string
@@ -1013,6 +1015,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		},
 		Prompts: DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore, PromptLeases: dependencies.PromptLeases},
 		Executor: RegistryACPMCPToolExecutor{
+			TaskProvenanceProtected: dependencies.TaskProvenanceProtected,
 			GatewayService:          dependencies.GatewayService,
 			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
 			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,

@@ -1961,6 +1961,7 @@ func main() {
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		TaskProvenanceProtected:      taskProvenanceProtected,
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
@@ -2476,9 +2477,10 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-		GatewayService:     gatewayService,
-		SubstrateMCPRouter: substrateMCPRouter,
-		Reader:             mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		TaskProvenanceProtected: taskProvenanceProtected,
+		GatewayService:          gatewayService,
+		SubstrateMCPRouter:      substrateMCPRouter,
+		Reader:                  mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
 		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,
