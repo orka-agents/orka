@@ -589,35 +589,38 @@ func TestKubeconfigTokenFileIsReadBeforeConnecting(t *testing.T) {
 func TestContextRedefinedWhileConnectingDropsTheForward(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		change func(*clientcmdapi.Config)
+		change func(*testing.T, *clientcmdapi.Config)
 		drop   bool
 	}{
-		{name: "another server", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "another server", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].Server = "https://other.k8s.invalid"
 		}},
-		{name: "another CA", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "another CA", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].CertificateAuthorityData = []byte("other-ca")
 		}},
-		{name: "another CA file", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "another CA file", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].CertificateAuthority = "/tmp/other-ca.crt"
 		}},
-		{name: "another proxy", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "CA file replaced", drop: true, change: func(t *testing.T, c *clientcmdapi.Config) {
+			require.NoError(t, os.WriteFile(c.Clusters["cluster-a"].CertificateAuthority, []byte("other-ca"), 0o600))
+		}},
+		{name: "another proxy", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].ProxyURL = "socks5://127.0.0.1:1080"
 		}},
-		{name: "another TLS server name", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "another TLS server name", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].TLSServerName = "api.internal"
 		}},
-		{name: "TLS verification off", drop: true, change: func(c *clientcmdapi.Config) {
+		{name: "TLS verification off", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["cluster-a"].InsecureSkipTLSVerify = true
 		}},
-		{name: "context removed", drop: true, change: func(c *clientcmdapi.Config) { delete(c.Contexts, "a") }},
-		{name: "another namespace", change: func(c *clientcmdapi.Config) { c.Contexts["a"].Namespace = "team-b" }},
-		{name: "another token", change: func(c *clientcmdapi.Config) { c.AuthInfos["user-a"].Token = "token-a-changed" }},
-		{name: "another user", change: func(c *clientcmdapi.Config) {
+		{name: "context removed", drop: true, change: func(_ *testing.T, c *clientcmdapi.Config) { delete(c.Contexts, "a") }},
+		{name: "another namespace", change: func(_ *testing.T, c *clientcmdapi.Config) { c.Contexts["a"].Namespace = "team-b" }},
+		{name: "another token", change: func(_ *testing.T, c *clientcmdapi.Config) { c.AuthInfos["user-a"].Token = "token-a-changed" }},
+		{name: "another user", change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.AuthInfos["user-b"] = &clientcmdapi.AuthInfo{Token: "token-b"}
 			c.Contexts["a"].AuthInfo = "user-b"
 		}},
-		{name: "cluster entry renamed", change: func(c *clientcmdapi.Config) {
+		{name: "cluster entry renamed", change: func(_ *testing.T, c *clientcmdapi.Config) {
 			c.Clusters["renamed"] = c.Clusters["cluster-a"]
 			delete(c.Clusters, "cluster-a")
 			c.Contexts["a"].Cluster = "renamed"
@@ -629,15 +632,18 @@ func TestContextRedefinedWhileConnectingDropsTheForward(t *testing.T) {
 			config := clientcmdapi.NewConfig()
 			config.CurrentContext = "a"
 			config.Contexts["a"] = &clientcmdapi.Context{Cluster: "cluster-a", AuthInfo: "user-a", Namespace: "team-a"}
-			config.Clusters["cluster-a"] = &clientcmdapi.Cluster{Server: "https://a.k8s.invalid"}
+			ca := filepath.Join(dir, "ca.crt")
+			require.NoError(t, os.WriteFile(ca, []byte("ca-a"), 0o600))
+			config.Clusters["cluster-a"] = &clientcmdapi.Cluster{Server: "https://a.k8s.invalid", CertificateAuthority: ca}
 			config.AuthInfos["user-a"] = &clientcmdapi.AuthInfo{Token: "token-a"}
 			kubeconfig := writeKubeconfig(t, dir, config)
 			contextA := currentKubeconfigContext(kubeconfig)
+			require.NotEmpty(t, contextA.identity)
 
 			stopped := false
 			stubKubeconfigTransport(t,
 				func(kubeTarget) (string, string) {
-					tc.change(config)
+					tc.change(t, config)
 					writeKubeconfig(t, dir, config)
 					return "orka-system", "orka"
 				},
@@ -1254,6 +1260,27 @@ func TestKubeconfigIdentityDistinguishesContexts(t *testing.T) {
 	require.NotEmpty(t, otherFile)
 	require.NotEqual(t, reference, otherFile)
 	require.Empty(t, kubeconfigIdentity(filepath.Join(t.TempDir(), "missing")))
+
+	// A CA file can be replaced without changing the kubeconfig. Inline CA data
+	// takes precedence over the file, as in client-go.
+	t.Run("CA file contents", func(t *testing.T) {
+		caDir := t.TempDir()
+		ca := filepath.Join(caDir, "ca.crt")
+		withCAFile := func(data []byte) string {
+			config := base()
+			config.Clusters["kubernetes"].CertificateAuthorityData = data
+			config.Clusters["kubernetes"].CertificateAuthority = ca
+			return kubeconfigIdentity(writeKubeconfig(t, caDir, config))
+		}
+		require.NoError(t, os.WriteFile(ca, []byte("ca-a"), 0o600))
+		fromFile, fromData := withCAFile(nil), withCAFile([]byte("ca-a"))
+		require.NotEmpty(t, fromFile)
+		require.NoError(t, os.WriteFile(ca, []byte("ca-b"), 0o600))
+		require.NotEqual(t, fromFile, withCAFile(nil), "replacing the CA file kept the identity")
+		require.Equal(t, fromData, withCAFile([]byte("ca-a")), "a CA file behind CA data changed the identity")
+		require.NoError(t, os.Remove(ca))
+		require.Empty(t, withCAFile(nil), "a CA file that cannot be read gave an identity")
+	})
 
 	// One file has one identity however its path is written, and two files
 	// given by the same relative name do not share one.

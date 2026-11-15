@@ -873,9 +873,10 @@ type kubeconfigContext struct {
 	namespace string // the context's namespace
 	// identity is a digest of the context's name and namespace, its cluster and
 	// user names, the file the cluster comes from and how the cluster is
-	// reached: server, proxy and TLS settings. Two contexts that differ in any
-	// of these get separate port-forwards. It is "" when the kubeconfig has no
-	// usable current context, and then no port-forward is cached.
+	// reached: server, proxy and TLS settings, including the CA it trusts. Two
+	// contexts that differ in any of these get separate port-forwards. It is ""
+	// when the kubeconfig has no usable current context or its CA file cannot
+	// be read, and then no port-forward is cached.
 	identity string
 	// cluster is a digest of the part of the identity that decides where
 	// kubectl connects: the cluster's source file, server, proxy and TLS
@@ -914,10 +915,14 @@ func readKubeconfigContext(kubeconfigPath, name string) kubeconfigContext {
 	if !ok || cluster == nil || cluster.Server == "" {
 		return kc
 	}
+	ca, err := clusterCA(cluster)
+	if err != nil {
+		return kc
+	}
 	clusterFields := []string{
 		resolvedPath(cluster.LocationOfOrigin), cluster.Server, cluster.ProxyURL, cluster.TLSServerName,
 		strconv.FormatBool(cluster.InsecureSkipTLSVerify),
-		cluster.CertificateAuthority, string(cluster.CertificateAuthorityData),
+		cluster.CertificateAuthority, string(ca),
 	}
 	clusterSum := sha256.Sum256([]byte(strings.Join(clusterFields, "\x00")))
 	kc.cluster = hex.EncodeToString(clusterSum[:])
@@ -926,6 +931,17 @@ func readKubeconfigContext(kubeconfigPath, name string) kubeconfigContext {
 	}, clusterFields...), "\x00")))
 	kc.identity = hex.EncodeToString(sum[:])
 	return kc
+}
+
+// clusterCA returns the CA that clients of cluster trust: its
+// certificate-authority-data, which takes precedence as in client-go, or else
+// the contents of its certificate-authority file, which can be replaced without
+// changing the kubeconfig.
+func clusterCA(cluster *clientcmdapi.Cluster) ([]byte, error) {
+	if len(cluster.CertificateAuthorityData) > 0 || cluster.CertificateAuthority == "" {
+		return cluster.CertificateAuthorityData, nil
+	}
+	return os.ReadFile(cluster.CertificateAuthority)
 }
 
 // clientConfig is kc's context in the kubeconfig as read, whatever the file
