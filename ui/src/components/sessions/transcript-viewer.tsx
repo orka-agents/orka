@@ -34,7 +34,8 @@ function ToolDetails({ kind, name, id, content }: {
       </summary>
       <div className="space-y-2 border-t border-border p-3">
         {id && <div className="text-xs text-muted-foreground">Call ID: {id}</div>}
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">
+        {/* A named, focusable region, so keyboard users can scroll a long result. */}
+        <pre tabIndex={0} role="region" aria-label={`Tool ${kind} ${name}`} className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">
           {formatToolContent(content)}
         </pre>
       </div>
@@ -67,7 +68,8 @@ export function TranscriptViewer({ transcript }: { transcript?: string }) {
                 <Icon className="h-4 w-4 text-primary" />
               </div>
             )}
-            <Card className={cn('min-w-0 max-w-[80%]', msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card')}>
+            {/* py-0 drops the Card's own vertical padding so the bubble's p-3 is even on all sides. */}
+            <Card className={cn('min-w-0 max-w-[80%] py-0', msg.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card')}>
               <CardContent className="space-y-2 p-3">
                 {isTool ? (
                   <ToolDetails
@@ -77,7 +79,7 @@ export function TranscriptViewer({ transcript }: { transcript?: string }) {
                     content={msg.content}
                   />
                 ) : msg.content && (
-                  <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
+                  <pre className="whitespace-pre-wrap wrap-anywhere text-sm font-sans">{msg.content}</pre>
                 )}
                 {toolCalls.map((call, callIndex) => (
                   <ToolDetails

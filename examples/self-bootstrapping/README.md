@@ -87,5 +87,5 @@ Task; specialists remain owned by the original creation Task.
 - **Depth and concurrency**: the coordinator config limits delegation to three
   levels and five concurrent children.
 
-See [Multi-agent coordination](../../website/docs/reference/multi-agent-coordination.md)
+See [Multi-agent coordination](../../website/docs/guides/multi-agent-coordination.md)
 for policy semantics and upgrade behavior.

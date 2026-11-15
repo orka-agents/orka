@@ -56,20 +56,20 @@ func (f *postP0FakeSessionStore) GetSession(ctx context.Context, namespace, name
 func (f *postP0FakeSessionStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	return nil, nil
 }
-func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
-func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string, _ time.Time) error {
 	delete(f.records, f.key(namespace, name))
 	return nil
 }
-func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
+func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string, _ time.Time) error {
 	return nil
 }
 func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
+func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string, _ time.Time) (bool, error) {
 	return false, nil
 }
 func (f *postP0FakeSessionStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
@@ -740,7 +740,6 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if tt.withBuiltInRuntimeFields {
 				maxTurns := int32(10)
 				allowBash := true
-				source.Spec.AgentRuntime.Workspace = &corev1alpha1.LegacyAgentWorkspaceConfig{GitRepo: "https://example.test/repo.git"}
 				source.Spec.AgentRuntime.MaxTurns = &maxTurns
 				source.Spec.AgentRuntime.DisallowedTools = []string{"stale_denied_tool"}
 				source.Spec.AgentRuntime.AllowBash = &allowBash
@@ -784,7 +783,7 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if created.Spec.AgentRuntime.AllowedTools == nil {
 				t.Fatal("allowedTools = nil, want explicit current policy")
 			}
-			if created.Spec.AgentRuntime.Workspace != nil || created.Spec.AgentRuntime.MaxTurns != nil ||
+			if created.Spec.AgentRuntime.MaxTurns != nil ||
 				created.Spec.AgentRuntime.DisallowedTools != nil || created.Spec.AgentRuntime.AllowBash != nil {
 				t.Fatalf("agentRuntime = %#v, want inherited runtime overrides cleared", created.Spec.AgentRuntime)
 			}
@@ -1378,5 +1377,81 @@ func TestTaskApprovalDecisionAPIIgnoresPassiveExpiryWithoutTerminalEvent(t *test
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want OK", resp.StatusCode)
+	}
+}
+
+func TestTaskApprovalDecisionAPIAcceptsAParkedSignOffAfterTheTurnEnded(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]any{"approvalID": "parked-1", "action": "Agent sign-off (parked turn)", "parked": true})
+	for _, id := range []string{"parked-1", "other-1"} {
+		if id == "other-1" {
+			content, _ = json.Marshal(map[string]string{"approvalID": id, "action": "create_pr"})
+		}
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "parked-task", TaskName: "parked-task",
+			Type: events.ExecutionEventTypeApprovalRequested, ToolCallID: id, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := testTask("default", "parked-task")
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateWaiting, Kind: corev1alpha1.TaskWaitKindApproval, References: []string{"parked-1"},
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	decide := func(id string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/parked-task/approvals/"+id+"/decision?namespace=default",
+			bytes.NewBufferString(`{"decision":"approve"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode
+	}
+	if got := decide("other-1"); got != http.StatusConflict {
+		t.Fatalf("an unrelated approval on a finished Task must conflict, got %d", got)
+	}
+	if got := decide("parked-1"); got != http.StatusOK {
+		t.Fatalf("the active parked sign-off must be decidable, got %d", got)
+	}
+	reloaded := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "parked-task"}, reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Annotations[labels.AnnotationApprovalDecisionID] != "parked-1" {
+		t.Fatal("the decision must nudge the parked Task so its wait resumes promptly")
+	}
+}
+
+func TestTaskApprovalDecisionAPIRejectsAParkedSignOffAfterAFailedTurn(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]any{"approvalID": "parked-1", "action": "Agent sign-off (parked turn)", "parked": true})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "parked-task", TaskName: "parked-task",
+		Type: events.ExecutionEventTypeApprovalRequested, ToolCallID: "parked-1", Content: content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "parked-task")
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	// The turn failed before the controller abandoned the requested wait.
+	task.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateRequested, Kind: corev1alpha1.TaskWaitKindApproval, References: []string{"parked-1"},
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/parked-task/approvals/parked-1/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a sign-off whose turn failed has nothing to resume and must conflict, got %d", resp.StatusCode)
 	}
 }

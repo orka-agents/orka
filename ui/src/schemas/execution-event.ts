@@ -89,6 +89,8 @@ const traceEventSchema = z.object({
 const modelRequestTraceSchema = z.object({
   id: z.string(),
   status: z.string(),
+  model: z.string().optional(),
+  provider: z.string().optional(),
   startSeq: z.number().optional(),
   endSeq: z.number().optional(),
   startedAt: z.string().optional(),

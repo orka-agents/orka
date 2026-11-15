@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { pollUnlessForbidden, retryUnlessForbidden, type ListResponse } from '@/lib/list-api'
 import { useUIStore } from '@/stores/ui'
 import type { MonitorAction, MonitorCommand, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
@@ -27,7 +27,17 @@ export function useRepositoryMonitor(name: string) {
     queryKey: ['monitors', 'repository', namespace, name],
     queryFn: () => api.get<RepositoryMonitor>(`/monitors/repositories/${name}`, { namespace }),
     enabled: !!name,
-    refetchInterval: 10000,
+    // A 403 or 404 does not clear on a retry.
+    retry: (failureCount, error) => !isForbiddenError(error) && !isNotFoundError(error) && failureCount < 3,
+    // A forbidden monitor stays forbidden, and one that 404s after it loaded
+    // was deleted; polling those only spams the API. One never seen keeps
+    // polling: the create form opens the monitor right away, and the API
+    // reads it through the controller cache, so it can 404 briefly.
+    refetchInterval: (query) => {
+      if (isForbiddenError(query.state.error)) return false
+      if (isNotFoundError(query.state.error) && query.state.data !== undefined) return false
+      return 10000
+    },
   })
 }
 

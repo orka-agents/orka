@@ -9,8 +9,14 @@ Next steps:
        kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "orka.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
   2. In another terminal, create a client token:
        export ORKA_TOKEN="$(kubectl -n {{ .Release.Namespace }} create token {{ .Values.client.name }})"
+{{- if dig "dashboard" "enabled" false .Values.controller }}
   3. Open http://localhost:{{ .Values.service.port }} and paste the token, or continue with
        https://orka-agents.github.io/orka/docs/getting-started#connect-to-the-api
+{{- else }}
+  3. Continue with the orka CLI:
+       https://orka-agents.github.io/orka/docs/getting-started#connect-to-the-api
+     The web dashboard is off; set controller.dashboard.enabled=true to serve it.
+{{- end }}
 
 Webhook certificate: Secret {{ include "orka.webhookTLSSecretName" . }}
 {{- if include "orka.webhookTLSGenerated" . }}
@@ -29,7 +35,7 @@ Snapshot encryption key: Secret {{ include "orka.agentExecutionSnapshotSecretNam
 
 ⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).
    Task results and session data will be LOST on pod restart.
-{{- if and (eq .Values.controller.mode "harness-v2") .Values.controller.gateway.enabled }}
+{{- if .Values.controller.gateway.enabled }}
    Gateway acknowledgements, deduplication, and queued deliveries are also NOT durable.
 {{- end }}
    For production use, enable persistent storage:

@@ -1,4 +1,5 @@
 ---
+sidebar_label: Scheduled tasks
 description: "Running any Orka Task on a cron schedule."
 ---
 

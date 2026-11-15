@@ -1447,7 +1447,7 @@ func TestJournalRetainsCacheAvailabilityInUsageReport(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = db.Close() })
-			eventStore := sqlite.NewStore(db, "usage")
+			eventStore := orkaEventStore(t, db)
 			var snapshot harnessv2.UsageUpdate
 			if err := json.Unmarshal([]byte(test.wire), &snapshot); err != nil {
 				t.Fatal(err)

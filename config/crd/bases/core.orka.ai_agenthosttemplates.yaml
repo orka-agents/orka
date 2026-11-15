@@ -1,0 +1,619 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agenthosttemplates.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    categories:
+    - orka
+    kind: AgentHostTemplate
+    listKind: AgentHostTemplateList
+    plural: agenthosttemplates
+    shortNames:
+    - aht
+    singular: agenthosttemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.access
+      name: Access
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentHostTemplate defines a long-lived, single-user agent host that
+          AgentHosts in the same namespace may run. Selecting one requires the use
+          verb on it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentHostTemplateSpec is the operator's definition of an agent host.
+
+              The container named host runs the daemon. Orka adds to it, and promises
+              nothing else:
+                - ORKA_HOST_ID: the AgentHost UID, stable for the host's life.
+                - ORKA_HOST_NAME: the AgentHost name, for display.
+                - ORKA_CONNECTION_TOKEN_FILE: a per-host random token in a memory-backed
+                  volume mounted only into host. Read it once and delete it.
+                - ORKA_GITHUB_TOKEN_FILE: the user's GitHub token, read-only, when
+                  githubToken allows it and the AgentHost names a token Secret.
+                - ORKA_STATUS_DIR: a directory shared with the Orka host agent. When
+                  idleStatusFile is set, the host writes its idle status there as JSON
+                  with at least idle (boolean) and idleSince (RFC 3339 or null), and
+                  rewrites it at least every five minutes. Freshness is judged by
+                  updatedAt (RFC 3339), or by the file's modification time without it.
+
+              The daemon must serve the Agent Host Protocol on 127.0.0.1:listenPort, gated
+              by the connection token.
+            properties:
+              access:
+                description: Access selects how clients reach the host.
+                enum:
+                - Relay
+                - Standalone
+                type: string
+              additionalEgress:
+                description: AdditionalEgress allows TCP egress beyond DNS and public
+                  HTTPS.
+                items:
+                  description: |-
+                    AgentHostEgressRule allows TCP egress to one CIDR in addition to DNS and
+                    public HTTPS.
+                  properties:
+                    cidr:
+                      description: CIDR is the destination address range.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    ports:
+                      description: Ports are the allowed TCP destination ports.
+                      items:
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      maxItems: 8
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                  required:
+                  - cidr
+                  - ports
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-type: atomic
+              containers:
+                description: Containers are the long-running containers. Exactly one
+                  is named host.
+                items:
+                  description: |-
+                    AgentHostContainer is the constrained container shape a template may declare.
+                    The controller adds the security context, so containers always run as the
+                    template's non-root user with no capabilities.
+                  properties:
+                    args:
+                      description: Args are the entrypoint arguments.
+                      items:
+                        type: string
+                      maxItems: 128
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    command:
+                      description: Command overrides the image entrypoint.
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    env:
+                      description: Env lists plain environment variables.
+                      items:
+                        description: |-
+                          AgentHostEnvVar is a plain environment variable. Values are stored in the
+                          template in clear text; never put credentials here.
+                        properties:
+                          name:
+                            description: Name is the variable name. Names starting
+                              with ORKA_ are reserved.
+                            maxLength: 128
+                            pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: environment variables starting with ORKA_ are
+                                reserved
+                              rule: '!self.startsWith(''ORKA_'')'
+                          value:
+                            description: Value is the variable value.
+                            maxLength: 4096
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      maxItems: 64
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - name
+                      x-kubernetes-list-type: map
+                    image:
+                      description: Image is a container image pinned by digest.
+                      maxLength: 512
+                      pattern: ^[^@\s]+@sha256:[a-f0-9]{64}$
+                      type: string
+                    name:
+                      description: Name is the container name. Names starting with
+                        orka- are reserved.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: container names starting with orka- are reserved
+                        rule: '!self.startsWith(''orka-'')'
+                    resources:
+                      description: Resources are the container's compute requests
+                        and limits.
+                      properties:
+                        claims:
+                          description: |-
+                            Claims lists the names of resources, defined in spec.resourceClaims,
+                            that are used by this container.
+
+                            This field depends on the
+                            DynamicResourceAllocation feature gate.
+
+                            This field is immutable. It can only be set for containers.
+                          items:
+                            description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                            properties:
+                              name:
+                                description: |-
+                                  Name must match the name of one entry in pod.spec.resourceClaims of
+                                  the Pod where this field is used. It makes that resource available
+                                  inside a container.
+                                type: string
+                              request:
+                                description: |-
+                                  Request is the name chosen for a request in the referenced claim.
+                                  If empty, everything from the claim is made available, otherwise
+                                  only the result of this request.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Limits describes the maximum amount of compute resources allowed.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Requests describes the minimum amount of compute resources required.
+                            If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                      type: object
+                    volumeMounts:
+                      description: VolumeMounts mount the state volume and scratch
+                        volumes.
+                      items:
+                        description: AgentHostVolumeMount mounts the state volume
+                          or a declared scratch volume.
+                        properties:
+                          mountPath:
+                            description: MountPath is the absolute path inside the
+                              container.
+                            maxLength: 1024
+                            pattern: ^/
+                            type: string
+                          name:
+                            description: Name is workspace or the name of a template
+                              scratch volume.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          readOnly:
+                            description: ReadOnly mounts the volume read-only.
+                            type: boolean
+                        required:
+                        - mountPath
+                        - name
+                        type: object
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    workingDir:
+                      description: WorkingDir is the container working directory.
+                      maxLength: 1024
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                maxItems: 4
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              githubToken:
+                default: None
+                description: GitHubToken says whether the host receives the user's
+                  GitHub token.
+                enum:
+                - None
+                - Optional
+                - Required
+                type: string
+              idleStatusFile:
+                description: |-
+                  IdleStatusFile is the file name, inside ORKA_STATUS_DIR, where the host
+                  writes its idle status.
+                pattern: ^[A-Za-z0-9._-]{1,128}$
+                type: string
+                x-kubernetes-validations:
+                - message: idleStatusFile must be a plain file name
+                  rule: self != '.' && self != '..'
+              idleSuspend:
+                description: |-
+                  IdleSuspend suspends hosts that report idle for the given duration. Unset
+                  keeps hosts running.
+                properties:
+                  after:
+                    description: |-
+                      After is how long the host must report idle before Orka suspends it,
+                      from 1m to 720h.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: after must be a duration from 1m to 720h
+                      rule: duration(self) >= duration('1m') && duration(self) <=
+                        duration('720h')
+                required:
+                - after
+                type: object
+              initContainers:
+                description: |-
+                  InitContainers run in order before the containers, for example to copy
+                  pinned vendor binaries into a scratch volume.
+                items:
+                  description: |-
+                    AgentHostContainer is the constrained container shape a template may declare.
+                    The controller adds the security context, so containers always run as the
+                    template's non-root user with no capabilities.
+                  properties:
+                    args:
+                      description: Args are the entrypoint arguments.
+                      items:
+                        type: string
+                      maxItems: 128
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    command:
+                      description: Command overrides the image entrypoint.
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    env:
+                      description: Env lists plain environment variables.
+                      items:
+                        description: |-
+                          AgentHostEnvVar is a plain environment variable. Values are stored in the
+                          template in clear text; never put credentials here.
+                        properties:
+                          name:
+                            description: Name is the variable name. Names starting
+                              with ORKA_ are reserved.
+                            maxLength: 128
+                            pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: environment variables starting with ORKA_ are
+                                reserved
+                              rule: '!self.startsWith(''ORKA_'')'
+                          value:
+                            description: Value is the variable value.
+                            maxLength: 4096
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      maxItems: 64
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - name
+                      x-kubernetes-list-type: map
+                    image:
+                      description: Image is a container image pinned by digest.
+                      maxLength: 512
+                      pattern: ^[^@\s]+@sha256:[a-f0-9]{64}$
+                      type: string
+                    name:
+                      description: Name is the container name. Names starting with
+                        orka- are reserved.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: container names starting with orka- are reserved
+                        rule: '!self.startsWith(''orka-'')'
+                    resources:
+                      description: Resources are the container's compute requests
+                        and limits.
+                      properties:
+                        claims:
+                          description: |-
+                            Claims lists the names of resources, defined in spec.resourceClaims,
+                            that are used by this container.
+
+                            This field depends on the
+                            DynamicResourceAllocation feature gate.
+
+                            This field is immutable. It can only be set for containers.
+                          items:
+                            description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                            properties:
+                              name:
+                                description: |-
+                                  Name must match the name of one entry in pod.spec.resourceClaims of
+                                  the Pod where this field is used. It makes that resource available
+                                  inside a container.
+                                type: string
+                              request:
+                                description: |-
+                                  Request is the name chosen for a request in the referenced claim.
+                                  If empty, everything from the claim is made available, otherwise
+                                  only the result of this request.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Limits describes the maximum amount of compute resources allowed.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Requests describes the minimum amount of compute resources required.
+                            If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                      type: object
+                    volumeMounts:
+                      description: VolumeMounts mount the state volume and scratch
+                        volumes.
+                      items:
+                        description: AgentHostVolumeMount mounts the state volume
+                          or a declared scratch volume.
+                        properties:
+                          mountPath:
+                            description: MountPath is the absolute path inside the
+                              container.
+                            maxLength: 1024
+                            pattern: ^/
+                            type: string
+                          name:
+                            description: Name is workspace or the name of a template
+                              scratch volume.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          readOnly:
+                            description: ReadOnly mounts the volume read-only.
+                            type: boolean
+                        required:
+                        - mountPath
+                        - name
+                        type: object
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    workingDir:
+                      description: WorkingDir is the container working directory.
+                      maxLength: 1024
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                maxItems: 4
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              listenPort:
+                description: ListenPort is the loopback port the host serves the Agent
+                  Host Protocol on.
+                format: int32
+                maximum: 65535
+                minimum: 1024
+                type: integer
+                x-kubernetes-validations:
+                - message: port 7790 is reserved for the Orka host agent
+                  rule: self != 7790
+              runtimeClassName:
+                description: |-
+                  RuntimeClassName selects a RuntimeClass, for example a gVisor or Kata
+                  sandbox, for host Pods.
+                maxLength: 253
+                minLength: 1
+                type: string
+              securityContext:
+                description: SecurityContext selects the non-root identity for every
+                  template container.
+                properties:
+                  runAsGroup:
+                    description: RunAsGroup is the primary gid of every template container
+                      and the Pod fsGroup.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  runAsUser:
+                    description: RunAsUser is the uid of every template container.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                required:
+                - runAsGroup
+                - runAsUser
+                type: object
+              storage:
+                description: Storage sizes the state volume mounted as workspace.
+                properties:
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the requested capacity.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: StorageClassName selects the storage class. Unset
+                      uses the cluster default.
+                    type: string
+                required:
+                - size
+                type: object
+              volumes:
+                description: Volumes declares per-Pod scratch volumes.
+                items:
+                  description: AgentHostScratchVolume is a per-Pod emptyDir volume.
+                  properties:
+                    medium:
+                      description: Medium selects node disk (empty) or memory.
+                      enum:
+                      - ""
+                      - Memory
+                      type: string
+                    name:
+                      description: Name is the volume name. workspace and names starting
+                        with orka- are reserved.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: workspace and names starting with orka- are reserved
+                        rule: self != 'workspace' && !self.startsWith('orka-')
+                    sizeLimit:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: SizeLimit bounds the volume.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                  required:
+                  - name
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+            required:
+            - access
+            - containers
+            - listenPort
+            - securityContext
+            - storage
+            type: object
+            x-kubernetes-validations:
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: self == oldSelf
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: has(self.initContainers) == has(oldSelf.initContainers) && (!has(self.initContainers)
+                || self.initContainers.map(c, c.name) == oldSelf.initContainers.map(c,
+                c.name))
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: self.containers.all(c, oldSelf.containers.exists(o, o.name ==
+                c.name && has(c.env) == has(o.env) && (!has(c.env) || c.env.map(e,
+                e.name) == o.env.map(e, e.name))))
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: '!has(self.initContainers) || self.initContainers.all(c, has(oldSelf.initContainers)
+                && oldSelf.initContainers.exists(o, o.name == c.name && has(c.env)
+                == has(o.env) && (!has(c.env) || c.env.map(e, e.name) == o.env.map(e,
+                e.name))))'
+            - message: exactly one container must be named host
+              rule: self.containers.exists_one(c, c.name == 'host')
+            - message: container volumeMounts must name workspace or a declared scratch
+                volume
+              rule: self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
+                m.name == 'workspace' || (has(self.volumes) && self.volumes.exists(v,
+                v.name == m.name))))
+            - message: init container volumeMounts must name workspace or a declared
+                scratch volume
+              rule: '!has(self.initContainers) || self.initContainers.all(c, !has(c.volumeMounts)
+                || c.volumeMounts.all(m, m.name == ''workspace'' || (has(self.volumes)
+                && self.volumes.exists(v, v.name == m.name))))'
+            - message: init container and container names must be distinct
+              rule: '!has(self.initContainers) || self.initContainers.all(i, self.containers.all(c,
+                c.name != i.name))'
+            - message: idleSuspend requires idleStatusFile
+              rule: '!has(self.idleSuspend) || has(self.idleStatusFile)'
+            - message: 'Relay access requires githubToken: Required'
+              rule: self.access != 'Relay' || self.githubToken == 'Required'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

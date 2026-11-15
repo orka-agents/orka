@@ -23,6 +23,13 @@ type ACPRuntimeSessionBinding struct {
 	WorkspaceDigest    string
 	MCPDigest          string
 	RecreationRequired bool
+	// PromptDelivered records that the provider process behind this binding
+	// accepted a prompt, so once-per-process prompt context (the toolbox
+	// note) is not repeated. It lives only in controller memory: creating a
+	// RuntimeSession clears it and a binding rebuilt from Task status starts
+	// false, so the context may repeat after a controller restart but is
+	// never skipped for a process that has not received a prompt.
+	PromptDelivered bool
 }
 
 // ACPRuntimeSessionPlan explains whether the supervisor session can be reused

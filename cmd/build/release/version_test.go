@@ -105,12 +105,14 @@ func TestRepositoryVersionDefaultHonorsMakeOverrides(t *testing.T) {
 	if len(assignments) != 1 {
 		t.Fatalf("repository Makefile has %d VERSION defaults, want one", len(assignments))
 	}
+	// Release preparation rewrites the default, so expect whatever this checkout declares.
+	_, declared, _ := strings.Cut(assignments[0], "= ")
 	path := filepath.Join(t.TempDir(), makefilePath)
 	writeTestFile(t, path, assignments[0]+"\nprint-version:\n\t@printf '%s' '$(VERSION)'\n")
 	for _, test := range []struct {
 		name, environment, commandLine, want string
 	}{
-		{name: "default", want: "v0.0.0-dev"},
+		{name: "default", want: declared},
 		{name: "environment", environment: "v9.8.7", want: "v9.8.7"},
 		{name: "command line", commandLine: "v9.8.7-rc.3", want: "v9.8.7-rc.3"},
 		{name: "command line takes precedence", environment: "v9.8.7", commandLine: "v9.8.7-rc.3", want: "v9.8.7-rc.3"},

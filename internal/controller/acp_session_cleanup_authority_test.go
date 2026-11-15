@@ -114,7 +114,7 @@ func TestSessionCleanupAuthorityCannotPerformOtherMutations(t *testing.T) {
 			}
 			prompt, err := fixture.base.dispatcher.buildPromptRequest(
 				fixture.task, fence, fixture.bound.plan.Profile, fixture.bound.mcpConfiguration,
-				"", "must not run", fixture.bound.body.ExternalRuntime.Limits, 0,
+				"", "", "must not run", fixture.bound.body.ExternalRuntime.Limits, 0,
 			)
 			if err != nil {
 				t.Fatal(err)

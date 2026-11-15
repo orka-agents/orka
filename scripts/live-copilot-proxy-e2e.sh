@@ -376,7 +376,7 @@ YAML
   E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME="${provider_proxy_service}" \
   E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT="${provider_proxy_service_port}" \
   go test -tags=e2e ./test/e2e/ -timeout 45m -v -ginkgo.v \
-    -ginkgo.focus="Live Copilot Proxy Provider|Live Chat API|Live Anthropic Compat API|Live Agent Runtime Matrix"
+    -ginkgo.focus="Live Copilot Proxy Provider|Live Chat API|Anthropic Compat API|Coordination Memory Tools|Agent Runtime Matrix"
 
   log "Live copilot-proxy e2e passed"
 }

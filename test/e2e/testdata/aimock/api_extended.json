@@ -1,0 +1,8 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:api-ext-result]" },
+      "response": { "content": "E2E_API_EXT_RESULT: 14" }
+    }
+  ]
+}

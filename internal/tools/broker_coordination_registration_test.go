@@ -154,6 +154,7 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 	want := []string{
 		checkMessagesToolName,
 		delegateTaskToolName,
+		ParkUntilToolName,
 		"propose_memory",
 		"recall_memory",
 		"remember",
@@ -336,6 +337,9 @@ func TestBrokeredDelegateTaskUsesRequestScopedParentContext(t *testing.T) {
 	}
 	if got := child.Annotations[labels.AnnotationParentTaskUID]; got != string(parent.UID) {
 		t.Fatalf("child authenticated parent UID = %q, want %q", got, parent.UID)
+	}
+	if got := child.Annotations[labels.AnnotationParentTaskNamespace]; got != parent.Namespace {
+		t.Fatalf("child parent namespace = %q, want %q", got, parent.Namespace)
 	}
 	effectID, err := (store.ExternalEffectIdentity{
 		Kind: "acp-mcp-tool", Namespace: brokerTestNamespace,

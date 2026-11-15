@@ -98,3 +98,59 @@ func TestRepositoryMonitorUpdateBranchRetriesSuccessProjections(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryMonitorUpdateBranchMergedPullRequestSettlesAutomergeState(t *testing.T) {
+	for _, merged := range []bool{true, false} {
+		t.Run(fmt.Sprintf("merged=%v", merged), func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor, _ := repositoryMonitorInventoryTestObjects(fmt.Sprintf("merged-automerge-%v", merged))
+			command := &store.CommandEvent{
+				ID: "cmd-merged-automerge", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 42,
+				Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "old-head-sha", Status: "accepted", CreatedAt: time.Now(),
+			}
+			if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+				t.Fatal(err)
+			}
+			run := &store.MonitorRun{
+				ID: repositoryMonitorCommandRunIDFromCommand(command.ID), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				CommandEventID: command.ID, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA,
+				Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
+			}
+			if err := monitorStore.CreateMonitorRun(ctx, run); err != nil {
+				t.Fatal(err)
+			}
+			mutation := &store.GitHubMutationRecord{
+				ID: repositoryMonitorUpdateBranchMutationID(command.ID), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				RunID: run.ID, CommandEventID: command.ID, Operation: repositoryMonitorUpdateBranchOperation,
+				TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA,
+				Status: repositoryMonitorAutomergeStatePending, CreatedAt: time.Now(),
+			}
+			if err := monitorStore.CreateGitHubMutationRecord(ctx, mutation); err != nil {
+				t.Fatal(err)
+			}
+			pr := repositoryMonitorPullRequest{
+				Number: command.Number, State: repositoryMonitorItemStateOpen, Merged: merged,
+				BaseSHA: "live-base-sha", HeadSHA: "updated-head-sha",
+			}
+			item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+			item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			if err := reconciler.completeRepositoryMonitorUpdateBranch(ctx, monitor, run, command, item, mutation, pr); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, item.ItemKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantState, wantAutomerge := repositoryMonitorItemStateOpen, repositoryMonitorAutomergeStateMergeReady
+			if merged {
+				wantState, wantAutomerge = repositoryMonitorAutomergeStateMerged, repositoryMonitorAutomergeStateMerged
+			}
+			if stored.State != wantState || stored.AutomergeState != wantAutomerge {
+				t.Fatalf("item state = %q automerge = %q, want %q and %q", stored.State, stored.AutomergeState, wantState, wantAutomerge)
+			}
+		})
+	}
+}

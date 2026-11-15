@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-func TestClientRoutesTypedRequestsThroughActorHost(t *testing.T) {
+func TestClientRoutesTypedRequestsThroughTargetActorHeader(t *testing.T) {
 	seen := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "actor-1.actors.test" {
-			t.Fatalf("Host = %q, want actor route host", r.Host)
+		if got := r.Header.Get(TargetActorHeader); got != "team-a/actor-1" {
+			t.Fatalf("%s = %q, want atespace/name target", TargetActorHeader, got)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer auth-value" {
 			t.Fatalf("Authorization = %q, want bearer auth", got)
@@ -52,8 +52,8 @@ func TestClientRoutesTypedRequestsThroughActorHost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := HTTPClient{RouterURL: server.URL + "/router", ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
-	actor := ActorRequest{ActorID: "actor-1", AuthValue: "auth-value"}
+	client := HTTPClient{RouterURL: server.URL + "/router", HTTPClient: server.Client()}
+	actor := ActorRequest{ActorID: "actor-1.team-a", AuthValue: "auth-value"}
 	if err := client.Health(context.Background(), actor); err != nil {
 		t.Fatalf("Health() error = %v", err)
 	}
@@ -85,8 +85,8 @@ func TestClientStatusErrorCarriesRetryability(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
-	err := client.Health(context.Background(), ActorRequest{ActorID: "actor-1"})
+	client := HTTPClient{RouterURL: server.URL, HTTPClient: server.Client()}
+	err := client.Health(context.Background(), ActorRequest{ActorID: "actor-1.team-a"})
 	var daemonErr *Error
 	if !errors.As(err, &daemonErr) {
 		t.Fatalf("Health() error = %T %[1]v, want daemon Error", err)
@@ -101,8 +101,8 @@ func TestClientHealthUsesNoBodyAndNoAuthWhenEmpty(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != HealthPath {
 			t.Fatalf("request = %s %s, want GET %s", r.Method, r.URL.Path, HealthPath)
 		}
-		if r.Host != "actor-1.actors.test" {
-			t.Fatalf("Host = %q, want actor route host", r.Host)
+		if got := r.Header.Get(TargetActorHeader); got != "team-a/actor-1" {
+			t.Fatalf("%s = %q, want atespace/name target", TargetActorHeader, got)
 		}
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Fatalf("Authorization = %q, want omitted", got)
@@ -114,8 +114,8 @@ func TestClientHealthUsesNoBodyAndNoAuthWhenEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
-	if err := client.Health(context.Background(), ActorRequest{ActorID: "actor-1"}); err != nil {
+	client := HTTPClient{RouterURL: server.URL, HTTPClient: server.Client()}
+	if err := client.Health(context.Background(), ActorRequest{ActorID: "actor-1.team-a"}); err != nil {
 		t.Fatalf("Health() error = %v", err)
 	}
 }
@@ -126,8 +126,8 @@ func TestClientDecodeErrorIsNonRetryable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
-	_, err := client.Exec(context.Background(), ActorRequest{ActorID: "actor-1"}, ExecRequest{Command: []string{"echo"}})
+	client := HTTPClient{RouterURL: server.URL, HTTPClient: server.Client()}
+	_, err := client.Exec(context.Background(), ActorRequest{ActorID: "actor-1.team-a"}, ExecRequest{Command: []string{"echo"}})
 	var daemonErr *Error
 	if !errors.As(err, &daemonErr) {
 		t.Fatalf("Exec() error = %T %[1]v, want daemon Error", err)
@@ -146,8 +146,30 @@ func TestClientUploadNoResponseAcceptsNoContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
-	if err := client.UploadNoResponse(context.Background(), ActorRequest{ActorID: "actor-1"}, UploadRequest{Files: []UploadFile{{Path: "file"}}}); err != nil {
+	client := HTTPClient{RouterURL: server.URL, HTTPClient: server.Client()}
+	if err := client.UploadNoResponse(context.Background(), ActorRequest{ActorID: "actor-1.team-a"}, UploadRequest{Files: []UploadFile{{Path: "file"}}}); err != nil {
 		t.Fatalf("UploadNoResponse() error = %v", err)
+	}
+}
+
+func TestTargetActorRequiresQualifiedID(t *testing.T) {
+	for _, id := range []string{"actor-1", ".team-a", "actor-1.", "actor-1.team.a", "actor/1.team-a", "actor-1.team/a"} {
+		if target, ok := TargetActor(id); ok {
+			t.Fatalf("TargetActor(%q) = %q, want rejection", id, target)
+		}
+	}
+	if target, ok := TargetActor(" actor-1.team-a "); !ok || target != "team-a/actor-1" {
+		t.Fatalf("TargetActor() = %q, %v", target, ok)
+	}
+}
+
+func TestClientRejectsUnqualifiedActorBeforeSending(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unqualified Actor request reached the router")
+	}))
+	defer server.Close()
+	client := HTTPClient{RouterURL: server.URL, HTTPClient: server.Client()}
+	if err := client.Health(context.Background(), ActorRequest{ActorID: "actor-1"}); err == nil {
+		t.Fatal("Health() accepted an unqualified Actor ID")
 	}
 }

@@ -1,330 +1,482 @@
 ---
 slug: /substrate
-description: "Agent Substrate execution, data-only suspension, checkpoints, and cold restore."
+description: "External Agent Substrate ACP workspaces, data-only checkpoints, and native MCP Tools."
 ---
 
 # Agent Substrate workspaces
 
-Orka runs direct workspaces, MCP servers, and built-in ACP runtimes on the
-unmodified [Agent Substrate v0.1.0](https://github.com/agent-substrate/substrate/tree/v0.1.0)
-provider. The supported source and protocol are pinned together in
-`hack/agent-substrate/upstream.env`. Provider forks, local patches, and
-fork-specific `ActorSnapshot` APIs are not part of this integration.
+ACP workspaces use the separately deployed `orka-workspace-substrate` provider.
+It targets unmodified Agent Substrate `v1.0.0`, with source and protocol pinned to
+commit `b34fbee742906494b5eb4f1f36987176bf8770a4`. The
+[provider installation and protocol pin](https://github.com/orka-agents/orka-workspace/blob/main/providers/substrate/README.md)
+live in the external workspace repository. Orka core retains a separate native
+integration for MCP Tools; enabling it does not enable ACP workspace allocation.
 
-Substrate owns placement, gVisor isolation, snapshot storage, and physical
-workers. Orka owns Task outcomes, durable Sessions and transcripts, prompt
-leases, cancellation, runtime admission, workspace data references, and
-publication. Reading a dormant Session does not start an Actor.
+Substrate owns native Actors, placement, gVisor isolation, and snapshot storage.
+The external provider owns its private worker pools and allocation journals.
+Core owns Task outcomes, RuntimeSessions, prompt leases, credentials, admission,
+and settlement. Reading a dormant Session does not start an Actor.
 
 :::tip[Video demo]
 Watch [Checkpoint and restore an agent workspace](https://www.youtube.com/watch?v=jsdRB-0LLAc).
 :::
 
-## Native provider setup
+## Install the external ACP provider
 
-Actor, ActorTemplate, Atespace, Worker, and Tag are native ate-api resources.
-Only infrastructure such as WorkerPool is a Kubernetes CRD. Create an
-infrastructure template through `kubectl ate create actor-template -f`, with
-`metadata.atespace` and `metadata.name`, rather than applying an ActorTemplate
-CRD. In Orka's `templateRef`, `namespace` names the native Atespace.
+Install the native backend independently, then the shared workspace CRDs and
+ownership policies and the provider's CRDs, RBAC, registration, and Deployment.
+Supply the provider's installation-owned `substrate-native-control` Secret.
+Control traffic uses authenticated TLS with a CA bundle and either a bearer token
+or client certificate/key files. Actor traffic goes through `atenet-router` over
+mTLS with a pod certificate, selected by the `ate-target-actor: <atespace>/<actor>`
+header. The provider reloads tokens for each request and certificates for each TLS
+handshake. These credentials never enter workload requests, status, templates, or
+logs.
 
-ACP dispatch requires `--substrate-enabled` and
-`--acp-workspace-dispatch-enabled`, plus the direct egress configuration below.
-Class-backed suspension and checkpoint
-restore also require `--enable-workspace-provider-api`, Task provenance and
-workspace-use admission, and the matching CRDs and webhooks.
-
-Configure these controller connection settings:
-
-| Setting | Purpose |
+| External provider flag | Purpose |
 | --- | --- |
-| `--substrate-api-endpoint` | Native TLS gRPC endpoint, usually `api.ate-system.svc:443`. |
-| `--substrate-api-ca-file` | Server trust bundle. |
-| `--substrate-api-cert-file` and `--substrate-api-key-file` | Client PEM identity, reloaded at each TLS handshake. A projected PodCertificate bundle may supply both paths. |
-| `--substrate-api-bearer-token-file` | Alternative to mTLS, reloaded for every RPC. Choose one authentication method. |
-| `--substrate-router-url` | In-cluster workload router URL. |
-| `--substrate-actor-dns-suffix` | Usually `actors.resources.substrate.ate.dev`. |
+| `--native-api-endpoint` | Native TLS control endpoint, usually `api.ate-system.svc:443`. |
+| `--native-ca-file` | Server trust bundle. |
+| `--native-token-file` | Rotating bearer identity. |
+| `--native-cert-file`, `--native-key-file` | Alternative rotating client identity. |
+| `--native-router-endpoint` | Router URL, default `https://atenet-router.ate-system.svc:443`. |
+| `--native-router-ca-file`, `--native-router-cert-file`, `--native-router-key-file` | Router trust and the pod-certificate identity on the router allowlist. |
 
-The native route is `name.atespace.<suffix>`. Identical Actor names in different
-Atespaces remain distinct. An explicit local insecure-TLS option exists, but
-the bundled installer uses verified server trust and projected client identity.
+Authorization is always enforced. Grant each Orka identity least privilege with
+access policies rather than bootstrap ownership: `editor` on the Atespaces it uses
+and global `viewer` for worker placement reads. Add the provider's and core's
+pod-certificate SPIFFE IDs (`spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`)
+to `--ingress-allowed-spiffe-ids`; no other Orka workload needs router access.
+Namespaces whose Pods call the native API need the `ate.dev/api-access=true` label.
 
-Helm can mount control credentials from an existing Secret in the release namespace:
+Actor, ActorTemplate, Atespace, Worker, and Tag are native API resources. WorkerPool
+is a Kubernetes CRD. Create infrastructure templates through the native API, such
+as `kubectl ate create actor-template -f`, rather than applying an ActorTemplate
+CRD. The profile's `templateRef.namespace` names the native Atespace.
+
+The operator creates a `SubstrateProviderConfig` and immutable
+`SubstrateWorkspaceProfile` in `substrate.workspace.orka.ai/v1alpha1`. For example:
+
+```yaml
+apiVersion: substrate.workspace.orka.ai/v1alpha1
+kind: SubstrateWorkspaceProfile
+metadata:
+  name: substrate-data
+spec:
+  templateRef:
+    name: workspace-infrastructure
+    namespace: team
+  suspend:
+    mode: DataOnly
+```
+
+An administrator-managed `ExecutionWorkspaceClass` references that profile and
+the registered provider. Require `acp.runtime.v2` explicitly. Suspension requires
+interactive session reuse, an allowed Suspend action, and bounded expiry.
+
+Enable core's provider API and ACP dispatch with the required provenance and
+class-use admission webhooks. Core has no Substrate ACP backend or native routing
+flag. Give its ServiceAccount read-only Pod access in the worker namespaces so
+it can independently verify startup and termination. With Helm:
 
 ```yaml
 controller:
-  substrate:
-    enabled: true
-    directEgressEnabled: true
-    apiCredentials:
-      existingSecret: substrate-control
-      certKey: tls.crt
-      privateKeyKey: tls.key
-      caKey: ca.crt
+  executionWorkspace:
+    dispatchEnabled: true
     workerNamespaces: [ate-workers]
+  substrate:
+    podCertificate:
+      enabled: true
+providerProxy:
+  substrateEgressGateway:
+    enabled: true
 ```
 
-For bearer authentication, select `apiCredentials.bearerTokenKey` instead of
-the certificate and private-key keys. Verified TLS requires `apiCredentials.caKey`
-for either authentication method, or `apiCAFile` when mounting credentials yourself.
-Secret projections support rotation.
-`workerNamespaces` grants Pod cleanup and NetworkPolicy management only in the
-listed provider namespaces. Keep both settings while disabling Substrate
-admission so existing workspaces can still finish cleanup.
+Core reaches each Substrate workspace's supervisor only through the configured
+`--substrate-router-url`, using its pod certificate and the attested
+`ate-target-actor` target; a provider-reported endpoint that differs from that
+router is refused. Without the certificate, Substrate pools stay `Degraded`. Core
+sends Substrate v1 providers an egress allowlist naming its provider-auth-proxy
+and API origins instead of a NetworkPolicy. Because Actor egress arrives from the
+egress gateway Pods, `providerProxy.substrateEgressGateway` admits them to the
+token-authenticated provider proxy.
 
-Keep that configuration until retained checkpoint catalogs and template journals
-are collected, even after the last RuntimePool is gone. Controller startup checks
-those records in the controller namespace when Substrate admission is disabled.
-Their cleanup watches run even when the optional public checkpoint CRD is
-absent; public checkpoint and restore capabilities remain unavailable until
-that API is installed and its reconciliation is enabled.
+The provider's separate RBAC authorizes its native infrastructure and network
+policy operations. See [workspace configuration](../reference/configuration.md#workspace-providers).
 
-The infrastructure template must select exactly one WorkerPool and specify a
-gVisor `sandboxConfig`, resource limits, and snapshot storage. The controller
-compiles separate immutable native templates for ACP. It preserves admitted
-placement and storage settings and supplies the pinned runtime image, process
-capabilities, readiness probe, durable volume, and public bootstrap material.
-Native revisions and their ownership are recorded in private controller
-ConfigMaps. Unused revisions are collected after journal and checkpoint
-references disappear.
-
-Back up the controller's lifecycle ConfigMaps along with its Kubernetes state.
-An initialized pool with a missing journal closes admission and blocks deletion
-until the original journal is restored or an operator completes recovery.
-Existing legacy pools with lifecycle records are not automatically migrated.
-Finish their cleanup using the previous controller before upgrading.
-
-MCP Tool IDs that can be attributed to a recorded template or validated current
-binding migrate to `name.atespace` without replacing the Actor or its ownership
-lease. Orka rechecks endpoint readiness after migration. Historical cleanup IDs
-without enough template provenance remain blocked rather than guessing an Atespace.
-
-The WorkerPool must be dedicated to Orka ACP workloads. Orka needs Pod
-get/list/delete and NetworkPolicy access in its namespace. It confines worker
-egress before delivering credentials. Cross-cluster placement is unsupported.
-
-Configure the provider's ateapi with `--egress-gateway-address=` to use direct
-egress, and use a CNI that enforces Kubernetes NetworkPolicies. The provider
-sets this mode at boot, so drain and remove existing ACP Actors before changing
-it. Then acknowledge
-that configuration with Orka's `--substrate-direct-egress-enabled=true`,
-`ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED=true`, or Helm's
-`controller.substrate.directEgressEnabled: true`. Orka cannot inspect this
-server setting through the native API. The acknowledgement defaults to false
-and closes ACP admission before Actor creation or credential delivery. Providers
-also withhold their capability advertisement until it is enabled. Disabling it
-still permits drain, suspension, and deletion with the existing credentials.
-
-The pinned provider's default transparent gateway hides Actor destinations from
-worker NetworkPolicies, and its Envoy handler does not enforce destination
-policies. That mode is unsupported for ACP confinement. Direct egress is a
-provider-wide setting, so use a dedicated provider instance if other workloads
-require the gateway. The bundled local installer changes only this supported
-deployment argument on its dedicated cluster and leaves provider source intact.
-Direct workspace and MCP admission do not require Orka's acknowledgement flag.
-
-The router's request timeout must cover the longest supported operation; the
-local suite sets `--route-timeout=30m` and uses Envoy info logging. Longer router
-shutdown survival also needs a suitable drain timeout and Pod termination grace.
-
-For direct commands with an explicit daemon timeout, the client allows up to
-five additional seconds to collect the final exit status. A caller context can
-impose a tighter overall deadline or cancel the wait. Timeout conformance requires
-the daemon's exit code 124; connection or authentication failures do not count.
-
-Direct workspaces using SessionIdentity recover their installed handoff JWT
-after executor recreation through a signed, sealed bootstrap request. The reply
-is encrypted for that request and the exact challenged process. Recovery does
-not replace the credential, write it to controller state, or replay workspace
-commands. An unseeded process returns an authenticated empty result before the
-client mints a new JWT. Bootstrap signing credentials are required for recovery.
-
-Direct workspace and MCP deletion use upstream `DeleteActor(anyState=true)` to
-terminate workloads without creating snapshots. This also permits cleanup of
-stateless MCP Actors and failed suspension attempts. ACP teardown continues to
-require its controller-owned journal and worker termination proof.
-
-Upstream currently authenticates control clients but does not implement native
-resource authorization/RBAC. Treat its control API, router, template operators,
-and worker namespace as a trusted infrastructure boundary. Kubernetes `use`
-authorization protects Orka workspace and checkpoint selection; it does not add
-RBAC to Substrate. Concurrent external mutation of Orka-owned Actors or Tags is
-unsupported.
-
-## Execution and cold suspension
-
-`Task.spec.workspace` remains the repository configuration. Clone/read and
-publication credentials stay in their existing workspace and publisher
-boundaries. They never enter the ACP process tree.
-
-A class-backed Task selects its execution environment independently:
+A Task selects a class without native selectors:
 
 ```yaml
 spec:
   type: agent
-  agentRef: {name: coding}
-  sessionRef: {name: work-session, create: true, append: true}
   execution:
     workspace:
       classRef: {name: substrate-coding}
       reusePolicy: session
-      onDetach: Suspend
 ```
 
-The class uses the reserved adapter `acp.workspace.orka.ai/runtime-pool`, a
-Substrate `RuntimeProviderConfig`, and a `RuntimeWorkspaceProfile` containing:
+Top-level `Task.spec.workspace` remains the repository and publication contract.
+
+## Private workers and network confinement
+
+Agent Substrate v1 has no direct Actor egress. All Actor traffic leaves through the
+installation's egress gateway and is denied unless the Actor's `EgressPolicy`
+allows it. Workspace requests carry a host-name egress allowlist instead of a
+Kubernetes NetworkPolicy: each rule names `HTTP`, `HTTPS`, or `TLSPassthrough`, a
+lowercase FQDN (or a single leftmost `*.` wildcard), and its ports. Bare `*`, IP
+addresses, and CIDRs are rejected, and an empty list denies all egress. Core always
+adds its in-cluster provider-auth-proxy origin. With `--enable-telemetry` and
+`--runtime-telemetry-collector-egress`, core also adds the OTLP collector origins it
+projects into the supervisor; see
+[collector egress](../guides/observability.md#collector-egress-for-agent-substrate-runtimes).
+The provider applies the allowlist
+before every native Resume and does not resume if it cannot. `HTTPS` rules are
+intercepted by the gateway, so only allowlists with an `HTTPS` rule get the
+`egress-mitm.ate.dev` and `system-roots.ate.dev` trust bundles and seven CA
+variables. Upstream allows at most 32 environment variables per container and the
+Orka supervisor uses 31, so core admits only `HTTP` and `TLSPassthrough` rules for
+workspaces today.
+
+### Provider-proxy token injection
+
+Native runtimes never receive the provider-auth-proxy token. When the provider
+advertises `runtime.egress-credential-injection`, Core's proxy rule asks the
+egress gateway to replace `Authorization` with `Bearer ` plus the token from
+Core's private provider Secret in its runtime namespace; the runtime boots with a
+public placeholder. Enable it by installing the gateway with
+`--credential-provider='{"name":"k8s.io"}'`, granting the profile Atespace the
+runtime namespace (narrowed to `orka.ai/runtime-pool-provider-credential: "true"`)
+in the credential provider's namespace policy and restarting it, and starting the
+provider with `--egress-credential-provider=k8s.io` and
+`--egress-credential-namespace=orka-runtimes`. The provider-auth-proxy URL must be
+`http` and must not share a host with the controller API, because the gateway
+re-originates `https` trusting only public roots. If injection is unavailable the
+pool reports why and stays closed; `--acp-workspace-allow-provider-token-in-sandbox`
+explicitly restores bootstrap delivery. See
+[ADR 0045](https://github.com/orka-agents/orka/blob/main/docs/adr/0045-substrate-egress-credential-injection.md)
+for the remaining limits: any guest process can send the placeholder, a
+header-echoing destination reveals the value, and grants are per Atespace.
+
+The infrastructure ActorTemplate must select exactly one operator-owned
+WorkerPool (`ate.dev/v1`, one `gvisor` sandbox class, no `template.resources`).
+Each allocation copies its frozen worker image, scheduling, labels, and annotations
+into a private single-replica pool whose Pod limits leave room for exactly one
+template-sized Actor (the Actor's CPU, and its memory plus the 64Mi gVisor
+reserve). Upstream workers report up to `--max-actors` Actors, so the provider
+verifies that capacity, the gVisor class, the worker epoch, and that the worker's
+Actor assignments contain only its own Actor before Resume, while Ready, and
+before teardown. Allocation and instance labels are present in the Pod template at
+birth. Later worker replacements never become startup evidence for that request.
+
+Core checks the provider's sealed process evidence and exact worker Pod before
+releasing credentials, then verifies the authenticated supervisor boot. Native
+worker control registration, certificate management, and storage transfer run
+through the native host/control infrastructure. They do not require broad worker
+Pod egress exceptions. Native worker and router ingress remain operator-owned;
+allow only authorized management callers and Orka runtime routes.
+
+Native Delete carries the observed Actor UID as a precondition; Suspend and
+Resume have no caller preconditions, and the router can resume a suspended Actor
+on traffic. The provider's Kubernetes journal CAS serializes its own operations
+without adding native atomic fencing. Concurrent administrator mutation of
+provider-owned Actors, Tags, templates, or pools is outside that ownership
+boundary.
+
+## Data-only suspension and cold resume
+
+Derived templates set `snapshotConfig.preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES`
+and disable golden snapshots, so snapshots never capture process memory and a
+fresh Actor always cold-boots. Only `VOLUMES` snapshots are accepted; `ROOTFS` and
+`MEMORY` fail closed. Full-memory restore stays disabled.
+The admitted runtime mounts `/durable/orka-workspace` and uses
+`ORKA_ACP_DURABLE_WORKSPACE_KEY=shared` for retained workspace data.
+
+After core's authenticated drain, the provider suspends synchronously, verifies a
+completed `VOLUMES` snapshot, and copies it into a private native Tag. Upstream
+Tags record only the source Actor's name, so it fences the source Actor's UID and
+version before and after tagging and checks the Tag's template UID. It
+foreground-deletes the private pool and observes every recorded worker Pod UID's
+absence before deleting the source Actor or reporting suspension. The operator's source WorkerPool remains
+untouched. A snapshot alone is not termination evidence.
+
+Cold resume verifies the retained Tag and frozen ActorTemplate and worker
+specification. Generated allocation and instance labels rotate. The worker image
+follows the operator WorkerPool's current image, which must be pinned by digest,
+so a workspace suspended before a Substrate upgrade resumes on the upgraded
+worker. Isolation, the pinned SandboxConfig, scheduling, resources, and operator
+labels remain exact, and the journal records every image transition. It starts a
+fresh Actor and worker, repeats sealed bootstrap, and receives fresh core
+credentials. Durable workspace data survives; process memory does not.
+
+The private pool always names its SandboxConfig: an omitted `configRef` on the
+operator pool is pinned to the config that pool has resolved. Each checkpoint
+records the snapshot's sandbox runtime. If a restore crashes before the
+supervisor boots under a different runtime, the workspace fails with the
+`SandboxRuntimeRestoreFailed` reason instead of `InstanceFailed`, and its
+checkpoint stays available for explicit recovery.
+
+### Worker eviction
+
+A worker Pod can be terminated while it hosts a running workspace: an upgrade
+rolls its WorkerPool, a node drains, or a Spot VM is reclaimed. The worker sends
+`SIGTERM` to the supervisor, which then has 30 minutes to be suspended before it
+is killed. A supervisor that serves a suspendable workspace does not exit. It
+stops admitting sessions and prompts, as it would for a drain, and stays alive
+for that window.
+
+Core sees the eviction either through the worker Pod's termination or through
+the eviction time the supervisor reports in its drain status. The supervisor
+reports it even when a suspension or capacity drain was already running and
+keeps that drain's reason. Core closes admission and records the
+eviction deadline. It then reuses the normal retirement: an authenticated drain,
+settlement of prompts already accepted, and a synchronous data-only suspension.
+After suspension the workspace resumes on a new worker. The RuntimePool's
+`WorkerEviction` condition reports `EvictionDraining`, then `EvictionSuspended`.
+
+Suspension is authorized only after every accepted prompt settles, and never at
+or after the deadline. A prompt that outlives the window is lost with the
+instance and is never replayed. The pool then reports `EvictionDeadlineExceeded`,
+the workspace fails, and its last checkpoint stays retained. Spot reclaims allow
+15 seconds to 2 minutes, so only an idle workspace reliably survives them. A
+workspace class without Suspend reports `EvictionNotSuspendable` and loses the
+instance.
+
+Missing journals, foreign placement, changed storage or infrastructure identities,
+and uncertain native outcomes close admission. A lost Resume response is not
+permission to replay boot. Preserve journals and checkpoint catalogs for explicit
+recovery rather than removing ownership markers or finalizers.
+
+## Checkpoints, forks, and recovery {#checkpoints-forks-and-recovery}
+
+The provider advertises `checkpoint.data` and `restore.cold` alongside ACP runtime
+and suspension. A public `ExecutionWorkspaceCheckpoint` carries an opaque data
+reference bound to provider, source class/profile, namespace, checkpoint UID, and
+content digest. It does not expose native Tags or control credentials.
+
+Export must finish before deleting the source workspace. Import requires live
+`use` authorization for the checkpoint and exact compatible target infrastructure.
+A fresh target workspace restores data into a new Actor; it never resumes source
+process memory or credentials. Immutable checkpoint and template references keep
+required provider-owned storage alive until their consumers are gone.
+
+The provider does not advertise pooled ACP capacity, generic exec/files, TLS Actor
+endpoints, MCP Service workloads, or full-memory restore.
+
+## Native MCP Tools in core
+
+MCP Tools retain `spec.mcp.substrateActor` and optional `SubstrateActorPool` placement.
+Enable only that path with `--substrate-mcp-tools-enabled`. The core
+`--substrate-api-*` and `--substrate-router-url` settings apply to this MCP
+integration, not the external ACP provider.
 
 ```yaml
-spec:
+controller:
   substrate:
-    templateRef: {namespace: team, name: coding-infrastructure}
-    suspend: {mode: DataOnly}
+    mcpToolsEnabled: true
+    podCertificate:
+      enabled: true
 ```
 
-The class must allow Session reuse and Suspend, set an idle timeout or maximum
-lifetime, and use Delete deletion policies. See [configuration](../reference/configuration.md)
-for the complete class resources.
+`podCertificate` projects the controller's Substrate pod identity and service
+trust bundle. The router admits only allowlisted pod certificates, so MCP Tools
+need it (or another podidentity-signed client certificate); a bearer token alone
+authenticates control calls but cannot reach Actors. Add the controller's SPIFFE
+ID to `--ingress-allowed-spiffe-ids`.
 
-Each workspace binds a dedicated single-session RuntimePool. On detach:
+The controller is the only Orka client of the router. AI workers and other
+callers invoke a Substrate MCP Tool through the authenticated orka-api proxy
+published in `Tool.status.endpoint` (`/api/v1/tools/<name>/mcp?namespace=<ns>`).
+The proxy requires `get` on that Tool, derives the Actor only from controller-owned
+status, injects the Tool's configured credentials, and never forwards the caller's
+Orka credentials. OIDC callers and `outboundAccessPolicyRef` are not supported for
+these Tools.
 
-1. Orka closes admission and authenticates a quiescent supervisor drain.
-2. It verifies the exact Actor, worker, and immutable template. The template
-   uses `Data` for pause and commit and `ColdBoot` for data restore. Only the
-   durable workspace directory participates; runtime credentials, child
-   process roots, and process memory remain ephemeral.
-3. It drains the single-Actor worker to stop new placement, requests the Data
-   snapshot, and captures an independent native Tag. Tag UID, source Actor
-   UID/version, original template UID, and observed Data scope are verified.
-4. It deletes the exact worker Pod and observes its absence before deleting
-   the source Actor and reporting the workspace Suspended.
+Before the proxy injects a Tool's `http.authSecretRef` credential, it checks that
+the caller may use it. A Kubernetes caller, including the AI worker's
+ServiceAccount, needs `get` on that Secret in the Tool's namespace; a
+transaction-token caller needs the credential-read scope. Other callers receive
+`403`. The restricted worker profile needs [a grant](#mcp-tool-credential-grant).
 
-A successful snapshot alone is never proof that the workload stopped.
-Continuation creates a new Actor from the retained Tag using its original
-immutable template. Orka then CAS-updates the suspended Actor to the next
-compatible template and cold-boots it. The supervisor generates a process-local
-X25519 challenge; Orka encrypts and signs bootstrap credentials for that Actor
-and challenge before authenticating the new boot. Actor, Pod, boot identity,
-and runtime credentials all change.
+A Tool stands for the one MCP callable that carries its name, so permission to use
+a Tool is permission to call only that. The proxy accepts a single JSON-RPC
+message per request: `initialize`, `notifications/initialized`, or a `tools/call`
+whose `params.name` is the Tool's name. It answers `403` for any other method or
+callable and `400` for a batch or a malformed message, and it forwards the
+message it checked rather than the caller's bytes.
 
-The native provider has no caller UID/version preconditions on Suspend, Resume,
-or Delete. Orka's ConfigMap CAS protects its own operation journal, not provider
-mutations. Random non-reused names, immutable template and Tag identities,
-explicit creation intents, exact workload deletion, and fresh admission checks
-support this cold-only path. An uncertain boot or previously admitted prompt
-is not automatically replayed. Full-memory restore remains prohibited by ADR
-0030; ADR 0031 replaces the earlier fork-specific DataOnly requirement.
+The caller never sees the values the proxy injects. If the Actor echoes the Tool
+credential, a sensitive configured header value or the forwarded transaction
+token, the proxy replaces it with `[REDACTED]` in the response body and headers,
+also when the value is written with JSON string escapes.
 
-Actor scale-to-zero does not imply WorkerPool Pod scale-to-zero. Upstream
-currently provides one Actor slot per worker. Worker capacity and autoscaling
-remain operator responsibilities.
+MCP Actors get no egress unless `spec.mcp.substrateActor.egress` allows it, using
+`http`, `https` (gateway-intercepted), or `tls` (passthrough) rules with a
+lowercase FQDN or leftmost `*.` wildcard and ports. The controller applies the
+policy before every resume and reports `EgressPolicyReady`. Intercepted `https`
+egress requires the operator's ActorTemplate to trust the `egress-mitm.ate.dev`
+bundle. An `http` or `https` rule on an exact host may add a
+`credential` (header, default `Authorization`; optional `prefix`; `secretRef` in
+the Tool's namespace). The gateway replaces that header, which the Actor sends
+with any placeholder value, with the Secret value, so the Actor never holds it.
+It needs `--substrate-egress-credential-provider=k8s.io`, a credential-provider
+grant from the Actor's Atespace to the Tool namespace, and a caller allowed to
+`get` the Secret; the REST API rejects such Tools. MCP templates must set a `wakeupProbe` on the routable port and disable
+golden snapshots when Tools request `boot: true`.
+`SubstrateActorPool.spec.templateRef` is immutable and belongs to native MCP Tool
+placement. It does not select a Task's ACP workspace.
 
-`SubstrateActorPool.spec.templateRef` is immutable. Orka persists the first
-accepted native ActorTemplate UID in `status.templateUID`, even when the pool
-has no Actors. MCP Tools wait for this binding and reject a different native
-template UID before acquiring an Actor lease. Create another pool to change
-the template or Atespace, or to use a template recreated under the same name.
-The original pool retains responsibility for cleaning up its Actors.
+The controller stops an Actor rather than leave it running under a policy it has
+not verified for the Tool's current `spec`. If the policy cannot be applied, or an edit is
+rejected before that step (for example an invalid egress rule or a missing auth
+Secret), the Tool reports `EgressPolicyReady=False` and the controller stops the
+Actor it owns, retrying until it has. It suspends the Actor when the template
+keeps data, and the next successful reconcile resumes it. A template that
+snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
+Substrate, so its Actor is deleted and created again later. Substrate also lets
+an Actor outlive its template. When the template cannot be read, the controller
+cannot suspend the Actor (Substrate refuses without it), so it replaces the
+Actor's egress policy with one that denies all egress and keeps retrying the
+stop. While the gateway may still apply the previous rules from its cache (see
+below), a running Actor is deleted instead, which discards any data on its
+durable volumes; a suspended one is left as it is.
 
-## Checkpoints, forks, and recovery
+A stored policy is not enforced at once. The Substrate egress gateway caches each
+Actor's policy by Actor name for `--egress-policy-cache-ttl` (10s by default) and
+does not invalidate the entry when the policy changes or the Actor is replaced.
+The controller therefore waits `--substrate-egress-policy-propagation` (14s by
+default: the cache TTL plus the 4s a policy fetch may take) before it lets an
+Actor run under a policy the gateway may not apply yet. During the wait the Tool
+reports `EgressPolicyReady=False` with reason `EgressPolicyPropagating` and is
+unavailable. Operators will notice two effects:
 
-Export a completed checkpoint from an idle suspended workspace:
+- **An egress edit restarts the Actor.** When an edit replaces the stored
+  policy, a running Actor is stopped first (suspended, or deleted and created
+  again if its template cannot be suspended) and resumed after the wait. Expect
+  about 15 seconds of downtime for that Tool and, for a template without a
+  durable directory, the loss of whatever the Actor held in memory. Edits that
+  leave `egress` unchanged do not restart it.
+- **A new Actor's first boot waits.** An Actor's name is derived from its Tool
+  or pool slot, and a policy deleted and created again looks like a new one, so
+  a new policy can share its Actor name with rules the gateway still holds. The
+  controller cannot tell, so an Actor runs no sooner than one wait after its
+  policy was created or last changed. That includes a pool's Actors created
+  ahead of use: their policy is created when a Tool first claims them.
+
+Set the flag to your gateway's cache TTL plus 4s. Set it to `0` only if the
+gateway runs with `--egress-policy-cache-ttl=0`; the controller then neither
+waits nor restarts Actors.
+
+### Grant restricted AI workers the Tool credential {#mcp-tool-credential-grant}
+
+Workers used to read a Substrate MCP Tool's `http.authSecretRef` themselves, from
+a Secret mounted into the worker or from the Kubernetes API. The proxy now reads
+it, and only for a caller allowed to `get` that Secret. A copy mounted into the
+worker is no longer used for these Tools.
+
+The default AI worker role can read Secrets, so nothing changes there. With
+`workers.ai.rbacProfile: restricted` the worker has no Secret access, and a
+Substrate MCP Tool with `authSecretRef` fails with
+`403 not authorized to use the tool credential` after the upgrade. Grant the
+worker ServiceAccount `get` on that one Secret, in the namespace that holds the
+Tool. Do not grant Secret access more broadly: the grant also lets the worker read
+that Secret directly.
 
 ```yaml
-apiVersion: workspace.orka.ai/v1alpha1
-kind: ExecutionWorkspaceCheckpoint
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
 metadata:
-  name: before-refactor
-  namespace: team
-spec:
-  workspaceRef:
-    name: workspace-name
-    uid: WORKSPACE_UID
+  name: mcp-tool-credential
+  namespace: orka-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["my-mcp-tool-token"] # the Tool's http.authSecretRef.name
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-tool-credential
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-tool-credential
+subjects:
+  - kind: ServiceAccount
+    name: orka-ai-worker # <release fullname>-ai-worker
+    namespace: orka-system
 ```
 
-Creation requires Kubernetes `use` on the source ExecutionWorkspace. Export
-waits for suspension and never interrupts an attached Task. When Ready, the
-checkpoint exposes an immutable digest, class revision, and timestamp, without
-native identifiers or storage URLs. Its private reference keeps the Data Tag
-and original template alive after source workspace deletion.
+Tools without `authSecretRef` need no grant.
 
-The digest is the checkpoint's identity for restore, so `kubectl get` shows it
-next to the phase without extra flags:
+## Upgrades and proof limits
 
-```console
-$ kubectl -n team get executionworkspacecheckpoint before-refactor
-NAME              WORKSPACE        PHASE   DIGEST                                                                  AGE
-before-refactor   workspace-name   Ready   sha256:3f1c0d9a7b2e4c6d8f0a1b3c5d7e9f2a4b6c8d0e1f3a5b7c9d0e2f4a6b8c0d2   2m
-```
+Agent Substrate 1.x minor releases upgrade in place by following the upstream
+[upgrade guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/upgrade.md),
+with two Orka-specific rules in its worker step:
 
-Helm does not update CRDs during an upgrade, so the column appears once the
-CRDs from the new chart are applied (see
-[Upgrading](../operations/upgrading.md)).
+- Patch only operator-owned WorkerPools, and pin each new `workerImage` by
+  digest. Do not patch the provider's private `<actor>-workers` pools, which
+  carry the `substrate.workspace.orka.ai` allocation labels. The provider
+  refuses to resume on a changed private pool, and suspended workspaces pick up
+  the new operator image on their next resume.
+- Before upgrading `ate-api-server`, move running workspaces off old workers by
+  deleting their private worker Pods (or draining their nodes). Each one drains
+  and suspends as described in [Worker eviction](#worker-eviction), then resumes
+  on the new image. Wait until no private pool runs the old image.
 
-If the source workspace disappears before Orka acquires that private reference,
-export fails with phase `Failed` and reason `SourceMissing`. Temporary read
-errors leave the checkpoint `Pending` with reason `SourceUnavailable` so Orka
-can retry.
+Agent Substrate cannot upgrade a pre-1.0 installation in place. Before moving to
+v1.0.0, retire every workspace, checkpoint, and MCP Actor created under v0.1.0,
+then install Substrate v1.0.0 fresh and upgrade the provider and core. Records
+from v0.1.0 fail closed with `LegacySubstrateV0State` rather than being adopted.
+The `--substrate-actor-dns-suffix` and `--substrate-session-identity-*` settings
+were removed and fail startup if set; core now issues each Actor's workspace
+credential itself through the sealed bootstrap.
 
-A fresh Task or Session restores the exact accepted reference:
+Native Substrate workspaces reach the controller API and the provider proxy
+through the egress gateway, by the host names in `--controller-url` and
+`--acp-provider-proxy-base-url`. An Actor cannot resolve a short
+`<service>.<namespace>.svc` name, so Core refuses one when it admits a native
+workspace: the RuntimePool reports `Degraded` with a message naming the flag
+and the fully qualified name to use. Charts and kustomize manifests from this
+release set `<service>.<namespace>.svc.<cluster domain>` (chart value
+`clusterDomain`, default `cluster.local`). If you set either flag yourself to a
+short name, change it to the fully qualified one before using Substrate-native
+workspaces. Pod-backed workspaces and other workers keep resolving short names.
+The same rule applies to the hosts in a Substrate MCP Tool's
+`spec.mcp.substrateActor.egress`.
 
-```yaml
-spec:
-  execution:
-    workspace:
-      classRef: {name: substrate-coding}
-      reusePolicy: session
-      restoreFrom:
-        name: before-refactor
-        uid: CHECKPOINT_UID
-        digest: sha256:CHECKPOINT_DIGEST
-```
+Installations that run AI workers with `workers.ai.rbacProfile: restricted` and
+use Substrate MCP Tools with `http.authSecretRef` must
+[grant the worker that Secret](#mcp-tool-credential-grant) before upgrading.
 
-Restore requires `use` on the checkpoint and the class. Namespace, class and
-provider revisions, runtime profile/image, and durable layout must match.
-The target acquires its own durable reference before Actor creation. Deleting
-the public checkpoint cannot invalidate a restore that already acquired data.
-Deleting it before acquisition can make a queued restore fail. Task acceptance
-alone does not retain checkpoint data.
-Continuation Tasks in that restored Session must preserve the original
-`restoreFrom` binding. To branch from another checkpoint, create a new Session.
+Substrate MCP Tools behave differently around egress from this release on. A
+Tool becomes available about 14 seconds later than before when its Actor or its
+Actor's egress policy is new,
+and editing a Tool's `egress` allowlist restarts its Actor, with about 15 seconds
+of downtime. Both come from waiting for the Substrate egress gateway to apply a
+changed policy; see [Native MCP Tools in core](#native-mcp-tools-in-core) for the
+`--substrate-egress-policy-propagation` flag that sets the wait.
 
-The Task fork API accepts `executionCheckpoint` with the same name/UID/digest.
-`afterSeq` selects conversation history, not filesystem state. A fork gets an
-independent workspace and, for Session reuse, its own Session. Without an
-explicit execution checkpoint it starts with fresh workspace data.
+Drain all old in-tree ACP allocations and retained records through the original
+owner before applying the pruned RuntimePool CRD or starting new core. The startup
+gate rejects legacy workspace labels in every state, including `Failed` and
+`Deleted`, across all namespaces. It never adopts native allocations or strips
+finalizers. See [Upgrading](../operations/upgrading.md#external-workspace-migration).
 
-After a failed restore or lost Actor, set `recoverLastCheckpoint: true` on a
-new export to accept the last verified checkpoint explicitly. Later work may be
-missing. Recovery starts a fresh workspace; it does not retry an uncertain
-source Task. With `onDetach: Suspend`, Orka stops the failed attempt's compute
-and retains the failed source workspace when it still owns a verified native
-checkpoint. The source cannot accept another Task. It continues to count
-against suspended-workspace quota and remains subject to the class's idle and
-maximum lifetime limits. Export before those limits expire, or before deleting
-the source. `onDetach: Delete` still deletes the source and releases its data.
-Removing all pool and public references eventually collects the Tag, its
-catalog, and unused templates.
+The [external Substrate proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-substrate-e2e.sh)
+installs the pinned v1.0.0 release with `ate-setup` on a dedicated gVisor kind
+cluster. It verifies worker sizing, assignments, and the egress allowlist before
+native Resume, writes a filesystem marker, captures `VOLUMES` data, observes exact
+worker/Actor cleanup, and restores that marker in a fresh process after source
+deletion. It proves native provider lifecycle and checkpoint behavior. Its
+standalone lane uses fixture Core admission.
 
-## Diagnostics and verification
-
-`go run ./cmd/orka-substrate-doctor --atespace team --template coding-infrastructure`
-uses the `ORKA_SUBSTRATE_API_*` environment settings to check authenticated
-native connectivity, Tag inventory, template storage/placement, and worker
-readiness. It reports adapter capabilities separately from observed checks and
-states that native lifecycle preconditions are absent. It does not identify the
-server build or prove execution and streaming compatibility.
-
-Run `bash hack/demos/cluster/install-substrate.sh` for local fixture-backed
-conformance on a dedicated gVisor kind cluster. This retains a scoped kubeconfig
-under `bin/` and does not modify the default kubeconfig. The source must match
-the official pin exactly. Existing clusters require explicit reuse; the
-installer does not destroy them to recreate the environment.
-
-The suite exercises native authentication, direct sealed execution and files,
-MCP execution, ACP Tasks, controller restart, cold continuation, independent
-checkpoint restore, runtime-loss recovery after Task settlement, cancellation,
-timeout, and cleanup. Protocol/TLS and
-fault-injection tests additionally cover lost responses, source replacement,
-Tag provenance, reference races, and explicit recovery. Local provider
-conformance and the PR workflow must pass before treating an upgraded pin as
-validated. A doctor pass or unit fixture pass is not live execution evidence.
+The [native Core Task proof](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+last passed with deployed Core and provider controllers on Substrate v0.1.0 and
+must be rerun on v1.0.0. It verifies real fail-closed Task admission, sealed
+bootstrap, authenticated Serving, RuntimeSession execution, and a persisted prompt
+result. Exact Actor, worker, private pool, Core pool, and credential retirement are
+required. The agent is deterministic and makes no external model requests. Neither
+native lane proves packet enforcement; full-memory restore remains gated.

@@ -1,0 +1,31 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:chat-advanced-json]" },
+      "response": { "content": "4" }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-advanced-agent-ref]" },
+      "response": { "content": "Hello" }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-advanced-create-agent]", "hasToolResult": false },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "create_agent",
+            "arguments": {
+              "name": "e2e-chat-created-agent",
+              "providerRef": "e2e-chat-adv-provider",
+              "model": { "name": "gpt-4o-mini" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-advanced-create-agent]", "hasToolResult": true },
+      "response": { "content": "Created agent e2e-chat-created-agent." }
+    }
+  ]
+}

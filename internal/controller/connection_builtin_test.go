@@ -326,6 +326,18 @@ func TestLinkedBuiltinAccountsFailClosed(t *testing.T) {
 	if _, _, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests"); err == nil || !strings.Contains(err.Error(), "connection revoked") {
 		t.Fatalf("source err = %v", err)
 	}
+	// A link the person must fix names the provider, so the agent is told
+	// how to relink, and the source's own shared error stays untouched.
+	shared := &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
+	source.err = shared
+	_, _, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests")
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok ||
+		!strings.Contains(refusal.Error(), "`orka connect github -n tenant`") {
+		t.Fatalf("expired link err = %v, want the relink command", err)
+	}
+	if shared.Provider != "" || shared.Namespace != "" {
+		t.Fatalf("the source's error was annotated in place: %+v", shared)
+	}
 	source.err = nil
 	source.credential.Mode = corev1alpha1.ConnectionModeReadOnly
 	if _, _, err := accounts.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "readOnly") {
@@ -367,7 +379,10 @@ func (t *contextCapturingTool) Execute(ctx context.Context, _ json.RawMessage) (
 func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	task := f.task.DeepCopy()
-	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"}}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"},
+	}
 	body, err := json.Marshal(agentExecutionSnapshotBody{Connections: []agentExecutionSnapshotConnection{
 		{PolicyName: outboundaccess.BuiltinConnectionKey("list_pull_requests"), Tool: "list_pull_requests", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, GrantSequence: 1, Mode: "readWrite"},
 	}})
@@ -459,7 +474,10 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 func TestRegistryACPMCPToolExecutorScopesLinkedBuiltinsToTheAuthenticatedTask(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	task := f.task.DeepCopy()
-	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"}}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"},
+	}
 	body, err := json.Marshal(agentExecutionSnapshotBody{Connections: []agentExecutionSnapshotConnection{
 		{PolicyName: outboundaccess.BuiltinConnectionKey("list_pull_requests"), Tool: "list_pull_requests", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, GrantSequence: 1, Mode: "readWrite"},
 	}})

@@ -11,6 +11,8 @@ resources:
 - core_v1alpha1_agent_opencode.yaml
 - core_v1alpha1_outboundaccesspolicy.yaml
 - core_v1alpha1_connectorprovider.yaml
+- core_v1alpha1_agenthosttemplate.yaml
+- core_v1alpha1_agenthost.yaml
 - gateway_v1alpha1_gatewayclass.yaml
 - gateway_v1alpha1_gateway.yaml
 - gateway_v1alpha1_gatewaybinding.yaml
@@ -18,9 +20,5 @@ resources:
 - workspace_v1alpha1_executionworkspacepool.yaml
 - workspace_v1alpha1_executionworkspaceclass.yaml
 - workspace_v1alpha1_executionworkspace.yaml
-- fake.workspace_v1alpha1_fakeproviderconfig.yaml
-- fake.workspace_v1alpha1_fakepoolparameters.yaml
-- acp.workspace_v1alpha1_runtimeproviderconfig.yaml
-- acp.workspace_v1alpha1_runtimeworkspaceprofile.yaml
 
 # +kubebuilder:scaffold:manifestskustomizesamples

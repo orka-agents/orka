@@ -75,20 +75,20 @@ func (t *CommentOnIssueTool) Parameters() json.RawMessage {
 func (t *CommentOnIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args CommentOnIssueArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("failed to parse arguments: %w", err)
+		return "", notSent(fmt.Errorf("failed to parse arguments: %w", err))
 	}
 
 	if args.IssueNumber <= 0 {
-		return "", fmt.Errorf("issue_number is required and must be positive")
+		return "", notSent(fmt.Errorf("issue_number is required and must be positive"))
 	}
 	if args.Body == "" {
-		return "", fmt.Errorf("body is required")
+		return "", notSent(fmt.Errorf("body is required"))
 	}
 
 	// Resolve repo and token using the shared helper
 	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
-		return "", err
+		return "", notSent(err)
 	}
 
 	// Post the comment via GitHub API
@@ -138,7 +138,7 @@ func postIssueComment(ctx context.Context, token, owner, repo string, issueNumbe
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return 0, "", githubStatusError(resp, respBody)
 	}
 
 	var commentResp struct {

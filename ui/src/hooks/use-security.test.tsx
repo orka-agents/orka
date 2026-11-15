@@ -1,8 +1,8 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
-import { describe, expect, it, beforeEach, vi } from 'vitest'
+import { afterEach, describe, expect, it, beforeEach, vi } from 'vitest'
 import { server } from '@/test/mocks/server'
 import type { SecurityFinding } from '@/schemas/security'
 
@@ -15,9 +15,12 @@ import {
   useAllFindings,
   useCreatePullRequest,
   useDismissFinding,
+  useFinding,
   useGeneratePatch,
   useReopenFinding,
+  useRepositoryScan,
   useRunSecurityScan,
+  useUpdateThreatModel,
   useValidateFinding,
 } from './use-security'
 
@@ -84,6 +87,36 @@ function expectNamespaceQuery(requests: CapturedRequest[]) {
 describe('security mutations', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'team-blue' })
+  })
+
+  it('saves a threat model to the namespace it was saved in, and files it there', async () => {
+    let putNamespace: string | null = null
+    server.use(http.put('/api/v1/security/repositories/:name/threat-model', ({ request, params }) => {
+      putNamespace = new URL(request.url).searchParams.get('namespace')
+      return HttpResponse.json({ namespace: 'team-blue', repositoryScan: params.name, version: 2, content: 'saved', source: 'edited' })
+    }))
+    const queryClient = createQueryClient()
+    const { result } = renderHook(() => useUpdateThreatModel('repo'), { wrapper: createWrapper(queryClient) })
+
+    // Offline, the save waits before sending; the user switches namespace meanwhile.
+    onlineManager.setOnline(false)
+    try {
+      let save: Promise<unknown> = Promise.resolve()
+      act(() => {
+        save = result.current.mutateAsync({ content: 'saved', expectedVersion: 1 })
+      })
+      act(() => useUIStore.setState({ namespace: 'team-red' }))
+      await act(async () => {
+        onlineManager.setOnline(true)
+        await save
+      })
+    } finally {
+      onlineManager.setOnline(true)
+    }
+
+    expect(putNamespace).toBe('team-blue')
+    expect(queryClient.getQueryData(['security', 'threat-model', 'team-blue', 'repo'])).toMatchObject({ version: 2 })
+    expect(queryClient.getQueryData(['security', 'threat-model', 'team-red', 'repo'])).toBeUndefined()
   })
 
   it('runs a repository scan with the selected namespace in the query', async () => {
@@ -343,5 +376,72 @@ describe('useAllFindings', () => {
     expect(queryClient.getQueryCache().findAll({
       queryKey: ['security', 'findings', 'default'],
     })).toHaveLength(1)
+  })
+})
+
+describe('security detail reads on 404', () => {
+  const notFound = () => HttpResponse.json({ error: { code: 404, message: 'not found' } }, { status: 404 })
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('does not retry a missing repository, but keeps polling one never seen', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/security/repositories/new-repo', () => {
+      calls += 1
+      return notFound()
+    }))
+
+    // The app's default of one retry, which the hook must override for a 404.
+    const appClient = new QueryClient({ defaultOptions: { queries: { retry: 1, gcTime: 0 } } })
+    renderHook(() => useRepositoryScan('new-repo'), { wrapper: createWrapper(appClient) })
+
+    await advance(9_000)
+    expect(calls).toBe(1)
+    // A just-created RepositoryScan can 404 until the API cache catches up.
+    await advance(1_500)
+    expect(calls).toBe(2)
+  })
+
+  it('stops polling a repository that 404s after it loaded', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/security/repositories/deleted-repo', () => {
+      calls += 1
+      return calls === 1
+        ? HttpResponse.json({ metadata: { name: 'deleted-repo' }, spec: { repoURL: 'https://github.com/org/repo', analysisAgentRef: { name: 'agent' } } })
+        : notFound()
+    }))
+
+    renderHook(() => useRepositoryScan('deleted-repo'), { wrapper: createWrapper() })
+
+    await advance(10_500)
+    expect(calls).toBe(2)
+    await advance(60_000)
+    expect(calls).toBe(2)
+  })
+
+  it('neither retries nor polls a missing finding', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/security/findings/missing', () => {
+      calls += 1
+      return notFound()
+    }))
+
+    const appClient = new QueryClient({ defaultOptions: { queries: { retry: 1, gcTime: 0 } } })
+    renderHook(() => useFinding('missing'), { wrapper: createWrapper(appClient) })
+
+    await advance(60_000)
+    expect(calls).toBe(1)
   })
 })

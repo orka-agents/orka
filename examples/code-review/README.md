@@ -93,5 +93,5 @@ or `headSHA` is missing, the coordinator reports the result and stops.
 The tool checks the allowlist and depth before creating a child Task; the controller
 checks coordination constraints again during reconciliation, with the legacy exemption
 noted above. These are runtime checks, not prompt instructions. See
-[Multi-agent coordination](../../website/docs/reference/multi-agent-coordination.md) for
+[Multi-agent coordination](../../website/docs/guides/multi-agent-coordination.md) for
 the full tool schemas and controller checks.

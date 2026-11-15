@@ -94,4 +94,34 @@ describe('ChatToolCall', () => {
     expect(screen.getByText('Result')).toBeInTheDocument()
     expect(screen.getByText(/"success": true/)).toBeInTheDocument()
   })
+
+  it('makes a long result a named, keyboard-scrollable region', () => {
+    render(<ChatToolCall message={toolResultSuccess} />)
+    fireEvent.click(screen.getByRole('button'))
+    const result = screen.getByRole('region', { name: 'create_task result' })
+    expect(result).toHaveAttribute('tabindex', '0')
+    expect(result).toHaveClass('max-h-64', 'overflow-auto')
+    expect(result).toHaveTextContent('"success": true')
+  })
+
+  it('stays within a phone-width transcript', () => {
+    const longArg = { url: `https://example.com/${'a'.repeat(200)}`, digest: 'f'.repeat(128) }
+    const { container } = render(<ChatToolCall message={{ ...toolCallMsg, toolName: 'mcp__github__create_pull_request_review_comment', toolArgs: longArg }} />)
+    const row = container.firstElementChild as HTMLElement
+    // The side indent only applies from sm up.
+    expect(row).toHaveClass('sm:mx-12')
+    expect(row).not.toHaveClass('mx-12')
+    const name = screen.getByTitle('mcp__github__create_pull_request_review_comment')
+    expect(name).toHaveClass('min-w-0', 'truncate')
+
+    fireEvent.click(screen.getByRole('button'))
+    // A long URL or hex digest wraps instead of widening the transcript.
+    expect(container.querySelector('pre')).toHaveClass('whitespace-pre-wrap', 'wrap-anywhere')
+  })
+
+  it('wraps a long result too', () => {
+    const { container } = render(<ChatToolCall message={{ ...toolResultSuccess, toolResult: { digest: 'f'.repeat(128) } }} />)
+    fireEvent.click(screen.getByRole('button'))
+    expect(container.querySelector('pre')).toHaveClass('whitespace-pre-wrap', 'wrap-anywhere')
+  })
 })

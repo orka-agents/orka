@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { pollUnlessForbidden, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useUIStore } from '@/stores/ui'
 import type { DroppedFinding, PatchProposal, RepositoryScan, ReviewSlice, ScanRun, SecurityFinding, ThreatModel } from '@/schemas/security'
@@ -27,13 +27,26 @@ export function useRepositoryScans() {
   })
 }
 
+// A 403 or 404 does not clear on a retry.
+const retryUnlessDeniedOrMissing = (failureCount: number, error: unknown) =>
+  !isForbiddenError(error) && !isNotFoundError(error) && failureCount < 3
+
 export function useRepositoryScan(name: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['security', 'repository', namespace, name],
     queryFn: () => api.get<RepositoryScan>(`/security/repositories/${name}`, { namespace }),
     enabled: !!name,
-    refetchInterval: 10000,
+    retry: retryUnlessDeniedOrMissing,
+    // A forbidden repository stays forbidden, and one that 404s after it
+    // loaded was deleted; polling those only spams the API. One never seen
+    // keeps polling: the API reads RepositoryScans through the controller
+    // cache, so a just-created one can 404 briefly.
+    refetchInterval: (query) => {
+      if (isForbiddenError(query.state.error)) return false
+      if (isNotFoundError(query.state.error) && query.state.data !== undefined) return false
+      return 10000
+    },
   })
 }
 
@@ -54,17 +67,33 @@ export function useThreatModel(name: string) {
   })
 }
 
+// expectedVersion is the version the edit started from, or 0 when no model
+// existed; the server answers 409 when the model has moved on since (or, for 0,
+// when one has been created meanwhile).
+interface ThreatModelEdit {
+  content: string
+  source?: string
+  expectedVersion: number
+}
+
 export function useUpdateThreatModel(name: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
-  return useMutation({
-    mutationFn: (body: { content: string; source?: string }) =>
-      api.put<ThreatModel>(`/security/repositories/${name}/threat-model`, body, { namespace }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', namespace, name] })
-      queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
+  const mutation = useMutation({
+    // The target travels in the variables, fixed when the save is made. A
+    // pending mutation runs with the latest render's options, so a namespace
+    // or repository switch before the PUT goes out (a save waiting for the
+    // network, say) must not send it, or file the saved model, anywhere else.
+    mutationFn: ({ target, edit }: { target: { namespace: string; name: string }; edit: ThreatModelEdit }) =>
+      api.put<ThreatModel>(`/security/repositories/${target.name}/threat-model`, edit, { namespace: target.namespace }),
+    onSuccess: (saved, { target }) => {
+      // The saved version is the base for the next edit, even before the refetch lands.
+      if (saved) queryClient.setQueryData(['security', 'threat-model', target.namespace, target.name], saved)
+      queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', target.namespace, target.name] })
+      queryClient.invalidateQueries({ queryKey: ['security', 'repository', target.namespace, target.name] })
     },
   })
+  return { ...mutation, mutateAsync: (edit: ThreatModelEdit) => mutation.mutateAsync({ target: { namespace, name }, edit }) }
 }
 
 export function useScanRuns(name: string) {
@@ -148,7 +177,10 @@ export function useFinding(id: string) {
     queryKey: ['security', 'finding', namespace, id],
     queryFn: () => api.get<SecurityFinding>(`/security/findings/${id}`, { namespace }),
     enabled: !!id,
-    refetchInterval: 10000,
+    retry: retryUnlessDeniedOrMissing,
+    // Findings come from the security store, so a 404 is final.
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : 10000,
   })
 }
 

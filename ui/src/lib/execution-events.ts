@@ -185,8 +185,13 @@ function hasModelTokenTelemetry(event: ExecutionEvent): boolean {
 // newest event identity while carrying forward counters omitted by partial
 // updates, then sum prompts at the task level.
 export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent[] {
+  // The native AI worker's per-call usage updates carry their counters nested
+  // in content, not as event fields; its ModelRequestCompleted events already
+  // report that model and those tokens, so an unscoped update with neither
+  // would only add an empty "unknown model" entry.
   const updates = events
-    .filter((event) => event.type === 'ModelUsageUpdated')
+    .filter((event) => event.type === 'ModelUsageUpdated' &&
+      (harnessV2PromptKey(event) !== undefined || hasModelTokenTelemetry(event) || Boolean(event.model)))
     .sort((a, b) => a.seq - b.seq)
   const completions = events.filter((event) => event.type === 'ModelRequestCompleted')
   if (updates.length === 0) {

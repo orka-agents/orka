@@ -13,7 +13,7 @@ function makeMessage(overrides: Partial<ChatMessage> & { role: ChatMessage['role
 
 describe('useChatStore', () => {
   beforeEach(() => {
-    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, activeNamespace: 'default', selections: {} })
+    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, stopRequested: false, activeNamespace: 'default', selections: {} })
   })
 
   it('resets the transcript and session when switching between namespaces', () => {
@@ -40,6 +40,22 @@ describe('useChatStore', () => {
     useChatStore.getState().selectNamespace('gamma')
     expect(useChatStore.getState().currentSessionId).toBe('sess-beta')
     expect(useChatStore.getState().turnEpoch).toBe(4)
+  })
+
+  it('accepts a stop request only while streaming and clears it with the turn', () => {
+    useChatStore.getState().requestStop()
+    expect(useChatStore.getState().stopRequested).toBe(false)
+
+    useChatStore.getState().setStreaming(true)
+    useChatStore.getState().requestStop()
+    expect(useChatStore.getState().stopRequested).toBe(true)
+    useChatStore.getState().setStreaming(false)
+    expect(useChatStore.getState().stopRequested).toBe(false)
+
+    useChatStore.getState().setStreaming(true)
+    useChatStore.getState().requestStop()
+    useChatStore.getState().newSession()
+    expect(useChatStore.getState().stopRequested).toBe(false)
   })
 
   it('keeps a separate provider/model selection per namespace', () => {
@@ -84,40 +100,6 @@ describe('useChatStore', () => {
     useChatStore.getState().addMessage(msg)
     expect(useChatStore.getState().messages).toHaveLength(1)
     expect(useChatStore.getState().messages[0]).toEqual(msg)
-  })
-
-  it('updateLastAssistantMessage updates last assistant message content', () => {
-    const userMsg = makeMessage({ role: 'user', content: 'question' })
-    const assistantMsg = makeMessage({ role: 'assistant', content: 'original' })
-    useChatStore.getState().addMessage(userMsg)
-    useChatStore.getState().addMessage(assistantMsg)
-
-    useChatStore.getState().updateLastAssistantMessage('updated')
-
-    const msgs = useChatStore.getState().messages
-    expect(msgs[1].content).toBe('updated')
-    expect(msgs[0].content).toBe('question')
-  })
-
-  it('updateLastAssistantMessage does nothing with no assistant messages', () => {
-    const userMsg = makeMessage({ role: 'user', content: 'hi' })
-    useChatStore.getState().addMessage(userMsg)
-    useChatStore.getState().updateLastAssistantMessage('nope')
-
-    expect(useChatStore.getState().messages).toHaveLength(1)
-    expect(useChatStore.getState().messages[0].content).toBe('hi')
-  })
-
-  it('updateLastAssistantMessage updates only the last assistant message', () => {
-    useChatStore.getState().addMessage(makeMessage({ role: 'assistant', content: 'first' }))
-    useChatStore.getState().addMessage(makeMessage({ role: 'user', content: 'q' }))
-    useChatStore.getState().addMessage(makeMessage({ role: 'assistant', content: 'second' }))
-
-    useChatStore.getState().updateLastAssistantMessage('changed')
-
-    const msgs = useChatStore.getState().messages
-    expect(msgs[0].content).toBe('first')
-    expect(msgs[2].content).toBe('changed')
   })
 
   it('setSessionId updates sessionId', () => {

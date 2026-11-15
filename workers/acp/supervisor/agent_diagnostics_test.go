@@ -22,6 +22,19 @@ var copilotObservedStartupDiagnostics = []string{
 	`Info: Unknown tool name in the tool excludedlist: "report_intent"`,
 }
 
+// The chunks Copilot CLI 1.0.96 emitted in --acp mode under the supervisor's
+// flags for an unrestricted session and for a session limited to Read and
+// Grep. Without workspace skills, that build leaves skill out of the disabled
+// list because it registers skill only when the workspace has skills.
+var copilotPinnedStartupDiagnostics = map[bool][]string{
+	true: {"Info: Disabled tools: list_agents, read_agent, sql, task, write_agent"},
+	false: {
+		"Info: Disabled tools: apply_patch, bash, glob, list_agents, list_bash, read_agent, read_bash, sql, stop_bash, task, web_fetch, write_agent",
+		`Info: Unknown tool name in the tool excludedlist: "write_bash"`,
+		`Info: Unknown tool name in the tool excludedlist: "web_search"`,
+	},
+}
+
 // The CLI routes its inference retry notice through the same channel; it is
 // deliberately not recognized here (tracked separately in #473).
 const copilotObservedRetryNotice = "Info: Response was interrupted due to a server error. Retrying..."
@@ -182,6 +195,32 @@ func testDiagnosticPromptState() *promptState {
 	return prompt
 }
 
+func TestCopilotProjectionsRecognizePinnedCLIStartupDiagnostics(t *testing.T) {
+	paths := acp.SessionPaths{Home: t.TempDir(), Config: t.TempDir()}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:1/v1", Credential: strings.Repeat("c", 32)}
+	copilot, err := providerProfile(providerKindCopilot, "copilot-test", harnessv2.WorkspaceIntentRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for unrestricted, chunks := range copilotPinnedStartupDiagnostics {
+		var tools []string
+		if !unrestricted {
+			tools = []string{providerToolRead, providerToolGrep}
+		}
+		projection, err := copilot.ProjectSession(
+			testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", tools, nil, unrestricted), paths, proxy,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, text := range chunks {
+			if _, ok := projection.AgentDiagnosticFilter.Startup(text); !ok {
+				t.Fatalf("projection (unrestricted=%v) did not recognize pinned CLI diagnostic %q", unrestricted, text)
+			}
+		}
+	}
+}
+
 func TestCopilotProjectionDeclaresDiagnosticFilterForSessionExclusions(t *testing.T) {
 	paths := acp.SessionPaths{Home: t.TempDir(), Config: t.TempDir()}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:1/v1", Credential: strings.Repeat("c", 32)}
@@ -224,7 +263,7 @@ func TestCopilotProjectionDeclaresDiagnosticFilterForSessionExclusions(t *testin
 func TestCopilotAlwaysExcludedToolIDsMatchPinnedCLICatalog(t *testing.T) {
 	want := "list_agents,read_agent,skill,sql,task,write_agent"
 	if got := strings.Join(copilotAlwaysExcludedToolIDs, ","); got != want {
-		t.Fatalf("copilotAlwaysExcludedToolIDs = %s, want %s (verified against Copilot CLI 1.0.77)", got, want)
+		t.Fatalf("copilotAlwaysExcludedToolIDs = %s, want %s (verified against Copilot CLI 1.0.96)", got, want)
 	}
 }
 

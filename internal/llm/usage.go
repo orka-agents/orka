@@ -168,8 +168,13 @@ func (p *usageProvider) begin(ctx context.Context, req *CompletionRequest) (cont
 	return context.WithValue(ctx, usageHTTPAttemptKey{}, call), call, nil
 }
 
+// usageWriteTimeout bounds usage writes detached from the call's cancellation.
+// It outlasts the worker event recorder's connection retries, so a controller
+// restart during a model call does not fail the call.
+const usageWriteTimeout = 90 * time.Second
+
 func finishUsage(ctx context.Context, record UsageRecorder, observation store.UsageObservation) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), usageWriteTimeout)
 	defer cancel()
 	if err := record(writeCtx, observation); err != nil {
 		return &usagePersistenceError{cause: err}

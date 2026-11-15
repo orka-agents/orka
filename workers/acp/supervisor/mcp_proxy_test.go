@@ -294,6 +294,30 @@ func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
 	}
 }
 
+// Copilot CLI 1.0.96 sends this exact server/discover request to every HTTP MCP
+// server before initialize, and falls back to initialize when it gets a
+// JSON-RPC error. The proxy must answer it as an unsupported method rather
+// than fail the request at the transport.
+func TestMCPProxyAnswersCopilotServerDiscoverAsUnsupported(t *testing.T) {
+	broker := MCPBrokerFunc(func(context.Context, harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		t.Error("server/discover reached the broker")
+		return harnessv2.MCPBrokerCallResponse{}, nil
+	})
+	_, server := newTestMCPProxySession(t, broker, false)
+	response := doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{`+
+		`"io.modelcontextprotocol/protocolVersion":"2026-07-28",`+
+		`"io.modelcontextprotocol/clientInfo":{"name":"copilot-cli","version":"1.0.96"},`+
+		`"io.modelcontextprotocol/clientCapabilities":{"sampling":{}}}}}`)
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		t.Fatalf("server/discover status = %d", response.StatusCode)
+	}
+	decoded := decodeMCPResponse(t, response)
+	if decoded.Error == nil || decoded.Error.Code != -32601 || string(decoded.ID) != "0" {
+		t.Fatalf("server/discover response = %#v", decoded)
+	}
+}
+
 func newTestMCPProxySession(t *testing.T, broker MCPBroker, requireApproval bool) (*mcpProxySession, string) {
 	t.Helper()
 	proxy, err := newMCPProxy(broker)

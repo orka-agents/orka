@@ -235,7 +235,7 @@ func (d *ACPDispatcher) recoverPublicationPrepared(
 	if err := d.recoveryDeliveryTransition(ctx, recovery.attemptID, recovery.fence, store.PromptDeliveryPreparing, store.PromptDeliveryPrepared, "recover-publication-prepared"); err != nil {
 		return nil, err
 	}
-	cancelled, err := d.taskCancellationRequested(ctx, recovery.task)
+	cancelled, refusal, err := d.taskPublicationRefused(ctx, recovery.task)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func (d *ACPDispatcher) recoverPublicationPrepared(
 			publicationOperationID("publishing", recovery.task), mustACPDomainDigest("publication-publishing", publication.ID), nil, nil, nil, "")
 	}
 	publication, err = d.transitionPublication(ctx, publication, recovery.fence, store.PublicationCancelledBeforePublish,
-		publicationOperationID("cancel-before-publish", recovery.task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, "")
+		publicationOperationID("cancel-before-publish", recovery.task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, refusal)
 	if err != nil {
 		return nil, err
 	}
@@ -522,10 +522,9 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 	withoutMetadata.Intent = withoutTaskPullRequestMetadata(withoutMetadata.Intent)
 	legacy := withoutMetadata
 	legacy.Intent.SessionUID = ""
-	const requestKey = "request"
 	for _, candidate := range []publisherservice.PullRequestReconcileRequest{request, withoutMetadata, legacy} {
 		digest, digestErr := acpDomainDigest("external-effect-request", map[string]any{
-			"identity": identity, requestKey: candidate,
+			identityKey: identity, requestKey: candidate,
 		})
 		if digestErr != nil {
 			return request, nil, digestErr

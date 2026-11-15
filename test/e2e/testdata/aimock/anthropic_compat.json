@@ -1,0 +1,11 @@
+{
+  "fixtures": [
+    {
+      "match": {"userMessage": "[e2e:anthropic-compat]"},
+      "response": {
+        "content": "<ORKA_GOAL_STATE_REACHED>\nORKA_LIVE_ANTHROPIC_OK",
+        "usage": {"input_tokens": 42, "output_tokens": 12}
+      }
+    }
+  ]
+}

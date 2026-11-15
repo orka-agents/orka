@@ -1,0 +1,20 @@
+{{- include "orka.validateAgentHosts" . }}
+{{- if include "orka.agentHostsEnabled" . }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "orka.agentHostNamespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "orka.name" . }}
+    app.kubernetes.io/component: agent-host
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    # Agent-host Pods run non-root with no capabilities and the RuntimeDefault
+    # seccomp profile, so the restricted Pod Security profile applies.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+  annotations:
+    # Host volumes hold users' sessions. Disabling agent hosts, a rollback or an
+    # uninstall must not delete them with the namespace.
+    helm.sh/resource-policy: keep
+{{- end }}

@@ -37,6 +37,9 @@ var _ = Describe("API Coverage", Ordered, func() {
 		providerName = "e2e-api-cov-provider"
 		sessionName  = "e2e-api-cov-session"
 		agentName    = "e2e-api-cov-agent"
+
+		sessionMarker = "[e2e:api-cov-session]"
+		chatMarker    = "[e2e:api-cov-chat]"
 	)
 
 	BeforeAll(func() {
@@ -104,14 +107,14 @@ var _ = Describe("API Coverage", Ordered, func() {
 					"create": true
 				},
 				"ai": {
-					"prompt": "What is 3+3? Reply with just the number.",
+					"prompt": "What is 3+3? Reply with just the number. %s",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, namespace, sessionName, model, providerName)
+		}`, namespace, sessionName, sessionMarker, model, providerName)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
@@ -142,6 +145,10 @@ var _ = Describe("API Coverage", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred(), "Session response should be valid JSON")
 			g.Expect(sessionResp).To(HaveKey("transcript"))
 			g.Expect(sessionResp).To(HaveKey("messageCount"))
+			if e2eMockOpenAI {
+				g.Expect(string(body)).To(ContainSubstring("E2E_API_COV_SESSION_ANSWER"),
+					"the transcript should hold the scripted model answer")
+			}
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
@@ -332,8 +339,8 @@ var _ = Describe("API Coverage", Ordered, func() {
 		chatSessionID := "e2e-api-cov-chat-session"
 
 		By("creating a chat session via POST /api/v1/chat")
-		chatBody := fmt.Sprintf(`{"message":"Say hello briefly","provider":"%s","model":"%s","sessionId":"%s"}`,
-			providerName, model, chatSessionID)
+		chatBody := fmt.Sprintf(`{"message":"Say hello briefly %s","provider":"%s","model":"%s","sessionId":"%s"}`,
+			chatMarker, providerName, model, chatSessionID)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -346,7 +353,13 @@ var _ = Describe("API Coverage", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
 		// Drain the response body (may be SSE stream)
-		_, _ = io.ReadAll(resp.Body)
+		chatResponse, _ := io.ReadAll(resp.Body)
+		if e2eMockOpenAI {
+			By("verifying the scripted chat answer streamed back")
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			Expect(string(chatResponse)).To(ContainSubstring("E2E_API_COV_CHAT_ANSWER"))
+			expectMockLLMServed(chatMarker, 30*time.Second)
+		}
 
 		By("deleting the chat session")
 		Eventually(func(g Gomega) {

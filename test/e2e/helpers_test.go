@@ -166,9 +166,17 @@ type apiMemoryProposalListResponse struct {
 	Items []store.MemoryProposal `json:"items"`
 }
 
-// skipIfNoKey skips the current test if the given environment variable is not set or empty.
+// skipIfNoKey skips the current test when the credential named by envVar is
+// unavailable. Model keys resolve to aimock unless E2E_DISABLE_MOCK_LLM is set.
 func skipIfNoKey(envVar string) {
-	if os.Getenv(envVar) == "" {
+	value := os.Getenv(envVar)
+	switch envVar {
+	case "E2E_OPENAI_API_KEY":
+		value = e2eOpenAIAPIKey
+	case "E2E_ANTHROPIC_API_KEY":
+		value = e2eAnthropicAPIKey
+	}
+	if value == "" {
 		Skip(fmt.Sprintf("Skipping: %s not set", envVar))
 	}
 }
@@ -1424,6 +1432,41 @@ func liveACPProviderProxyServicePort() int {
 	return value
 }
 
+// expectProviderValidated checks that a Provider echoes its spec and that the
+// controller validated it: ready, with the validation message, time, and a
+// Ready condition.
+func expectProviderValidated(name, providerType, baseURL, model string) {
+	provider := fetchProviderSnapshot(name)
+	ExpectWithOffset(1, provider.Spec.Type).To(Equal(providerType))
+	ExpectWithOffset(1, provider.Spec.BaseURL).To(Equal(baseURL))
+	ExpectWithOffset(1, provider.Spec.DefaultModel).To(Equal(model))
+	ExpectWithOffset(1, provider.Status.Ready).To(BeTrue())
+	ExpectWithOffset(1, provider.Status.Message).To(Equal("Provider configuration is valid"))
+	ExpectWithOffset(1, provider.Status.LastValidated).NotTo(BeEmpty())
+	readyCondition := findStatusCondition(provider.Status.Conditions, "Ready")
+	ExpectWithOffset(1, readyCondition).NotTo(BeNil())
+	ExpectWithOffset(1, readyCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, readyCondition.Reason).To(Equal("ValidationSucceeded"))
+}
+
+// expectNativeAITaskSucceeded checks the status a native AI Task records when
+// its first attempt succeeds.
+func expectNativeAITaskSucceeded(taskName string) {
+	task := fetchTaskSnapshot(taskName)
+	ExpectWithOffset(1, task.Status.Phase).To(Equal("Succeeded"))
+	ExpectWithOffset(1, task.Status.JobName).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.Attempts).To(Equal(int32(1)))
+	ExpectWithOffset(1, task.Status.Message).To(Equal("task completed successfully"))
+	ExpectWithOffset(1, task.Status.StartTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.CompletionTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.ResultRef).NotTo(BeNil())
+	ExpectWithOffset(1, task.Status.ResultRef.Available).To(BeTrue())
+	completeCondition := findStatusCondition(task.Status.Conditions, "Complete")
+	ExpectWithOffset(1, completeCondition).NotTo(BeNil())
+	ExpectWithOffset(1, completeCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, completeCondition.Reason).To(Equal("TaskSucceeded"))
+}
+
 func fetchProviderSnapshot(name string) providerSnapshot {
 	var snapshot providerSnapshot
 	Eventually(func(g Gomega) {
@@ -1748,15 +1791,14 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 	if strings.TrimSpace(review.Namespace) == "" {
 		review.Namespace = namespace
 	}
+	// The server records the caller's identity as the reviewer.
 	payload, err := json.Marshal(struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
-		Reviewer   string `json:"reviewer,omitempty"`
 		ReviewNote string `json:"reviewNote,omitempty"`
 	}{
 		Namespace:  review.Namespace,
 		Status:     review.Status,
-		Reviewer:   review.Reviewer,
 		ReviewNote: review.ReviewNote,
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -1769,7 +1811,7 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 		"",
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
 	return getMemoryProposalViaAPI(apiBaseURL, token, id)
 }
 

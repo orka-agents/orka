@@ -10,9 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UsageRouteImport } from './routes/usage'
-import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
 import { Route as LoginRouteImport } from './routes/login'
-import { Route as LiveRouteImport } from './routes/live'
 import { Route as KanbanRouteImport } from './routes/kanban'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
@@ -35,6 +33,7 @@ import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monito
 import { Route as GatewaysGatewayIdRouteImport } from './routes/gateways/$gatewayId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as SecurityFindingsIndexRouteImport } from './routes/security/findings/index'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
@@ -44,19 +43,9 @@ const UsageRoute = UsageRouteImport.update({
   path: '/usage',
   getParentRoute: () => rootRouteImport,
 } as any)
-const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
-  id: '/runtime-simulator',
-  path: '/runtime-simulator',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LiveRoute = LiveRouteImport.update({
-  id: '/live',
-  path: '/live',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KanbanRoute = KanbanRouteImport.update({
@@ -169,6 +158,11 @@ const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecurityFindingsIndexRoute = SecurityFindingsIndexRouteImport.update({
+  id: '/security/findings/',
+  path: '/security/findings/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SecurityFindingsFindingIdRoute =
   SecurityFindingsFindingIdRouteImport.update({
     id: '/security/findings/$findingId',
@@ -191,9 +185,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -217,14 +209,13 @@ export interface FileRoutesByFullPath {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings/': typeof SecurityFindingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -248,15 +239,14 @@ export interface FileRoutesByTo {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings': typeof SecurityFindingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -280,6 +270,7 @@ export interface FileRoutesById {
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/security/findings/': typeof SecurityFindingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -287,9 +278,7 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -313,14 +302,13 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -344,14 +332,13 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings'
   id:
     | '__root__'
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -375,15 +362,14 @@ export interface FileRouteTypes {
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
+    | '/security/findings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChatRoute: typeof ChatRoute
   KanbanRoute: typeof KanbanRoute
-  LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
-  RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
   UsageRoute: typeof UsageRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
@@ -407,6 +393,7 @@ export interface RootRouteChildren {
   GatewaysBindingsBindingIdRoute: typeof GatewaysBindingsBindingIdRoute
   MonitorsCreateNewRoute: typeof MonitorsCreateNewRoute
   SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
+  SecurityFindingsIndexRoute: typeof SecurityFindingsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -418,25 +405,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UsageRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/runtime-simulator': {
-      id: '/runtime-simulator'
-      path: '/runtime-simulator'
-      fullPath: '/runtime-simulator'
-      preLoaderRoute: typeof RuntimeSimulatorRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/login': {
       id: '/login'
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/live': {
-      id: '/live'
-      path: '/live'
-      fullPath: '/live'
-      preLoaderRoute: typeof LiveRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/kanban': {
@@ -593,6 +566,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/security/findings/': {
+      id: '/security/findings/'
+      path: '/security/findings'
+      fullPath: '/security/findings/'
+      preLoaderRoute: typeof SecurityFindingsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/security/findings/$findingId': {
       id: '/security/findings/$findingId'
       path: '/security/findings/$findingId'
@@ -621,9 +601,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChatRoute: ChatRoute,
   KanbanRoute: KanbanRoute,
-  LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
-  RuntimeSimulatorRoute: RuntimeSimulatorRoute,
   UsageRoute: UsageRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
@@ -647,6 +625,7 @@ const rootRouteChildren: RootRouteChildren = {
   GatewaysBindingsBindingIdRoute: GatewaysBindingsBindingIdRoute,
   MonitorsCreateNewRoute: MonitorsCreateNewRoute,
   SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
+  SecurityFindingsIndexRoute: SecurityFindingsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

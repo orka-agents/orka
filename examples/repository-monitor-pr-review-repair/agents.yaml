@@ -7,7 +7,6 @@ spec:
     name: claude-sonnet-4.6
   runtime:
     type: claude
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowedTools:
       - Read
@@ -26,7 +25,6 @@ spec:
     name: gpt-5.4
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 100
     # Codex write sessions do not support a provider-native tool allowlist.
   systemPrompt:

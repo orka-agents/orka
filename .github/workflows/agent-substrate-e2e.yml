@@ -1,4 +1,4 @@
-name: Agent Substrate E2E
+name: Agent Substrate MCP E2E
 
 on:
   workflow_dispatch: {}
@@ -17,8 +17,6 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
-      - "scripts/fixtures/openai-responses/**"
-      - "scripts/fixtures/substrate-conformance/**"
       - "scripts/lib/substrate-*.sh"
       - "scripts/generate-substrate-proto.sh"
       - "scripts/lib/e2e-admission-tls.sh"
@@ -39,8 +37,6 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
-      - "scripts/fixtures/openai-responses/**"
-      - "scripts/fixtures/substrate-conformance/**"
       - "scripts/lib/substrate-*.sh"
       - "scripts/generate-substrate-proto.sh"
       - "scripts/lib/e2e-admission-tls.sh"
@@ -61,7 +57,7 @@ jobs:
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
       KO_VERSION: v0.18.1
-      # Direct, MCP, ACP, and DataOnly checkpoint/restore run on every change.
+      # Native MCP tool routing and cleanup run on every change.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,15 +87,5 @@ jobs:
           kubectl version --client=true
           ko version
 
-      - name: Verify durable workspace ownership after cleanup
-        run: |
-          test_dir="$(mktemp -d /tmp/orka-checkpoint-tests.XXXXXX)"
-          trap 'rm -rf "${test_dir}"' EXIT
-          chmod 755 "${test_dir}"
-          go build -o "${test_dir}/orka-acp-exec-helper" ./cmd/orka-acp-exec-helper
-          sudo install -m 0755 "${test_dir}/orka-acp-exec-helper" /usr/local/bin/orka-acp-exec-helper
-          go test -c -o "${test_dir}/supervisor.test" ./workers/acp/supervisor
-          sudo "${test_dir}/supervisor.test" -test.run '^TestDurableWorkspaceCleanupReclaimsOwnership$' -test.v
-
-      - name: Run Agent Substrate E2E
+      - name: Run Agent Substrate MCP E2E
         run: bash scripts/agent-substrate-e2e.sh

@@ -69,17 +69,6 @@ func TestStaticChartACPWorkspaceLeaseProtectionMatchesCanonicalPolicy(t *testing
 	}
 }
 
-func TestStaticChartACPWorkspaceLeaseProtectionIsHarnessV2Only(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	rendered := requireHelmRender(t,
-		"--set-string", "controller.mode=harness-v1",
-		"--set-string", "harnessV1.image.digest="+digest,
-		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-	)
-	require.NotContains(t, rendered, "acp-workspace-lease-protection")
-}
-
 // AKS refuses to stop a cluster while any fail-closed webhook intercepts
 // Leases, so Lease guards must stay admission policies.
 func TestSharedAdmissionWebhooksDoNotInterceptLeases(t *testing.T) {

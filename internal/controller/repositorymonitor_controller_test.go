@@ -1482,7 +1482,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
 	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
 
-	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr); err != nil {
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr, repositoryMonitorReviewPlan{}); err != nil {
 		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
 	}
 }
@@ -1946,6 +1946,15 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			},
 			serverConfig: repositoryMonitorPublishTestServerConfig{Labels: []string{"do-not-touch"}},
 			wantReason:   repositoryMonitorPublishSkipBlockedLabel,
+		},
+		{
+			name:    "missing include label",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+			},
+			wantReason: repositoryMonitorPublishSkipNotIncluded,
 		},
 		{
 			name:    "duplicate same head",
@@ -3322,7 +3331,7 @@ func TestRepositoryMonitorPullRequestShortcutsIgnoreIssueCommands(t *testing.T) 
 	if handled, created, err := reconciler.processTargetedPullRequestControlCommand(ctx, monitor, issueRun, "orka-agents", "orka"); err != nil || handled || created != 0 {
 		t.Fatalf("issue run pull-request shortcut handled=%v created=%d err=%v", handled, created, err)
 	}
-	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(nil, "main", issueRun); reason != "" {
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(corev1alpha1.RepositoryMonitorSpec{}, nil, "main", issueRun); reason != "" {
 		t.Fatalf("issue run pull-request block reason = %q, want empty", reason)
 	}
 	malformedRun := *issueRun
@@ -3721,6 +3730,9 @@ func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, nu
 			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			return
+		}
 		if r.URL.Path == wantPath+"/files" {
 			_, _ = w.Write([]byte(`[]`))
 			return
@@ -3751,8 +3763,32 @@ func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.
 // request and pull request files endpoints the review-context builder calls,
 // derived from the same inventory body. It returns true when it handled the
 // request.
+// repositoryMonitorTestServesNoHeldWorkflowRuns answers the workflow-run
+// approval lookup: no run for the commit waits for a maintainer.
+func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/actions/runs" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+	return true
+}
+
+// repositoryMonitorTestWithoutHeldWorkflowRuns serves no held workflow runs
+// and passes every other request to next.
+func repositoryMonitorTestWithoutHeldWorkflowRuns(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			next(w, r)
+		}
+	}
+}
+
 func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
 	t.Helper()
+	if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+		return true
+	}
 	const prefix = "/repos/orka-agents/orka/pulls/"
 	const comparePrefix = "/repos/orka-agents/orka/compare/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {
@@ -3947,6 +3983,12 @@ func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, hea
 		},
 		"suggestedComment": "Please fix the failing path.",
 	}
+	// Orka derives a passed verdict only when no blocking finding is open,
+	// so a passed review reports no findings by default.
+	if verdict == repositoryMonitorReviewVerdictPassed {
+		payload["findings"] = []map[string]any{}
+		payload["summary"] = "Review found no issues."
+	}
 	if mutate != nil {
 		mutate(payload)
 	}
@@ -3973,12 +4015,18 @@ type repositoryMonitorPublishTestServerConfig struct {
 	FilesBody   string
 	PostStatus  int
 	PostBody    string
+	// PutBody answers review summary updates; it defaults to PostBody.
+	PutBody string
 }
 
 type repositoryMonitorPublishTestServer struct {
 	*httptest.Server
 	PostCount    int
 	PostedReview repositoryMonitorPullRequestReviewRequest
+	// PutPath and PutBody record the last review summary update.
+	PutCount int
+	PutPath  string
+	PutBody  string
 }
 
 func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
@@ -4003,6 +4051,9 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 	}
 	if cfg.PostBody == "" {
 		cfg.PostBody = `{"id":123,"html_url":"https://github.com/orka-agents/orka/pull/1#pullrequestreview-123"}`
+	}
+	if cfg.PutBody == "" {
+		cfg.PutBody = cfg.PostBody
 	}
 	testServer := &repositoryMonitorPublishTestServer{}
 	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4030,6 +4081,17 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 			}
 			w.WriteHeader(cfg.PostStatus)
 			_, _ = w.Write([]byte(cfg.PostBody))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/pulls/1/reviews/"):
+			testServer.PutCount++
+			testServer.PutPath = r.URL.Path
+			var update struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatalf("decode review update: %v", err)
+			}
+			testServer.PutBody = update.Body
+			_, _ = w.Write([]byte(cfg.PutBody))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())
 		}
@@ -4674,8 +4736,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testi
 	reviewer := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "opencode-reviewer", Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
@@ -4855,15 +4920,6 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 		return errors.New("audit event unavailable")
 	}
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
-}
-
-type failingReviewRecordLookupStore struct {
-	store.RepositoryMonitorStore
-	err error
-}
-
-func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
-	return nil, s.err
 }
 
 type statusPatchCountingClient struct {
@@ -5620,7 +5676,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].Branch != branch || jobs[0].PatchArtifactID == "" {
 		t.Fatalf("implementation job final = %#v, want direct ACP delivery on branch %q with summary artifact", jobs, branch)
 	}
-	artifact, contentType, err := monitorStore.GetArtifact(ctx, "default", implTaskName, jobs[0].PatchArtifactID)
+	artifact, contentType, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: implTaskName}, Filename: jobs[0].PatchArtifactID})
 	if err != nil || contentType != "application/json" || !strings.Contains(string(artifact), "orka.issueImplementation.delivery.v1") {
 		t.Fatalf("delivery summary artifact = %q, %q, %v", artifact, contentType, err)
 	}
@@ -6032,7 +6088,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	run := &store.MonitorRun{ID: "run-repair-retry"}
 	command := &store.CommandEvent{ID: "cmd-repair-retry", Intent: "fix", Source: "api"}
-	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", BaseBranch: "main"}
+	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA, AutomergeState: repositoryMonitorAutomergeStateMergeReady}
 
 	if created, err := reconciler.createRepositoryMonitorRepairTask(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 {
@@ -6318,10 +6374,10 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, valid); got != "" {
 		t.Fatalf("valid patch reason = %q, want empty", got)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task"}, Filename: repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("diff artifact missing: %v", err)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task"}, Filename: repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("summary artifact missing: %v", err)
 	}
 }
@@ -6837,6 +6893,177 @@ func TestRepositoryMonitorPermanentCommandRunTerminalizesWorkAction(t *testing.T
 	}
 }
 
+// Command intake can coalesce a command after the controller lists it as
+// accepted. Recovery then finds the coalesced action and must settle the
+// command as intake does, without queuing a run or rewriting the action.
+func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "coalesced-command", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-coalesced", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: "review", HeadSHA: "head-9", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, &command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "review", DependsOnActionID: "wa-active", Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", CreatedAt: completedAt, CompletedAt: &completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v, want the coalesced command handled", handled, reset, err)
+	}
+	if _, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetMonitorRun() error = %v, want no run queued for a coalesced command", err)
+	}
+	persisted, err := monitorStore.GetCommandEvent(ctx, defaultNS, command.ID)
+	if err != nil {
+		t.Fatalf("GetCommandEvent() error = %v", err)
+	}
+	if persisted.Status != repositoryMonitorCommandCompleted || persisted.Error != store.RepositoryMonitorCoalescedCommandError("wa-active") {
+		t.Fatalf("command status=%q error=%q, want the coalesced outcome", persisted.Status, persisted.Error)
+	}
+
+	// A run that started before the coalesced action was created still
+	// cannot rewrite it.
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, &store.MonitorRun{ID: runID}, &command, repositoryMonitorPullRequestKind, 9, "head-9", "", "review", repositoryMonitorWorkActionStatusBlocked, "blocked", "", "issue_closed"); err != nil {
+		t.Fatalf("recordRepositoryMonitorWorkActionState() error = %v", err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusCompleted || action.Phase != "coalesced" || action.DependsOnActionID != "wa-active" || action.BlockedReason != "" {
+		t.Fatalf("action = %#v, want the coalesced action unchanged", action)
+	}
+}
+
+// Intake can coalesce a command after recovery has already queued its run.
+// Execution must then stop as it does for a cancelled action, so the command's
+// work never runs twice.
+func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "coalesced-run", Namespace: defaultNS}}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "45", Number: 45, SnapshotDigest: "sha256:coalesced", WorkflowPhase: repositoryMonitorIssuePhaseDiscovered}
+	command := &store.CommandEvent{ID: "cmd-research-coalesced", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "research")
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "research", DependsOnActionID: "wa-active", Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", CreatedAt: completedAt, CompletedAt: &completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	run := &store.MonitorRun{ID: "run-coalesced", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+
+	created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+	if err != nil || created != 0 {
+		t.Fatalf("processIssueCommandRun() created=%d err=%v, want no work for a coalesced command", created, err)
+	}
+	if item.WorkflowPhase != repositoryMonitorIssuePhaseDiscovered {
+		t.Fatalf("item phase = %q, want the issue left as discovered", item.WorkflowPhase)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != store.RepositoryMonitorWorkActionStatusCompleted || action.Phase != "coalesced" {
+		t.Fatalf("action = %#v err=%v, want the coalesced action unchanged", action, err)
+	}
+}
+
+// A halted issue command must not block the shared issue or emit an event
+// for it, whether the phase is disabled or the transition is not allowed: the
+// issue is driven by the action that still owns the work.
+func TestRepositoryMonitorHaltedIssueCommandLeavesSharedIssue(t *testing.T) {
+	disabled := false
+	cases := map[string]func(*corev1alpha1.RepositoryMonitor) string{
+		"phase disabled": func(monitor *corev1alpha1.RepositoryMonitor) string {
+			monitor.Spec.IssueWorkflow.Research.Enabled = &disabled
+			return repositoryMonitorIssuePhaseDiscovered
+		},
+		"transition not allowed": func(*corev1alpha1.RepositoryMonitor) string {
+			return repositoryMonitorIssuePhaseTriageQueued
+		},
+	}
+	for name, setup := range cases {
+		for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				ctx := context.Background()
+				monitorStore := setupControllerSQLiteStore(t)
+				monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-issue", Namespace: defaultNS}}
+				phase := setup(monitor)
+				item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "46", Number: 46, SnapshotDigest: "sha256:halted", WorkflowPhase: phase}
+				command := &store.CommandEvent{ID: "cmd-research-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+				if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+					t.Fatalf("CreateCommandEvent() error = %v", err)
+				}
+				actionID := store.RepositoryMonitorWorkActionID(command.ID, "research")
+				if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "research", Status: status, CreatedAt: time.Now()}); err != nil {
+					t.Fatalf("CreateWorkAction() error = %v", err)
+				}
+				reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+				run := &store.MonitorRun{ID: "run-halted-issue", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+
+				created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+				if err != nil || created != 0 {
+					t.Fatalf("processIssueCommandRun() created=%d err=%v", created, err)
+				}
+				if item.WorkflowPhase != phase || item.SkipReason != "" {
+					t.Fatalf("item phase=%q skipReason=%q, want %q and no skip reason", item.WorkflowPhase, item.SkipReason, phase)
+				}
+				if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorIssueKind, "46"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+				}
+				events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: defaultNS, MonitorName: monitor.Name, Limit: 10})
+				if err != nil || len(events) != 0 {
+					t.Fatalf("events = %#v err=%v, want none for a halted command", events, err)
+				}
+			})
+		}
+	}
+}
+
+// A halted fix command (cancelled, or coalesced into another action) must not
+// mark the shared PR item failed when the PR carries a blocked label: the item
+// belongs to the action that is still doing the work.
+func TestRepositoryMonitorHaltedRepairCommandLeavesBlockedPullRequestItem(t *testing.T) {
+	for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+		t.Run(status, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-repair", Namespace: defaultNS}}
+			monitor.Spec.Policy.ProtectedLabels = []string{"hold"}
+			pr := repositoryMonitorPullRequest{Number: 12, HeadSHA: "head-12", Labels: []string{"hold"}}
+			item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "12", Number: 12, HeadSHA: "head-12", RepairState: repositoryMonitorRepairPhaseQueued}
+			command := &store.CommandEvent{ID: "cmd-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 12, Intent: repositoryMonitorCommandIntentFix, HeadSHA: "head-12", Status: "accepted", CreatedAt: time.Now()}
+			if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+				t.Fatalf("CreateCommandEvent() error = %v", err)
+			}
+			desiredAction := store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorRepairWorkflowActionKind(command.Intent))
+			actionID := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
+			if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: desiredAction, Status: status, CreatedAt: time.Now()}); err != nil {
+				t.Fatalf("CreateWorkAction() error = %v", err)
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			run := &store.MonitorRun{ID: "run-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 12}
+
+			handled, created, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item)
+			if err != nil || !handled || created != 0 {
+				t.Fatalf("tryProcessPullRequestCommandRun() handled=%v created=%d err=%v", handled, created, err)
+			}
+			if item.RepairState != repositoryMonitorRepairPhaseQueued || item.SkipReason != "" {
+				t.Fatalf("item RepairState=%q SkipReason=%q, want the item left to its active action", item.RepairState, item.SkipReason)
+			}
+			if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "12"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorTransientCommandRunStopsAfterRetryBudget(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -7148,6 +7375,8 @@ func TestRepositoryMonitorRequireGreenCIGatesReviewQueue(t *testing.T) {
 			_, _ = w.Write([]byte(`{"number":90,"title":"Wait for CI","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-ci","sha":"head90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/check-runs":
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/status":
+			_, _ = w.Write([]byte(`{"total_count":0,"statuses":[]}`))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
 		}
@@ -7228,8 +7457,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecre
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: role, Namespace: "default"},
 				Spec: corev1alpha1.AgentSpec{
-					Model:   testOpenCodeModelConfig(),
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+					Model: testOpenCodeModelConfig(),
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type:            corev1alpha1.AgentRuntimeOpencode,
+						ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
 				},
 			}
 			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}

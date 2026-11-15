@@ -223,6 +223,55 @@ func TestFoundryDuplicateRenewalKeepsCommittedAuthority(t *testing.T) {
 	}
 }
 
+// A remote renewal is validated again after its round trip. A slow broker must
+// not turn that second check into a clock-skew rejection of a correct renewal.
+func TestFoundrySlowRemoteRenewalIsAccepted(t *testing.T) {
+	var settlements atomic.Int32
+	server, cfg, state, prompt := newFoundryRenewalTestPrompt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, proof := foundryTestProof(t, r)
+		switch r.URL.Path {
+		case "/internal/v1/renew":
+			time.Sleep(1500 * time.Millisecond)
+		case "/internal/v1/settle":
+			settlements.Add(1)
+		}
+		_ = json.NewEncoder(w).Encode(proof)
+	}))
+	renew := newFoundryRenewalTestRequest(t, prompt)
+	response := performMutation(t, server.Handler(), http.MethodPut, foundryRenewalTestPath, renew, cfg)
+	if response.Code != http.StatusOK || settlements.Load() != 0 {
+		t.Fatalf("slow remote renewal status = %d, settlements = %d", response.Code, settlements.Load())
+	}
+	server.mu.Lock()
+	lease := state.prompt.lease
+	server.mu.Unlock()
+	if lease != renew.Lease {
+		t.Fatal("slow remote renewal did not commit the renewed lease")
+	}
+}
+
+// The controller replays an ambiguous renewal verbatim. A replay the
+// supervisor never applied arrives after its issue time and must still renew
+// the lease.
+func TestReplayedRenewalIssuedEarlierIsAccepted(t *testing.T) {
+	server, cfg, state, prompt := newFoundryRenewalTestPrompt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, proof := foundryTestProof(t, r)
+		_ = json.NewEncoder(w).Encode(proof)
+	}))
+	renew := newFoundryRenewalTestRequest(t, prompt)
+	time.Sleep(1500 * time.Millisecond)
+	response := performMutation(t, server.Handler(), http.MethodPut, foundryRenewalTestPath, renew, cfg)
+	if response.Code != http.StatusOK {
+		t.Fatalf("replayed renewal status = %d", response.Code)
+	}
+	server.mu.Lock()
+	lease := state.prompt.lease
+	server.mu.Unlock()
+	if lease != renew.Lease {
+		t.Fatal("replayed renewal did not commit the renewed lease")
+	}
+}
+
 func TestFoundryDisconnectedRenewalStillObtainsRemoteSettlement(t *testing.T) {
 	renewEntered := make(chan struct{})
 	var settlements atomic.Int32

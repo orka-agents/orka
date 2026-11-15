@@ -48,6 +48,21 @@ func TestValidateWebhookCertRotationOptions(t *testing.T) {
 			wantErr: "--webhook-cert-name and --webhook-cert-key",
 		},
 		{
+			name:    "certificate name traverses parent",
+			mutate:  func(o *webhookCertRotationOptions) { o.CertName = "../tls.crt" },
+			wantErr: "plain file names",
+		},
+		{
+			name:    "certificate name uses publication link",
+			mutate:  func(o *webhookCertRotationOptions) { o.CertName = "..data" },
+			wantErr: "plain file names",
+		},
+		{
+			name:    "certificate and key names match",
+			mutate:  func(o *webhookCertRotationOptions) { o.CertName = o.KeyName },
+			wantErr: "names must differ",
+		},
+		{
 			name:    "dns name with scheme or port",
 			mutate:  func(o *webhookCertRotationOptions) { o.DNSName = "orka-webhook.orka-system.svc:443" },
 			wantErr: "bare DNS name",

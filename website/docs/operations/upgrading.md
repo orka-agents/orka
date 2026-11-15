@@ -5,13 +5,15 @@ description: "Back up Orka, update its Kubernetes resource definitions, and chec
 
 # Upgrading
 
-Orka currently supports new installations only. Upgrades between versions are
-not yet supported. Follow [Install Orka](installation.md) for setup.
+Orka supports in-place SQLite upgrades from the exact layouts listed below.
+This is a narrow database compatibility guarantee, not support for every older
+release or deployment topology. This procedure covers harness v2 installations
+only. Follow [Install Orka](installation.md) for new installations.
 
 ## Delegation policy behavior change
 
-This is a configuration compatibility note, not a supported in-place upgrade
-procedure; the new-installation-only policy above still applies.
+This note describes delegation configuration compatibility. The database and
+deployment compatibility limits on this page still apply.
 
 Native worker `delegate_task` now denies an empty or omitted
 `spec.coordination.allowedAgents`, matching the ACP broker. Previously, an
@@ -31,35 +33,333 @@ use the current list, including later autonomous iterations. For non-autonomous
 two-stage bootstrap, let the first Task create specialists and return their names without
 delegating; an operator then allowlists them and submits a **new Task**. Retain
 the creation Task while its owned specialists are needed. See
-[explicit delegation policy](../reference/multi-agent-coordination.md#explicit-delegation-policy)
+[explicit delegation policy](../guides/multi-agent-coordination.md#explicit-delegation-policy)
 and the [two-stage bootstrap example](https://github.com/orka-agents/orka/tree/main/examples/self-bootstrapping).
 
 ## What release checks cover {#release-checks}
 
 The release checks install the chart after creating CRDs and internal Secrets
 separately. They restart the controller using the same data and encryption key,
-confirm that tasks still work, and check that Helm blocks a change to
+confirm that tasks still work, and check that Helm rejects an unsupported
 `controller.mode`. Results are in the release's `acceptance.json`.
 
 These checks do not test Helm's automatic CRD and Secret creation.
-Tests for upgrades between versions and restoring a lost installation from
-backups are tracked in
+Broader coverage for upgrades between versions and restoring a lost installation
+from backups is tracked in
 [#499](https://github.com/orka-agents/orka/issues/499) and
 [#505](https://github.com/orka-agents/orka/issues/505).
+
+## Memory tool opt-in: warning release {#memory-tool-opt-in}
+
+This release is the compatibility/warning phase of [#680](https://github.com/orka-agents/orka/issues/680).
+All native `type: ai` Tasks still receive `recall_memory`, `remember`, `propose_memory`,
+and `search_transcript`, regardless of their selected tools or coordination configuration.
+This includes Tasks with `orka.ai/disable-coordination-tool-injection: "true"` and
+Agents whose memory-tool references have `enabled: false`. **This release does not yet
+provide per-Agent memory-tool denial.**
+
+The worker emits a structured warning when the model calls a memory tool that will
+lose automatic access in the next release. Unused tools do not warn. Tools explicitly
+selected by the Agent or Task do not warn, nor do automatically injected tools for an
+Agent with `coordination.enabled: true` and no disable-injection annotation. Child-task
+identity alone is not coordination opt-in. Update the controller and AI worker together
+so the worker receives the controller's deprecation metadata.
+
+**The next release will enforce opt-in.** Before upgrading to that release:
+
+- List the memory tools the Agent needs in `spec.tools`, with `enabled` omitted or `true`,
+  or list them in the Task's `spec.ai.tools`. Explicit selections will remain available
+  even with the disable-injection annotation.
+- Alternatively, use an Agent with `coordination.enabled: true` and no disable-injection
+  annotation. This also adds other coordination tools; prefer explicit memory selections
+  when those capabilities are not needed.
+- Keep transaction-token `tctx.allowedTools` grants for all four memory tools throughout
+  this warning release. Narrow grants only after the enforcing release's effective tool
+  list no longer contains the omitted tools.
+
+For example, preserve only the memory tools an Agent needs by adding these selections
+before the enforcing release (the warning release still exposes all four):
+
+```yaml
+spec:
+  tools:
+    - name: recall_memory
+    - name: remember
+```
+
+`remember` and `propose_memory` still create review proposals rather than applying durable memories.
+Startup loading of reviewed memories into the prompt is separate and unchanged; tool
+opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
+
+## Task webhooks are signed and fail closed {#task-webhooks}
+
+`spec.webhookURL` notices are now signed, durable, and bounded. Review receivers before
+upgrading:
+
+- Every request carries an Ed25519-signed `X-Orka-Signature` and a stable
+  `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
+  against `/.well-known/orka/task-webhook-jwks.json`. See
+  [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
+- The signing key lives in a new namespace that holds only that Secret and binds only
+  the controller: `<release namespace>-task-webhook-signing` for Helm (value
+  `controller.taskWebhooks.signingNamespace`), `orka-task-webhook-signing` for kustomize
+  (flag `--task-webhook-signing-namespace`). The chart and the kustomize
+  install create the namespace and a controller Role in it; the controller creates the
+  Secret and mints the key on first use. Installs that grant RBAC some other way must
+  grant the controller `get` and `update` on that Secret and `create` on Secrets there.
+  The controller refuses to start if the signing namespace is its own, the watch, ACP
+  runtime or agent-host namespace. See
+  [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- Builds of `main` from before this change kept the key in the controller namespace,
+  where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+  new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
+  or `orka-task-webhook-signing` in the controller namespace) after upgrading.
+- A new ValidatingAdmissionPolicy, `<fullname>-ai-worker-identity-protection`
+  (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
+  ServiceAccount may create. Before, the default AI worker role could create a
+  ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
+  act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+  RoleBindings. Now it may write only Opaque Secrets, create or delete only `code_exec`'s
+  own `orka-code-exec-*` ServiceAccounts, and create only
+  `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
+  the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
+  labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
+  subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+  ephemeral containers, and non-root, unprivileged containers with
+  `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
+  `RuntimeDefault` or `Localhost` seccomp profile.
+  Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
+  ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+  and cannot move it to its own ServiceAccount, set `workers.ai.identityProtection: false`
+  (Helm) or drop `orka-ai-worker-identity-protection` and its binding from your kustomize
+  build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+  controller again, including reading the webhook signing key.
+- Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
+  and on worker accounts the controller creates. An OutboundAccessPolicy whose
+  `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
+  controller is configured with (labeled or not, for example an externally managed
+  controller account), now reports `ReferenceDenied`, and the controller revokes any
+  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
+  token for itself gives it nothing new. Point other such policies at a dedicated
+  ServiceAccount.
+- Check the release namespace for ServiceAccount-token Secrets
+  (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
+  The default AI worker profile can read them; delete any you do not need, and treat a
+  token for a privileged account as exposed.
+- With signing enabled but no usable key (the Secret cannot be read or holds a malformed
+  key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
+  key is available.
+- With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
+  their deliveries are marked `Failed`; enabling signing later does not retry them.
+- Destinations are checked at connect time. A DNS failure, any non-public resolved
+  address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
+  a private address stops receiving notices. Use a Service in the Task's namespace for
+  in-cluster receivers.
+- Failed deliveries are retried at most 8 times with exponential backoff, not every 30
+  seconds forever. Literal private IPs and other policy violations fail at once.
+- The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
+  fields are unchanged.
+
+## The class admin role no longer grants every verb {#class-admin-role}
+
+This affects installs from the raw installer (`deploy/orka.yaml`); the Helm chart does
+not ship this role.
+
+`orka-workspace-executionworkspaceclass-admin-role` used to grant `*` on
+ExecutionWorkspaceClasses. It now lists its verbs: `create`, `delete`,
+`deletecollection`, `get`, `list`, `patch`, `update`, `watch`, and `use`. Anyone bound
+to it can still manage classes and select them for Tasks.
+
+The role no longer grants `operator-access`, the verb required to opt a class into
+`orka task exec` and `orka task cp`. Grant that verb separately to whoever should
+enable operator access; see
+[Operator workspace access](../guides/operator-workspace-access.md).
 
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database
 and keep its records. Keep the data volume and encryption key together.
 
-If startup reports `unsupported SQLite schema`, preserve the database and stop.
-Orka does not convert, reset, or replace an incompatible database.
+The controller compares the complete schema, including every table and index
+definition, before upgrading. These immutable main-branch revisions identify
+supported source layouts; they are **unreleased baselines**, not release-version
+compatibility promises. Other commits with the exact same layout are equivalent.
+Object counts alone do not establish compatibility.
 
-## Update CRDs first {#the-one-thing-that-will-bite-you}
+| Source layout | Representative revision | Transition |
+| --- | --- | --- |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
+| 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
+| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns; keep the dataset identity, records and key bootstrap state. |
+| 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
+| 162 objects, schema version 3 | Dataset binding layout | Rebuild the work action dedupe index so a `retry_pending` action owns its key, first cancelling any `retry_pending` action whose key another active action shares (reason `dedupe_superseded`); keep the dataset identity, binding, records and key bootstrap state. |
+| 162 objects, schema version 4 | Work action dedupe layout | Add the write stamp columns of results and artifacts, giving existing rows the stamp (0, 0); keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 162 objects (current), schema version 5 | Write stamp layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+
+A harness v2 store never writes the harness v1 tables or harness v1 Session
+lineages. If either table holds records, or a Session lineage uses
+`orka.harness.v1`, the upgrade stops before changing the schema and reports
+`harness v1 ... records`; that store belongs to an unsupported harness v1
+installation.
+
+The five historical source layouts have SQLite `user_version = 0` and upgrade
+to the current layout in one transaction, ending with the schema version 5
+objects. A schema version 1, 2, 3 or 4 store keeps its identity row and upgrades in
+place through each later version, after the same automatic backup. A nonzero marker on any other layout is
+refused rather than adopted.
+
+### Dataset identity and key bootstrap
+
+The current database records a stable dataset UUID, whether it was freshly
+created or adopted during upgrade, and whether key bootstrap completed.
+`PRAGMA user_version = 5` records this metadata layout; the controller also checks
+every actual schema definition. Unknown versions and missing or malformed
+established identity are refused without regenerating metadata or replacing data.
+
+The controller acquires the SQLite process lock before inspecting this history
+or loading the key. It may populate an empty managed snapshot-key Secret only
+for a new, unfinished dataset containing no application records. It never mints
+a key for an adopted dataset, even an empty one, or after bootstrap completed.
+Restore a missing key for such a dataset from backup. Key-file mode always
+requires an operator-supplied key.
+
+An interrupted first start can resume with the same dataset identity. A key
+already committed to the Secret is reused; bootstrap completes only after the
+key authenticates retained execution snapshots, native sessions and connector
+custody under the existing retention and consent-expiry rules. Key-load/authentication failure releases the database lock and
+stops startup before consumers run. Deleting ordinary records does not reset the
+bootstrap history.
+
+Dataset identity is stored inside the database. It does not detect replacement
+of the entire database, restoration of older history, or establish an independent
+installation binding. Preserve the volume, Kubernetes state and key together;
+this metadata is not a backup/restore protocol.
+
+### Unsupported intermediate connector layout
+
+The **161-object layout from #700**, introduced at
+[`b5265055`](https://github.com/orka-agents/orka/commit/b526505518fa139848cc610f6055b33e919ce594),
+is explicitly unsupported. The subsequent #701 changes the existing
+`connector_credentials` and `connector_retired_credentials` table definitions as
+well as adding a table. This cannot be handled by adding new empty tables alone.
+The controller refuses this exact layout even if its connector tables are empty,
+names #700 and its revision in the error, and points here. **No rewrite path is
+provided.** Do not change the schema or delete custody records to force acceptance.
+
+Unknown, partially modified, and newer layouts are also refused. If startup
+reports `unsupported SQLite schema`, preserve the database and stop. Orka does
+not reset or replace it. In-memory initialization and the low-level `NewDB`
+constructor do not migrate; production startup uses `OpenLockedStore` to hold the
+exclusive controller lock throughout backup and upgrade.
+
+### Automatic pre-upgrade backup
+
+For a recognized older layout, startup creates a consistent SQLite backup beside
+the database before applying any DDL. With the default `--store-path`, its name is
+`/data/orka.db.pre-upgrade-<random>.db`. Startup logs the exact path. The backup
+includes committed WAL records, retains the original schema and rows, is created
+with owner-only permissions (`0600`), and is verified and synced before migration.
+If backup creation or verification fails, startup stops without changing schema.
+Only an incomplete backup created by that attempt is removed.
+
+All additive steps run in one `BEGIN IMMEDIATE` transaction under the controller
+lock. Each resulting layout is checked exactly, and integrity and foreign-key
+checks must pass before commit. A process interrupted before commit leaves the
+old schema; retry takes a new backup and repeats the migration. A committed
+current layout only validates on reopen. Completed backups remain available even
+if a later migration step fails; they are not overwritten or automatically
+pruned, so allow disk space for them and manage retention explicitly.
+
+Backups contain the same sensitive records as the live database. Keep them
+protected with the original encryption key, include them in your backup policy,
+and account for retained credential material when deleting old backups. The
+adjacent backup is **not** a replacement for the independent volume, Kubernetes
+state, and Secret backups below.
+
+Migration is forward-only. An older image cannot necessarily open the upgraded
+store. Rolling back an installation requires a coordinated, offline restoration
+of the database, original key, configuration, and Kubernetes state—not just an
+image downgrade. This page does not qualify a general restore procedure.
+
+### Controller startup allowance
+
+Database backup, integrity checks, and migration run before the controller starts
+serving `/healthz`. Both deployment sources include a startup probe that allows
+about ten minutes for the entire initialization (60 failed probes, ten seconds
+apart, with a one-second request timeout). Kubernetes holds off the existing
+liveness and readiness probes until startup succeeds; their checks are unchanged.
+
+Before upgrading a large database or a slow persistent volume, increase the
+budget as needed. Helm exposes `controller.startupProbe.failureThreshold`,
+`periodSeconds`, and `timeoutSeconds`; for example,
+`--set controller.startupProbe.failureThreshold=120` allows about twenty minutes
+at the default ten-second interval. For Kustomize, patch the manager container's
+`startupProbe` timing fields in your overlay. The allowance is bounded: exceeding
+it can restart initialization and create another retained backup, so size the
+budget and free disk space before the upgrade.
+
+## CRD update ordering {#the-one-thing-that-will-bite-you}
 
 CRDs define Orka's Kubernetes resource types. Helm installs them on a fresh
-install, but does not update them during `helm upgrade`. Apply the target
-chart's CRDs before updating Orka, or Kubernetes may drop new fields.
+install but does not update them during `helm upgrade`. Apply target CRDs before
+starting the target controller. When removing the in-tree workspace providers,
+first drain the old allocations through their original owner, as described below.
+Applying the pruned RuntimePool schema before that drain can discard settings
+needed by the old owner to clean up.
+
+## External workspace migration {#external-workspace-migration}
+
+The external-provider core binary does not allocate, suspend, resume, or delete
+old in-tree Agent Sandbox or Substrate ACP workspaces. It does not adopt their
+resources. Keep the original core binary, backend access, credentials, worker
+RBAC, and NetworkPolicies available while draining them.
+
+Before applying the pruned RuntimePool CRD or replacing the core binary:
+
+1. Stop new legacy workspace demand and settle active Tasks and RuntimeSessions
+   through the original controller.
+2. Drain and delete every legacy RuntimePool and retained ExecutionWorkspace,
+   including records in `Ready`, `Suspended`, `Failed`, and `Deleted` states.
+   Allow the original owner to observe exact Pod/native termination and storage
+   cleanup before its finalizers complete.
+3. Retire legacy checkpoint references, catalogs, and template journals through
+   their original owner. Preserve required data separately before destructive
+   cleanup. Do not strip finalizers or relabel an allocation to transfer ownership.
+4. Verify no old allocations or retained records remain, then apply the target
+   CRDs and start the new core. Install external provider CRDs, registrations,
+   immutable profiles, and Deployments as separate components.
+
+Stock core startup lists RuntimePools and legacy-labelled ExecutionWorkspaces
+across all namespaces. It rejects every remaining legacy workspace state and
+names the blockers before starting dispatch. A pruned pool missing its generic
+external binding also blocks startup. The gate does not mutate provider status,
+seed runtime credentials, recreate compute, or perform native cleanup. Return to
+the original owner to finish the drain when it rejects startup.
+
+Tasks now select `execution.workspace.classRef` only. Provider-specific Task
+selectors, `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, and the old
+Sandbox/Substrate ACP flags are removed. Install the selected provider's own
+config/profile kinds instead. Native MCP Tools remain separate and use
+`--substrate-mcp-tools-enabled`; their control credentials are not external ACP
+provider credentials.
+
+Substrate-native workspaces need fully qualified Service names in
+`--controller-url` and `--acp-provider-proxy-base-url`
+(`<service>.<namespace>.svc.<cluster domain>`). The chart and kustomize
+manifests now render them (chart value `clusterDomain`, default
+`cluster.local`). An installation that sets either flag itself to a short
+`<service>.<namespace>.svc` name must change it before using Substrate-native
+workspaces; Core refuses the short form for them and the RuntimePool reports
+`Degraded`. See [Agent Substrate](../concepts/substrate.md#upgrades-and-proof-limits).
+
+The [local upgrade proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh)
+uses actual API objects and a released stock core image. It covers old-shaped
+pools, all retained workspace states, schema pruning, unchanged legacy identities,
+and fresh startup after exact synthetic cleanup. This scoped migration proof does
+not establish general release-to-release or database restore support.
 
 ## Upgrade steps
 
@@ -120,12 +420,16 @@ If you have the workspace provider API enabled, back up its resources too:
 ```bash
 kubectl --context "$TARGET_CONTEXT" -n orka-system get \
   executionworkspaceclasses,executionworkspaceproviders,executionworkspacepools,\
-executionworkspaces,executionworkspacecheckpoints,runtimeproviderconfigs,runtimeworkspaceprofiles \
+executionworkspaces,executionworkspacecheckpoints \
   -o json > orka-workspace-crs.json
 ```
 
-Include the `RuntimeProviderConfig` and `RuntimeWorkspaceProfile` resources.
-Workspace classes need them to run.
+Export provider-owned configuration and profile resources from each installed
+provider group as well, such as `SandboxProviderConfig`, `SandboxWorkspaceProfile`,
+`SubstrateProviderConfig`, and `SubstrateWorkspaceProfile`. They are installed by
+the separate providers. Before migrating an old installation, also back up its
+legacy `RuntimeProviderConfig` and `RuntimeWorkspaceProfile` records for the
+original owner's drain.
 
 Leave out any kind your cluster does not have; `kubectl` fails the whole command on an
 unknown resource rather than skipping it.
@@ -135,9 +439,11 @@ Copying `orka.db` while the controller is writing can lose records.
 Snapshot the whole data volume, or stop the controller before copying it.
 :::
 
-### 2. Apply the target CRDs
+### 2. Drain legacy workspaces, then apply the target CRDs
 
-From a checkout matching the version you are upgrading to:
+If the target removes in-tree ACP workspace providers, complete the
+[external workspace migration drain](#external-workspace-migration) first.
+Then, from a checkout matching the version you are upgrading to:
 
 ```bash
 scripts/apply-helm-crds.sh "$TARGET_CHART" "$TARGET_CONTEXT"
@@ -191,11 +497,14 @@ existing tasks and data depend on them:
 
 | Value | Why it is fixed |
 | --- | --- |
-| `controller.mode` | Determines how this installation runs coding agents. |
+| `controller.mode` | The `harness-v2` execution contract is the installation's identity. |
 | `controller.watchNamespace` | Existing Tasks live there. |
 | `controller.agentExecutionSnapshot.existingSecret` and `.key` | Saved agent configuration needs the original encryption key. A generated key cannot be swapped for your own later, or the reverse. |
 | `controller.acpRuntime.namespace` | Running pools live there. |
 | The release fullname | Every owned resource is named from it. |
+
+To change one, install a new release alongside the old one and migrate producers across.
+See [installation ownership](harness-modes.md).
 
 The snapshot key also seals linked accounts (connectors). When the controller
 starts, it checks that its key opens every retained execution snapshot and
@@ -234,3 +543,10 @@ readable. Keeping them does not preserve the data stored in volumes.
 Deleting a CRD also deletes every resource of that type across the cluster.
 Keep CRDs until their data is no longer needed or has been backed up.
 :::
+
+## Unsupported installations
+
+The current controller only supports harness v2. Older execution protocols have
+no in-place upgrade, automatic Task or Session conversion, or database backfill.
+A database holding harness v1 records is refused at startup. Use a fresh
+installation with the current schema and images.

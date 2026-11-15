@@ -179,37 +179,39 @@ type operationExecutor func(context.Context, OperationMetadata, string, journalR
 
 func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Request, operation Operation, decode operationDecoder, execute operationExecutor) {
 	if !s.authenticateBearer(request) {
-		s.writePublicJSON(writer, http.StatusUnauthorized, ErrorResponse{Code: "unauthorized", Message: "authorization failed", Retryable: false})
+		response := ErrorResponse{Code: "unauthorized", Message: "authorization failed", Retryable: false}
+		s.logOperationFailure(operation, OperationMetadata{}, http.StatusUnauthorized, response)
+		s.writePublicJSON(writer, http.StatusUnauthorized, response)
 		return
 	}
 	body, err := s.readBody(writer, request)
 	if err != nil {
-		s.writeOperationError(writer, OperationMetadata{}, "", err)
+		s.writeOperationError(writer, operation, OperationMetadata{}, "", err)
 		return
 	}
 	canonical, err := canonicalRequestBody(body)
 	if err != nil {
-		s.writeOperationError(writer, OperationMetadata{}, "", err)
+		s.writeOperationError(writer, operation, OperationMetadata{}, "", err)
 		return
 	}
 	requestDigest, err := RequestDigest(http.MethodPost, operation.Path(), canonical)
 	if err != nil {
-		s.writeOperationError(writer, OperationMetadata{}, "", err)
+		s.writeOperationError(writer, operation, OperationMetadata{}, "", err)
 		return
 	}
 	metadata, value, err := decode(canonical)
 	if err != nil {
-		s.writeOperationError(writer, metadata, requestDigest, err)
+		s.writeOperationError(writer, operation, metadata, requestDigest, err)
 		return
 	}
 	if err := metadata.validateFor(operation); err != nil {
-		s.writeOperationError(writer, metadata, requestDigest, err)
+		s.writeOperationError(writer, operation, metadata, requestDigest, err)
 		return
 	}
 	expected := NewClaims(operation, metadata, requestDigest, s.config.Now(), s.config.CapabilityTTL)
 	if err := VerifyCapability(s.config.OperationCapabilitySecret, request.Header.Get(OperationCapabilityHeader), expected, s.config.Now()); err != nil ||
 		!constantEqual(request.Header.Get(OperationRequestDigestHeader), requestDigest) {
-		s.writeOperationError(writer, metadata, requestDigest, apiError(ErrUnauthorized, "unauthorized", "authorization failed", http.StatusForbidden, false, nil))
+		s.writeOperationError(writer, operation, metadata, requestDigest, apiError(ErrUnauthorized, "unauthorized", "authorization failed", http.StatusForbidden, false, nil))
 		return
 	}
 	// Acquire the global operation slot only after the operation capability is
@@ -219,7 +221,9 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 	case s.semaphore <- struct{}{}:
 		defer func() { <-s.semaphore }()
 	default:
-		s.writePublicJSON(writer, http.StatusTooManyRequests, ErrorResponse{Code: "busy", Message: "publisher concurrency limit reached", Retryable: true})
+		response := ErrorResponse{Code: "busy", Message: "publisher concurrency limit reached", Retryable: true}
+		s.logOperationFailure(operation, metadata, http.StatusTooManyRequests, response)
+		s.writePublicJSON(writer, http.StatusTooManyRequests, response)
 		return
 	}
 	lock := s.operationLock(metadata.OperationID)
@@ -227,7 +231,7 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 	defer lock.Unlock()
 	record, _, err := s.journal.begin(request.Context(), operation, metadata, requestDigest)
 	if err != nil {
-		s.writeOperationError(writer, metadata, requestDigest, err)
+		s.writeOperationError(writer, operation, metadata, requestDigest, err)
 		return
 	}
 	if record.State == journalCompleted || record.State == journalFailed {
@@ -236,16 +240,16 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 	}
 	status, response, err := execute(request.Context(), metadata, requestDigest, record, value)
 	if err != nil {
-		s.writeAndJournalError(writer, metadata, requestDigest, err)
+		s.writeAndJournalError(writer, operation, metadata, requestDigest, err)
 		return
 	}
 	data, err := encodeJSON(response)
 	if err != nil || int64(len(data)) > s.config.MaxResponseBytes {
-		s.writeAndJournalError(writer, metadata, requestDigest, apiError(nil, "response_invalid", "publisher response could not be encoded", 500, true, err))
+		s.writeAndJournalError(writer, operation, metadata, requestDigest, apiError(nil, "response_invalid", "publisher response could not be encoded", 500, true, err))
 		return
 	}
 	if err := s.journal.complete(context.WithoutCancel(request.Context()), metadata.OperationID, requestDigest, status, data); err != nil {
-		s.writeOperationError(writer, metadata, requestDigest, apiError(ErrJournalFull, "journal_unavailable", "publisher result could not be durably recorded", 507, true, err))
+		s.writeOperationError(writer, operation, metadata, requestDigest, apiError(ErrJournalFull, "journal_unavailable", "publisher result could not be durably recorded", 507, true, err))
 		return
 	}
 	s.writeBytes(writer, status, data)
@@ -293,8 +297,9 @@ func (s *Server) operationLock(operationID string) *sync.Mutex {
 	return &s.locks[index]
 }
 
-func (s *Server) writeAndJournalError(writer http.ResponseWriter, metadata OperationMetadata, requestDigest string, err error) {
+func (s *Server) writeAndJournalError(writer http.ResponseWriter, operation Operation, metadata OperationMetadata, requestDigest string, err error) {
 	status, response, terminal := errorResponse(classifyPublisherError(err), metadata, requestDigest)
+	s.logOperationFailure(operation, metadata, status, response)
 	data, encodeErr := encodeJSON(response)
 	if encodeErr != nil {
 		data = []byte("{\"code\":\"internal\",\"message\":\"publisher error response failed\",\"retryable\":true}\n")
@@ -306,9 +311,19 @@ func (s *Server) writeAndJournalError(writer http.ResponseWriter, metadata Opera
 	s.writeBytes(writer, status, data)
 }
 
-func (s *Server) writeOperationError(writer http.ResponseWriter, metadata OperationMetadata, requestDigest string, err error) {
+func (s *Server) writeOperationError(writer http.ResponseWriter, operation Operation, metadata OperationMetadata, requestDigest string, err error) {
 	status, response, _ := errorResponse(classifyPublisherError(err), metadata, requestDigest)
+	s.logOperationFailure(operation, metadata, status, response)
 	s.writePublicJSON(writer, status, response)
+}
+
+// logOperationFailure records only fields already returned to the controller,
+// never request bodies, credentials, repository URLs, or upstream error text.
+func (s *Server) logOperationFailure(operation Operation, metadata OperationMetadata, status int, response ErrorResponse) {
+	s.config.Logger.Warn("workspace publisher operation failed",
+		"operation", operation, "namespace", metadata.Namespace, "operationId", metadata.OperationID,
+		"taskId", metadata.TaskID, "publicationId", metadata.PublicationID,
+		"status", status, "code", response.Code, "message", response.Message, "retryable", response.Retryable)
 }
 
 func (s *Server) writePublicJSON(writer http.ResponseWriter, status int, value any) {

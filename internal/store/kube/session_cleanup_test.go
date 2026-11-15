@@ -10,6 +10,8 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -67,7 +69,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 		Namespace: "tenant-a", Name: name, SessionType: controlstore.SessionTypeChat,
 	}
 	expiresAt := time.Now().UTC().Add(time.Minute)
-	created, err := sqliteStore.AcquireChatTurn(ctx, session, "failed-turn", expiresAt)
+	created, err := sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "failed-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt})
 	if err != nil || !created {
 		t.Fatalf("AcquireChatTurn(first turn): created=%v, err=%v", created, err)
 	}
@@ -86,7 +88,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 	if err != nil || identity != control.SessionUID {
 		t.Fatalf("cleanup identity after failed turn = %q, err=%v, want %q", identity, err, control.SessionUID)
 	}
-	created, err = sqliteStore.AcquireChatTurn(ctx, session, "next-turn", expiresAt)
+	created, err = sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "next-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt})
 	if err != nil || created {
 		t.Fatalf("AcquireChatTurn(next turn): created=%v, err=%v, want the preserved session with a released lease", created, err)
 	}
@@ -116,7 +118,7 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 	if completion.SessionUID != control.SessionUID || completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
 		t.Fatalf("completion receipt = %#v", completion)
 	}
-	if _, err := sqliteStore.AcquireChatTurn(ctx, session, "late-turn", expiresAt); !errors.Is(err, controlstore.ErrConflict) {
+	if _, err := sqliteStore.AcquireChatTurn(ctx, controlstore.AcquireChatTurnRequest{Session: session, TurnID: "late-turn", Now: time.Now().UTC(), ExpiresAt: expiresAt}); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("AcquireChatTurn(after coordinated deletion) error = %v, want ErrConflict", err)
 	}
 }
@@ -182,70 +184,6 @@ func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing
 		Namespace: control.Namespace, Name: control.SessionName, SessionType: "chat", CreatedAt: testNow, UpdatedAt: testNow,
 	}); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("CreateSession(recently deleted name) error = %v, want ErrConflict", err)
-	}
-}
-
-func TestReclaimSessionWithoutClusterScopedBranchClaims(t *testing.T) {
-	ctx := context.Background()
-	_, kubeClient, fence := newTestStoreWithEpoch(t)
-	withWatch, ok := kubeClient.(client.WithWatch)
-	if !ok {
-		t.Fatal("fake client does not implement client.WithWatch")
-	}
-	branchClaimLists := 0
-	branchBlockingReader := interceptor.NewClient(withWatch, interceptor.Funcs{
-		List: func(ctx context.Context, delegate client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
-			if _, isBranchClaims := list.(*corev1alpha1.BranchClaimList); isBranchClaims {
-				branchClaimLists++
-				return errors.New("unexpected cluster-scoped BranchClaim list")
-			}
-			return delegate.List(ctx, list, options...)
-		},
-	})
-	db, err := sqlitestore.NewDB(filepath.Join(t.TempDir(), "branchless-session-cleanup.db"))
-	if err != nil {
-		t.Fatalf("NewDB(): %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	sqliteStore := sqlitestore.NewStore(db, "")
-	kubeStore, err := NewComposite(
-		kubeClient,
-		testControlNamespace,
-		sqliteStore,
-		WithAPIReader(branchBlockingReader),
-		WithoutClusterScopedBranchClaims(),
-	)
-	if err != nil {
-		t.Fatalf("NewComposite(): %v", err)
-	}
-	const sessionName = "harness-v1-session-cleanup"
-	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{
-		Namespace: "tenant-a", Name: sessionName, SessionType: "task", CreatedAt: testNow, UpdatedAt: testNow,
-	}); err != nil {
-		t.Fatalf("CreateSession(): %v", err)
-	}
-	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
-		Namespace: "tenant-a", SessionName: sessionName, SessionUID: sessionName + "-uid",
-		RequestDigest: testDigest(sessionName + "-control"), LeaseGeneration: 1,
-		Availability: controlstore.SessionAvailable, CreatedAt: testNow,
-	}, fence)
-	if err != nil {
-		t.Fatalf("CreateSessionControl(): %v", err)
-	}
-	if err := kubeStore.ReclaimSession(ctx, controlstore.ReclaimSessionRequest{
-		Namespace: control.Namespace, SessionName: control.SessionName, Fence: fence,
-		OperationID: "delete-harness-v1-session", OperationDigest: testDigest("delete-harness-v1-session"), RequestedAt: testNow,
-	}); err != nil {
-		t.Fatalf("ReclaimSession(): %v", err)
-	}
-	if branchClaimLists != 0 {
-		t.Fatalf("BranchClaim list calls = %d, want 0", branchClaimLists)
-	}
-	if _, err := kubeStore.GetBranchClaim(ctx, "forbidden"); !errors.Is(err, ErrBranchClaimAccessDisabled) {
-		t.Fatalf("GetBranchClaim() error = %v, want ErrBranchClaimAccessDisabled", err)
-	}
-	if _, err := sqliteStore.GetSession(ctx, control.Namespace, control.SessionName); !errors.Is(err, controlstore.ErrNotFound) {
-		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -358,7 +296,7 @@ func TestReclaimSessionRecoversLegacyKubernetesOrphanAfterTranscriptDeletion(t *
 	ctx := context.Background()
 	kubeStore, _, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
 	control, claim := seedSessionCleanupState(t, ctx, kubeStore, sqliteStore, fence, "session-legacy-orphan")
-	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName); err != nil {
+	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("legacy SQLite-only DeleteSession(): %v", err)
 	}
 	request := controlstore.ReclaimSessionRequest{
@@ -384,7 +322,7 @@ func TestReclaimSessionRejectsPreCutoverReplacementWithOldKubernetesIdentity(t *
 	ctx := context.Background()
 	kubeStore, _, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)
 	control, _ := seedSessionCleanupState(t, ctx, kubeStore, sqliteStore, fence, "session-precutover-replacement")
-	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName); err != nil {
+	if err := sqliteStore.DeleteSession(ctx, control.Namespace, control.SessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("legacy SQLite-only DeleteSession(): %v", err)
 	}
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{
@@ -475,7 +413,7 @@ func TestReclaimSessionUsesLegacyTurnUIDAsIdentityProof(t *testing.T) {
 }
 
 type failOnceSessionCleanupPersistence struct {
-	*sqlitestore.Store
+	*storageclient.Client
 	err error
 }
 
@@ -485,7 +423,7 @@ func (p *failOnceSessionCleanupPersistence) CompleteSessionCleanup(ctx context.C
 		p.err = nil
 		return err
 	}
-	return p.Store.CompleteSessionCleanup(ctx, request)
+	return p.Client.CompleteSessionCleanup(ctx, request)
 }
 
 func newSessionCleanupTestStore(
@@ -500,15 +438,17 @@ func newSessionCleanupTestStore(
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	sqliteStore := sqlitestore.NewStore(db, "")
-	var persistence SQLitePersistence = sqliteStore
+	storage := storageclienttest.Client(t, sqliteStore)
+	var persistence SQLitePersistence = storage
 	if failing != nil {
-		failing.Store = sqliteStore
+		failing.Client = storage
 		persistence = failing
 	}
 	kubeStore, err := NewComposite(kubeClient, testControlNamespace, persistence)
 	if err != nil {
 		t.Fatalf("NewComposite(): %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, persistence)
 	return kubeStore, kubeClient, sqliteStore, db, fence
 }
 

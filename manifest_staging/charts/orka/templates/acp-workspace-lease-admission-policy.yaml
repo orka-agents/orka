@@ -1,4 +1,3 @@
-{{- if eq .Values.controller.mode "harness-v2" }}
 {{- /*
 ACP workspace coordination Leases are reserved for this release's controller.
 This is CEL rather than a controller-served webhook so the guard never depends
@@ -26,6 +25,7 @@ spec:
   matchConditions:
     - name: reserved-acp-workspace-lease-name
       expression: >-
+        request.?name.orValue('') == 'orka-agent-use-enforcement' ||
         request.?name.orValue('').startsWith('acp-suspend-quota-') ||
         request.?name.orValue('').startsWith('acp-retention-fence-') ||
         (request.operation == 'CREATE' &&
@@ -58,4 +58,3 @@ metadata:
 spec:
   policyName: {{ include "orka.fullname" . }}-acp-workspace-lease-protection
   validationActions: [Deny]
-{{- end }}

@@ -369,6 +369,36 @@ func TestBuildLLMTools_CustomToolWithParameters(t *testing.T) {
 	}
 }
 
+// TestBuildLLMTools_HidesForwardingTools covers a native worker enabling both
+// a forwarding Tool, which serves a command-line client in an ACP runtime,
+// and an ordinary custom Tool: only the ordinary one is advertised as a
+// function.
+func TestBuildLLMTools_HidesForwardingTools(t *testing.T) {
+	customTools := map[string]*corev1alpha1.Tool{
+		"arm": {Spec: corev1alpha1.ToolSpec{
+			Description: "Azure Resource Manager",
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:     "https://management.azure.com",
+				Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+			},
+		}},
+		"lookup": {Spec: corev1alpha1.ToolSpec{
+			Description: "Look up an order",
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "https://orders.example.com/lookup"},
+		}},
+	}
+	customTools["arm"].Name, customTools["lookup"].Name = "arm", "lookup"
+
+	llmTools := buildLLMTools([]string{"arm", "lookup"}, customTools)
+	if len(llmTools) != 1 || llmTools[0].Name != "lookup" {
+		names := make([]string, 0, len(llmTools))
+		for _, tool := range llmTools {
+			names = append(names, tool.Name)
+		}
+		t.Fatalf("advertised tools = %v, want only the ordinary Tool", names)
+	}
+}
+
 // --- executeAgentLoop tests ---
 
 func TestExecuteAgentLoop_WithToolCalls(t *testing.T) {

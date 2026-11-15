@@ -213,31 +213,6 @@ func TestSessionRuntimeCleanupRejectsMalformedProjection(t *testing.T) {
 	}
 }
 
-func TestSessionRuntimeCleanupAcceptsTerminalV1ProjectionWithoutTask(t *testing.T) {
-	fixture, tasks := newContinuedSessionCleanupFixture(t)
-	turn, projection := sessionRuntimeCleanupTurnProjection(t, fixture, tasks[0])
-	body, err := json.Marshal(taskterminal.Projection{
-		Namespace: defaultNS, Task: "previously-reclaimed-v1-task", TaskUID: turn.Key.TaskUID, Attempt: int32(turn.Key.Attempt),
-		Phase: corev1alpha1.TaskPhaseSucceeded,
-		HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
-			Attempt: int32(turn.Key.Attempt), State: corev1alpha1.TaskExecutionStateSucceeded,
-			Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	projection.Payload, projection.PayloadDigest = body, store.CanonicalBytesDigest(body)
-	turn.ProjectionDigest = projection.PayloadDigest
-	dispatcher := &ACPDispatcher{
-		Store: &sessionRuntimeCleanupProjectionStore{DurableControlStore: fixture.controlStore, projection: projection},
-	}
-	intent := store.SessionCleanupIntent{Namespace: defaultNS, SessionName: "cleanup-conversation", SessionUID: turn.Key.SessionUID}
-	if target, err := dispatcher.sessionRuntimeCleanupTarget(fixture.ctx, intent, turn); err != nil || target != nil {
-		t.Fatalf("terminal harness v1 projection requires resident runtime cleanup: target:%v err:%v", target, err)
-	}
-}
-
 func TestSessionRuntimeCleanupChecksWriteTaskRetirementProof(t *testing.T) {
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "write-cleanup", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
 		profileTransform:                func(profile *harnessv2.RuntimeProfile) { profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite },

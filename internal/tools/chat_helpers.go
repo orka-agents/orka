@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -14,11 +15,32 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 // classifyChatK8sErr returns a ChatToolResult for common K8s API errors.
+// chatTaskCreateTimeout bounds a chat Task's Create, which stopping the chat
+// turn does not cut short. It stays under the time a Session cancel waits
+// for the turn to stop.
+const chatTaskCreateTimeout = 5 * time.Second
+
+// createChatTask creates a Task for a chat turn. A turn already stopped
+// starts no Create. One the turn's stop interrupts runs on to its outcome:
+// a Session cancel stops the turn and then lists its Tasks, and were the
+// Create abandoned mid-flight, the API server could commit the Task after
+// that list, where it would run uncancelled. The turn instead waits for the
+// Create's outcome, so the list sees it.
+func createChatTask(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatTaskCreateTimeout)
+	defer cancel()
+	return c.Create(createCtx, task)
+}
+
 func classifyChatK8sErr(err error) (string, error) {
 	if apierrors.IsNotFound(err) {
 		return ChatToolErrorResult(errTypeNotFound, err.Error(), "Check the resource name and namespace")
@@ -47,6 +69,21 @@ func checkChatNamespaceScope(tc *ToolContext, namespace string) (string, bool) {
 		return r, false
 	}
 	return "", true
+}
+
+// requireChatObjectArg rejects a present, non-null argument that is not an
+// object. Registry.Execute already decodes JSON-encoded objects, so anything
+// left here is a value the tool would otherwise ignore.
+func requireChatObjectArg(a map[string]any, key string) (string, bool) {
+	value, ok := a[key]
+	if !ok || value == nil {
+		return "", true
+	}
+	if _, isObject := value.(map[string]any); isObject {
+		return "", true
+	}
+	result, _ := ChatToolErrorResult(invalidArgumentsErrorType, key+" must be an object", "Pass "+key+" as a JSON object")
+	return result, false
 }
 
 // chatGetStringArg extracts a string argument from a map.
@@ -79,6 +116,17 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 	switch n := v.(type) {
 	case float64:
+		// Saturate rather than convert out of range, which wraps, so a huge
+		// value still meets the caller's clamp: wait_for_task turned a huge
+		// timeout into a negative one that had already expired.
+		switch {
+		case math.IsNaN(n):
+			return defaultVal
+		case n >= math.MaxInt:
+			return math.MaxInt
+		case n <= math.MinInt:
+			return math.MinInt
+		}
 		return int(n)
 	case int:
 		return n
@@ -87,6 +135,23 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	default:
 		return defaultVal
 	}
+}
+
+// chatPriorityArg reads the optional priority argument. It returns an error
+// result and false for a value that is not a whole number from 0 to 1000; a
+// larger value would wrap when narrowed to int32, possibly into that range.
+func chatPriorityArg(a map[string]any) (*int32, string, bool) {
+	value := a[priorityField]
+	if value == nil {
+		return nil, "", true
+	}
+	number, ok := value.(float64)
+	if !ok || number != math.Trunc(number) || number < 0 || number > 1000 {
+		result, _ := ChatToolErrorResult(invalidArgumentsErrorType, "priority must be a whole number from 0 to 1000", "Use a priority from 0 to 1000; the default is 500")
+		return nil, result, false
+	}
+	p := int32(number)
+	return &p, "", true
 }
 
 // chatParseBoolArg parses a bool tool argument that may arrive as a JSON

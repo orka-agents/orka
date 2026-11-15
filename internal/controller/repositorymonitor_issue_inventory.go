@@ -218,7 +218,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return selected, createdTasks, skipped, err
 			}
-			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{eventReasonField: skipReason, substrateObjectLabelsField: issue.Labels}); err != nil {
+			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{eventReasonField: skipReason, objectLabelsField: issue.Labels}); err != nil {
 				return selected, createdTasks, skipped, err
 			}
 			continue

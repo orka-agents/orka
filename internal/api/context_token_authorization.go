@@ -363,7 +363,7 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, reader client.Reader, 
 	if err := authorizeContextTokenTaskCreateObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
-	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
+	if err := authorizeKubernetesTaskCreate(ctx, reader, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
@@ -375,7 +375,7 @@ func authorizeAndStampTaskContext(ctx context.Context, reader client.Reader, kub
 	if err := authorizeContextTokenTaskContextObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
-	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
+	if err := authorizeKubernetesTaskCreate(ctx, reader, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
@@ -1558,6 +1558,15 @@ func contextTokenSortedUniqueToolNames(values []string) []string {
 	return normalized
 }
 
+// collectSubstrateMCPEgressCredentialSecrets adds the Secrets the Substrate
+// egress gateway injects into the Tool actor's requests; invoking the Tool
+// uses them, so any collected Secret requires the credential-read scope.
+func collectSubstrateMCPEgressCredentialSecrets(secrets map[string]struct{}, tool *corev1alpha1.Tool) {
+	for _, name := range aitools.SubstrateMCPEgressCredentialSecretNames(tool) {
+		secrets[name] = struct{}{}
+	}
+}
+
 func contextTokenTaskToolCredentialFailures(
 	ctx context.Context,
 	reader client.Reader,
@@ -1608,6 +1617,7 @@ func contextTokenTaskToolCredentialFailures(
 			}
 			return nil, fmt.Errorf("resolve Tool %q credential policy: %w", toolName, err)
 		}
+		collectSubstrateMCPEgressCredentialSecrets(credentialSecrets, tool)
 		if tool.Spec.HTTP == nil {
 			continue
 		}
@@ -1723,6 +1733,20 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	failures = append(failures, contextTokenWorkspaceCredentialFailures(token, cfg, taskRequestWorkspace(authzCtx.Request))...)
 	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, true)...)
 	return failures
+}
+
+// authorizeContextTokenAgentTaskReference checks only request-supplied identity
+// and creation scope. Runtime policy validation belongs to the completed Task.
+func authorizeContextTokenAgentTaskReference(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, name string) error {
+	if !cfg.Enabled() || token == nil {
+		return nil
+	}
+	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenAgentContextFailures(token, namespace, name)...)
+	if len(failures) == 0 {
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, "chatToolAgentReference", failures)
 }
 
 func contextTokenTaskCreateScopeFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig) []string {
@@ -2063,6 +2087,7 @@ func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConf
 	}
 }
 
+//nolint:unparam // Callers name the excluded tool so each filter site reads on its own.
 func filterCompletionToolsExcluding(tools []llm.Tool, name string) []llm.Tool {
 	filtered := make([]llm.Tool, 0, len(tools))
 	for _, tool := range tools {

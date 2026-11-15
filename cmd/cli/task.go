@@ -81,8 +81,11 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskChildrenCmd())
 	cmd.AddCommand(newTaskWaitCmd())
 	cmd.AddCommand(newTaskDeleteCmd())
+	cmd.AddCommand(newTaskCancelCmd())
 	cmd.AddCommand(newTaskArtifactsCmd())
 	cmd.AddCommand(newTaskDownloadCmd())
+	cmd.AddCommand(newTaskExecCmd())
+	cmd.AddCommand(newTaskCopyCmd())
 	return cmd
 }
 
@@ -505,6 +508,9 @@ func newTaskWaitCmd() *cobra.Command {
 			}
 
 			c := newClientFromCmd(cmd)
+			// A Task held on an approval would otherwise look like a plain
+			// wait; say once, on stderr, that it needs a person.
+			announced := false
 			return waitForTaskPhase(
 				ctx,
 				args[0],
@@ -513,6 +519,12 @@ func newTaskWaitCmd() *cobra.Command {
 					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
 					if err != nil {
 						return "", err
+					}
+					if waitingOn := taskWaitingOn(*detail); waitingOn == "" {
+						announced = false
+					} else if !announced {
+						announced = true
+						fmt.Fprintf(cmd.ErrOrStderr(), "Task %s is waiting on %s.\n", args[0], waitingOn) //nolint:errcheck
 					}
 					return client.StringField(*detail, "status", "phase"), nil
 				},
@@ -632,9 +644,8 @@ type resolvedAgentRuntimePolicy struct {
 }
 
 // resolveAgentRuntimePolicy loads the task policy for a runtimeRef Agent.
-// Harness v1 requires an explicit empty task allowlist, while harness v2 uses
-// the registered MCP policy and workspace intent. A nil result means the Agent
-// is missing, built-in, or has no classified harness contract. An explicit
+// The registered MCP policy and workspace intent are authoritative. A nil
+// result means the Agent is missing or uses a built-in runtime. An explicit
 // empty allowedTools result is a deny-all policy and must be serialized as [].
 func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, error) {
 	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
@@ -646,7 +657,10 @@ func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName 
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: %w", agentName, err)
 	}
 	var agent *corev1alpha1.Agent
-	if err := json.Unmarshal(body, &agent); err != nil || agent == nil || strings.TrimSpace(agent.Name) == "" {
+	if err := json.Unmarshal(body, &agent); err != nil {
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: %w", agentName, err)
+	}
+	if agent == nil || strings.TrimSpace(agent.Name) == "" {
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q: invalid Agent response", agentName)
 	}
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
@@ -663,18 +677,14 @@ func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName 
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: %w", agentName, runtimeName, err)
 	}
 	var runtime *corev1alpha1.AgentRuntime
-	if err := json.Unmarshal(body, &runtime); err != nil || runtime == nil || strings.TrimSpace(runtime.Name) == "" {
+	if err := json.Unmarshal(body, &runtime); err != nil {
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: %w", agentName, runtimeName, err)
+	}
+	if runtime == nil || strings.TrimSpace(runtime.Name) == "" {
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: invalid AgentRuntime response", agentName, runtimeName)
 	}
-	switch runtime.RegisteredContractVersion() {
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		return &resolvedAgentRuntimePolicy{
-			runtimeName:  runtimeName,
-			allowedTools: []string{},
-		}, nil
-	case corev1alpha1.AgentRuntimeContractHarnessV2:
-	default:
-		return nil, nil
+	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: contractVersion must be orka.harness.v2", agentName, runtimeName)
 	}
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.MCPPolicy == nil {
 		return nil, fmt.Errorf("resolve AgentRuntime policy for --agent %q from %q: capabilities.mcpPolicy is required", agentName, runtimeName)

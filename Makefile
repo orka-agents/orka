@@ -6,7 +6,6 @@ VERSION ?= v0.0.0-dev
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
-HARNESS_WRAPPER_IMG ?= ghcr.io/orka-agents/orka/agent-harness-wrapper:latest
 ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
@@ -63,9 +62,11 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and staged manifests.
+manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
 	# A module pattern excludes nested provider checkouts used by local conformance.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
+	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
+	rm -f config/crd/bases/acp.workspace.orka.ai_*.yaml config/crd/bases/fake.workspace.orka.ai_*.yaml
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -91,6 +92,14 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 		tmp=""; \
 		trap - EXIT; \
 		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
+
+.PHONY: workspace-crds
+workspace-crds: ## Source workspace CRDs from the pinned shared module.
+	go mod download github.com/orka-agents/orka-workspace
+	@set -euo pipefail; \
+		workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+		rm -f config/crd/bases/workspace.orka.ai_*.yaml; \
+		cp "$$workspace_module_dir"/config/crd/bases/workspace.orka.ai_*.yaml config/crd/bases/
 
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
@@ -138,8 +147,9 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen ## Generate DeepCopy implementations and the storage client's write envelope decorators.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
+	go generate ./internal/storageclient
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -165,19 +175,29 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
-	bash scripts/repository-monitor-completion-audit.sh
+# GO_TEST_TIMEOUT bounds each test package. The controller package alone runs
+# for about ten minutes, which is Go's default limit.
+GO_TEST_TIMEOUT ?= 20m
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -timeout $(GO_TEST_TIMEOUT) -coverprofile cover.out
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
 E2E_GO_TEST_TIMEOUT ?= 50m
+# Keep interrupted specs and suite cleanup inside the outer Go deadline.
+E2E_GINKGO_TIMEOUT ?= 45m
+E2E_GINKGO_GRACE_PERIOD ?= 2m
 E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
+E2E_GINKGO_LABEL_FILTER ?=
+E2E_GINKGO_LABEL_FILTER_ARG = $(if $(E2E_GINKGO_LABEL_FILTER),-ginkgo.label-filter="$(E2E_GINKGO_LABEL_FILTER)",)
+# Regular expressions matched against spec file paths, without "$" or ":".
+E2E_GINKGO_FOCUS_FILE ?=
+E2E_GINKGO_FOCUS_FILE_ARG = $(if $(E2E_GINKGO_FOCUS_FILE),-ginkgo.focus-file="$(E2E_GINKGO_FOCUS_FILE)",)
+E2E_GINKGO_SKIP_FILE ?=
+E2E_GINKGO_SKIP_FILE_ARG = $(if $(E2E_GINKGO_SKIP_FILE),-ginkgo.skip-file="$(E2E_GINKGO_SKIP_FILE)",)
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -195,8 +215,13 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
+	$(MAKE) test-e2e-run
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-run
+test-e2e-run: ## Run only the e2e suite on an existing Kind cluster: no regeneration, fmt, vet, or teardown.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_GINKGO_TIMEOUT) -ginkgo.grace-period=$(E2E_GINKGO_GRACE_PERIOD) \
+		$(E2E_GINKGO_FOCUS_ARG) $(E2E_GINKGO_LABEL_FILTER_ARG) $(E2E_GINKGO_FOCUS_FILE_ARG) $(E2E_GINKGO_SKIP_FILE_ARG)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -208,7 +233,6 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
 	set -e; for img in $(ACP_RUNTIME_IMGS); do $(KIND) load docker-image $$img --name $(KIND_CLUSTER); done
 	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
@@ -223,7 +247,7 @@ lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform 
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
+demo-cluster-up: ## Bootstrap Orka + agent-sandbox demo assets; ACP providers installed separately
 	hack/demos/cluster/cluster-up.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
@@ -233,15 +257,15 @@ demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
 .PHONY: demo-substrate-up
-demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + Orka (Demo 70)
+demo-substrate-up: ## Bootstrap a dedicated Substrate MCP Tools conformance cluster (no ACP provider)
 	hack/demos/cluster/install-substrate.sh
 
 .PHONY: demo-substrate-down
-demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
+demo-substrate-down: ## Tear down the Substrate MCP Tools conformance cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
+demo-cluster-up-all: ## Bootstrap Substrate MCP Tools + Orka demo assets; ACP providers installed separately
 	hack/demos/cluster/install-substrate.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
@@ -334,10 +358,6 @@ docker-build-ai-worker: ## Build docker image for the AI worker.
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
 
-.PHONY: docker-build-harness-wrapper
-docker-build-harness-wrapper: ## Build the opt-in harness v1 compatibility wrapper image.
-	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
-
 # Recipes for the docker-build-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
 # `make help` entries.
@@ -373,10 +393,6 @@ docker-push-ai-worker: ## Push docker image for the AI worker.
 .PHONY: docker-push-general-worker
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
-
-.PHONY: docker-push-harness-wrapper
-docker-push-harness-wrapper: ## Push the opt-in harness v1 compatibility wrapper image.
-	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
 
 # Recipes for the docker-push-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
@@ -416,10 +432,10 @@ docker-push-workspace-publisher: ## Push the clean-room workspace publisher imag
 	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-harness-wrapper docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-harness-wrapper docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
 
 ##@ Deployment
 
@@ -429,8 +445,9 @@ endif
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	# Shared runtime Pod schemas exceed the client-side apply annotation limit.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
-	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply -f -; else echo "No CRDs to install; skipping."; fi
+	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply --server-side -f -; else echo "No CRDs to install; skipping."; fi
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -487,18 +504,18 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 	done
 	@for crd in agentexecutioncontrols.core.orka.ai agentexecutionpolicies.core.orka.ai agentexecutionadjudications.core.orka.ai; do \
 		if "$(KUBECTL)" get crd "$$crd" >/dev/null 2>&1; then \
-			echo "unsupported superseded coexistence CRD remains installed: $$crd" >&2; \
+			echo "unsupported retired CRD remains installed: $$crd" >&2; \
 			exit 1; \
 		fi; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
-		{ echo "AgentRuntime CRD is not the shared orka.harness.v1/orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v2"]))' >/dev/null || \
+		{ echo "AgentRuntime CRD is not the orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd agents.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Agent CRD is missing the immutable shared contract selector; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd tasks.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Task CRD is missing the static-mode execution-authority schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 
 .PHONY: deploy

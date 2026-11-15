@@ -32,7 +32,7 @@ The flow is:
    SARIF-upload failures still fail the run.
 4. Release dispatches **Release Qualification** with the exact candidate
    bundle. A `release-qualification` environment reviewer must approve the
-   candidate source and workflow before the job can receive model-provider credentials.
+   candidate source and workflow before the job runs.
    The gate runs Git publication and GitHub API fixture tests from that checkout,
    then installs the packaged chart using the built image digests,
    verifies durable results after controller replacement, rejects an
@@ -97,7 +97,7 @@ its job summary. Review the candidate source, workflows, generated changes, and
 build bundle before approving the waiting `release-qualification` deployment.
 After qualification succeeds, review the acceptance evidence and approve the
 `release` deployment. The per-release human actions are dispatch, approval to
-run qualification with model-provider access, and approval to publish.
+run qualification, and approval to publish.
 
 Finish or cancel any existing qualification run before starting another. The
 release checks for active or approval-pending runs before dispatch. If a
@@ -131,16 +131,23 @@ never update `latest` or the minor-version alias.
 
 ## Coverage and environment
 
-Release qualification needs no stored GitHub repository token or custom GitHub
-App. GitHub observations use the job's temporary `GITHUB_TOKEN` with read-only
+Release qualification needs no stored GitHub repository token, custom GitHub
+App, or model-provider credential. Agent execution runs against aimock deployed
+as `vekil-system/vekil` behind the production provider proxy, scripted by
+`scripts/fixtures/agent-runtime-aimock` (`ACP_E2E_MODEL_BACKEND=aimock`), and the
+report records `coverage.modelBackend`. Qualification checks the shipped
+artifacts: each runtime image must start from the packaged chart and complete a
+workspace read. Runtime behavior (continuation, forks, concurrency,
+cancellation, timeout, restart, replacement, and scale to zero) runs on every PR
+in the `Agent runtime lifecycle` job of `test-e2e.yml`, and real-model drift is
+not part of qualification. GitHub observations use the job's temporary `GITHUB_TOKEN` with read-only
 access. Runtime Tasks clone the public candidate repository without a stored
 Git credential. Qualification creates no GitHub branch or PR.
 
 | Check | Required coverage |
 | --- | --- |
-| Codex, OpenCode, Claude, and Copilot | Live workspace reads, API results, Session continuation, and Task forks |
-| Runtime lifecycle | Concurrency, cancellation, timeout, controller restart, pool replacement, and scale-to-zero recovery |
-| Isolation and deployment | Unsafe workspace rejection, read policy, publisher broker configuration, and exact deployed image digests |
+| Codex, OpenCode, Claude, and Copilot | A workspace read with a scripted model and its API result, on the digest-pinned runtime image |
+| Isolation and deployment | Unsafe workspace rejection, publisher broker configuration, and exact deployed image digests |
 | Branch publication | Publisher and service tests against real temporary Git repositories, including exact-head pushes, conflicts, retries, and cleanup |
 | PR reconciliation | Local GitHub API test servers exercise creation, reuse, head changes, ambiguous responses, Session ownership, and credential boundaries |
 | Release artifacts | The exact packaged chart and image digests, durable results after controller replacement, no Task replay, and opposite-mode rejection |
@@ -155,14 +162,12 @@ Configure the `release-qualification` environment in `orka-agents/orka`:
 - Select deployment branches by name. Allow `main` and each approved release
   branch by its exact name. Do not allow tags, PR refs, or arbitrary branches.
 - Require a trusted reviewer and disable administrator bypass. This approval
-  protects model-provider credentials from unreviewed release-branch workflows.
+  keeps unreviewed release-branch workflows from qualifying a candidate.
   Keep Prevent self-review disabled if the trusted release maintainer also
   dispatches and approves the run. Final publication has a separate approval
   in the `release` environment.
-- Supply `COPILOT_GITHUB_TOKEN` for model-provider authentication through Vekil.
-  The existing repository secret can supply it. Qualification does not use it
-  for Git publication, and the local publication tests receive no workflow,
-  provider, or canary tokens.
+- Supply no model-provider secret: qualification runs on aimock, and the local
+  publication tests receive no workflow, provider, or canary tokens.
 
 GitHub creates a [token for each job](https://docs.github.com/en/actions/concepts/security/github_token)
 and expires it when the job ends. Do not save it as an environment secret.

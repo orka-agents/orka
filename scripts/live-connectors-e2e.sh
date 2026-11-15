@@ -37,6 +37,7 @@ controller_pod_names() {
 
 . "${script_dir}/lib/kind-local-registry.sh"
 . "${script_dir}/lib/e2e-admission-tls.sh"
+. "${script_dir}/lib/deployment-rollout.sh"
 
 cluster="${KIND_CLUSTER:-orka-live-connectors-e2e}"
 namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -328,7 +329,8 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_CONNECTOR_CALLBACK_BASE_URL="${callback_base}" \
   ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS=i-understand-tokens-may-leave-the-cluster \
   ORKA_OIDC_JWKS_URL- ORKA_CONTEXT_TOKEN_PROFILE- ORKA_CONTEXT_TOKEN_ISSUER- ORKA_CONTEXT_TOKEN_AUDIENCE-
-kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
+rollout_timeout="$(deployment_rollout_timeout kubectl -n "${namespace}" "${deployment}")"
+kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout="${rollout_timeout}"
 # The leak check at the end reads these pods' logs. A pod replaced mid-lane
 # would take its logs with it, so the set is recorded now and must not change.
 controller_pods="$(controller_pod_names)"

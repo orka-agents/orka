@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -63,8 +64,53 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	}
 	systemPrompt, ok := properties["systemPrompt"].(map[string]any)
 	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
-	if !ok || !strings.Contains(description, "Required unless runtime.type is opencode") {
+	if !ok || !strings.Contains(description, "Role instructions") {
 		t.Fatalf("systemPrompt schema = %#v, want OpenCode omission guidance", systemPrompt)
+	}
+}
+
+func TestCreateAgentTool_ParametersRequireNonblankAllowedAgentNames(t *testing.T) {
+	tool := NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)
+	assertCreateAgentAllowedAgentNameSchema(t, tool.Parameters())
+}
+
+func assertCreateAgentAllowedAgentNameSchema(t *testing.T, params json.RawMessage) {
+	t.Helper()
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("failed to unmarshal parameters schema: %v", err)
+	}
+	for _, key := range []string{jsonSchemaPropertiesField, "coordination", jsonSchemaPropertiesField, "allowedAgents", itemsField, jsonSchemaPropertiesField, nameField} {
+		child, ok := schema[key].(map[string]any)
+		if !ok {
+			t.Fatalf("allowed agent name schema missing object %q: %#v", key, schema)
+		}
+		schema = child
+	}
+	if schema[jsonSchemaTypeField] != jsonSchemaTypeString || schema[jsonSchemaMinLengthField] != float64(1) {
+		t.Errorf("allowed agent name schema = %#v, want string with minLength 1", schema)
+	}
+	pattern, _ := schema[jsonSchemaPatternField].(string)
+	if pattern != `\S` {
+		t.Fatalf("allowed agent name pattern = %q, want %q", pattern, `\S`)
+	}
+	nonblank := regexp.MustCompile(pattern)
+	for _, tc := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "empty", value: "", valid: false},
+		{name: "spaces", value: "   ", valid: false},
+		{name: "mixed whitespace", value: " \t\r\n ", valid: false},
+		{name: "agent name", value: "coder", valid: true},
+		{name: "padded agent name", value: " coder \t", valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nonblank.MatchString(tc.value); got != tc.valid {
+				t.Errorf("allowed agent name pattern matches %q = %t, want %t", tc.value, got, tc.valid)
+			}
+		})
 	}
 }
 
@@ -455,11 +501,6 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 			runtimeType: corev1alpha1.AgentRuntimeCopilot,
 		},
 		{
-			name:        "legacy secretRef is not retained",
-			runtimeArgs: `{"type":"claude","secretRef":"missing-legacy-secret"}`,
-			runtimeType: corev1alpha1.AgentRuntimeClaude,
-		},
-		{
 			name:        "runtime type is normalized",
 			runtimeArgs: `{"type":"  claude  "}`,
 			runtimeType: corev1alpha1.AgentRuntimeClaude,
@@ -511,31 +552,28 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 	}
 }
 
-func TestCreateAgentTool_Execute_DefaultsHarnessV1Contract(t *testing.T) {
+func TestCreateAgentToolRejectsRemovedRuntimeInputs(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(parentTask())
-	result, err := NewCreateAgentTool(k8sClient, executionmode.HarnessV1).Execute(
-		context.Background(),
-		json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":{"type":"codex"}}`),
-	)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var createdResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &createdResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-	created := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: createdResult.AgentName, Namespace: createdResult.Namespace,
-	}, created); err != nil {
-		t.Fatalf("failed to get Agent: %v", err)
-	}
-	if got := created.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV1 {
-		t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV1)
+	for _, input := range []string{
+		`{"type":"codex","contractVersion":"orka.harness.v1"}`,
+		`{"type":"codex","contractVersion":"harness-v1"}`,
+		`{"type":"codex","secretRef":"removed-reference"}`,
+	} {
+		k8sClient := newFakeClient(parentTask())
+		_, err := NewCreateAgentTool(k8sClient, executionmode.HarnessV2).Execute(
+			t.Context(), json.RawMessage(`{"role":"coder","model":{"name":"test-model"},"runtime":`+input+`}`),
+		)
+		if err == nil {
+			t.Fatal("removed runtime input was accepted")
+		}
+		var agents corev1alpha1.AgentList
+		if err := k8sClient.List(t.Context(), &agents); err != nil {
+			t.Fatal(err)
+		}
+		if len(agents.Items) != 0 {
+			t.Fatal("rejected runtime input created an Agent")
+		}
 	}
 }
 
@@ -569,7 +607,6 @@ func TestNormalizedCreateAgentModelAcceptsQualifiedIDWithNestedSlashes(t *testin
 	got, err := normalizedCreateAgentModel(
 		&RuntimeArgs{Type: string(corev1alpha1.AgentRuntimeOpencode)},
 		&ModelArgs{Name: "openrouter/anthropic/claude-sonnet-4", ContextWindow: &contextWindow, MaxTokens: &maxTokens},
-		executionmode.HarnessV2,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -646,7 +683,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.
 	}
 }
 
-func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestCreateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(`{
@@ -655,8 +692,8 @@ func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 		"model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
 		"runtime":{"type":"opencode"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "does not support systemPrompt") {
-		t.Fatalf("Execute() error = %v, want OpenCode systemPrompt rejection", err)
+	if err != nil {
+		t.Fatalf("native OpenCode prompt: %v", err)
 	}
 }
 
@@ -738,12 +775,10 @@ func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 }
 
 func TestCreateAgentModelRequiredForBuiltInRuntimesInHarnessV2(t *testing.T) {
-	if _, err := normalizedCreateAgentModel(&RuntimeArgs{Type: "codex"}, nil, executionmode.HarnessV2); err == nil || !strings.Contains(err.Error(), "model.name is required") {
+	if _, err := normalizedCreateAgentModel(&RuntimeArgs{Type: "codex"}, nil); err == nil || !strings.Contains(err.Error(), "model.name is required") {
 		t.Fatalf("harness v2 err = %v, want the model requirement mirroring admission", err)
 	}
-	if _, err := normalizedCreateAgentModel(&RuntimeArgs{Type: "codex"}, nil, executionmode.HarnessV1); err != nil {
-		t.Fatalf("harness v1 err = %v, want no model requirement", err)
-	}
+
 }
 
 func TestCreateAgentToolExecuteInheritsHarnessV2RuntimeModel(t *testing.T) {

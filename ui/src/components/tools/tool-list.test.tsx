@@ -139,6 +139,47 @@ describe('ToolList', () => {
     })
   })
 
+  it('built-in tools report no availability status instead of a fixed "Available"', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({
+          items: [
+            { name: 'web_search', builtin: true, description: 'Search the web' },
+          ],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('web_search')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Available')).not.toBeInTheDocument()
+    expect(screen.getByTitle('Built-in tools have no availability check')).toBeInTheDocument()
+  })
+
+  it('exposes the full description of a truncated cell as a tooltip', async () => {
+    const description = 'A very long description that the table truncates to a single line of text'
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({
+          items: [{ name: 'long-tool', namespace: 'default', builtin: false, description, available: true }],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText(description)).toBeInTheDocument()
+    })
+    expect(screen.getByText(description)).toHaveAttribute('title', description)
+    // The cap only widens from xl, so every column fits beside the sidebar at 1024px.
+    expect(screen.getByText(description)).toHaveClass('truncate', 'max-w-48', 'xl:max-w-xs')
+    expect(screen.getByText(description)).not.toHaveClass('max-w-xs')
+  })
+
   it('custom tools show "Custom" badge', async () => {
     server.use(
       http.get('/api/v1/tools', () =>

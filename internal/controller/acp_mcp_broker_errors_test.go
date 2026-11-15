@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,9 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const mcpUpstreamPrivateDiagnostic = "private-upstream-diagnostic-must-not-reach-agent"
@@ -319,4 +322,42 @@ func newMCPExecutionErrorTestBroker(
 		Effects: effects,
 	}
 	return broker, request
+}
+
+// A missing or unusable linked account stops the call before anything is
+// sent, so the broker returns Orka's reason, which names the fix, as a tool
+// result instead of an opaque failed call.
+func TestACPMCPToolExecutionResultReportsAConnectionTheRequesterMustLink(t *testing.T) {
+	descriptor := harnessv2.MCPToolDescriptor{Name: "azure_arm", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly}
+	refusal := &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotLinked, Provider: "azure", DisplayName: "Azure", Namespace: "team-a"}
+	reason := refusal.Error()
+	err := &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: fmt.Errorf("resolve outbound access policy: %w", refusal)}
+	result, resultErr := acpMCPToolExecutionResult(context.Background(), descriptor, "", err)
+	// The refusal is typed, so approval settlement can trust that nothing
+	// was sent; a direct call gets its result.
+	typed, ok := errors.AsType[*acpMCPRefusedWithoutEffect](resultErr)
+	if !ok || string(typed.Result) != string(result) || typed.Code != harnessv2.MCPToolErrorCodeConnectionRequired || typed.Reason != reason {
+		t.Fatalf("acpMCPToolExecutionResult() error = %v, want the typed refusal", resultErr)
+	}
+	var got struct {
+		IsError bool   `json:"isError"`
+		Code    string `json:"code"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &got); err != nil || !got.IsError || got.Code != harnessv2.MCPToolErrorCodeConnectionRequired || got.Error != reason {
+		t.Fatalf("acpMCPToolExecutionResult() = %s", result)
+	}
+}
+
+// A registry argument rejection happens before the tool runs, so the broker
+// returns it as a tool result the agent can correct, not a failed call.
+func TestACPMCPToolExecutionResultReportsArgumentErrors(t *testing.T) {
+	descriptor := harnessv2.MCPToolDescriptor{Name: "wait_for_tasks", Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly}
+	result, err := acpMCPToolExecutionResult(context.Background(), descriptor, "", &tools.ToolArgumentError{Field: "timeout", Want: "a whole number", Got: "a non-numeric string"})
+	if err != nil {
+		t.Fatalf("acpMCPToolExecutionResult() error = %v, want a tool result", err)
+	}
+	if string(result) != `{"isError":true,"code":"invalid_arguments","error":"invalid arguments: timeout must be a whole number, got a non-numeric string"}` {
+		t.Fatalf("acpMCPToolExecutionResult() = %s", result)
+	}
 }

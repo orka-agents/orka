@@ -320,8 +320,8 @@ func TestACPAgentConfigurationAndNativePolicyRotateOrReject(t *testing.T) {
 		ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("c", 64)},
 		configuration,
 	)
-	if err == nil || !strings.Contains(err.Error(), "cannot enforce Agent systemPrompt") {
-		t.Fatalf("unenforceable Copilot system prompt error = %v", err)
+	if err != nil {
+		t.Fatalf("Copilot native instruction plan: %v", err)
 	}
 }
 

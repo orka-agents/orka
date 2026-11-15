@@ -327,6 +327,7 @@ func (r *ProviderResolver) buildProvider(providerCRD *corev1alpha1.Provider, api
 	}
 	if providerCRD.Spec.Azure != nil {
 		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
+		providerConfig.AzureDeploymentName = providerCRD.Spec.Azure.DeploymentName
 	}
 
 	provider, err := llm.NewProvider(string(providerCRD.Spec.Type), providerConfig)
