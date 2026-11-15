@@ -394,7 +394,7 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
-`orka dashboard` creates a ServiceAccount token, or uses `--token` or `--token-file`, and opens the dashboard signed in with it, passing the token in the URL fragment. It ignores `ORKA_TOKEN` and the config file's token. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
+`orka dashboard` creates a ServiceAccount token, or uses `--token` or `--token-file`, and opens the dashboard signed in with it, passing the token in the URL fragment. It ignores `ORKA_TOKEN` and the config file's token. It opens `--server`, `ORKA_SERVER` or the config file's server, else `http://localhost:8080`; unlike other commands, it does not find the server through the kubeconfig. The ServiceAccount is in `--namespace`, `ORKA_NAMESPACE` or the config file's namespace, else `default`. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash
 orka dashboard --service-account orka-client --namespace orka-system

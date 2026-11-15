@@ -1710,3 +1710,32 @@ func TestDashboardIgnoresEnvAndConfigToken(t *testing.T) {
 	require.NoError(t, executeCLI(t, "dashboard", "--server", "http://dashboard.invalid"))
 	require.Equal(t, "http://dashboard.invalid/login#token=minted-token", opened)
 }
+
+// orka dashboard has its own --token, whose help does not recommend the
+// ORKA_TOKEN it ignores, and its help says where it differs from other
+// commands. -t still sets the token.
+func TestDashboardHelpMatchesWhatItReads(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := newRootCmd()
+	dashboard, _, err := root.Find([]string{"dashboard"})
+	require.NoError(t, err)
+	flag := dashboard.Flags().Lookup("token")
+	require.NotNil(t, flag, "dashboard should declare its own --token")
+	require.Equal(t, "t", flag.Shorthand)
+	require.NotContains(t, flag.Usage, "prefer --token-file or "+envToken)
+	require.Nil(t, dashboard.InheritedFlags().Lookup("token"))
+	require.Contains(t, dashboard.Long, "does not use "+envToken)
+	require.Contains(t, dashboard.Long, "does not find the server through the kubeconfig")
+	require.Contains(t, dashboard.Long, "else \""+defaultNamespace+"\"")
+
+	stubDashboardProbe(t)
+	var opened string
+	origOpen := openBrowserFunc
+	openBrowserFunc = func(u string) error {
+		opened = u
+		return nil
+	}
+	t.Cleanup(func() { openBrowserFunc = origOpen })
+	require.NoError(t, executeCLI(t, "dashboard", "--server", "http://dashboard.invalid", "-t", "short-token"))
+	require.Equal(t, "http://dashboard.invalid/login#token=short-token", opened)
+}
