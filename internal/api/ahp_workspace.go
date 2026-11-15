@@ -42,6 +42,8 @@ import (
 // follows.
 const (
 	ahpWorkspaceContainer = "workspace"
+	// ahpWorkspaceVolume is the volume holding the checkouts.
+	ahpWorkspaceVolume    = "workspace"
 	ahpWorkspaceRoot      = "/workspace"
 	ahpWorktreeRoot       = "/workspace/worktrees"
 	ahpWorkspaceComponent = "ahp-workspace"
@@ -171,10 +173,10 @@ func (w *ahpWorkspaces) podSpec(principal ahphost.Principal) *corev1.Pod {
 					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
 					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 				},
-				VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: ahpWorkspaceRoot}, {Name: "tmp", MountPath: "/tmp"}},
+				VolumeMounts: []corev1.VolumeMount{{Name: ahpWorkspaceVolume, MountPath: ahpWorkspaceRoot}, {Name: "tmp", MountPath: "/tmp"}},
 			}},
 			Volumes: []corev1.Volume{
-				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &workspaceLimit}}},
+				{Name: ahpWorkspaceVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &workspaceLimit}}},
 				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpLimit}}},
 			},
 		},

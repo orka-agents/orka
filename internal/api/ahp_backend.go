@@ -294,7 +294,7 @@ type ahpProject struct {
 func (p ahpProject) wire() map[string]any {
 	project := map[string]any{
 		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": true, "origin": "cloned",
-		"remoteUrl": p.URL, "status": "ready",
+		"remoteUrl": p.URL, apiFieldStatus: "ready",
 	}
 	if p.DefaultBranch != "" {
 		project["defaultBranch"] = p.DefaultBranch
