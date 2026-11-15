@@ -1110,3 +1110,35 @@ func TestGitHubSignInIsRateLimitedBeforeTheTokenCheck(t *testing.T) {
 		t.Fatalf("a refused attempt asked GitHub: %d checks", got)
 	}
 }
+
+// Renewal spends the App's GitHub rate limit and returns a session that can
+// renew again: a person's chained renewals are limited as sign-ins are,
+// before anything is asked of GitHub.
+func TestSessionRenewalsAreRateLimited(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	_, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+	h.handlers.signInLimiter = newGatewayIngressLimiterWithLimits(100, 100, 0.001, 2, 16, time.Minute)
+	for i := range 2 {
+		if err := h.asSession(session.Token); err != nil {
+			t.Fatal(err)
+		}
+		resp, raw := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("renewal %d = %d %s", i+1, resp.StatusCode, raw)
+		}
+		if err := json.Unmarshal(raw, &session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.asSession(session.Token); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("third chained renewal = %d %s, want 429", resp.StatusCode, raw)
+	}
+	if resp.Header.Get(fiber.HeaderRetryAfter) == "" {
+		t.Fatal("a refused renewal says when to retry")
+	}
+}

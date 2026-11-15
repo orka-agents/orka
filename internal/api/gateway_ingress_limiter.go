@@ -28,7 +28,8 @@ const (
 // refresh token yields, and the token custody already holds, and revokes a
 // minted token it does not keep. The global rate allows at most 900 sign-ins,
 // 3,600 such calls, an hour, plus its burst, however many clients call; a
-// person signs in rarely, so one client gets a few attempts a minute.
+// person signs in rarely, so one client gets a few attempts a minute. Session
+// renewals, which make one such call, share the limit, keyed by the person.
 const (
 	githubSignInGlobalRate  = rate.Limit(0.25)
 	githubSignInGlobalBurst = 30

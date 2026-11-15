@@ -89,6 +89,9 @@ context-token subjects. A GitHub session also owns Connections, as issuer
 - Before a session expires, the CLI renews it at `POST /api/v1/auth/session/renew`. Orka
   refreshes the person's GitHub token from custody and checks membership again. A person
   no longer in an allowed org or team cannot renew; they sign in again, and are refused.
+  Renewals share the sign-in rate limit, per person and overall, before Orka asks GitHub
+  anything: a renewed session can renew again, so chained renewals could otherwise spend
+  the App's GitHub rate limit.
 - The agent host's token refresh under ADR 0036, at most every eight hours, checks
   membership too. If it is gone, the controller handles it as a disconnect: it stops the
   host and keeps its volume.

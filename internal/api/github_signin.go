@@ -310,6 +310,13 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	if cfg.Credentials == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session renewal is not available")
 	}
+	// Renewal spends the App's GitHub rate limit too, and returns a session
+	// that can renew again, so a person's renewals, concurrent or chained,
+	// share the sign-in limit: one person's limit, and the overall one.
+	if h.signInLimiter != nil && !h.signInLimiter.AllowClientFirst("renew\x00"+ui.Issuer+"\x00"+ui.Subject, time.Now()) {
+		c.Set(fiber.HeaderRetryAfter, "10")
+		return fiber.NewError(fiber.StatusTooManyRequests, "too many session renewals; try again shortly")
+	}
 	held, err := cfg.Credentials.HostCredential(ctx, h.watchNamespace, name, sessionRenewHorizon)
 	if errors.Is(err, credential.ErrHostLinkUnavailable) {
 		return fiber.NewError(fiber.StatusUnauthorized, "your GitHub link is gone; sign in again")
