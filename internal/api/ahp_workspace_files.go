@@ -129,8 +129,13 @@ func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string
 
 // ahpStampsScript prints stat's "size/mtime/name" for at most $3 files under
 // $1, to depth $2, once ahpInWorkspace has checked $1. -H follows $1 itself
-// when it is a symlink, to the target checked, and no symlink below it.
-const ahpStampsScript = `[ -e "$p" ] || exit 3; find -H "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%s/%y/%n' -- "$f"; done`
+// when it is a symlink, to the target checked, and no symlink below it. A
+// scan find could not finish, such as one below an unreadable directory,
+// fails: its files would otherwise read as deleted. find stopped by head at
+// the limit exits on a signal, above 128, and is not a failure.
+const ahpStampsScript = `[ -e "$p" ] || exit 3; t=$(mktemp) || exit 1; trap 'rm -f "$t"' EXIT; ` +
+	`{ find -H "$1" -maxdepth "$2" -name .git -prune -o -type f -print; echo "$?" >"$t"; } | head -n "$3" | ` +
+	`while IFS= read -r f; do stat -c '%s/%y/%n' -- "$f"; done; s=$(cat "$t"); [ "$s" = 0 ] || [ "$s" -gt 128 ] || exit 4`
 
 // ahpParseStamps reads stat's "size/mtime/name" lines into each file's stamp.
 // The modification time is stat's %y, with fractional seconds where the

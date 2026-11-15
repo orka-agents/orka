@@ -202,6 +202,38 @@ func TestAHPStampsFollowAWatchedSymlink(t *testing.T) {
 	require.Len(t, stamps, 1, "only the watched target's own file: %s", out)
 }
 
+// A watch scan that find could not finish fails, so its unread files are not
+// reported deleted; one stopped at the file limit does not.
+func TestAHPStampsFailAnIncompleteScan(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find is not installed")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads unreadable directories")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(name), 0o600))
+	}
+	stamps := func(limit string) ([]byte, error) {
+		return exec.Command("/bin/sh", "-c", ahpInWorkspaceUnder(root)+ahpStampsScript, "sh", root, "64", limit).CombinedOutput()
+	}
+	out, err := stamps("1")
+	if err != nil && strings.Contains(string(out), "stat") {
+		t.Skip("stat does not take -c here")
+	}
+	require.NoError(t, err, "a scan stopped at the limit succeeds: %s", out)
+	require.Len(t, ahpParseStamps(out), 1)
+
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(filepath.Join(locked, "inner"), 0o755))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	out, err = stamps("100")
+	require.Error(t, err, "a scan below an unreadable directory fails: %s", out)
+}
+
 // A file read from the workspace is redacted for the person's git tokens as
 // terminal output is, to its very end: a shell could otherwise copy a token
 // into a file and read it back here.
