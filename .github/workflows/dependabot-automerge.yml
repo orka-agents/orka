@@ -80,7 +80,7 @@ jobs:
           # newest ones, whoever opened them.
           list_dependabot_prs() {
             gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
-              --jq '.[] | select(.user.login == "dependabot[bot]" and .draft == false) | .number'
+              --jq '.[] | select((.user.login == "dependabot[bot]" or .user.login == "app/dependabot") and .draft == false) | .number'
           }
 
           case "$EVENT_NAME" in
