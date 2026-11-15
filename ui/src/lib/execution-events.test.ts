@@ -287,6 +287,15 @@ describe('model telemetry snapshots', () => {
     expect(selected.map((event) => event.id)).toEqual(['new'])
   })
 
+  it('drops native usage updates that carry no event-level model or tokens', () => {
+    const selected = latestModelUsageEvents([
+      { ...base, id: 'usage', seq: 1, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 10 } } },
+      { ...base, id: 'completion', seq: 2, type: 'ModelRequestCompleted', model: 'gpt-4.1', inputTokens: 10, outputTokens: 4 },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['completion'])
+    expect(selected.reduce((sum, event) => sum + (event.inputTokens ?? 0) + (event.outputTokens ?? 0), 0)).toBe(14)
+  })
+
   it('merges partial cumulative usage fields within one harness prompt', () => {
     const selected = latestModelUsageEvents([
       {

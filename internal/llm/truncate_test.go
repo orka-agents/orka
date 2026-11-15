@@ -508,3 +508,51 @@ func TestExtractDroppedSummary(t *testing.T) {
 		}
 	})
 }
+
+// TestTruncateMessagesKeepsCutWhileGrowing checks that a growing conversation
+// sends the same prefix step after step, so a provider's prompt cache matches,
+// and moves its cut only once per quarter budget of growth.
+func TestTruncateMessagesKeepsCutWhileGrowing(t *testing.T) {
+	const budget = 400
+	conversation := make([]Message, 0, 201)
+	conversation = append(conversation, Message{Role: "user", Content: "first"})
+	for i := range 200 {
+		conversation = append(conversation, Message{Role: "user", Content: fmt.Sprintf("message %03d %s", i, strings.Repeat("x", 28))}) // ~10 tokens
+	}
+
+	var previous []Message
+	moves, steps := 0, 0
+	for n := 60; n <= len(conversation); n++ {
+		got := TruncateMessages(conversation[:n], budget)
+		tokens := 0
+		for _, m := range got {
+			tokens += estimateMessageTokens(m)
+		}
+		if tokens > budget {
+			t.Fatalf("%d messages: kept %d tokens, budget %d", n, tokens, budget)
+		}
+		if previous != nil {
+			steps++
+			if !isPrefix(previous, got) {
+				moves++
+			}
+		}
+		previous = got
+	}
+	// 140 steps of ~10 tokens is ~1400 tokens of growth: about 14 quarter-budget moves.
+	if moves == 0 || moves > steps/5 {
+		t.Fatalf("cut moved %d times in %d steps", moves, steps)
+	}
+}
+
+func isPrefix(prefix, messages []Message) bool {
+	if len(prefix) > len(messages) {
+		return false
+	}
+	for i := range prefix {
+		if prefix[i].Role != messages[i].Role || prefix[i].Content != messages[i].Content {
+			return false
+		}
+	}
+	return true
+}

@@ -63,9 +63,8 @@ acp_report_update '
   | .checks |= with_entries(.value = true)
   | .checks.publication = true | .checks.credentialsFrozen = true | .checks.publisherSecretReadDenied = true
   | .runtime = {
-      providers: (["codex","opencode","claude","copilot"] | map({key:.,value:{read:true,continuation:true,result:true,fork:true}}) | from_entries),
-      checks: (["unsafeWorkspace","concurrency","timeout","cancellation","controllerRestart","poolReplacement","scaleToZeroRecovery","opencodeReadPolicy"]
-        | map({key:.,value:true}) | from_entries)}
+      providers: (["codex","opencode","claude","copilot"] | map({key:.,value:{read:true,result:true}}) | from_entries),
+      checks: {unsafeWorkspace:true}}
   | .publicationTests = {candidateSHA:.candidateSHA,status:"passed",exitCode:0,failedEvents:0,
       suites:($required | with_entries(.value = {passed:true,testCount:(.value | length),passedTests:.value}))}
   | .canary = {path:"canary.txt",expectedCommitBytesMatched:true,remoteBytesMatched:true,singleAddedFile:true}
@@ -193,17 +192,9 @@ del(.publicationTests)
 .publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passed = false
 .publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passedTests |= .[1:]
 .publicationTests.suites["github.com/orka-agents/orka/internal/publisher/service"].passedTests |= .[1:]
-.runtime.checks.scaleToZeroRecovery = false
-.runtime.checks.controllerRestart = false
-.runtime.checks.poolReplacement = false
-.runtime.checks.cancellation = false
-.runtime.checks.timeout = false
-.runtime.checks.concurrency = false
 .runtime.checks.unsafeWorkspace = false
-.runtime.checks.opencodeReadPolicy = false
-.runtime.providers.codex.fork = false
+.runtime.providers.codex.read = false
 .runtime.providers.claude.result = false
-.runtime.providers.opencode.continuation = false
 del(.runtime.providers.copilot)
 .checks.publisherBrokeredAuthority = false
 .checks.baseUnchanged = false

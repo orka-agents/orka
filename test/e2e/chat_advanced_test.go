@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,14 +65,15 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 	// --- Test 1: JSON response mode ---
 
 	It("should return a JSON response when Accept header is application/json", func() {
+		const marker = "[e2e:chat-advanced-json]"
 		model := e2eOpenAIModel
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
 
 		By("sending a chat message with Accept: application/json")
-		chatBody := fmt.Sprintf(`{"message":"What is 2+2? Reply with just the number.","provider":"%s","model":"%s"}`,
-			providerName, model)
+		chatBody := fmt.Sprintf(`{"message":"What is 2+2? Reply with just the number. %s","provider":"%s","model":"%s"}`,
+			marker, providerName, model)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -105,6 +105,14 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 
 		Expect(result).To(HaveKey("message"), "Response should have a 'message' field")
 		Expect(result).To(HaveKey("sessionId"), "Response should have a 'sessionId' field")
+
+		if e2eMockOpenAI {
+			By("verifying the scripted answer came from a single model call")
+			Expect(result["message"]).To(Equal("4"))
+			Expect(result).NotTo(HaveKey("toolCalls"))
+			Expect(result["usage"]).To(HaveKeyWithValue("llmCalls", BeNumerically("==", 1)))
+			expectMockLLMServed(marker, 30*time.Second)
+		}
 	})
 
 	// --- Test 2: Chat with agentRef ---
@@ -139,7 +147,8 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("sending a chat message with agentRef")
-		chatBody := fmt.Sprintf(`{"message":"Say hello in one word.","agentRef":"%s"}`, agentName)
+		const marker = "[e2e:chat-advanced-agent-ref]"
+		chatBody := fmt.Sprintf(`{"message":"Say hello in one word. %s","agentRef":"%s"}`, marker, agentName)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -156,23 +165,20 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 		By("reading SSE events from agentRef chat")
-		scanner := bufio.NewScanner(resp.Body)
-		var events []string
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "event:") {
-				eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-				events = append(events, eventType)
-				if eventType == "done" {
-					break
-				}
-			}
-		}
+		sseEvents := readChatSSEEvents(resp.Body)
+		events := chatSSEEventNames(sseEvents)
 
 		_, _ = fmt.Fprintf(GinkgoWriter, "AgentRef chat SSE events: %v\n", events)
 
 		Expect(events).To(ContainElement("message"), "Should receive 'message' events in stream")
 		Expect(events).To(ContainElement("done"), "Should receive 'done' event in stream")
+
+		if e2eMockOpenAI {
+			By("verifying the Agent's provider and model served the scripted answer")
+			Expect(chatSSEMessageText(sseEvents)).To(Equal("Hello"))
+			served := expectMockLLMServed(marker, 30*time.Second)
+			Expect(served[0].Body.Model).To(Equal(model), "agentRef should select the Agent's model")
+		}
 	})
 
 	// --- Test 3: Management tools - create_agent via chat ---
@@ -184,6 +190,7 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 		}
 
 		createdAgentName := "e2e-chat-created-agent"
+		const marker = "[e2e:chat-advanced-create-agent]"
 
 		DeferCleanup(func() {
 			cmd := exec.Command("kubectl", "delete", "agent", createdAgentName,
@@ -193,11 +200,11 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 
 		By("sending a chat message with create_agent tool")
 		chatBody := fmt.Sprintf(`{
-			"message": "Create an agent called '%s' with provider '%s'. Use the create_agent tool.",
+			"message": "Create an agent called '%s' with provider '%s'. Use the create_agent tool. %s",
 			"provider": "%s",
 			"model": "%s",
 			"tools": ["create_agent"]
-		}`, createdAgentName, providerName, providerName, model)
+		}`, createdAgentName, providerName, marker, providerName, model)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/chat",
 			strings.NewReader(chatBody))
@@ -214,21 +221,20 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 		By("reading SSE stream until done")
-		scanner := bufio.NewScanner(resp.Body)
-		var events []string
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "event:") {
-				eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-				events = append(events, eventType)
-				if eventType == "done" {
-					break
-				}
-			}
-		}
+		sseEvents := readChatSSEEvents(resp.Body)
+		events := chatSSEEventNames(sseEvents)
 
 		_, _ = fmt.Fprintf(GinkgoWriter, "create_agent chat SSE events: %v\n", events)
 		Expect(events).To(ContainElement("done"), "Should receive 'done' event")
+
+		if e2eMockOpenAI {
+			By("verifying the coordinator executed the scripted create_agent call")
+			Expect(events).To(Equal([]string{"status", "tool_call", "tool_result", "message", "done"}))
+			toolResult := expectMockLLMToolResult(marker, "create_agent", 30*time.Second)
+			Expect(toolResult).To(ContainSubstring(`"success":true`))
+			Expect(toolResult).To(ContainSubstring(createdAgentName))
+			Expect(chatSSEMessageText(sseEvents)).To(Equal("Created agent e2e-chat-created-agent."))
+		}
 
 		By("verifying the agent CRD was created")
 		Eventually(func(g Gomega) {
@@ -238,5 +244,14 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(Equal(createdAgentName))
 		}, 30*time.Second, time.Second).Should(Succeed())
+
+		if e2eMockOpenAI {
+			By("verifying the created agent carries the scripted provider and chat provenance")
+			cmd := exec.Command("kubectl", "get", "agent", createdAgentName, "-n", namespace,
+				"-o", `jsonpath={.spec.providerRef.name}/{.metadata.labels.orka\.ai/created-by}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(providerName + "/chat"))
+		}
 	})
 })

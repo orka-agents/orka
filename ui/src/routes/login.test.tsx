@@ -15,11 +15,16 @@ vi.mock('@tanstack/react-router', async () => {
     ...actual,
     createFileRoute: (_path: string) => (opts: any) => ({ ...opts, path: _path }),
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: mockPathname }),
+    // Like the browser-history router, the fragment mirrors the address bar.
+    useLocation: () => ({ pathname: mockPathname, hash: window.location.hash.slice(1) }),
   }
 })
 
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 import { useAuthStore } from '@/stores/auth'
+import { captureHashToken, takeHashToken } from '@/lib/login-return'
+import { DEMO_TOKEN } from '@/demo/token'
 import { Route } from './login'
 
 describe('login route', () => {
@@ -28,6 +33,7 @@ describe('login route', () => {
     mockPathname = '/login'
     useAuthStore.setState({ token: null })
     sessionStorage.clear()
+    takeHashToken()
   })
 
   it('exports Route with component', () => {
@@ -105,13 +111,106 @@ describe('login route', () => {
   })
 
   it('handles #token=... hash fragment from CLI login', async () => {
-    const originalHash = window.location.hash
-    window.location.hash = '#token=hash-cli-token'
+    window.history.replaceState(null, '', '/login#token=hash-cli-token')
+    captureHashToken()
     const LoginPage = Route.component!
     render(<LoginPage />)
     await waitFor(() => {
       expect(useAuthStore.getState().token).toBe('hash-cli-token')
     })
-    window.location.hash = originalHash
+    expect(window.location.hash).toBe('')
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith({ href: '/' }))
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('signs in with a deep-link token and returns to the deep link', async () => {
+    let authorization: string | null = null
+    server.use(http.get('/api/v1/auth/validate', ({ request }) => {
+      authorization = request.headers.get('Authorization')
+      return new HttpResponse(null, { status: 200 })
+    }))
+    // What the root route leaves behind for /monitors/example#token=deep-link-token.
+    window.history.replaceState(null, '', '/monitors/example#token=deep-link-token')
+    captureHashToken()
+    sessionStorage.setItem('orka-login-return', '/monitors/example')
+    window.history.replaceState(null, '', '/login')
+
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+    expect(screen.getByRole('button', { name: /validating/i })).toBeDisabled()
+
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith({ href: '/monitors/example' }))
+    expect(mockNavigate).toHaveBeenCalledTimes(1)
+    expect(authorization).toBe('Bearer deep-link-token')
+    expect(useAuthStore.getState().token).toBe('deep-link-token')
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('validates a captured token before leaving, even over an existing token', async () => {
+    let release: () => void = () => {}
+    server.use(http.get('/api/v1/auth/validate', () => new Promise<Response>((resolve) => {
+      release = () => resolve(new HttpResponse(null, { status: 200 }))
+    })))
+    useAuthStore.setState({ token: 'old-token' })
+    window.history.replaceState(null, '', '/login#token=new-token')
+    captureHashToken()
+
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mockNavigate).not.toHaveBeenCalled()
+
+    release()
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith({ href: '/' }))
+    expect(useAuthStore.getState().token).toBe('new-token')
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('stays on the error when a captured token is rejected while an earlier one is stored', async () => {
+    server.use(http.get('/api/v1/auth/validate', () => new HttpResponse(null, { status: 401 })))
+    useAuthStore.setState({ token: 'old-token' })
+    window.history.replaceState(null, '', '/login#token=expired-token')
+    captureHashToken()
+
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+
+    expect(await screen.findByText('Token from CLI is invalid or expired. Please generate a new one.')).toBeInTheDocument()
+    // The rejected switch must not continue silently under the old identity.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(useAuthStore.getState().token).toBe('old-token')
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('reports a captured token the server rejects', async () => {
+    server.use(http.get('/api/v1/auth/validate', () => new HttpResponse(null, { status: 401 })))
+    window.history.replaceState(null, '', '/login#token=expired-token')
+    captureHashToken()
+
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+
+    expect(await screen.findByText('Token from CLI is invalid or expired. Please generate a new one.')).toBeInTheDocument()
+    expect(useAuthStore.getState().token).toBeNull()
+    expect(mockNavigate).not.toHaveBeenCalled()
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('signs in to the demo build without asking for a token', async () => {
+    vi.stubEnv('MODE', 'demo')
+    try {
+      const LoginPage = Route.component!
+      render(<LoginPage />)
+
+      expect(screen.queryByPlaceholderText('Paste your token here...')).not.toBeInTheDocument()
+      expect(screen.queryByText(/kubectl create token/)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to the demo' }))
+
+      expect(useAuthStore.getState().token).toBe(DEMO_TOKEN)
+      await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith({ href: '/' }))
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

@@ -6,6 +6,8 @@ interface ListAccessErrorProps {
   error: unknown
   /** Plural, human-readable resource label, e.g. "tasks". */
   resource: string
+  /** Optional way onward, e.g. a link back to the list page. */
+  action?: React.ReactNode
   className?: string
 }
 
@@ -14,7 +16,7 @@ interface ListAccessErrorProps {
  * "nothing here, create one" empty state: the token cannot see the list, so
  * the view says so instead of inviting the user to create resources.
  */
-export function ListAccessError({ error, resource, className }: ListAccessErrorProps) {
+export function ListAccessError({ error, resource, action, className }: ListAccessErrorProps) {
   const forbidden = isForbiddenError(error)
   const message = error instanceof Error ? error.message.trim() : ''
   const detail = message ? ` (${message})` : ''
@@ -26,6 +28,7 @@ export function ListAccessError({ error, resource, className }: ListAccessErrorP
         hint={forbidden
           ? `Your token lacks read permission for ${resource}${detail}.`
           : message || `The ${resource} request failed.`}
+        action={action}
       />
     </div>
   )

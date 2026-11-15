@@ -71,13 +71,6 @@ for provider in ("codex", "claude", "copilot", "opencode"):
     role = "acp-" + provider + "-runtime"
     image(role)
     values["controller"]["acpRuntime"][provider + "Image"] = images[role]
-# Supply valid v1 render inputs so the opposite-mode check tests the live mode
-# identity guard, rather than failing because v1 values were omitted.
-values["harnessV1"] = {
-    "image": image("agent-harness-wrapper"),
-    "auth": {"existingSecret": "release-chart-v1-auth"},
-    "tls": {"existingSecret": "release-chart-v1-tls"},
-}
 output.write_text(json.dumps(values) + "\n")
 PY
 }
@@ -157,7 +150,7 @@ live_acp_release_chart_assert_recovery() {
 live_acp_release_chart_assert_mode_rejection() {
   # A transport error or a missing Secret is not an immutable-mode rejection.
   [[ "$4" != "0" ]] || return 1
-  grep -Eq 'controller mode identity is missing or incompatible|controller\.mode is immutable' "$3" || return 1
+  grep -Eq 'controller\.mode must be harness-v2' "$3" || return 1
   jq -e -s 'length == 2 and .[0] == .[1]
     and (.[0].release.revision | type == "number" and . >= 1)
     and .[0].release.status == "deployed" and .[0].namespace.mode == "harness-v2"
@@ -382,7 +375,7 @@ _live_acp_release_chart_acceptance() (
     controllerPodUIDBefore:$before.controller.podUID, controllerPodUIDAfter:$after.controller.podUID}' \
     --argjson before "$(cat "${chart_work_dir}/before.json")" --argjson after "$(cat "${chart_work_dir}/after.json")" || return 1
 
-  live_acp_kind_log "Checking opposite-mode upgrade rejection without release changes"
+  live_acp_kind_log "Checking unsupported-mode upgrade rejection without release changes"
   _live_acp_release_chart_stable_state "${chart_work_dir}/mode-before.json" || return 1
   helm --kube-context "${LIVE_ACP_CONTEXT}" -n orka-system upgrade orka "${archive}" \
     --values "${chart_work_dir}/values.json" --set-string controller.mode=harness-v1 \
@@ -391,7 +384,7 @@ _live_acp_release_chart_acceptance() (
   _live_acp_release_chart_stable_state "${chart_work_dir}/mode-after.json" || return 1
   live_acp_release_chart_assert_mode_rejection "${chart_work_dir}/mode-before.json" \
     "${chart_work_dir}/mode-after.json" "${chart_work_dir}/mode-error.log" "${rc}" || {
-    live_acp_release_chart_die "opposite-mode upgrade did not fail safely with unchanged release state"
+    live_acp_release_chart_die "unsupported-mode upgrade did not fail safely with unchanged release state"
     return 1
   }
   _live_acp_release_chart_observe "${task}" "${chart_work_dir}/after.json" || return 1

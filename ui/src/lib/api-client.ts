@@ -80,7 +80,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const response = await fetch(url, { ...fetchOptions, headers })
 
   if (!response.ok) {
-    if (response.status === 401) {
+    // A 401 condemns only the token this request carried. A late answer to a
+    // request sent with no token, or with one since replaced (signing in
+    // while the previous page's requests are in flight), must not sign the
+    // new session out.
+    if (response.status === 401 && token && useAuthStore.getState().token === token) {
       useAuthStore.getState().clearToken()
     }
     const text = await response.text().catch(() => 'Unknown error')

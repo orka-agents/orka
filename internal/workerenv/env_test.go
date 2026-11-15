@@ -31,6 +31,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		BaseURL:                          "https://example.test/v1",
 		AzureAPIVersion:                  "2024-10-21",
 		Tools:                            []string{"delegate_task", "wait_for_tasks"},
+		DeprecatedMemoryTools:            []string{"recall_memory", "remember"},
 		EnforceTransactionCredentialAuth: true,
 		TransactionCredentialReadScopes:  []string{"tenant:outbound-credentials:read"},
 		EnableTelemetry:                  true,
@@ -64,6 +65,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if strings.Join(parsed.DeprecatedMemoryTools, ",") != strings.Join(env.DeprecatedMemoryTools, ",") {
+		t.Fatalf("deprecated memory tools = %#v, want %#v", parsed.DeprecatedMemoryTools, env.DeprecatedMemoryTools)
 	}
 	if !parsed.EnforceTransactionCredentialAuth ||
 		len(parsed.TransactionCredentialReadScopes) != 1 ||

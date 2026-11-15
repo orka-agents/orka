@@ -103,7 +103,7 @@ func TestAPICompletionDoesNotRetryUsagePersistenceFailure(t *testing.T) {
 			req := &llm.CompletionRequest{Model: "fixture", MaxTokens: 64, Messages: []llm.Message{{Role: "user", Content: "hello"}}}
 			if tt.nativeChat {
 				handler := &ChatHandler{}
-				_, _, err = handler.callLLMWithRetry(ctx, provider, req.Messages, "", req.Model, nil, req.MaxTokens, 0)
+				_, _, _, err = handler.callLLMWithRetry(ctx, provider, req.Messages, "", req.Model, nil, req.MaxTokens, 0)
 			} else {
 				_, err = runNonStreamingToolLoop(ctx, provider, req, req.Model, DefaultChatConfig(), nil)
 			}

@@ -100,7 +100,33 @@ func clearPortForwardCache() {
 
 // newClientFromCmd creates a client.Client using flag values resolved against config.
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
-	server, _ := cmd.Flags().GetString("server")
+	return newClientFromCmdWithServer(cmd, "")
+}
+
+// newClientFromCmdWithServer preserves credential/config resolution while using
+// a transport already selected by the caller.
+func newClientFromCmdWithServer(cmd *cobra.Command, server string) *client.Client {
+	c, _ := newClientWithTunnel(cmd, server, false)
+	return c
+}
+
+// discoverServiceFn and startPortForwardFn are replaced in tests.
+var (
+	discoverServiceFn  = discoverService
+	startPortForwardFn = startPortForward
+)
+
+// newClientWithTunnel is newClientFromCmdWithServer for a command that handles
+// interrupts itself. A port-forward this call starts normally ends on the
+// first interrupt. With ownTunnel the caller decides instead: no interrupt
+// handler is registered for the port-forward, the terminal's own interrupt
+// does not reach it, and the returned function stops it. That function does
+// nothing when no port-forward was started or ownTunnel is false.
+func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*client.Client, func()) {
+	closeTunnel := func() {}
+	if server == "" {
+		server, _ = cmd.Flags().GetString("server")
+	}
 	token, _ := cmd.Flags().GetString("token")
 	txnToken, _ := cmd.Flags().GetString("txn-token")
 	txnTokenFile, _ := cmd.Flags().GetString("txn-token-file")
@@ -158,16 +184,20 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		if stderrIsTTY {
 			fmt.Fprint(os.Stderr, "⠋ Connecting to cluster…")
 		}
-		if svcNS, svcName := discoverService(kubeconfigFlag, ns); svcName != "" {
-			localPort, pid, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
+		if svcNS, svcName := discoverServiceFn(kubeconfigFlag, ns); svcName != "" {
+			localPort, pid, cleanup, err := startPortForwardFn(kubeconfigFlag, svcNS, svcName, ownTunnel)
 			if err == nil {
-				// Register cleanup for interrupt
-				go func() {
-					c := make(chan os.Signal, 1)
-					signal.Notify(c, os.Interrupt)
-					<-c
-					cleanup()
-				}()
+				if ownTunnel {
+					closeTunnel = cleanup
+				} else {
+					// Register cleanup for interrupt
+					go func() {
+						c := make(chan os.Signal, 1)
+						signal.Notify(c, os.Interrupt)
+						<-c
+						cleanup()
+					}()
+				}
 				server = fmt.Sprintf("http://localhost:%d", localPort)
 				savePortForwardCache(&portForwardCache{
 					Port:      localPort,
@@ -201,7 +231,7 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		txnToken = string(data)
 	}
 	c.TxnToken = strings.TrimSpace(txnToken)
-	return c
+	return c, closeTunnel
 }
 
 // discoverService finds the Orka service in the cluster.
@@ -230,7 +260,10 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 
 // startPortForward starts a kubectl port-forward to the Orka service.
 // Returns the local port, the process PID, a cleanup function, and any error.
-func startPortForward(kubeconfigPath, namespace, service string) (int, int, func(), error) {
+// With isolateInterrupt the port-forward does not receive the interrupt a
+// terminal sends to the CLI's foreground process group on Ctrl-C; only the
+// cleanup function stops it.
+func startPortForward(kubeconfigPath, namespace, service string, isolateInterrupt bool) (int, int, func(), error) {
 	// Find a free port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -247,6 +280,9 @@ func startPortForward(kubeconfigPath, namespace, service string) (int, int, func
 	cmd := exec.Command("kubectl", args...)
 	cmd.Stderr = nil
 	cmd.Stdout = nil
+	if isolateInterrupt {
+		isolateFromTerminalInterrupt(cmd)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return 0, 0, nil, fmt.Errorf("start port-forward: %w", err)

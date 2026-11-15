@@ -26,9 +26,19 @@ class PrepareTests(unittest.TestCase):
                 (runtime / package).mkdir(parents=True)
                 for name in ("pyproject.toml", "README.md", "Dockerfile"):
                     (runtime / name).write_text("fixture\n")
+            (source / "runtimes/microsoft-agent-framework/Dockerfile").write_text(
+                "# syntax=docker/dockerfile:1\nFROM python:3.12-slim-bookworm\nRUN pip install ./microsoft-agent-framework\n")
             output = root / "context"
             with patch("sys.argv", ["prepare.py", "--agentkit", str(source), "--output", str(output)]):
                 prepare.main()
+            self.assertEqual((output / prepare.AGENTKIT_CONSTRAINTS).read_text(),
+                             Path(prepare.__file__).with_name(prepare.AGENTKIT_CONSTRAINTS).read_text())
+            self.assertTrue((output / "Dockerfile.agentkit-base").read_text().startswith(
+                "# syntax=docker/dockerfile:1\nFROM python:3.12-slim-bookworm\n"
+                "COPY agentkit-constraints.txt /src/agentkit-constraints.txt\n"
+                "ARG PIP_CONSTRAINT=/src/agentkit-constraints.txt\n"
+                "RUN pip install ./microsoft-agent-framework\n"
+                "RUN /opt/agentkit/bin/pip install --no-index --no-deps -r /src/agentkit-constraints.txt\n"))
             config = json.loads((output / "foundry.json").read_text())
             endpoint = urlsplit(config["hostedTarget"]["projectEndpoint"])
             self.assertEqual(endpoint.scheme, "https")
@@ -68,6 +78,15 @@ class PrepareTests(unittest.TestCase):
             finally:
                 os.umask(previous_umask)
             self.assertEqual(cluster.tls_fields, {"ca.crt", "tls.crt", "tls.key"})
+
+    def test_agentkit_constraints_wrap_one_build_stage_and_verify_installs(self):
+        for dockerfile in ("RUN pip install .\n", "FROM a AS build\nFROM b\nRUN pip install .\n"):
+            with self.assertRaises(SystemExit):
+                prepare.constrain_agentkit_dockerfile(dockerfile)
+        self.assertEqual(prepare.constrain_agentkit_dockerfile("FROM a\nRUN pip install ."),
+                         "FROM a\nCOPY agentkit-constraints.txt /src/agentkit-constraints.txt\n"
+                         "ARG PIP_CONSTRAINT=/src/agentkit-constraints.txt\nRUN pip install .\n"
+                         "RUN /opt/agentkit/bin/pip install --no-index --no-deps -r /src/agentkit-constraints.txt\n")
 
 
 if __name__ == "__main__":

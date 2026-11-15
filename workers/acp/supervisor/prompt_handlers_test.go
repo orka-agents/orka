@@ -1599,3 +1599,45 @@ func testBeginInferenceRequest(s *providerProxySession) {
 	}
 	s.inflightInference++
 }
+
+func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
+	var state promptState
+	state.appendAssistantText("Reviewing the change.", "", "msg_progress", 1<<20)
+	// codex-acp sends a /review result without a message ID.
+	state.appendAssistantText("Review: ", "", "", 1<<20)
+	state.appendAssistantText("no issues found.", "", "", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Review: no issues found." {
+		t.Fatalf("terminalResultText() = %q, want the untagged review text", got)
+	}
+	state.appendAssistantText("Final.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final." {
+		t.Fatalf("terminalResultText() = %q, want the later named message", got)
+	}
+	// A warning in the middle of a named message does not drop its start.
+	state.appendAssistantText("Warning: slow\n\n", "", "", 1<<20)
+	state.appendAssistantText(" Done.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final. Done." {
+		t.Fatalf("terminalResultText() = %q, want the whole resumed message", got)
+	}
+}
+
+func TestWorkspaceDeltaPathViolationReportsControlPathBeforeAllowlist(t *testing.T) {
+	limits := harnessv2.WorkspaceDeltaLimits{AllowedPaths: []string{"internal/**", "docs/**"}, DenyRepositoryControlPaths: true}
+	cases := []struct {
+		path string
+		want string
+	}{
+		{path: ".github/workflows/ci.yml", want: harnessv2.WorkspaceDeltaRepositoryControlPathMessage},
+		{path: "cmd/main.go", want: harnessv2.WorkspaceDeltaDisallowedPathMessage},
+		{path: "internal/x.go", want: ""},
+	}
+	for _, tc := range cases {
+		if got := workspaceDeltaPathViolation("", tc.path, limits); got != tc.want {
+			t.Errorf("workspaceDeltaPathViolation(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	limits.DenyRepositoryControlPaths = false
+	if got := workspaceDeltaPathViolation("", ".github/workflows/ci.yml", limits); got != harnessv2.WorkspaceDeltaDisallowedPathMessage {
+		t.Errorf("without control-path denial, got %q", got)
+	}
+}

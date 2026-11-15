@@ -13,6 +13,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -39,6 +40,9 @@ func resolveACPAgentSessionConfiguration(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) (harnessv2.AgentSessionConfiguration, error) {
+	if err := validateSoulRuntime(agent); err != nil {
+		return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
+	}
 	if err := validateACPAgentSkills(agent); err != nil {
 		return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
 	}
@@ -52,7 +56,14 @@ func resolveACPAgentSessionConfiguration(
 	if err != nil {
 		return harnessv2.AgentSessionConfiguration{}, err
 	}
-	return buildACPAgentSessionConfiguration(task, agent, systemPrompt)
+	soul, err := agentcontext.ResolveSoul(ctx, reader, agent)
+	if err != nil {
+		if agentcontext.IsInvalidSource(err) {
+			return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
+		}
+		return harnessv2.AgentSessionConfiguration{}, err
+	}
+	return buildACPAgentSessionConfiguration(task, agent, agentcontext.Compose(systemPrompt, soul))
 }
 
 func buildACPAgentSessionConfiguration(
@@ -267,9 +278,10 @@ func validateACPProviderSystemPrompt(provider string, configuration harnessv2.Ag
 			return fmt.Errorf("codex session configuration exceeds the safe environment limit")
 		}
 	case string(corev1alpha1.AgentRuntimeCopilot):
-		return fmt.Errorf("copilot ACP runtime cannot enforce Agent systemPrompt")
+		return acp.ValidateCopilotInstructions(configuration.SystemPrompt)
 	case string(corev1alpha1.AgentRuntimeOpencode):
-		return fmt.Errorf("opencode ACP runtime cannot enforce Agent systemPrompt")
+		// The supervisor delivers literal, protected additive instructions.
+		return nil
 	}
 	return nil
 }

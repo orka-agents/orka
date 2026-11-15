@@ -210,7 +210,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 		require.NoError(t, err)
 		event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 			Severity: "info", Content: content, CreatedAt: start.Add(time.Duration(sequence) * time.Second)}
-		_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
+		_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
 		require.NoError(t, err)
 		return event
 	}
@@ -233,7 +233,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 	s = NewStore(db, path)
 	// The event journal itself was cleaned up. The accounting identity still
 	// prevents replay of its final summary from charging the team twice.
-	_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
+	_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), get().Summary.TotalTokens)
 	require.Equal(t, "partial", get().Summary.Completeness)
@@ -271,7 +271,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 			require.NoError(t, err)
 			event := &store.ExecutionEvent{Namespace: "a", TaskName: task.uid, StreamType: "task", StreamID: task.uid,
 				SessionName: "conversation", Type: events.ExecutionEventTypeModelUsageUpdated, Severity: "info", Content: content, CreatedAt: at}
-			_, err = s.AppendExecutionEvent(t.Context(), event)
+			_, err = orkaClient(t, s).AppendExecutionEvent(t.Context(), event)
 			require.NoError(t, err)
 			journal = append(journal, event)
 		}
@@ -296,7 +296,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 		require.NoError(t, s.DeleteExecutionEvents(t.Context(), "a", "task", task))
 	}
 	for _, j := range slices.Backward(journal) {
-		_, err := s.AppendExecutionEvent(t.Context(), j)
+		_, err := orkaClient(t, s).AppendExecutionEvent(t.Context(), j)
 		require.NoError(t, err)
 	}
 	check()
@@ -348,10 +348,10 @@ func TestUsageInvalidACPCountsDoNotAbortJournal(t *testing.T) {
 					require.NoError(t, err)
 					event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 						Severity: "info", Content: encoded, CreatedAt: start.Add(time.Duration(i+1) * time.Second)}
-					_, added, err := s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err := orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.True(t, added)
-					_, added, err = s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err = orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.False(t, added)
 				}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent } from '@/components/ui/card'
 import { EventTimeline } from '@/components/events/event-timeline'
 import { useSessionEvents } from '@/hooks/use-execution-events'
@@ -75,10 +76,16 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   // The session stream sends a SessionDeleted stream_complete frame when the
   // session is gone; surface that distinctly from a task's terminal completion.
   const sessionDeleted = stream.streamComplete?.type === 'SessionDeleted'
+  // Refresh the session itself so the page stops presenting the deleted
+  // session's overview and Delete action.
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    if (sessionDeleted) queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
+  }, [sessionDeleted, sessionId, queryClient])
 
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         {sessionDeleted && (
           <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
             This session was deleted. The timeline below shows its final recorded events.

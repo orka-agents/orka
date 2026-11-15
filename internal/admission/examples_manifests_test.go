@@ -25,11 +25,9 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
-	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
 
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -45,8 +43,6 @@ func TestShippedManifestsDecodeStrictly(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	require.NoError(t, workspacev1alpha1.AddToScheme(scheme))
-	require.NoError(t, acpworkspacev1alpha1.AddToScheme(scheme))
-	require.NoError(t, fakeworkspacev1alpha1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1alpha1.AddToScheme(scheme))
 
 	admissionScheme := runtime.NewScheme()
@@ -142,6 +138,19 @@ func strictDecodeOrkaDocument(scheme *runtime.Scheme, document []byte) (runtime.
 		return nil, false, fmt.Errorf("parse apiVersion %q: %w", typeMeta.APIVersion, err)
 	}
 	gvk := groupVersion.WithKind(typeMeta.Kind)
+	// Provider schemas are served and validated by separately installed modules.
+	// Core validates its own API examples without importing a provider SDK.
+	providerKinds := map[string][]string{
+		"sandbox.workspace.orka.ai":   {"SandboxProviderConfig", "SandboxWorkspaceProfile"},
+		"substrate.workspace.orka.ai": {"SubstrateProviderConfig", "SubstrateWorkspaceProfile"},
+		"fake.workspace.orka.ai":      {"FakeProviderConfig", "FakeWorkspaceProfile"},
+	}
+	for _, kind := range providerKinds[groupVersion.Group] {
+		if groupVersion.Version == "v1alpha1" && typeMeta.Kind == kind {
+			return nil, false, nil
+		}
+	}
+
 	if clientgoscheme.Scheme.Recognizes(gvk) ||
 		(typeMeta.APIVersion == "kustomize.config.k8s.io/v1beta1" && typeMeta.Kind == "Kustomization") {
 		return nil, false, nil
@@ -249,8 +258,6 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	require.NoError(t, workspacev1alpha1.AddToScheme(scheme))
-	require.NoError(t, acpworkspacev1alpha1.AddToScheme(scheme))
-	require.NoError(t, fakeworkspacev1alpha1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1alpha1.AddToScheme(scheme))
 
 	checkedDocuments := 0

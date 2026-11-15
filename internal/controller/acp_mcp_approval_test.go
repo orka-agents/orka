@@ -24,6 +24,8 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -45,6 +47,7 @@ type mcpApprovalFixture struct {
 	request    harnessv2.MCPBrokerCallRequest
 	profile    harnessv2.RuntimeProfile
 	events     *storesqlite.Store
+	storage    *storageclient.Client
 	active     atomic.Bool
 	authorized atomic.Bool
 	count      atomic.Int32
@@ -60,6 +63,7 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	db := storesqlite.NewStore(connection, dbPath)
+	storage := approvalStorageClient(t, db)
 	epoch, err := db.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 		ExpectedVersion: 0, ExpectedEpoch: 0, NewEpoch: 1, HolderID: "controller-a",
 		RequestDigest: testControllerMCPDigest("epoch"), UpdatedAt: time.Now().UTC(),
@@ -74,7 +78,7 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 	profile.ApprovalPolicyDigest = request.Authorization.ApprovalPolicyDigest
 	profile.ProviderKind = "agentkit"
 	request.Metadata.RequestDigest, _ = harnessv2.CanonicalRequestDigest(request)
-	f := &mcpApprovalFixture{t: t, request: request, profile: profile, events: db}
+	f := &mcpApprovalFixture{t: t, request: request, profile: profile, events: db, storage: storage}
 	f.active.Store(true)
 	f.authorized.Store(true)
 	f.broker = &ACPMCPBroker{
@@ -101,7 +105,7 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 			}
 			return json.RawMessage(`{"workOrder":"simulated-1"}`), nil
 		}),
-		Effects: db, EpochMutations: &approvalTestGuard{}, ApprovalEvents: db,
+		Effects: db, EpochMutations: &approvalTestGuard{}, ApprovalEvents: storage,
 		ApprovalSecrets: k8sfake.NewClientset(), ApprovalPollInterval: 5 * time.Millisecond,
 	}
 	f.reopen = func() {
@@ -113,12 +117,20 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 			t.Fatal(err)
 		}
 		f.events = storesqlite.NewStore(connection, dbPath)
+		f.storage = approvalStorageClient(t, f.events)
 		recovered := *f.broker
 		recovered.Effects = f.events
-		recovered.ApprovalEvents = f.events
+		recovered.ApprovalEvents = f.storage
 		f.broker = &recovered
 	}
 	return f
+}
+
+// approvalStorageClient is the storage client production code reaches the
+// approval event store through; projections need its fenced task data access.
+func approvalStorageClient(t *testing.T, db *storesqlite.Store) *storageclient.Client {
+	t.Helper()
+	return storageclienttest.NewEmbedded(t, db)
 }
 
 func (f *mcpApprovalFixture) start(request harnessv2.MCPBrokerCallRequest) <-chan *httptest.ResponseRecorder {
@@ -679,7 +691,7 @@ func TestMCPApprovalPendingPromptRevocationStopsWait(t *testing.T) {
 }
 
 type approvalCancelDuringRevocationStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
@@ -699,7 +711,7 @@ func TestMCPApprovalRevocationSettlesWhenCallerContextEnds(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	storage := &approvalCancelDuringRevocationStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events, cancel: cancel}
+	storage := &approvalCancelDuringRevocationStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage, cancel: cancel}
 	f.broker.ApprovalEvents = storage
 	done := f.startContext(ctx, f.request)
 	pending := f.pending()
@@ -717,5 +729,32 @@ func TestMCPApprovalRevocationSettlesWhenCallerContextEnds(t *testing.T) {
 	values := approvals.Derive(listed, time.Time{})
 	if len(values) != 1 || values[0].Status != approvals.StatusApproved || values[0].ExecutionOutcome != "not_started" {
 		t.Fatal("caller cancellation lost the saved review decision or denial outcome")
+	}
+}
+
+func TestMCPApprovalForwardedWriteNamesTheRequest(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	request := f.request
+	request.Call.ToolName = "azure-arm:write"
+	request.Call.Arguments = json.RawMessage(`{"method":"PUT","path":"/subscriptions/s/resourceGroups/rg","query":"api-version=2021-04-01","body":{"location":"westus3","properties":{"adminPassword":"private-test-password"}}}`)
+	descriptor := request.Authorization.ToolPolicy.Tools[0]
+	descriptor.Name = request.Call.ToolName
+	descriptor.Forward = &harnessv2.MCPToolForward{
+		Protocol: harnessv2.MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com", Write: true,
+	}
+	call, _, err := f.broker.persistApprovalCall(t.Context(), request, descriptor, ACPMCPAuthenticatedTask{
+		Name: "approval-task", Namespace: request.Namespace, UID: string(request.Metadata.TaskUID),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.broker.requestToolApproval(t.Context(), call); err != nil {
+		t.Fatal(err)
+	}
+	preview := f.pending()
+	if preview.Action != "Send PUT /subscriptions/s/resourceGroups/rg via azure-arm:write" ||
+		!strings.Contains(string(preview.TargetArgsPreview), `"location":"westus3"`) ||
+		strings.Contains(string(preview.TargetArgsPreview), "private-test-password") || f.count.Load() != 0 {
+		t.Fatalf("forwarded write approval = %q", preview.Action)
 	}
 }

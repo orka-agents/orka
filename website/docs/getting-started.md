@@ -1,60 +1,29 @@
 ---
-description: "Install Orka on a Kubernetes cluster and run your first agent task."
+description: "Run your first AI task and your first coding agent on Orka, then explore the dashboard, the CLI, and chat."
 ---
 
 # Getting started
 
-Orka runs AI agents on Kubernetes. You describe work as a **Task**, and Orka runs it in
-a Pod, keeps a durable record of what happened, and gives you the result over a REST API,
-a CLI, or a built-in web dashboard.
+This guide takes you from a fresh install to a working AI Task, a coding agent reviewing a
+real repository, and the tools you will use every day.
 
-The point is that the API keys stay in the cluster. Developers get a ServiceAccount token,
-not an LLM key, and the platform team decides which models and providers are allowed.
+New to Orka? [What is Orka?](overview.md) explains the three resources you will create here —
+a **Provider** (a model and its API key), an **Agent** (a reusable configuration), and a
+**Task** (one unit of work) — and the three types of Task.
 
-## Mental model
+## Before you begin
 
-Three custom resources cover most of what you will do:
+You need:
 
-| Resource | What it is |
-| --- | --- |
-| **Provider** | An LLM backend plus the Secret holding its API key. Anthropic, OpenAI, Azure OpenAI, or any OpenAI- or Anthropic-compatible endpoint. |
-| **Agent** | A reusable configuration: which Provider and model to use, a system prompt, which tools it may call. |
-| **Task** | One unit of work. This is the thing you create to make something happen. |
-
-A Task points at an Agent; an Agent points at a Provider.
-
-There are three kinds of Task, and the difference matters because they run in different places:
-
-- **`type: ai`** — Orka's own AI worker. It runs in a per-Task Kubernetes Job, calls the
-  model, and can use built-in tools like web search and code execution.
-- **`type: agent`** — a real coding-agent CLI (Codex, Claude Code, GitHub Copilot CLI, or
-  OpenCode) running inside Orka. Orka drives the CLI over the
-  [Agent Client Protocol](https://agentclientprotocol.com), an open protocol these CLIs
-  speak, and keeps a warm pool of them (a **RuntimePool**) so Tasks start fast.
-- **`type: container`** — an arbitrary container command. No model involved. Useful for
-  build and test steps that an agent needs done. See
-  [Container tasks](guides/container-tasks.md) for the filesystem rules, which trip
-  most people up the first time.
-
-[Architecture](concepts/architecture.md) has the full component picture. When a term
-is new to you, the [Glossary](reference/glossary.md) has it.
-
-## Install
-
-Follow [Install Orka](operations/installation.md). It is one Helm command, and it ends
-with a test container task so you know the cluster side works. Come back here when that
-task reports `Succeeded`.
-
-To run your first AI task you also need either an API key for an LLM provider or a
-model server your cluster can reach.
-
-Building Orka yourself instead? See [Build from source](development/build-from-source.md),
-then continue here.
+- Orka installed. Follow [Install Orka](operations/installation.md); it is one Helm command
+  and ends with a test Task. Building Orka yourself? See
+  [Build from source](development/build-from-source.md), then continue here.
+- An API key for a model provider, or a model server your cluster can reach.
 
 ## Connect to the API
 
-The REST API authenticates with Kubernetes ServiceAccount tokens. The Helm install
-created an `orka-client` ServiceAccount with the right permissions.
+The REST API authenticates with Kubernetes ServiceAccount tokens. The Helm install created an
+`orka-client` ServiceAccount with the right permissions.
 
 Forward the API port and leave this running:
 
@@ -68,8 +37,8 @@ In a second terminal, create a client token. Every command below runs in this te
 export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
-The token lasts one hour. If the API starts answering `401`, run that command again,
-or ask for a longer one with `--duration=8h`.
+The token lasts one hour. If the API starts answering `401`, run that command again, or ask
+for a longer one with `--duration=8h`.
 
 :::warning[Namespace matters]
 Almost every command on this page needs `-n orka-system`. Orka watches exactly one
@@ -183,8 +152,13 @@ spec:
     temperature: 0.7
   systemPrompt:
     inline: "You are a helpful assistant."
+  tools:
+    - name: web_search
 EOF
 ```
+
+`web_search` is one of Orka's [built-in tools](reference/built-in-tools.md). The Agent can
+call it whenever the model decides it needs to.
 
 ### 3. Run a Task
 
@@ -223,15 +197,15 @@ Files a Task writes to its artifact directory are available the same way at
 If the Task never leaves `Pending`, see
 [Troubleshooting](operations/troubleshooting.md#my-task-stays-pending).
 
-## Running a coding agent
+## Run a coding agent {#running-a-coding-agent}
 
 A `type: agent` Task runs a real coding-agent CLI against a git repository. Orka clones the
-repo, hands the agent a working copy, and records everything it does.
+repository, hands the agent a working copy, and records everything it does.
 
 ### 1. Connect a model gateway
 
-Coding agents do not use the Provider from the previous section. They reach models
-through a gateway you run, so provider credentials never enter the agent process. Follow
+Coding agents do not use the Provider from the previous section. They reach models through
+a gateway you run, so provider credentials never enter the agent process. Follow
 [Provider proxy](operations/provider-proxy.md) once to install a gateway and connect it.
 Then confirm the proxy is ready:
 
@@ -241,10 +215,9 @@ kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-p
 
 ### 2. Create an Agent with a runtime
 
-The `model.name` must be a model your gateway lists.
-
 This uses the Codex runtime with the model the [gateway examples](operations/provider-proxy.md)
-expose. For Claude Code use `type: claude` with a Claude model your gateway lists.
+expose. The `model.name` must be a model your gateway lists. For Claude Code, use
+`type: claude` with a Claude model.
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -307,95 +280,93 @@ The first coding-agent Task starts a RuntimePool for that runtime, which pulls t
 image and takes a few minutes. Later Tasks reuse the warm pool and start in seconds. Read
 the result the same way as before, at `/api/v1/tasks/code-review/result`.
 
-## The dashboard
+To have an agent change code and open a pull request, set `workspace.intent: write` and add
+publication credentials; see [Write and publication Tasks](concepts/agent-runtimes.md#write-and-publication-task).
 
-With the [API port forwarded](#connect-to-the-api), open
+## Ask the orchestrator
+
+Chat describes the work in plain language and lets an orchestrator create and run the Tasks.
+Send one message and watch it stream its progress:
+
+```bash
+curl -N -H "Authorization: Bearer ${ORKA_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "Run a container task that prints the date, then tell me what it printed.", "namespace": "orka-system"}' \
+  http://localhost:8080/api/v1/chat
+```
+
+[Interactive chat](guides/chat.md) covers sessions, the orchestrator's tools, and its limits.
+
+## Use the dashboard {#the-dashboard}
+
+The dashboard is built into the controller but off by default. Turn it on with the Helm value
+`controller.dashboard.enabled=true` (see [Web dashboard](guides/ui.md#turn-it-on)), then,
+with the [API port forwarded](#connect-to-the-api), open
 [http://localhost:8080](http://localhost:8080) and sign in with your client token.
-The dashboard is included in Orka. See [Web dashboard](guides/ui.md).
 
-## The CLI
+Want to look around first? The [dashboard demo](pathname:///demo/)
+runs in your browser on sample data.
 
-The CLI is optional. Download the archive for your operating system and architecture
-from [GitHub Releases](https://github.com/orka-agents/orka/releases), choosing a published
-version that matches your installed Helm chart and controller. Follow
-[CLI installation](reference/cli.md#installation) to select the platform, verify the
-checksum and optional signature, and put `orka` on your `PATH`. No Go toolchain is needed.
+## Use the CLI {#the-cli}
 
-Run `orka version` to confirm that the local CLI matches your Helm/controller release:
+The `orka` CLI is optional. Download it from
+[GitHub Releases](https://github.com/orka-agents/orka/releases), choosing the version that
+matches your installed chart, and follow [CLI installation](reference/cli.md#installation) to
+verify and install it. No Go toolchain is needed. Contributors can
+[build it from source](reference/cli.md#building-from-source).
+
+Point the CLI at the forwarded API once, and every command after that uses it:
 
 ```bash
+orka config set-server http://localhost:8080
+orka config set-namespace orka-system
+kubectl -n orka-system create token orka-client | orka config set-token --file -
 orka version
-orka login                                  # reads your kubeconfig, opens a browser
-orka login --server https://orka.example.com
-orka login --token '<token>'
 ```
 
-It can pull a token from a bearer token, a token file, exec-based auth (GKE, AWS IAM), or
-an OIDC provider. With it, checking a Task and downloading its artifacts looks like this:
-
-```bash
-orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
-  task status code-review
-orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
-  task artifacts '<task-name>'
-orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
-  task download '<task-name>' '<artifact-name>'
-```
-
-`task status` keeps to the rows you need. A Task with a write-intent workspace also
-shows its delivery state and publication branch, and a failed Task shows its reason;
-`--verbose` adds the runtime details.
+Then check on the Tasks from this guide:
 
 ```console
+$ orka task list
+$ orka task result hello-task
 $ orka task status code-review
 FIELD  VALUE
 Task   code-review
 Phase  Succeeded
 ```
 
-Full command list: [CLI reference](reference/cli.md).
-
-### Building from source
-
-For contributors, run this from the root of an Orka source checkout with the
-[Go toolchain](development/development.md#prerequisites) installed:
-
-```bash
-make build-cli
-```
-
-Copy `bin/orka` to a directory on your `PATH` to use the commands above.
+`task status` keeps to the rows you need. A Task with a write-intent workspace also shows its
+delivery state and publication branch, and a failed Task shows its reason; `--verbose` adds
+the runtime details. With the dashboard turned on, `orka dashboard` opens it already signed in.
+The [CLI reference](reference/cli.md) covers authentication options, output formats, and
+every workflow.
 
 ## Next steps
 
-**Learn the pieces**
+**Do more**
 
-- [Glossary](reference/glossary.md) — the terms these docs use, defined once
-- [Architecture](concepts/architecture.md) — how a Task becomes a Pod
-- [Configuration](reference/configuration.md) — Helm values and controller flags
-- [Security](concepts/security.md) — hardening, auth, and tenancy, including
-  [stronger isolation](concepts/security.md#execution-workloads) with gVisor or Kata
+- [Agents, skills, and tools](guides/agents-skills-and-tools.md) — shape what an agent knows and can do
+- [Multi-agent coordination](guides/multi-agent-coordination.md) — one agent delegating to several
+- [Repository monitors](guides/repository-monitors.md) — review every pull request automatically
+- [Issue-to-PR automation](guides/issue-to-pr-automation.md) — from a labeled issue to a pull request
+- [Scheduled tasks](guides/scheduled-tasks.md) — run any Task on a cron schedule
+- [Container tasks](guides/container-tasks.md) — build and test steps that work the first time
 
-**Do something with it**
+**Connect your tools**
 
-- [Interactive chat](guides/chat.md) — talk to an orchestrator that creates Tasks for you
-- [Container tasks](guides/container-tasks.md) — build and test steps that actually work
-- [Multi-agent coordination](reference/multi-agent-coordination.md) — one agent delegating to several
-- [Repository monitors](guides/repository-monitors.md) — automatic PR review queues
-- [Scheduled tasks](guides/scheduled-tasks.md) — cron-driven agents
-
-**Connect your own tools**
-
-- [OpenAI-compatible API](reference/openai-compat.md) — Continue, Cursor, and similar
+- [OpenAI-compatible API](reference/openai-compat.md) — Codex, OpenCode and more
 - [Anthropic-compatible API](reference/anthropic-compat.md) — Claude Code and similar
-- [REST API](reference/api-reference.md)
+- [Gateways](guides/gateways.md) — Microsoft Teams, Telegram, and A2A
 
-**Work on Orka**
+**Understand it**
 
-- [Build from source](development/build-from-source.md)
-- [Development](development/development.md)
+- [Architecture](concepts/architecture.md) — how a Task becomes a Pod
+- [Security](concepts/security.md) — credential boundaries and hardening, including
+  [stronger isolation](concepts/security.md#execution-workloads) with gVisor or Kata
+- [Glossary](reference/glossary.md) — every term, defined once
 
 **When it breaks**
 
-- [Troubleshooting](operations/troubleshooting.md)
-- [Operations runbook](operations/runbook.md)
+- [Troubleshooting](operations/troubleshooting.md) — error messages, causes, and fixes
+- [Operations runbook](operations/runbook.md) — what to do when something looks stuck

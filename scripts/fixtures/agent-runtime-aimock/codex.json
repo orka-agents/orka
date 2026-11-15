@@ -1,0 +1,6 @@
+{
+  "fixtures": [
+    {"match": {"userMessage": "Remember the session nonce nonce-aimock-codex", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-aimock-codex. First non-empty LICENSE line: MIT License"}},
+    {"match": {"userMessage": "Remember the session nonce nonce-aimock-codex", "hasToolResult": false}, "response": {"toolCalls": [{"name": "exec_command", "arguments": {"cmd": "cat LICENSE"}}]}}
+  ]
+}

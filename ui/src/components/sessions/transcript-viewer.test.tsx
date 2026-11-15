@@ -24,6 +24,12 @@ describe('TranscriptViewer', () => {
     expect(screen.getByText('Hi there!')).toBeInTheDocument()
   })
 
+  it('wraps long unbroken message text instead of overflowing the bubble', () => {
+    const long = 'y'.repeat(400)
+    render(<TranscriptViewer transcript={JSON.stringify({ role: 'assistant', content: long })} />)
+    expect(screen.getByText(long).className).toContain('wrap-anywhere')
+  })
+
   it('skips invalid JSON lines gracefully', () => {
     const jsonl = [
       JSON.stringify({ role: 'user', content: 'Good line' }),
@@ -48,6 +54,22 @@ describe('TranscriptViewer', () => {
     expect(rows[0].className).toContain('justify-end')
     // assistant message: justify-start
     expect(rows[1].className).toContain('justify-start')
+  })
+
+  it('pads message bubbles evenly on every side', () => {
+    const jsonl = [
+      JSON.stringify({ role: 'user', content: 'User msg' }),
+      JSON.stringify({ role: 'assistant', content: 'Bot msg' }),
+    ].join('\n')
+
+    render(<TranscriptViewer transcript={jsonl} />)
+    for (const text of ['User msg', 'Bot msg']) {
+      const bubble = screen.getByText(text).closest('[data-slot="card"]') as HTMLElement
+      // The Card's own py-6 would stack on the content's p-3.
+      expect(bubble).toHaveClass('py-0')
+      expect(bubble).not.toHaveClass('py-6')
+      expect(bubble.querySelector('[data-slot="card-content"]')).toHaveClass('p-3')
+    }
   })
 
   it('shows metadata (model, tokens) when present', () => {
@@ -96,6 +118,9 @@ describe('TranscriptViewer', () => {
     expect(call.closest('details')).toHaveAttribute('open')
     expect(result.closest('details')).toHaveAttribute('open')
     expect(screen.getByText(/"namespace": "default"/)).toBeVisible()
+    // Long tool content scrolls in a named region the keyboard can reach.
+    expect(screen.getByRole('region', { name: 'Tool result list_tasks' })).toHaveAttribute('tabindex', '0')
+    expect(screen.getByRole('region', { name: 'Tool call list_tasks' })).toHaveAttribute('tabindex', '0')
     expect(screen.getByText('{"success":true,"data":[]}')).toBeVisible()
     expect(screen.getAllByText('Call ID: call-1')).toHaveLength(2)
     expect(screen.getByText('No tasks found')).toBeVisible()

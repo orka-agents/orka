@@ -30,9 +30,10 @@ Available Commands:
   config        Manage CLI configuration
   connect       Link one of your accounts to a connector provider
   connection    Manage your linked accounts
+  dashboard     Open the Orka dashboard in your browser, signed in
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
-  login         Authenticate with the Orka dashboard
+  host          See and manage your agent host for the Copilot app
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -588,7 +589,7 @@ Global Flags:
 ## `orka connect`
 
 ```text
-Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link to become ready. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
+Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link and any agent host to become ready within one timeout. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
 
 Usage:
   orka connect <provider> [flags]
@@ -598,7 +599,7 @@ Flags:
       --mode string        Link mode: readOnly or readWrite (write tools ask for approval) (default "readOnly")
       --no-open            Print the consent URL without opening a browser
       --no-wait            Return as soon as consent has started
-      --timeout duration   How long to wait for the link to become ready (default 5m0s)
+      --timeout duration   Total time to wait for the link and any agent host to become ready (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -732,6 +733,29 @@ Usage:
 Flags:
   -h, --help            help for providers
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka dashboard`
+
+```text
+Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in with it. The token goes only to the browser; other orka commands do not use it. The controller serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.
+
+Usage:
+  orka dashboard [flags]
+
+Flags:
+  -h, --help                     help for dashboard
+      --no-open                  Print the dashboard URL without opening a browser
+      --service-account string   ServiceAccount name (default "default")
+      --show-token               Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1134,19 +1158,85 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
-## `orka login`
+## `orka host`
 
 ```text
-Generate a ServiceAccount token and open the Orka dashboard in your browser.
+Your agent host runs the Copilot app's environment on Orka. Orka creates it when you link GitHub through a provider that serves agent hosts, and it appears in the Copilot app as orka-<host>.
 
 Usage:
-  orka login [flags]
+  orka host [command]
+
+Available Commands:
+  delete      Delete your agent host and its volume
+  status      Show your agent host
+  wake        Start your agent host after it idled out
 
 Flags:
-  -h, --help                     help for login
-      --no-open                  Print the login URL without opening a browser
-      --redact-token             Redact the token in printed output while preserving browser login
-      --service-account string   ServiceAccount name (default "default")
+  -h, --help   help for host
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka host [command] --help" for more information about a command.
+```
+
+## `orka host delete`
+
+```text
+Delete your agent host and its volume: its clones, worktrees and sessions are lost. While you stay linked, Orka creates a fresh host; disconnect with 'orka connection delete' to have none.
+
+Usage:
+  orka host delete [flags]
+
+Flags:
+  -h, --help   help for delete
+      --yes    Confirm deleting the host and its volume
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host status`
+
+```text
+Show your agent host
+
+Usage:
+  orka host status [flags]
+
+Flags:
+  -h, --help            help for status
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host wake`
+
+```text
+Start your agent host after it idled out
+
+Usage:
+  orka host wake [flags]
+
+Flags:
+  -h, --help   help for wake
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1358,14 +1448,13 @@ Use "orka memory proposal [command] --help" for more information about a command
 ## `orka memory proposal apply`
 
 ```text
-Apply an accepted memory proposal
+Apply an accepted memory proposal. The server records your signed-in identity as the applier.
 
 Usage:
   orka memory proposal apply <id> [flags]
 
 Flags:
-      --applied-by string   Reviewer applying the proposal
-  -h, --help                help for apply
+  -h, --help   help for apply
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1447,16 +1536,15 @@ Global Flags:
 ## `orka memory proposal review`
 
 ```text
-Review a memory proposal
+Review a memory proposal. The server records your signed-in identity as the reviewer.
 
 Usage:
   orka memory proposal review <id> [flags]
 
 Flags:
-  -h, --help              help for review
-      --note string       Review note
-      --reviewer string   Reviewer name
-      --status string     Review status (accepted or rejected)
+  -h, --help            help for review
+      --note string     Review note
+      --status string   Review status (accepted or rejected)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3915,11 +4003,13 @@ Usage:
   orka session [command]
 
 Available Commands:
+  cancel      Stop a session's current turn
   delete      Delete a session resource
   events      List session execution events
   follow      Follow session execution events
   get         Get a session resource
   list        List session resources
+  migrate     Move Codex 0.160.0 paginated conversation state
 
 Flags:
   -h, --help   help for session
@@ -3933,6 +4023,29 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka session [command] --help" for more information about a command.
+```
+
+## `orka session cancel`
+
+```text
+Stop the session's in-flight chat request, if any, and cancel its
+Pending and Running tasks. The session keeps its history and accepts the next
+message.
+
+Usage:
+  orka session cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the turn is being stopped
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session delete`
@@ -3974,6 +4087,7 @@ the filters, so "what did the agent say last?" is:
   TaskStarted
   TaskSucceeded
   TaskFailed
+  TaskCancellationRequested
   TaskCancelled
   WorkerStarted
   WorkerCompleted
@@ -3985,6 +4099,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed
@@ -4091,6 +4206,83 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate`
+
+```text
+Move Codex 0.160.0 paginated conversation state
+
+Usage:
+  orka session migrate [command]
+
+Available Commands:
+  export      Install a saved Orka checkpoint into a fresh local Codex home
+  import      Stage a stopped local Codex thread for its first Orka Task
+
+Flags:
+  -h, --help                   help for migrate
+      --max-bundle-bytes int   Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka session migrate [command] --help" for more information about a command.
+```
+
+## `orka session migrate export`
+
+```text
+Install a saved Orka checkpoint into a fresh local Codex home
+
+Usage:
+  orka session migrate export <session-name> [flags]
+
+Flags:
+      --codex-bin string     Codex 0.160.0 executable (default "codex")
+      --codex-home string    Fresh isolated destination CODEX_HOME
+      --cwd string           Existing destination working directory
+  -h, --help                 help for export
+      --journal-dir string   Private directory outside CODEX_HOME, retained for retries
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate import`
+
+```text
+Stage a stopped local Codex thread for its first Orka Task
+
+Usage:
+  orka session migrate import <new-session-name> [flags]
+
+Flags:
+      --codex-home string    Source CODEX_HOME (must already exist)
+  -h, --help                 help for import
+      --journal-dir string   Private directory retained for exact retries
+      --source-stopped       Confirm every source Codex writer has stopped
+      --thread string        Native thread UUID
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+      --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
@@ -4514,12 +4706,15 @@ Available Commands:
   approvals   List task approvals, or wait for one
   approve     Approve a pending task approval
   artifacts   List artifacts for a task
+  cancel      Stop a running task and keep its history
   children    List child tasks
+  cp          Copy one file out of or into a Task's execution workspace (operator debugging)
   create      Create a new task
   decline     Decline a pending task approval
   delete      Delete a task
   download    Download task artifacts
   events      List task execution events
+  exec        Run a command in a running Task's execution workspace (operator debugging)
   follow      Follow task execution events
   fork        Fork a task from an execution event checkpoint
   get         Get task details
@@ -4623,6 +4818,29 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka task cancel`
+
+```text
+Stop a Pending or Running task. Unlike delete, cancel keeps the task's
+result, artifacts, plan and events. Cancelling an already cancelled task
+changes nothing.
+
+Usage:
+  orka task cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the task is being cancelled
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka task children`
 
 ```text
@@ -4634,6 +4852,40 @@ Usage:
 Flags:
   -h, --help            help for children
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task cp`
+
+```text
+Copy a single regular file between the local machine and the execution
+workspace of a running or retained ACP Task. Workspace paths are relative to the
+workspace root (the agent's working directory); a leading "/" names that root.
+Use "-" as the local path for stdout or stdin.
+
+Copying out requires the class opt-in "read" or "exec" and the "get" permission
+on tasks/files; it does not taint the session. Copying in requires the class
+opt-in "exec" and the "update" permission on tasks/files, and taints the session:
+it will never be published, reused, checkpointed, or continued.
+
+Usage:
+  orka task cp <task>:<path> <local> | <local> <task>:<path> [flags]
+
+Examples:
+  orka task cp my-task:src/main.go ./main.go
+  orka task cp ./fix.patch my-task:/tmp-fix.patch
+
+Flags:
+  -h, --help            help for cp
+      --max-bytes int   Refuse files larger than this when copying out (default 67108864, at most 268435456)
+  -q, --quiet           Do not print the session taint notice
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4787,6 +5039,7 @@ the filters, so "what did the agent say last?" is:
   TaskStarted
   TaskSucceeded
   TaskFailed
+  TaskCancellationRequested
   TaskCancelled
   WorkerStarted
   WorkerCompleted
@@ -4798,6 +5051,7 @@ the filters, so "what did the agent say last?" is:
   ModelContextUpdated
   ModelMessage
   ContextTruncated
+  NativeSessionCaptureSkipped
   ToolCallStarted
   ToolCallCompleted
   ToolCallFailed
@@ -4840,6 +5094,43 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task exec`
+
+```text
+Run one command inside the execution workspace of a running or retained ACP Task.
+
+The command runs as the Task session's own unprivileged child identity, never as
+the supervisor, and is bounded by --timeout and an output limit. It requires the
+--operator-workspace-access-enabled controller flag, an ExecutionWorkspaceClass
+opted in with the acp.workspace.orka.ai/operator-access=exec annotation, and the
+"create" permission on the tasks/exec subresource.
+
+Every exec taints the Task's session: it will never be published, reused,
+checkpointed for forks, or continued. Every exec is audited.
+
+Usage:
+  orka task exec <task> [-i] [-t] -- <command> [args...] [flags]
+
+Examples:
+  orka task exec my-task -- git status
+  orka task exec my-task -it -- bash
+
+Flags:
+  -h, --help               help for exec
+  -q, --quiet              Do not print the session taint notice
+  -i, --stdin              Pass stdin to the command
+      --timeout duration   Maximum command duration (at most 1h0m0s) (default 15m0s)
+      --token string       Bearer token for authentication
+  -t, --tty                Allocate a terminal for the command (implies -i)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```

@@ -1,0 +1,34 @@
+// Package storagefault injects storage faults for tests. It wraps the
+// providers behind Orka's storage client so a test can make a store
+// unreachable and bring it back, slow calls down or hold them until released,
+// lose a response after the provider committed, reject credentials, or change
+// what Describe reports, and it counts every call it sees.
+//
+// An [Injector] holds the faults and the counts. Wrap the providers a test
+// builds the storage client from with [Injector.WrapState],
+// [Injector.WrapArtifacts] or [Injector.WrapEmbedded], or use
+// [NewEmbeddedClient] for a complete client over one embedded store:
+//
+//	client, faults, err := storagefault.NewEmbeddedClient(sqliteStore)
+//	err = client.ActivateSnapshotKey(ctx, key) // as startup does; sealed calls need it
+//	outage := faults.Down(storagev1.StateContract) // state storage is unreachable
+//	...
+//	outage.Remove() // and back
+//
+// The client retries a write that fails with ErrUnavailable or loses its
+// response, with the same write envelope, until the call's deadline or
+// storageclient.DefaultRetryHorizon. A fault that fails a write once is
+// therefore absorbed by the retry, and a test that expects a write to fail
+// through an outage gives the call a short deadline.
+//
+// Every method of the provider interfaces is wrapped, so a fault applies to
+// every call that reaches the contract it names. The methods of
+// OperationReceiptStore and ControllerEpochAdvancer are not wrapped until
+// they join the provider interfaces; a test fails if a provider interface
+// gains a catalog method the wrappers miss.
+//
+// The wrappers are generated (wrappers_gen.go); run go generate in this
+// package after a provider interface changes.
+package storagefault
+
+//go:generate go run ./internal/wrappergen -o wrappers_gen.go

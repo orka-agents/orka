@@ -1,0 +1,32 @@
+# Setting or changing Agent.spec.identity requires the bind verb on
+# agentidentities/<issuer> for that identity (ADR 0039).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["agents"]
+  validations:
+  - expression: >-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) ||
+      (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) &&
+      oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) ||
+      authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agent-identity-bind.orka.ai
+spec:
+  policyName: agent-identity-bind.orka.ai
+  validationActions: [Deny]

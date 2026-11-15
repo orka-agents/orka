@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuthStore } from '@/stores/auth'
 import { API_BASE_URL } from '@/lib/constants'
+import { apiErrorMessage } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { TaskPhase } from '@/schemas/task'
+import { isTaskInFlight } from '@/lib/task-phase'
 
 const taskLogRequestIdleTimeoutMs = 30_000
 
@@ -11,8 +13,13 @@ interface InFlightLogRequest {
   timeoutId: ReturnType<typeof setTimeout> | null
 }
 
-function isRunningPhase(phase?: TaskPhase): boolean {
-  return phase === 'Running' || phase === 'Finalizing' || phase === 'Pending'
+// Blank lines are part of the output; only the empty remainder after a
+// trailing newline is dropped.
+function splitLogLines(text: string): string[] {
+  if (!text) return []
+  const lines = text.split(/\r?\n/)
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
 }
 
 export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhase) {
@@ -23,6 +30,9 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLive, setIsLive] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A 404 means the task has no logs to serve (no Job or pod yet, or none
+  // recorded); it carries the server's reason and is not a failure.
+  const [unavailable, setUnavailable] = useState<string | null>(null)
   const inFlightRef = useRef<InFlightLogRequest | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -34,7 +44,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
     if (inFlightRef.current) return
 
     const token = useAuthStore.getState().token
-    const running = isRunningPhase(taskPhase)
+    const running = isTaskInFlight(taskPhase)
     const controller = new AbortController()
     const request: InFlightLogRequest = { controller, timeoutId: null }
     const armIdleTimeout = () => {
@@ -74,15 +84,22 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
       armIdleTimeout()
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch logs: ${response.statusText}`)
+        const detail = apiErrorMessage(await response.text().catch(() => ''))
+        if (controller.signal.aborted) return
+        if (response.status === 404) {
+          setUnavailable(detail || 'No logs are available for this task yet')
+          return
+        }
+        throw new Error(`Failed to fetch logs: ${detail || response.statusText}`)
       }
+      setUnavailable(null)
 
       if (running) {
         // For running tasks, parse JSON response and replace logs
         const data = await response.json()
         if (controller.signal.aborted) return
         const text: string = data.logs ?? ''
-        setLogs(text.split('\n').filter(Boolean))
+        setLogs(splitLogLines(text))
         setIsLive(true)
       } else {
         // For completed tasks, use streaming reader or text fallback
@@ -91,9 +108,9 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
           const text = await response.text()
           try {
             const data = JSON.parse(text)
-            setLogs((data.logs ?? '').split('\n').filter(Boolean))
+            setLogs(splitLogLines(data.logs ?? ''))
           } catch {
-            setLogs(text.split('\n').filter(Boolean))
+            setLogs(splitLogLines(text))
           }
         } else {
           const decoder = new TextDecoder()
@@ -106,9 +123,9 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
 
             armIdleTimeout()
             buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split('\n')
+            const lines = buffer.split(/\r?\n/)
             buffer = lines.pop() || ''
-            allLines.push(...lines.filter(Boolean))
+            allLines.push(...lines)
           }
 
           if (buffer) allLines.push(buffer)
@@ -118,7 +135,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
             try {
               const data = JSON.parse(allLines[0])
               if (data.logs) {
-                setLogs(data.logs.split('\n').filter(Boolean))
+                setLogs(splitLogLines(data.logs))
               } else {
                 setLogs(allLines)
               }
@@ -154,6 +171,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
     setIsStreaming(false)
     setIsLive(false)
     setError(null)
+    setUnavailable(null)
   }, [taskScope])
 
   useEffect(() => {
@@ -165,7 +183,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
       pollRef.current = null
     }
 
-    if (enabled && isRunningPhase(taskPhase)) {
+    if (enabled && isTaskInFlight(taskPhase)) {
       pollRef.current = setInterval(fetchLogs, 3000)
     }
 
@@ -188,7 +206,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
 
   // When task completes, stop polling and do a final fetch
   useEffect(() => {
-    if (!isRunningPhase(taskPhase) && isLive) {
+    if (!isTaskInFlight(taskPhase) && isLive) {
       setIsLive(false)
       if (pollRef.current) {
         clearInterval(pollRef.current)
@@ -207,6 +225,7 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
     isStreaming: isCurrentScope ? isStreaming : false,
     isLive: isCurrentScope ? isLive : false,
     error: isCurrentScope ? error : null,
+    unavailable: isCurrentScope ? unavailable : null,
     refetch: fetchLogs,
     clear,
   }

@@ -27,15 +27,20 @@ type Provider interface {
 
 // CompletionRequest represents a completion request
 type CompletionRequest struct {
-	Model          string          `json:"model"`
-	Messages       []Message       `json:"messages"`
-	SystemPrompt   string          `json:"system_prompt,omitempty"`
-	MaxTokens      int             `json:"max_tokens,omitempty"`
-	Temperature    float64         `json:"temperature,omitempty"`
-	TemperatureSet bool            `json:"-"` // Preserves explicit zero for in-memory callers.
-	Tools          []Tool          `json:"tools,omitempty"`
-	StopSequences  []string        `json:"stop_sequences,omitempty"`
-	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Model        string    `json:"model"`
+	Messages     []Message `json:"messages"`
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+	// SystemPromptStable is how many leading bytes of SystemPrompt stay the
+	// same across requests while the rest may change, such as a catalog after
+	// fixed instructions. A provider whose cache needs explicit breakpoints
+	// marks the end of the stable part too. Zero means no split.
+	SystemPromptStable int             `json:"-"`
+	MaxTokens          int             `json:"max_tokens,omitempty"`
+	Temperature        float64         `json:"temperature,omitempty"`
+	TemperatureSet     bool            `json:"-"` // Preserves explicit zero for in-memory callers.
+	Tools              []Tool          `json:"tools,omitempty"`
+	StopSequences      []string        `json:"stop_sequences,omitempty"`
+	ResponseFormat     *ResponseFormat `json:"response_format,omitempty"`
 	// Store preserves explicit stateless requests through provider translation.
 	// Nil retains the provider default for existing callers.
 	Store *bool `json:"store,omitempty"`
@@ -187,12 +192,36 @@ type StreamChunk struct {
 	Error                 error     `json:"error,omitempty"`
 }
 
+// PromptTokens is the size of the whole prompt, cached or not.
+func (c *StreamChunk) PromptTokens() int {
+	return promptTokens(c.InputTokens, c.CachedInputTokens, c.CacheWriteInputTokens, c.InputExcludesCache)
+}
+
+// PromptTokens is the size of the whole prompt, cached or not.
+func (r *CompletionResponse) PromptTokens() int {
+	return promptTokens(r.InputTokens, r.CachedInputTokens, r.CacheWriteInputTokens, r.InputExcludesCache)
+}
+
+// promptTokens adds the cache reads and writes back to an input count that
+// excludes them, as Anthropic's does; an inclusive count already holds them.
+func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int {
+	if excludesCache {
+		for _, n := range []*int64{cached, cacheWrite} {
+			if n != nil {
+				input += int(*n)
+			}
+		}
+	}
+	return input
+}
+
 // ProviderConfig holds configuration for creating a provider
 type ProviderConfig struct {
-	APIKey          string
-	BaseURL         string // Optional override for API URL
-	ProviderType    string // e.g. "openai", "azure-openai"
-	AzureAPIVersion string // Azure OpenAI API version (e.g. "2024-02-15-preview")
+	APIKey              string
+	BaseURL             string // Optional override for API URL
+	ProviderType        string // e.g. "openai", "azure-openai"
+	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")
+	AzureDeploymentName string // Azure request model override; logical model selection is unchanged
 }
 
 // ProviderFactory is a function that creates a provider

@@ -19,14 +19,17 @@ import (
 
 const (
 	// Base worker env vars used by all worker types.
-	TaskName          = "ORKA_TASK_NAME"
-	TaskNamespace     = "ORKA_TASK_NAMESPACE"
-	ResultEndpoint    = "ORKA_RESULT_ENDPOINT"
-	ResultStdout      = "ORKA_RESULT_STDOUT"
-	ResultStdoutToken = "ORKA_RESULT_STDOUT_TOKEN"
-	ControllerURL     = "ORKA_CONTROLLER_URL"
-	Command           = "ORKA_COMMAND"
-	AgentName         = "ORKA_AGENT_NAME"
+	TaskName      = "ORKA_TASK_NAME"
+	TaskNamespace = "ORKA_TASK_NAMESPACE"
+	// ServiceAccountName is the worker Pod's own ServiceAccount, from the
+	// Downward API. Outbound access lets the AI worker exchange a token for
+	// itself even though its account is a platform account.
+	ServiceAccountName = "ORKA_SERVICE_ACCOUNT_NAME"
+	ResultEndpoint     = "ORKA_RESULT_ENDPOINT"
+	ResultStdout       = "ORKA_RESULT_STDOUT"
+	ControllerURL      = "ORKA_CONTROLLER_URL"
+	Command            = "ORKA_COMMAND"
+	AgentName          = "ORKA_AGENT_NAME"
 
 	// Task relationship env vars.
 	PriorTask           = "ORKA_PRIOR_TASK"
@@ -62,18 +65,20 @@ const (
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
-	AIProvider          = "ORKA_AI_PROVIDER"
-	AIModel             = "ORKA_AI_MODEL"
-	AITemperature       = "ORKA_AI_TEMPERATURE"
-	AIMaxTokens         = "ORKA_AI_MAX_TOKENS"
-	AIPrompt            = "ORKA_AI_PROMPT"
-	AISystemPrompt      = "ORKA_AI_SYSTEM_PROMPT"
-	AIBaseURL           = "ORKA_AI_BASE_URL"
-	AIAzureAPIVersion   = "ORKA_AI_AZURE_API_VERSION"
-	AITools             = "ORKA_AI_TOOLS"
-	GatewayReplyEnabled = "ORKA_GATEWAY_REPLY_ENABLED"
-	AIFallbackCount     = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode      = "ORKA_CONTROLLER_MODE"
+	AIProvider              = "ORKA_AI_PROVIDER"
+	AIModel                 = "ORKA_AI_MODEL"
+	AITemperature           = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens             = "ORKA_AI_MAX_TOKENS"
+	AIPrompt                = "ORKA_AI_PROMPT"
+	AISystemPrompt          = "ORKA_AI_SYSTEM_PROMPT"
+	AIBaseURL               = "ORKA_AI_BASE_URL"
+	AIAzureAPIVersion       = "ORKA_AI_AZURE_API_VERSION"
+	AIAzureDeploymentName   = "ORKA_AI_AZURE_DEPLOYMENT_NAME"
+	AITools                 = "ORKA_AI_TOOLS"
+	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
+	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
+	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode          = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -101,35 +106,17 @@ const (
 	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
-	Prompt                      = "ORKA_PROMPT"
-	Model                       = "ORKA_MODEL"
-	SystemPrompt                = "ORKA_SYSTEM_PROMPT"
-	MaxTurns                    = "ORKA_MAX_TURNS"
-	AgentReadOnly               = "ORKA_AGENT_READ_ONLY"
-	AllowedTools                = "ORKA_ALLOWED_TOOLS"
-	DisallowedTools             = "ORKA_DISALLOWED_TOOLS"
-	AllowBash                   = "ORKA_ALLOW_BASH"
-	TimeoutSeconds              = "ORKA_TIMEOUT_SECONDS"
-	SessionName                 = "ORKA_SESSION_NAME"
-	SessionPromptIncluded       = "ORKA_SESSION_PROMPT_INCLUDED"
-	ClaudeBare                  = "ORKA_CLAUDE_BARE"
-	ClaudeDisableSettingSources = "ORKA_CLAUDE_DISABLE_SETTING_SOURCES"
-	ClaudePermissionMode        = "ORKA_CLAUDE_PERMISSION_MODE"
-	CodexSandboxMode            = "ORKA_CODEX_SANDBOX_MODE"
-	CodexAutoCompactTokenLimit  = "ORKA_CODEX_AUTO_COMPACT_TOKEN_LIMIT"
-	CodexDisableSandbox         = "ORKA_CODEX_DISABLE_SANDBOX"
-	AnthropicBaseURL            = "ANTHROPIC_BASE_URL"
-	OpenAIBaseURL               = "OPENAI_BASE_URL"
-	AnthropicAPIKey             = "ANTHROPIC_API_KEY"
-	OpenAIAPIKey                = "OPENAI_API_KEY"
-	CodexAPIKey                 = "CODEX_API_KEY"
-	GitHubToken                 = "GITHUB_TOKEN"
-	GitToken                    = "GIT_TOKEN"
-	GitAskpass                  = "GIT_ASKPASS"
-	GitUsername                 = "GIT_USERNAME"
-	ClaudeCLIPath               = "CLAUDE_CLI_PATH"
-	CodexCLIPath                = "CODEX_CLI_PATH"
-	CopilotCLIPath              = "COPILOT_CLI_PATH"
+	SessionName           = "ORKA_SESSION_NAME"
+	SessionPromptIncluded = "ORKA_SESSION_PROMPT_INCLUDED"
+	AnthropicBaseURL      = "ANTHROPIC_BASE_URL"
+	OpenAIBaseURL         = "OPENAI_BASE_URL"
+	AnthropicAPIKey       = "ANTHROPIC_API_KEY"
+	OpenAIAPIKey          = "OPENAI_API_KEY"
+	CodexAPIKey           = "CODEX_API_KEY"
+	GitHubToken           = "GITHUB_TOKEN"
+	GitToken              = "GIT_TOKEN"
+	GitAskpass            = "GIT_ASKPASS"
+	GitUsername           = "GIT_USERNAME"
 
 	// Tool integration env vars.
 	SearchAPIKey = "SEARCH_API_KEY"
@@ -163,7 +150,6 @@ const (
 	GitRef               = "ORKA_GIT_REF"
 	GitRefShallow        = "ORKA_GIT_REF_SHALLOW"
 	WorkspaceSubpath     = "ORKA_WORKSPACE_SUBPATH"
-	WorkspacePrepared    = "ORKA_WORKSPACE_PREPARED"
 	ForkRepo             = "ORKA_FORK_REPO"
 	PRBaseBranch         = "ORKA_PR_BASE_BRANCH"
 	PRBaseRepo           = "ORKA_PR_BASE_REPO"
@@ -175,7 +161,6 @@ const (
 	SkillsDir            = "ORKA_SKILLS_DIR"
 
 	WorkspaceBootstrapToken = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
-	AgentSandboxDepth       = "ORKA_AGENT_SANDBOX_DEPTH"
 
 	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
@@ -345,11 +330,12 @@ func TransactionLogFields(transactionID, profile string) string {
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
 type FallbackProviderEnv struct {
-	Provider        string
-	APIKey          string
-	Model           string
-	BaseURL         string
-	AzureAPIVersion string
+	Provider            string
+	APIKey              string
+	Model               string
+	BaseURL             string
+	AzureAPIVersion     string
+	AzureDeploymentName string
 }
 
 // FallbackPrefix returns the prefix for fallback provider i.
@@ -362,6 +348,9 @@ func FallbackAPIKeyKey(i int) string          { return FallbackPrefix(i) + "_API
 func FallbackModelKey(i int) string           { return FallbackPrefix(i) + "_MODEL" }
 func FallbackBaseURLKey(i int) string         { return FallbackPrefix(i) + "_BASE_URL" }
 func FallbackAzureAPIVersionKey(i int) string { return FallbackPrefix(i) + "_AZURE_API_VERSION" }
+func FallbackAzureDeploymentNameKey(i int) string {
+	return FallbackPrefix(i) + "_AZURE_DEPLOYMENT_NAME"
+}
 
 // EnvVars renders the non-secret fallback metadata env vars for fallback i.
 // API keys should normally be rendered from SecretKeyRef by the caller.
@@ -372,6 +361,7 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 	}
 	envVars = AppendIfSet(envVars, FallbackBaseURLKey(i), e.BaseURL)
 	envVars = AppendIfSet(envVars, FallbackAzureAPIVersionKey(i), e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, FallbackAzureDeploymentNameKey(i), e.AzureDeploymentName)
 	if e.APIKey != "" {
 		envVars = append(envVars, Env(FallbackAPIKeyKey(i), e.APIKey))
 	}
@@ -381,11 +371,12 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 // ParseFallbackProviderEnv reads fallback provider i.
 func ParseFallbackProviderEnv(getenv func(string) string, i int) FallbackProviderEnv {
 	return FallbackProviderEnv{
-		Provider:        getenv(FallbackProviderKey(i)),
-		APIKey:          getenv(FallbackAPIKeyKey(i)),
-		Model:           getenv(FallbackModelKey(i)),
-		BaseURL:         getenv(FallbackBaseURLKey(i)),
-		AzureAPIVersion: getenv(FallbackAzureAPIVersionKey(i)),
+		Provider:            getenv(FallbackProviderKey(i)),
+		APIKey:              getenv(FallbackAPIKeyKey(i)),
+		Model:               getenv(FallbackModelKey(i)),
+		BaseURL:             getenv(FallbackBaseURLKey(i)),
+		AzureAPIVersion:     getenv(FallbackAzureAPIVersionKey(i)),
+		AzureDeploymentName: getenv(FallbackAzureDeploymentNameKey(i)),
 	}
 }
 
@@ -419,7 +410,9 @@ type AIWorkerEnv struct {
 	SystemPrompt                     string
 	BaseURL                          string
 	AzureAPIVersion                  string
+	AzureDeploymentName              string
 	Tools                            []string
+	DeprecatedMemoryTools            []string
 	GatewayReplyEnabled              bool
 	Fallbacks                        []FallbackProviderEnv
 	EnforceTransactionCredentialAuth bool
@@ -448,11 +441,15 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	)
 	envVars = AppendIfSet(envVars, AIBaseURL, e.BaseURL)
 	envVars = AppendIfSet(envVars, AIAzureAPIVersion, e.AzureAPIVersion)
+	envVars = AppendIfSet(envVars, AIAzureDeploymentName, e.AzureDeploymentName)
 	if e.GatewayReplyEnabled {
 		envVars = append(envVars, Env(GatewayReplyEnabled, "true"))
 	}
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
+	}
+	if len(e.DeprecatedMemoryTools) > 0 {
+		envVars = append(envVars, Env(AIDeprecatedMemoryTools, JoinCSV(e.DeprecatedMemoryTools)))
 	}
 	if e.EnforceTransactionCredentialAuth {
 		envVars = append(envVars, Env(TransactionCredentialAuthorizationEnforced, "true"))
@@ -488,7 +485,9 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		SystemPrompt:                     getenv(AISystemPrompt),
 		BaseURL:                          getenv(AIBaseURL),
 		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
+		AzureDeploymentName:              getenv(AIAzureDeploymentName),
 		Tools:                            SplitCSV(getenv(AITools)),
+		DeprecatedMemoryTools:            SplitCSV(getenv(AIDeprecatedMemoryTools)),
 		GatewayReplyEnabled:              IsTrue(getenv(GatewayReplyEnabled)),
 		Fallbacks:                        ParseFallbacks(getenv),
 		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),

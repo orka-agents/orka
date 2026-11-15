@@ -91,12 +91,12 @@ func TestReserveTaskSettlesFrozenWorkspaceCredentialBlocked(t *testing.T) {
 			}
 			defer db.Close() //nolint:errcheck
 
-			sqliteStore := sqlite.NewStore(db, "credential-blocked-test")
+			sqliteStore := sealedStore(t, sqlite.NewStore(db, "credential-blocked-test"))
 			controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "credential-blocked-controller")
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "credential-blocked-controller", sqliteStore)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {

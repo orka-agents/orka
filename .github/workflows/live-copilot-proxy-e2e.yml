@@ -1,15 +1,9 @@
 name: Live Copilot Proxy E2E
 
+# Manual only: the lane depends on a live Vekil and the repository's Copilot
+# credential, so a broken credential would otherwise fail every PR.
 on:
   workflow_dispatch:
-  push:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
-  pull_request:
-    paths-ignore:
-      - ".agents/**"
-      - ".claude/**"
 
 permissions:
   contents: read

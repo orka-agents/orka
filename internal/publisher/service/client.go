@@ -47,6 +47,26 @@ func (e *ClientError) Error() string {
 	return fmt.Sprintf("workspace publisher request failed with status %d and code %q", e.StatusCode, e.Response.Code)
 }
 
+// transportError is a request that got no response. It does not unwrap, so
+// errors.Is and errors.As see one opaque failure; TransportCause exposes the
+// underlying error to callers that classify connection failures.
+type transportError struct {
+	cause error
+}
+
+func (e *transportError) Error() string {
+	return "workspace publisher transport failed"
+}
+
+// TransportCause returns the error behind a Workspace/Publisher request that
+// got no response, or nil when err is not such a failure.
+func TransportCause(err error) error {
+	if transport, ok := errors.AsType[*transportError](err); ok {
+		return transport.cause
+	}
+	return nil
+}
+
 func NewClient(config ClientConfig) (*Client, error) {
 	parsed, err := url.Parse(config.BaseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
@@ -245,7 +265,7 @@ func (c *Client) post(ctx context.Context, operation Operation, metadata Operati
 func (c *Client) do(request *http.Request, target any) error {
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("workspace publisher transport failed")
+		return &transportError{cause: err}
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if response.StatusCode >= 300 && response.StatusCode < 400 && strings.TrimSpace(response.Header.Get("Location")) != "" {

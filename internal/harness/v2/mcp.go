@@ -44,6 +44,10 @@ const (
 	MCPToolEffectConsequential MCPToolEffect = "consequential"
 )
 
+// MCPToolErrorCodeConnectionRequired marks an error result the requester
+// fixes by linking or re-linking their account; its message says how.
+const MCPToolErrorCodeConnectionRequired = "connection_required"
+
 type MCPToolDescriptor struct {
 	Name             string          `json:"name"`
 	Description      string          `json:"description,omitempty"`
@@ -51,6 +55,9 @@ type MCPToolDescriptor struct {
 	Source           MCPToolSource   `json:"source"`
 	Effect           MCPToolEffect   `json:"effect"`
 	DefinitionDigest string          `json:"definitionDigest,omitempty"`
+	// Forward marks a forwarding Tool, which the runtime serves to a
+	// command-line client and never lists to the model.
+	Forward *MCPToolForward `json:"forward,omitempty"`
 }
 
 func (d MCPToolDescriptor) Validate() error {
@@ -93,6 +100,28 @@ func (d MCPToolDescriptor) Validate() error {
 		}
 	} else if len(bytes.TrimSpace(d.InputSchema)) != 0 {
 		return fmt.Errorf("provider-native tool %q must not carry an MCP input schema", d.Name)
+	}
+	if d.Forward != nil {
+		// Reads are read-only; the derived write tool is consequential and
+		// named after its Tool.
+		effect := MCPToolEffectReadOnly
+		if d.Forward.Write {
+			effect = MCPToolEffectConsequential
+		}
+		if d.Source != MCPToolSourceBrokeredCustom || d.Effect != effect {
+			return fmt.Errorf("forwarding tool %q must be a custom tool whose effect matches its methods", d.Name)
+		}
+		if d.Forward.Write != strings.HasSuffix(d.Name, MCPForwardWriteSuffix) {
+			return fmt.Errorf("forwarding tool %q: only a write tool is named with %q", d.Name, MCPForwardWriteSuffix)
+		}
+		if err := d.Forward.Validate(); err != nil {
+			return fmt.Errorf("forwarding tool %q: %w", d.Name, err)
+		}
+		got, gotErr := CanonicalJSON(d.InputSchema)
+		want, wantErr := CanonicalJSON(d.Forward.InputSchema())
+		if gotErr != nil || wantErr != nil || !bytes.Equal(got, want) {
+			return fmt.Errorf("forwarding tool %q must carry the fixed forwarding input schema", d.Name)
+		}
 	}
 	return nil
 }
@@ -171,6 +200,11 @@ func (p MCPToolPolicy) Allows(name string) bool {
 	if strings.TrimSpace(name) == "" || !slices.Contains(p.AllowedToolNames, name) || slices.Contains(p.DisallowedToolNames, name) {
 		return false
 	}
+	// Denying a forwarding Tool denies the write tool derived from it,
+	// whichever path built the lists.
+	if base := MCPForwardToolResource(name); base != name && slices.Contains(p.DisallowedToolNames, base) {
+		return false
+	}
 	return p.AllowBash || !strings.EqualFold(name, "bash")
 }
 
@@ -217,6 +251,21 @@ func (p MCPApprovalPolicy) Validate(toolPolicy MCPToolPolicy) error {
 
 func (p MCPApprovalPolicy) Requires(toolName string) bool {
 	return slices.Contains(p.RequiredTools, toolName)
+}
+
+// NeedsRuntimeApprovals reports whether some approval-required tool is one
+// the runtime's own MCP client calls, and so needs a runtime that waits for
+// brokered approvals. A forwarding write tool is not: only a client
+// forwarder in the supervisor calls it, and that forwarder holds the
+// client's request while the broker waits.
+func (p MCPApprovalPolicy) NeedsRuntimeApprovals(toolPolicy MCPToolPolicy) bool {
+	for _, name := range p.RequiredTools {
+		index := slices.IndexFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool { return tool.Name == name })
+		if index < 0 || toolPolicy.Tools[index].Forward == nil || !toolPolicy.Tools[index].Forward.Write {
+			return true
+		}
+	}
+	return false
 }
 
 type MCPPolicyConfiguration struct {
@@ -373,6 +422,15 @@ func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, _ time.Time) (MCPTo
 	}
 	if c.Approval != nil {
 		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q must not carry runtime-supplied approval evidence", c.ToolName)
+	}
+	if descriptor.Forward != nil {
+		request, err := DecodeMCPForwardRequest(c.Arguments)
+		if err == nil {
+			err = request.ValidateFor(*descriptor.Forward)
+		}
+		if err != nil {
+			return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q: %w", c.ToolName, err)
+		}
 	}
 	return descriptor, nil
 }

@@ -5,7 +5,7 @@ MIT License - see LICENSE file for details.
 */
 
 // orka-admission serves the stateless, fail-closed admission boundary shared
-// by isolated harness-v1 and harness-v2 installations. It owns no controllers,
+// by namespace-isolated installations. It owns no controllers,
 // dispatch state, runtime credentials, SQLite database, or leader-election
 // lease.
 package main
@@ -32,8 +32,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/controller"
 )
@@ -58,6 +58,7 @@ type options struct {
 	controllerUsernames        string
 	taskProvenanceTrustedUsers string
 	taskProvenanceTrustedSAs   string
+	workerServiceAccounts      string
 }
 
 func (o *options) bind(fs *flag.FlagSet) {
@@ -85,6 +86,30 @@ func (o *options) bind(fs *flag.FlagSet) {
 	fs.StringVar(&o.taskProvenanceTrustedSAs, "task-provenance-trusted-service-accounts",
 		os.Getenv("ORKA_ADMISSION_TASK_PROVENANCE_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in each Task namespace to write managed provenance.")
+	fs.StringVar(&o.workerServiceAccounts, "worker-service-accounts",
+		os.Getenv("ORKA_ADMISSION_WORKER_SERVICE_ACCOUNTS"),
+		"Comma-separated ServiceAccount names worker Pods run as in each Task namespace, such as renamed AI "+
+			"and vendor workers. The identity-bound Agent rule applies to them whether or not they are trusted.")
+}
+
+// taskProvenanceConfig builds the Task provenance admission configuration.
+// Like the manager-hosted webhook, it applies worker rules to every worker
+// ServiceAccount, including ones named only in --worker-service-accounts.
+func (o options) taskProvenanceConfig(controllerUsernames []string) orkaadmission.TaskProvenanceConfig {
+	provenanceUsers := strings.TrimSpace(o.taskProvenanceTrustedUsers)
+	if provenanceUsers == "" {
+		provenanceUsers = strings.Join(controllerUsernames, ",")
+	}
+	cfg := orkaadmission.NewTaskProvenanceConfig(
+		true,
+		strings.Join(controllerUsernames, ","),
+		provenanceUsers,
+		o.taskProvenanceTrustedSAs,
+		"",
+	)
+	cfg.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+		cfg.TrustedServiceAccountNames, splitCommaList(o.workerServiceAccounts))
+	return cfg
 }
 
 func (o options) validate() error {
@@ -179,26 +204,23 @@ func main() {
 	webhookServer = mgr.GetWebhookServer()
 
 	controllerUsernames := splitCommaList(opts.controllerUsernames)
-	provenanceUsers := strings.TrimSpace(opts.taskProvenanceTrustedUsers)
-	if provenanceUsers == "" {
-		provenanceUsers = strings.Join(controllerUsernames, ",")
-	}
 	orkaadmission.RegisterTaskProvenanceWebhook(
 		webhookServer,
 		admissionScheme,
-		orkaadmission.NewTaskProvenanceConfig(
-			true,
-			strings.Join(controllerUsernames, ","),
-			provenanceUsers,
-			opts.taskProvenanceTrustedSAs,
-			"",
-		),
+		opts.taskProvenanceConfig(controllerUsernames),
 		mgr.GetAPIReader(),
 	)
 	orkaadmission.RegisterWorkspaceClassUseWebhooks(
 		webhookServer,
 		admissionScheme,
 		controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
+	)
+	orkaadmission.RegisterAgentHostWebhook(
+		webhookServer,
+		admissionScheme,
+		controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+		mgr.GetAPIReader(),
+		orkaadmission.ExecutionModeConfig{ControllerUsernames: controllerUsernames},
 	)
 	orkaadmission.RegisterExecutionModeWebhooks(
 		webhookServer,

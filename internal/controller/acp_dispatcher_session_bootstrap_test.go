@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +42,7 @@ func TestPrepareTaskSessionSkipsBootstrapForLiveRuntimeSessionReuse(t *testing.T
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, runtimeInstanceID, supervisorBootID,
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +85,7 @@ func TestPrepareTaskSessionRetainsBootstrapWhenRuntimeSessionRecreationIsRequire
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +139,7 @@ func TestPrepareTaskSessionAdvancesPastDurableWorkspaceGenerationWithoutCachedBi
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -180,6 +183,7 @@ func TestPrepareTaskSessionAdvancesPastDurableSessionGenerationWithoutCachedBind
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
 		acpSessionLineageIdentity{},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)

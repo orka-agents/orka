@@ -292,7 +292,7 @@ func streamChat(
 
 func handleToolCallEvent(data client.SSEEventData, verbosity int) {
 	switch data.Name {
-	case "create_agent_task", "delegate_task":
+	case toolCreateAgentTask, toolDelegateTask:
 		var args map[string]any
 		if json.Unmarshal(data.Args, &args) == nil {
 			agentName, _ := args["agentRef"].(string)

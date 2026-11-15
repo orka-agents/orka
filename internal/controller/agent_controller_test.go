@@ -31,8 +31,10 @@ func TestValidateAgentRuntimeReasoningEffort(t *testing.T) {
 		effort    string
 		wantError string
 	}{
+		{name: "codex none", runtime: corev1alpha1.AgentRuntimeCodex, effort: agentReasoningEffortNone},
 		{name: "codex high", runtime: corev1alpha1.AgentRuntimeCodex, effort: agentReasoningEffortHigh},
-		{name: "codex max rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max", wantError: "low, medium, high, or xhigh"},
+		{name: "codex max rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max", wantError: "none, low, medium, high, or xhigh"},
+		{name: "claude none rejected", runtime: corev1alpha1.AgentRuntimeClaude, effort: agentReasoningEffortNone, wantError: "low, medium, high, xhigh, or max"},
 		{name: "claude max", runtime: corev1alpha1.AgentRuntimeClaude, effort: "max"},
 		{name: "copilot rejected", runtime: corev1alpha1.AgentRuntimeCopilot, effort: agentReasoningEffortHigh, wantError: "does not support"},
 		{name: "opencode rejected", runtime: corev1alpha1.AgentRuntimeOpencode, effort: agentReasoningEffortHigh, wantError: "does not support"},
@@ -210,7 +212,8 @@ var _ = Describe("Agent Controller", func() {
 							Name: "some-provider",
 						},
 						Runtime: &corev1alpha1.AgentCLIRuntime{
-							Type: "claude",
+							Type:            "claude",
+							ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						},
 					},
 				}
@@ -316,7 +319,8 @@ var _ = Describe("Agent Controller", func() {
 					},
 					Spec: corev1alpha1.AgentSpec{
 						Runtime: &corev1alpha1.AgentCLIRuntime{
-							Type: "claude",
+							Type:            "claude",
+							ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						},
 					},
 				}

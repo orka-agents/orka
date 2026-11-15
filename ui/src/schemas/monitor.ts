@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { agentRefSchema, k8sMetadataSchema } from './task'
+import { agentRefSchema, conditionSchema, k8sMetadataSchema } from './task'
 
 const repositoryMonitorTargetSchema = z.object({
   enabled: z.boolean().optional(),
@@ -115,6 +115,7 @@ export const repositoryMonitorSpecSchema = z.object({
 
 const repositoryMonitorStatusSchema = z.object({
   phase: z.string().optional(),
+  conditions: z.array(conditionSchema).optional(),
   lastRunID: z.string().optional(),
   lastRunTime: z.string().optional(),
   lastSuccessfulRunTime: z.string().optional(),

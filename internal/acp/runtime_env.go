@@ -47,6 +47,82 @@ type SessionPaths struct {
 	Cache     string
 	Data      string
 	State     string
+	// WorkspaceDevice and WorkspaceInode identify the workspace directory as
+	// recorded by RecordWorkspaceIdentity before the session child starts.
+	// The child may own the session root and rename entries in it, so code
+	// that reopens Workspace by path later verifies this identity.
+	WorkspaceDevice uint64
+	WorkspaceInode  uint64
+	// workspacePin holds the recorded directory open. A device and inode pair
+	// names a directory only while that inode stays allocated: once the child
+	// deletes its workspace, a directory it creates next can be given the same
+	// inode number. The open descriptor keeps the inode allocated, so no other
+	// directory can carry the recorded identity until the pin is released.
+	// Copies of SessionPaths share the pin.
+	workspacePin *os.File
+}
+
+// RecordWorkspaceIdentity records the workspace directory's device and inode
+// and holds the directory open so that identity cannot be reused. Call it only
+// while the supervisor still exclusively controls the tree, that is before the
+// session child starts, and release it with ReleaseWorkspaceIdentity when the
+// session ends. Platforms without Unix inode identity return an error, which
+// callers must treat as a refusal.
+func RecordWorkspaceIdentity(paths *SessionPaths) error {
+	pin, err := openWorkspaceDirectory(paths.Workspace)
+	if err != nil {
+		return fmt.Errorf("inspect session workspace: %w", err)
+	}
+	// The identity comes from the held descriptor, not from a second lookup
+	// of the path.
+	info, err := pin.Stat()
+	if err != nil {
+		_ = pin.Close()
+		return fmt.Errorf("inspect session workspace: %w", err)
+	}
+	if !info.IsDir() {
+		_ = pin.Close()
+		return fmt.Errorf("session workspace is not a directory")
+	}
+	dev, ino, err := directoryIdentity(info)
+	if err != nil {
+		_ = pin.Close()
+		return err
+	}
+	paths.ReleaseWorkspaceIdentity()
+	paths.WorkspaceDevice, paths.WorkspaceInode, paths.workspacePin = dev, ino, pin
+	return nil
+}
+
+// PinnedWorkspaceIdentity returns the recorded workspace identity while the
+// directory is still held open. Without a live pin the recorded numbers prove
+// nothing, so a session that was never pinned, or whose pin was released,
+// gets an error that callers must treat as a refusal.
+func (p SessionPaths) PinnedWorkspaceIdentity() (uint64, uint64, error) {
+	if p.workspacePin == nil || p.WorkspaceInode == 0 {
+		return 0, 0, errors.New("session workspace identity is not pinned")
+	}
+	info, err := p.workspacePin.Stat()
+	if err != nil {
+		return 0, 0, fmt.Errorf("session workspace identity is no longer pinned: %w", err)
+	}
+	dev, ino, err := directoryIdentity(info)
+	if err != nil {
+		return 0, 0, err
+	}
+	if dev != p.WorkspaceDevice || ino != p.WorkspaceInode {
+		return 0, 0, errors.New("session workspace identity does not match its pin")
+	}
+	return dev, ino, nil
+}
+
+// ReleaseWorkspaceIdentity closes the descriptor that holds the workspace
+// directory. Call it only once the session child is proven stopped; every
+// copy of these paths then refuses PinnedWorkspaceIdentity.
+func (p SessionPaths) ReleaseWorkspaceIdentity() {
+	if p.workspacePin != nil {
+		_ = p.workspacePin.Close()
+	}
 }
 
 func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {
@@ -777,6 +853,113 @@ func FinalizeSessionOwnership(root string, uid, gid int) error {
 		return err
 	}
 	return assignSessionOwnership(entries, uid, gid, os.Chmod, os.Lchown)
+}
+
+// ProtectReadOnlySessionWorkspace removes the child's write access to a
+// read-intent workspace. It runs after FinalizeSessionOwnership: the supervisor
+// takes back the workspace tree and, when the workspace lives inside the
+// session root, the root itself, so the child can neither modify the tree nor
+// rename it aside. The child's unique group keeps read and search access, which
+// no other child identity shares. Directory modes need no baseline preparation:
+// ownership reclaim resets them to 0700 before every validation.
+//
+// Like FinalizeSessionOwnership, it is a no-op for a non-root supervisor whose
+// child runs under the supervisor's own identity. That development and test
+// mode has no filesystem isolation to establish: the child could restore any
+// permission the supervisor removed. Read-intent delta validation remains its
+// enforcement. Managed runtime Pods always run the supervisor as root.
+func ProtectReadOnlySessionWorkspace(paths SessionPaths, uid, gid int) error {
+	root := filepath.Clean(strings.TrimSpace(paths.Root))
+	workspace := filepath.Clean(strings.TrimSpace(paths.Workspace))
+	if !filepath.IsAbs(root) || !filepath.IsAbs(workspace) || uid <= 0 || gid <= 0 {
+		return fmt.Errorf("absolute session paths and non-root UID/GID are required")
+	}
+	if os.Geteuid() != 0 {
+		if uid == os.Getuid() && gid == os.Getgid() {
+			return nil
+		}
+		return fmt.Errorf("non-root supervisor cannot protect a read-only workspace")
+	}
+	return protectReadOnlySessionWorkspace(root, workspace, os.Geteuid(), gid, os.Lchown, os.Chmod)
+}
+
+func protectReadOnlySessionWorkspace(
+	root, workspace string,
+	supervisorUID, gid int,
+	lchown func(string, int, int) error,
+	chmod func(string, os.FileMode) error,
+) error {
+	if strings.HasPrefix(workspace, root+string(filepath.Separator)) {
+		// The child owns every other entry under the root, but must not own the
+		// workspace's parent: that would let it rename the workspace aside.
+		if err := lchown(root, supervisorUID, gid); err != nil {
+			return fmt.Errorf("protect session root: %w", err)
+		}
+		if err := chmod(root, 0o710); err != nil {
+			return fmt.Errorf("chmod protected session root: %w", err)
+		}
+	}
+	// Parents are protected before WalkDir descends into the child-owned tree.
+	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := lchown(path, supervisorUID, gid); err != nil {
+			return fmt.Errorf("protect workspace path: %w", err)
+		}
+		switch {
+		case entry.IsDir():
+			if err := chmod(path, 0o750); err != nil {
+				return fmt.Errorf("chmod protected workspace directory: %w", err)
+			}
+		case entry.Type().IsRegular():
+			// Normally a no-op after PrepareReadOnlyWorkspaceModes; any file it
+			// still changes differs from the baseline and fails validation.
+			return applyReadOnlyWorkspaceFileMode(path, entry, chmod)
+		}
+		return nil
+	})
+}
+
+// PrepareReadOnlyWorkspaceModes applies the read-only file modes to a
+// supervisor-owned workspace before its baseline is captured. Workspace
+// validation compares exact modes for protected paths and ownership reclaim
+// does not restore file modes, so the baseline must already record the modes
+// ProtectReadOnlySessionWorkspace leaves behind.
+func PrepareReadOnlyWorkspaceModes(workspace string) error {
+	workspace = filepath.Clean(strings.TrimSpace(workspace))
+	if !filepath.IsAbs(workspace) {
+		return fmt.Errorf("absolute workspace path is required")
+	}
+	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		return applyReadOnlyWorkspaceFileMode(path, entry, os.Chmod)
+	})
+}
+
+func applyReadOnlyWorkspaceFileMode(path string, entry os.DirEntry, chmod func(string, os.FileMode) error) error {
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("inspect protected workspace file: %w", err)
+	}
+	if mode := readOnlyWorkspaceFileMode(info.Mode().Perm()); mode != info.Mode().Perm() {
+		if err := chmod(path, mode); err != nil {
+			return fmt.Errorf("chmod protected workspace file: %w", err)
+		}
+	}
+	return nil
+}
+
+// readOnlyWorkspaceFileMode grants the child's group read access, and execute
+// access for owner-executable files, and drops every group and other write bit.
+func readOnlyWorkspaceFileMode(perm os.FileMode) os.FileMode {
+	mode := perm&^0o022 | 0o040
+	if perm&0o100 != 0 {
+		mode |= 0o010
+	}
+	return mode
 }
 
 // ReclaimSessionOwnership returns a frozen session tree to the supervisor so it

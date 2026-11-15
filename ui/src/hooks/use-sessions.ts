@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ApiError, api } from '@/lib/api-client'
+import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { pageParams, pollUnlessForbidden, maxListWalkPages, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
@@ -46,12 +46,16 @@ export function useSessionListAll(pageLimit = '100', refetchInterval: number | f
   })
 }
 
-export function useSession(id: string) {
+// Polls so the overview follows new chat turns; a 403 or 404 (deleted)
+// session stays that way, so polling stops there.
+export function useSession(id: string, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['session', id, namespace],
     queryFn: () => api.get<Session>(`/sessions/${id}`, { namespace }),
     retry: retryUnlessClientError,
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : refetchInterval,
   })
 }
 

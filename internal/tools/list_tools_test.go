@@ -167,13 +167,20 @@ func TestListToolsTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data array, got %T", res.Data)
 			}
-			if len(data) != tt.wantCount {
-				t.Errorf("got %d tools, want %d", len(data), tt.wantCount)
+			// Built-in tools are listed first, followed by the namespace's Tool CRDs.
+			if len(data) != len(agentBuiltinToolNames)+tt.wantCount {
+				t.Fatalf("got %d tools, want %d built-in plus %d custom", len(data), len(agentBuiltinToolNames), tt.wantCount)
+			}
+			for i, name := range agentBuiltinToolNames {
+				builtin := data[i].(map[string]any)
+				if builtin[nameField] != name || builtin["builtin"] != true || builtin[jsonSchemaDescriptionField] == "" {
+					t.Errorf("tool %d = %v, want built-in %s with a description", i, builtin, name)
+				}
 			}
 
 			// Verify specific fields for single tool test
-			if tt.name == "single tool" && len(data) > 0 {
-				toolData := data[0].(map[string]any)
+			if tt.name == "single tool" {
+				toolData := data[len(agentBuiltinToolNames)].(map[string]any)
 				if toolData[nameField] != testMyToolName {
 					t.Errorf("tool name = %q, want %q", toolData[nameField], testMyToolName)
 				}

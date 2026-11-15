@@ -296,6 +296,42 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
+// ResumeSession requires the caller to check the advertised resume capability.
+func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest) (ResumeSessionResponse, error) {
+	if request.SessionID == "" {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session/resume requires sessionId")
+	}
+	var response ResumeSessionResponse
+	if err := c.Call(ctx, MethodSessionResume, request, &response); err != nil {
+		return ResumeSessionResponse{}, err
+	}
+	if response.SessionID != "" && response.SessionID != request.SessionID {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session/resume bound a different provider session")
+	}
+	return response, nil
+}
+
+// CloseSession asks the agent to end a provider session gracefully. Callers
+// must first check AgentCapabilities.SessionCapability(SessionCapabilityClose).
+func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("ACP session ID is required")
+	}
+	var response CloseSessionResponse
+	return c.Call(ctx, MethodSessionClose, CloseSessionRequest{SessionID: sessionID}, &response)
+}
+
+func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest) (LoadSessionResponse, error) {
+	if request.SessionID == "" {
+		return LoadSessionResponse{}, fmt.Errorf("ACP session/load requires sessionId")
+	}
+	var response LoadSessionResponse
+	if err := c.Call(ctx, MethodSessionLoad, request, &response); err != nil {
+		return LoadSessionResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) Prompt(ctx context.Context, request PromptRequest) (PromptResponse, error) {
 	return c.PromptWithWritten(ctx, request, nil)
 }

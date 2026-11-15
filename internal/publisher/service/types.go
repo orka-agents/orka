@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -333,6 +334,9 @@ type Config struct {
 	PRFactory                      PRReconcilerFactory
 	HTTPClient                     *http.Client
 	Now                            func() time.Time
+	// Logger records each failed operation with only the public error fields
+	// returned to the controller. Nil discards.
+	Logger *slog.Logger
 }
 
 func defaultWorkspaceLimits() WorkspaceLimits {

@@ -99,7 +99,7 @@ func brokeredGatewayReplyError(err error) error {
 		case http.StatusConflict:
 			code = "conflict"
 		case http.StatusTooManyRequests:
-			code = "limit_reached"
+			code = limitReachedCode
 		case http.StatusServiceUnavailable:
 			code = "unavailable"
 		}

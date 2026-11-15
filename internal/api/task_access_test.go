@@ -324,3 +324,35 @@ func TestTaskAccessAllowsCrossNamespaceGatewayChild(t *testing.T) {
 		t.Fatalf("status = %d, want 204", resp.StatusCode)
 	}
 }
+
+// TestCancelGatewayTaskChecksAccessBeforeTheConfirmedUID covers a caller who
+// may not operate the Gateway that owns a Task: a wrong confirmed UID is
+// refused as forbidden, like the right one, so the refusal says nothing
+// about the Task's identity.
+func TestCancelGatewayTaskChecksAccessBeforeTheConfirmedUID(t *testing.T) {
+	task := gatewayTaskAccessFixture()
+	task.UID = "gateway-task-uid"
+	objects := append(gatewayTaskIdentityObjects("gateway-uid"), task)
+	handlers, app := setupTestHandlersWithObjects(objects...)
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers.contextTokenAuthorization = cfg
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, contextScopedTestUser(defaultTaskUpdateScope, ContextScopeGatewaysRead))
+		return c.Next()
+	})
+	app.Post("/tasks/:id/cancel", handlers.CancelTask)
+	for _, uid := range []string{"some-other-uid", "gateway-task-uid"} {
+		request := httptest.NewRequest(http.MethodPost, "/tasks/gateway-task/cancel?namespace=default", strings.NewReader(`{"uid":"`+uid+`"}`))
+		request.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("uid %q: status = %d, want 403 before the UID is compared", uid, resp.StatusCode)
+		}
+	}
+}

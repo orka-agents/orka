@@ -143,10 +143,20 @@ func validWitnessContainerTermination(witness agentRuntimeBootWitness, terminal 
 }
 
 func witnessedContainerTermination(witness agentRuntimeBootWitness, pod *corev1.Pod) (*corev1.ContainerStateTerminated, error) {
+	if pod == nil {
+		return nil, errors.New("retirement observation does not match the witnessed Pod UID")
+	}
+	return witnessedContainerTerminationWithTopology(witness, pod, pod.Spec)
+}
+
+// witnessedContainerTerminationWithTopology checks topology, a view of the Pod
+// spec that may omit controller-rendered RuntimePool toolbox init containers;
+// the spec digest still covers the complete Pod spec.
+func witnessedContainerTerminationWithTopology(witness agentRuntimeBootWitness, pod *corev1.Pod, topology corev1.PodSpec) (*corev1.ContainerStateTerminated, error) {
 	if pod == nil || pod.Namespace != witness.Namespace || pod.Name != witness.PodName || pod.UID != witness.PodUID {
 		return nil, errors.New("retirement observation does not match the witnessed Pod UID")
 	}
-	if err := validateAgentRuntimeRecoveryPodSpec(pod.Spec, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
+	if err := validateAgentRuntimeRecoveryPodSpec(topology, witness.ContainerName, recoveryProviderKind(witness.Spec)); err != nil {
 		return nil, err
 	}
 	digest, err := recoveryPodSpecDigest(pod)

@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
+import { toast } from 'sonner'
 import { api, apiErrorMessage } from '@/lib/api-client'
 import { API_BASE_URL } from '@/lib/constants'
 import { useAuthStore } from '@/stores/auth'
@@ -46,6 +47,24 @@ function parseSSELines(text: string): Array<{ event: string; data: string }> {
   return events
 }
 
+// DELETE /chat/{sessionId} is the only way to stop a server-side turn: the
+// server keeps running a turn (tools, Task creation) when its stream is
+// dropped, so aborting the fetch alone does not stop it. The endpoint waits for
+// the active turn to stop and then ends the session. It carries the token
+// that started the turn, so a turn orphaned by an identity change is cancelled
+// as the identity that owns it (and a 401 cannot clear the new token).
+async function cancelChatTurn(sessionId: string, namespace: string, token: string | null) {
+  const url = `${API_BASE_URL}/chat/${encodeURIComponent(sessionId)}?${new URLSearchParams({ namespace })}`
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  // 404: the session is already gone, which is what cancelling wants.
+  if (!response.ok && response.status !== 404) {
+    throw new Error(apiErrorMessage(await response.text().catch(() => `HTTP ${response.status}`)))
+  }
+}
+
 export function useSendMessage() {
   const token = useAuthStore((s) => s.token)
   const namespace = useUIStore((s) => s.namespace)
@@ -62,6 +81,12 @@ export function useSendMessage() {
 
   return useCallback(
     async (messageText: string) => {
+      // One turn at a time. The store is read here rather than through a
+      // render-time snapshot: two sends in the same tick (a double Enter)
+      // both see the stale snapshot, and the second would post a duplicate
+      // turn whose 409 then ended the first turn's streaming state.
+      if (useChatStore.getState().isStreaming) return
+
       // Task names created during this turn, harvested from create_task tool
       // results, so the assistant message can render cross-linking chips.
       const createdTaskNames: string[] = []
@@ -71,17 +96,94 @@ export function useSendMessage() {
       // it, after which nothing from this response may reach the store.
       const epoch = useChatStore.getState().turnEpoch
       const live = () => useChatStore.getState().turnEpoch === epoch
-      // Epoch checks keep orphaned output out of the store, but only an
-      // abort stops the server-side turn (which can still be running tools
-      // or creating Tasks); the subscription below cancels the request the
-      // moment a reset bumps the epoch.
       const controller = new AbortController()
-      const unsubscribeAbort = useChatStore.subscribe((state) => {
-        if (state.turnEpoch !== epoch) controller.abort()
-      })
+
+      // Ending a turn early (Stop, New Chat, or a namespace or identity
+      // switch) cancels it server-side. A continuing chat knows its session
+      // up front; a new chat learns it from the first `status` event, so a
+      // cancel wanted before then is sent as soon as that event arrives
+      // (an orphaned turn keeps reading its stream until it does).
+      let turnSessionId = currentSessionId
+      let requestSent = false
+      let cancelWanted = false
+      let cancelSent = false
+      let orphaned = false
+      // Stop keeps the transcript: the turn reports the outcome itself.
+      let stopped = false
       let terminalEventSeen = false
+      let cancelPromise: Promise<void> | undefined
+      const reportOrphanedCancelFailure = (sessionId: string, err: unknown) => {
+        toast.error(`Could not stop the previous reply: ${err instanceof Error ? err.message : 'Unknown error'}`, {
+          description: 'It may still run tools or create tasks.',
+          action: {
+            label: 'Retry',
+            onClick: () => {
+              cancelChatTurn(sessionId, namespace, token).catch((retryErr: unknown) => reportOrphanedCancelFailure(sessionId, retryErr))
+            },
+          },
+        })
+      }
+      const cancelServerTurn = () => {
+        cancelWanted = true
+        // After done/error the server turn is over; cancelling would only
+        // delete the finished session.
+        if (!requestSent || cancelSent || !turnSessionId || terminalEventSeen) return
+        cancelSent = true
+        const sessionId = turnSessionId
+        cancelPromise = cancelChatTurn(sessionId, namespace, token).then(
+          () => {
+            if (!stopped || !live()) return
+            // The cancelled session is gone server-side; the next message
+            // must start a new one rather than reuse its reserved name.
+            if (useChatStore.getState().currentSessionId === sessionId) setSessionId(null)
+            addMessage({
+              id: generateMessageId(),
+              role: 'status',
+              content: 'Stopped. This chat and its history were deleted; your next message starts a new chat.',
+              timestamp: new Date().toISOString(),
+            })
+          },
+          (err: unknown) => {
+            if (orphaned) {
+              // New Chat (or a namespace or identity switch) discarded this
+              // turn's transcript, but its server turn keeps running, so say
+              // so outside the transcript and offer a retry.
+              reportOrphanedCancelFailure(sessionId, err)
+              return
+            }
+            if (!stopped || !live()) return
+            // The turn keeps running; re-arm Stop so it can be retried.
+            stopped = false
+            cancelSent = false
+            useChatStore.setState({ stopRequested: false })
+            addMessage({
+              id: generateMessageId(),
+              role: 'error',
+              content: `Could not stop the turn: ${err instanceof Error ? err.message : 'Unknown error'}`,
+              timestamp: new Date().toISOString(),
+            })
+          },
+        )
+      }
+      const unsubscribeTurnControl = useChatStore.subscribe((state) => {
+        if (state.turnEpoch !== epoch) {
+          if (orphaned) return
+          orphaned = true
+          cancelServerTurn()
+          // Without a session ID the stream must still be read to learn it.
+          if (turnSessionId || !requestSent) controller.abort()
+        } else if (state.stopRequested && !stopped) {
+          stopped = true
+          cancelServerTurn()
+        }
+      })
 
       function handleSSEEvent(event: string, data: string) {
+        if (event === 'status' && !turnSessionId) {
+          const status = JSON.parse(data) as SSEStatusEvent
+          turnSessionId = status.sessionId || null
+          if (cancelWanted) cancelServerTurn()
+        }
         if (!live()) return
         const now = new Date().toISOString()
 
@@ -169,6 +271,9 @@ export function useSendMessage() {
           case 'error': {
             const err = JSON.parse(data) as { error: string }
             terminalEventSeen = true
+            // A stopped turn ends with the server's interruption error; the
+            // cancel request reports the outcome instead.
+            if (stopped) break
             addMessage({
               id: generateMessageId(),
               role: 'error',
@@ -217,12 +322,23 @@ export function useSendMessage() {
           body.provider = effectiveProvider
           if (model.trim()) body.model = model.trim()
         }
-        // The config lookup above may have yielded; a New Chat or namespace
-        // switch in the meantime means this turn must never reach the server
-        // (it could still run tools or create Tasks before being cancelled).
+        // The config lookup above may have yielded; a New Chat, namespace
+        // switch, or Stop in the meantime means this turn must never reach
+        // the server (it could still run tools or create Tasks before being
+        // cancelled).
         if (!live()) return
+        if (stopped) {
+          addMessage({
+            id: generateMessageId(),
+            role: 'status',
+            content: 'Stopped before the message was sent.',
+            timestamp: new Date().toISOString(),
+          })
+          return
+        }
 
-        const response = await fetch(`${API_BASE_URL}/chat`, {
+        requestSent = true
+        const responsePromise = fetch(`${API_BASE_URL}/chat`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -231,8 +347,11 @@ export function useSendMessage() {
           body: JSON.stringify(body),
           signal: controller.signal,
         })
+        // A continuing chat's turn is cancellable as soon as it is posted.
+        if (cancelWanted) cancelServerTurn()
+        const response = await responsePromise
 
-        if (!live()) {
+        if (!live() && (turnSessionId || !response.ok || !response.body)) {
           await response.body?.cancel().catch(() => {})
           return
         }
@@ -240,7 +359,9 @@ export function useSendMessage() {
           const errText = await response.text().catch(() => 'Unknown error')
           // Reading the error body yielded; a reset in the meantime means
           // this error belongs to the orphaned turn, not the new transcript.
-          if (!live()) return
+          // A turn stopped before the server took it reports through the
+          // cancel instead (its session was ended under the request).
+          if (!live() || stopped) return
           addMessage({
             id: generateMessageId(),
             role: 'error',
@@ -270,8 +391,10 @@ export function useSendMessage() {
           const { done, value } = await reader.read()
           // The epoch is rechecked before acting on the result: a read that
           // resolves after a reset — including the final done — must not
-          // flush this turn's remaining buffer into the new transcript.
-          if (!live()) {
+          // flush this turn's remaining buffer into the new transcript. An
+          // orphaned new chat keeps reading only until it learns its session
+          // ID (handleSSEEvent sends the cancel then).
+          if (!live() && (turnSessionId || done)) {
             await reader.cancel().catch(() => {})
             return
           }
@@ -294,6 +417,11 @@ export function useSendMessage() {
               // Skip malformed events
             }
           }
+          // An orphan that just learned its session ID has sent its cancel.
+          if (!live() && turnSessionId) {
+            await reader.cancel().catch(() => {})
+            return
+          }
         }
 
         // Process remaining buffer
@@ -308,7 +436,8 @@ export function useSendMessage() {
           }
         }
 
-        if (!terminalEventSeen) {
+        if (!live()) return
+        if (!terminalEventSeen && !stopped) {
           addMessage({
             id: generateMessageId(),
             role: 'error',
@@ -325,7 +454,10 @@ export function useSendMessage() {
           timestamp: new Date().toISOString(),
         })
       } finally {
-        unsubscribeAbort()
+        unsubscribeTurnControl()
+        // A stopped turn stays "streaming" until its cancel settles, so a new
+        // message cannot race the session deletion with the old session ID.
+        if (cancelPromise && live()) await cancelPromise.catch(() => {})
         // An orphaned turn's transcript was already reset; its streaming flag
         // was cleared with it and must not be touched again.
         if (live()) setStreaming(false)

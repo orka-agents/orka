@@ -255,7 +255,7 @@ func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 		{name: "over max clamps down", requested: 120, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
 		{name: "at max is honored", requested: maxCodeExecTimeoutSeconds, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
 		{name: "under max is honored", requested: 5, want: 5 * time.Second},
-		{name: "unset uses default", requested: 0, want: defaultCodeExecTimeout},
+		{name: "omitted uses default", requested: 0, want: defaultCodeExecTimeout},
 	}
 
 	for _, tt := range tests {
@@ -272,6 +272,9 @@ func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 			}
 
 			args := fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, tt.requested)
+			if tt.requested == 0 {
+				args = `{"language":"bash","code":"echo test"}`
+			}
 			if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}

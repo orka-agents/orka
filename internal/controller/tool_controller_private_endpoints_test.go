@@ -97,3 +97,45 @@ func TestPrivateEndpointHealthClientRefusesInfrastructureAndRedirects(t *testing
 		t.Fatal("the probe transport must not use a proxy")
 	}
 }
+
+func TestValidateToolPrivateAllowanceCoversAgentIdentityButNotDirect(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	accepted := corev1alpha1.OutboundAccessPolicyStatus{ObservedGeneration: 1, Conditions: []metav1.Condition{
+		{Type: corev1alpha1.OutboundAccessPolicyConditionAccepted, Status: metav1.ConditionTrue, Reason: "Accepted", ObservedGeneration: 1},
+		{Type: corev1alpha1.OutboundAccessPolicyConditionResolvedRefs, Status: metav1.ConditionTrue, Reason: "Resolved", ObservedGeneration: 1},
+	}}
+	identity := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "as-agent", Namespace: "tenant", Generation: 1},
+		Status:     accepted,
+		Spec: corev1alpha1.OutboundAccessPolicySpec{AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{
+			Mode: corev1alpha1.OutboundAgentIdentityModeSelf, Entra: &corev1alpha1.EntraOutboundTarget{Resource: "api://fixture"},
+		}},
+	}
+	direct := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant", Generation: 1},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
+		Status:     accepted,
+	}
+	r := &ToolReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(identity, direct).Build(), AllowPrivateConnectorEndpoints: true}
+	tool := func(policy string) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "probe", Namespace: "tenant"},
+			Spec: corev1alpha1.ToolSpec{Description: "probe", HTTP: &corev1alpha1.HTTPExecution{
+				URL: "https://10.96.0.10/probe", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy},
+			}},
+		}
+	}
+	if err := r.validateTool(context.Background(), tool("as-agent")); err != nil {
+		t.Fatalf("an agentIdentity Tool may use a private endpoint under the allowance: %v", err)
+	}
+	if err := r.validateTool(context.Background(), tool("direct")); err == nil || !strings.Contains(err.Error(), "private/loopback") {
+		t.Fatalf("a direct-mode Tool must still be refused a private endpoint: %v", err)
+	}
+	r.AllowPrivateConnectorEndpoints = false
+	if err := r.validateTool(context.Background(), tool("as-agent")); err == nil || !strings.Contains(err.Error(), "private/loopback") {
+		t.Fatalf("without the allowance an agentIdentity Tool is refused a private endpoint: %v", err)
+	}
+}

@@ -158,6 +158,11 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if t.maxURLBytes > 0 && len(fetchArgs.URL) > t.maxURLBytes {
 		return "", fmt.Errorf("url must be no greater than %d bytes", t.maxURLBytes)
 	}
+	// The schema advertises the character count that fits the byte limit in
+	// any UTF-8 encoding; enforce that bound too.
+	if maxChars := t.maxURLBytes / utf8.UTFMax; t.maxURLBytes > 0 && utf8.RuneCountInString(fetchArgs.URL) > maxChars {
+		return "", fmt.Errorf("url must be no greater than %d characters", maxChars)
+	}
 
 	parsed, err := url.Parse(fetchArgs.URL)
 	if err != nil {

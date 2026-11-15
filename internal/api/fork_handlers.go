@@ -211,7 +211,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		case apierrors.IsRequestEntityTooLargeError(err):
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "forked task is too large; fork from an earlier checkpoint or shorten the prompt")
 		case apierrors.IsInvalid(err):
-			return fiber.NewError(fiber.StatusBadRequest, "forked task is invalid")
+			return fiber.NewError(fiber.StatusBadRequest, invalidObjectMessage("forked task is invalid", err))
 		default:
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
 		}
@@ -585,4 +585,36 @@ func listTaskEventsThrough(
 	throughSeq int64,
 ) ([]store.ExecutionEvent, bool, error) {
 	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
+}
+
+// invalidObjectError reports a Kubernetes Invalid rejection of a caller-supplied
+// object as 400 naming the rejected fields, and an admission webhook's denial
+// as 400 with the webhook's reason. It returns nil for any other error, so an
+// authorization failure of the API server's own identity stays a server error.
+func invalidObjectError(kind string, err error) error {
+	switch {
+	case apierrors.IsInvalid(err):
+		return fiber.NewError(fiber.StatusBadRequest, invalidObjectMessage(kind+" is invalid", err))
+	case (apierrors.IsForbidden(err) || apierrors.IsBadRequest(err)) && strings.Contains(err.Error(), "denied the request"):
+		return fiber.NewError(fiber.StatusBadRequest, kind+" was rejected: "+err.Error())
+	}
+	return nil
+}
+
+// invalidObjectMessage names the fields an Invalid create rejected, so the
+// caller can correct them, without repeating the whole object in the reply.
+func invalidObjectMessage(prefix string, err error) string {
+	status, ok := err.(apierrors.APIStatus)
+	if !ok || status.Status().Details == nil || len(status.Status().Details.Causes) == 0 {
+		return prefix
+	}
+	causes := make([]string, 0, len(status.Status().Details.Causes))
+	for _, cause := range status.Status().Details.Causes {
+		if cause.Field == "" {
+			causes = append(causes, cause.Message)
+			continue
+		}
+		causes = append(causes, cause.Field+": "+cause.Message)
+	}
+	return prefix + ": " + strings.Join(causes, "; ")
 }

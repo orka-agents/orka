@@ -16,7 +16,13 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ListToolsTool lists available Tool CRDs.
+// agentBuiltinToolNames are the worker built-in tools an Agent or Task enables
+// by name (see RegisterBuiltinTools), without the gateway-only reply tool.
+var agentBuiltinToolNames = []string{
+	webSearchToolName, codeExecToolName, fileReadToolName, webFetchToolName, fileWriteToolName, requestApprovalToolName,
+}
+
+// ListToolsTool lists the built-in tools and the namespace's Tool CRDs.
 type ListToolsTool struct{}
 
 func (t *ListToolsTool) Name() string { return listToolsToolName }
@@ -47,7 +53,12 @@ func (t *ListToolsTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return classifyChatK8sErr(err)
 	}
 
-	tools := make([]map[string]any, 0, len(toolList.Items))
+	tools := make([]map[string]any, 0, len(agentBuiltinToolNames)+len(toolList.Items))
+	for _, name := range agentBuiltinToolNames {
+		if tool, ok := DefaultRegistry.Get(name); ok {
+			tools = append(tools, map[string]any{nameField: name, jsonSchemaDescriptionField: tool.Description(), "builtin": true})
+		}
+	}
 	for _, tool := range toolList.Items {
 		tools = append(tools, map[string]any{nameField: tool.Name, jsonSchemaDescriptionField: tool.Spec.Description,
 			"builtin": false,

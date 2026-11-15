@@ -179,7 +179,7 @@ func TestGatewayMessageReplayOnlyIsAtomicReceiptLookup(t *testing.T) {
 			request.ReplayOnly = true
 			request.Now = now.Add(25 * time.Hour)
 			request.ExpiresAt = request.Now.Add(time.Hour)
-			err = s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+			err = s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 				replay, created, err := s.EnqueueGatewayMessage(txCtx, request)
 				if err != nil || created || !reflect.DeepEqual(before, replay) {
 					t.Fatalf("receipt = (%+v, %v, %v), want unchanged %+v", replay, created, err, before)
@@ -543,7 +543,7 @@ func TestGatewayMessageTransactionRollbackAndReopen(t *testing.T) {
 	request := messageEnqueue(event, now, "operation")
 	request.MaxMessages = 1
 	rollback := errors.New("rollback")
-	if err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+	if err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		if _, _, err := s.EnqueueGatewayMessage(txCtx, request); err != nil {
 			return err
 		}
@@ -552,7 +552,7 @@ func TestGatewayMessageTransactionRollbackAndReopen(t *testing.T) {
 		t.Fatalf("transaction = %v", err)
 	}
 	var delivery *store.GatewayDelivery
-	if err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+	if err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		var err error
 		delivery, _, err = s.EnqueueGatewayMessage(txCtx, request)
 		return err
