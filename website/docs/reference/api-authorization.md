@@ -210,7 +210,6 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
-| `POST` | `/api/v1/tasks/:id/cancel` | `core.orka.ai` | `tasks` | `patch` | `:id` | `Q` | Gateway operate; a signed-in person must be the Task's requester |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
