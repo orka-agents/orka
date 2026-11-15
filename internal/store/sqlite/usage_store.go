@@ -501,16 +501,17 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 	// decoding it would let a session's later turns push the lookup past the
 	// caller's budget. started_at is the start recorded when the row was
 	// first written, which later snapshots keep, so it is the decoded value.
-	startedByNano := int64(0)
-	if !startedBy.IsZero() {
+	// A zero startedBy sets no cut-off; the Unix epoch is a real one.
+	cutOff, startedByNano := !startedBy.IsZero(), int64(0)
+	if cutOff {
 		startedByNano = startedBy.UnixNano()
 	}
 	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx,
 		`SELECT data FROM usage_tasks
-		 WHERE namespace = ? AND (? = 0 OR started_at <= ?)
+		 WHERE namespace = ? AND (NOT ? OR started_at <= ?)
 		   AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
 		   AND TRIM(COALESCE(json_extract(data, '$.sessionName'), ''), ?) IN (SELECT value FROM json_each(?))`,
-		namespace, startedByNano, startedByNano, namespaceUID, namespaceUID, usageSpace, string(names))
+		namespace, cutOff, startedByNano, namespaceUID, namespaceUID, usageSpace, string(names))
 	if err != nil {
 		return nil, err
 	}

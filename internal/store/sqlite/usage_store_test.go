@@ -914,6 +914,10 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.Len(t, tasks, 3)
 	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 100)
 	require.Error(t, err, "without a cut-off the later turn is read")
+	// The Unix epoch is a cut-off too, before every turn here.
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Unix(0, 0), 100)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
 	_, err = s.db.ExecContext(ctx, `DELETE FROM usage_tasks WHERE namespace = 'team' AND task_uid = 'later'`)
 	require.NoError(t, err)
 	// An earlier namespace of the same name stays out.
