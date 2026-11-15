@@ -131,6 +131,11 @@ func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 			t.Errorf("close exported rootfs: %v", err)
 		}
 	}()
+	assertAgentKitRuntimeArchive(t, tar.NewReader(file))
+}
+
+func assertAgentKitRuntimeArchive(t *testing.T, reader *tar.Reader) {
+	t.Helper()
 	wantMetadata := map[string]struct {
 		uid, gid int
 		mode     int64
@@ -143,7 +148,6 @@ func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 		"usr/share":                       {123, 456, 0o751},
 		"usr/share/licenses":              {123, 456, 0o751},
 	}
-	reader := tar.NewReader(file)
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
