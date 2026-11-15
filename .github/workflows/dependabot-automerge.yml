@@ -76,6 +76,13 @@ jobs:
 
           dependabot_filter='map(select((.author.login == "dependabot[bot]" or .author.login == "app/dependabot") and .isDraft == false) | .number)'
 
+          # Page through every open PR so the sweep is not capped at the
+          # newest ones, whoever opened them.
+          list_dependabot_prs() {
+            gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
+              --jq '.[] | select(.user.login == "dependabot[bot]" and .draft == false) | .number'
+          }
+
           case "$EVENT_NAME" in
             workflow_run)
               pr_number="${WORKFLOW_PR:-}"
@@ -102,13 +109,11 @@ jobs:
                 fi
                 numbers="$MANUAL_PR"
               else
-                numbers="$(gh pr list --repo "$REPO" --state open --limit 200 \
-                  --json number,author,isDraft --jq "$dependabot_filter | .[]")"
+                numbers="$(list_dependabot_prs)"
               fi
               ;;
             schedule)
-              numbers="$(gh pr list --repo "$REPO" --state open --limit 200 \
-                --json number,author,isDraft --jq "$dependabot_filter | .[]")"
+              numbers="$(list_dependabot_prs)"
               ;;
             *)
               echo "Unsupported event: $EVENT_NAME" >&2
@@ -145,8 +150,8 @@ jobs:
 
             pr_json="$(gh pr view "$pr_number" \
               --repo "$REPO" \
-              --json author,isDraft,state,headRefOid,headRefName \
-              --jq '{author: .author.login, isDraft, state, headRefOid, headRefName}')" || {
+              --json author,isDraft,state,headRefOid,headRefName,mergeable \
+              --jq '{author: .author.login, isDraft, state, headRefOid, headRefName, mergeable}')" || {
               echo "::warning::Could not read PR #$pr_number."
               return 2
             }
@@ -173,6 +178,11 @@ jobs:
             is_draft="$(jq -r '.isDraft' <<<"$pr_json")"
             if [ "$is_draft" != "false" ]; then
               echo "PR #$pr_number is a draft; not automerging."
+              return 0
+            fi
+
+            if [ "$(jq -r '.mergeable' <<<"$pr_json")" = "CONFLICTING" ]; then
+              echo "PR #$pr_number conflicts with its base; waiting for Dependabot to rebase it."
               return 0
             fi
 
