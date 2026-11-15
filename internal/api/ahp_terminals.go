@@ -354,6 +354,8 @@ var _ ahphost.TerminalReaper = (*ahpBackend)(nil)
 // in the user's workspace, which outlives the process. A session ID one of
 // this process's terminals now holds was reused, and is left alone. A failure
 // is returned, so the host keeps the terminals' channels and tries again.
+// Once they are stopped, the workspace is considered for removal as after the
+// last terminal is disposed of.
 func (b *ahpBackend) ReapTerminals(ctx context.Context, principal ahphost.Principal, channels []string) error {
 	pod, err := b.workspaces.runningForCleanup(ctx, principal)
 	if err != nil || pod == nil {
@@ -373,6 +375,11 @@ func (b *ahpBackend) ReapTerminals(ctx context.Context, principal ahphost.Princi
 		argv := append([]string{ahpShell, "-c", ahpStopSessionScript, "sh", ahpTerminalPIDFile(principal.UserKey, channel), "reap"}, live...)
 		failed = errors.Join(failed, b.workspaces.run(killCtx, pod, argv...))
 		cancel()
+	}
+	if failed == nil {
+		// Without an idle timeout nothing else removes a workspace whose last
+		// terminal an earlier process left behind, as disposing of one does.
+		b.removeWorkspaceAfterLastTerminal(context.WithoutCancel(ctx), principal)
 	}
 	return failed
 }

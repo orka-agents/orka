@@ -654,3 +654,39 @@ func TestAHPDisposingTheLastTerminalConsidersTheWorkspace(t *testing.T) {
 	}
 	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
 }
+
+// Reaping the terminals an earlier process left behind runs the same decision
+// as disposing of the last terminal: with no idle timeout nothing else would
+// remove the workspace.
+func TestAHPReapingTerminalsConsidersTheWorkspace(t *testing.T) {
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	reads := func(idle time.Duration) int32 {
+		env := newAHPTestEnv(t)
+		env.backend.cfg.WorkspaceIdleTimeout = idle
+		// Exec reaches no API server here, so the workspace is never shown
+		// to hold no work and stays; only whether it was considered counts.
+		unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
+		clientset, err := kubernetes.NewForConfig(unreachable)
+		require.NoError(t, err)
+		w := &ahpWorkspaces{b: env.backend, clientset: clientset, rest: unreachable, namespace: "orka-ahp-workspaces",
+			image: "example.com/git@sha256:" + ahpHash("x")}
+		env.backend.workspaces = w
+		pod := w.podSpec(alice)
+		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: ahpWorkspaceContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}}
+		require.NoError(t, env.kube.Create(context.Background(), pod))
+		var podReads atomic.Int32
+		env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Pod); ok && key.Name == ahpWorkspacePodName(alice.UserKey) {
+					podReads.Add(1)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		require.NoError(t, env.backend.ReapTerminals(context.Background(), alice, nil))
+		return podReads.Load()
+	}
+	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
+}
