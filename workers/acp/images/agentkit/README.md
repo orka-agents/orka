@@ -15,7 +15,8 @@ are normalized exactly as the previous final-stage shell commands did for
 ordinary directories and files.
 
 Executable/nonempty checks resolve symlink components in the mounted source's
-namespace. For example, an absolute `/usr/local/bin/python` link is checked in
+namespace, preserving trailing-slash directory requirements through symlink
+chains. For example, an absolute `/usr/local/bin/python` link is checked in
 the source image, not against the builder's interpreter. Checking executability
 has the original `test -x` semantics: it does not execute the file, parse a
 shebang, or prove that an interpreter/shared library can run. Internal venv

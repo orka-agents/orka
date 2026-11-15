@@ -24,7 +24,10 @@ resolve_source() (
     links=0
     while test -n "$pending"; do
         component=${pending%%/*}
-        if test "$pending" = "$component"; then pending=; else pending=${pending#*/}; fi
+        # Keep the separator too: a trailing slash requires a directory,
+        # including when the preceding component is another symlink.
+        remaining=${pending#"$component"}
+        pending=${remaining#/}
         case "$component" in
             ''|.) continue ;;
             ..) resolved=${resolved%/*} ;;
@@ -40,9 +43,9 @@ resolve_source() (
                     case "$target" in *'
 '*) fail "source symlink target must not contain newlines" ;; esac
                     case "$target" in /*) resolved= ;; esac
-                    pending=$target${pending:+/$pending}
+                    pending=$target$remaining
                 else
-                    if test -n "$pending"; then test -d "$candidate" || fail "source path component is not a directory: $candidate"; fi
+                    if test -n "$remaining"; then test -d "$candidate" || fail "source path component is not a directory: $candidate"; fi
                     resolved=$resolved/$component
                 fi
                 ;;

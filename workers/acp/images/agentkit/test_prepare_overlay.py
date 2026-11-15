@@ -116,6 +116,32 @@ class OverlayTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.overlay.exists())
 
+    def test_executable_symlink_trailing_slash_requires_a_directory(self):
+        serve = self.root / "opt/agentkit/bin/agentkit-serve"
+        serve.unlink()
+        serve.symlink_to("/usr/local/bin/python/")
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source path component is not a directory", result.stderr)
+        self.assertFalse(self.overlay.exists())
+
+    def test_config_symlink_trailing_slash_requires_a_directory(self):
+        config = self.root / "agent/agent.yaml"
+        config.rename(self.root / "agent/config.yaml")
+        config.symlink_to("config.yaml/")
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source path component is not a directory", result.stderr)
+        self.assertFalse(self.overlay.exists())
+
+    def test_directory_symlink_with_trailing_slash_still_resolves(self):
+        binary_dir = self.root / "opt/agentkit/bin"
+        binary_dir.rename(self.root / "opt/agentkit/runtime-bin")
+        binary_dir.symlink_to("runtime-bin/")
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(os.readlink(self.overlay / "opt/agentkit/bin"), "runtime-bin/")
+
     def test_missing_optional_directories_are_created_with_original_modes(self):
         (self.root / "sessions/existing").unlink()
         (self.root / "sessions").rmdir()
