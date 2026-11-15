@@ -367,10 +367,15 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 	}
 	// The report's rows carry their namespace's verified UID, which keeps
 	// out an earlier namespace's rows of the same name.
-	known, namespaceUIDs := map[string]bool{}, map[string]string{}
+	// loaded counts, per namespace, the report's rows in its AHP sessions:
+	// the lookup returns them again, and they are already in the budget.
+	known, namespaceUIDs, loaded := map[string]bool{}, map[string]string{}, map[string]int{}
 	for _, task := range data.Tasks {
 		known[task.Namespace+"/"+task.TaskUID] = true
 		note(task.Namespace, task.SessionName)
+		if _, ahp := ahpSessionName(task.SessionName); ahp {
+			loaded[task.Namespace]++
+		}
 		namespaceUIDs[task.Namespace] = cmp.Or(namespaceUIDs[task.Namespace], task.NamespaceUID)
 	}
 	for _, observation := range data.Observations {
@@ -380,20 +385,29 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 		namespaceUIDs[observation.Namespace] = cmp.Or(namespaceUIDs[observation.Namespace], observation.NamespaceUID)
 	}
 	// remaining is what the report's record limit leaves: one budget covers
-	// every team of the report and the records it already loaded.
+	// every team of the report and the records it already loaded. Each
+	// lookup may also return the report's own rows again, which it skips, so
+	// only rows the report did not load count against the budget.
+	tooLarge := fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
 	remaining = max(remaining, 0)
 	for _, namespace := range slices.Sorted(maps.Keys(sessions)) {
-		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining)
+		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining+loaded[namespace])
 		if errors.Is(err, store.ErrUsageSelectionTooLarge) {
-			return fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
+			return tooLarge
 		}
 		if err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to load usage report")
 		}
-		remaining -= len(rows)
 		for _, row := range rows {
 			key := row.Namespace + "/" + row.TaskUID
-			if known[key] || !ahpUsageHidden(ui, row.Requester) {
+			if known[key] {
+				continue
+			}
+			if remaining == 0 {
+				return tooLarge
+			}
+			remaining--
+			if !ahpUsageHidden(ui, row.Requester) {
 				continue
 			}
 			known[key] = true

@@ -702,8 +702,10 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Equal(t, http.StatusOK, response.StatusCode)
-	require.Equal(t, []int{usageMaxRecords - 2, usageMaxRecords - 2 - 3}, recording.limits,
-		"the report's two records and each team's rows count against one budget")
+	// Each lookup may return the team's loaded row again, so its limit leaves
+	// room for it; only the three rows the report did not load use budget.
+	require.Equal(t, []int{usageMaxRecords - 2 + 1, usageMaxRecords - 2 - 3 + 1}, recording.limits,
+		"the report's two records and each team's new rows count against one budget")
 
 	// A report already at its record limit has no budget left for the lookup.
 	full := store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start}}}
@@ -721,5 +723,48 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Equal(t, http.StatusUnprocessableEntity, response.StatusCode)
-	require.Equal(t, []int{0}, recording.limits)
+	require.Equal(t, []int{1}, recording.limits, "only room for the report's own row")
+}
+
+// A report that the session lookup takes exactly to its record limit is not
+// refused because the lookup also returns a row the report already loaded.
+func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	backend := sqlite.NewStore(db, ":memory:")
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, uid := range []string{"loaded", "turn-0", "turn-1"} {
+		require.NoError(t, backend.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: uid,
+			TaskName: uid, SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start}))
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: backend})
+	report := func(extra int) (*store.UsageData, int) {
+		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
+		// The report's own records leave room for exactly the two other turns.
+		for i := range usageMaxRecords - 3 + extra {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+				SessionName: "team-session", ObservedAt: start})
+		}
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+			return handlers.filterUsageTaskAccess(c, data, start.Add(time.Hour))
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		return data, response.StatusCode
+	}
+	data, status := report(0)
+	require.Equal(t, http.StatusOK, status)
+	require.Len(t, data.Tasks, 3, "both other turns join the report, hidden")
+	require.True(t, data.HiddenTasks["team-a/turn-0"])
+	require.True(t, data.HiddenTasks["team-a/turn-1"])
+
+	// One record more and the turns no longer fit.
+	_, status = report(1)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
 }
