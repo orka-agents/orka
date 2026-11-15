@@ -1063,7 +1063,7 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-0",
 			TaskUID: "earlier-namespace", TaskName: "earlier-namespace", SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
 
-		tasks, err := p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one", "ahp-absent"}, 100)
+		tasks, err := p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one", "ahp-absent"}, time.Time{}, 100)
 		require.NoError(t, err)
 		found := map[string]storagev1.UsageTask{}
 		for _, task := range tasks {
@@ -1073,15 +1073,28 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 			"names match without surrounding space, and only whole names")
 		require.Equal(t, alice, found["plain"].Requester)
 		require.True(t, found["plain"].AHPTurn)
-		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "", []string{"ahp-one"}, 100)
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "", []string{"ahp-one"}, time.Time{}, 100)
 		require.NoError(t, err)
 		require.Len(t, tasks, 4, "without a namespace UID, every namespace of the name counts")
-		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"team-session"}, 100)
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"team-session"}, time.Time{}, 100)
 		require.NoError(t, err)
 		require.Len(t, tasks, 1, "any session name is looked up, not only an AHP one")
 		require.Equal(t, "team", tasks[0].TaskUID)
-		_, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, 2)
+		_, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, time.Time{}, 2)
 		require.ErrorIs(t, err, storagev1.ErrUsageSelectionTooLarge)
+		// A Task that started after startedBy is left out and uses none of
+		// the limit: three rows started by then fit a limit of three.
+		require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-1",
+			TaskUID: "later", TaskName: "later", SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at.Add(time.Hour)}))
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, at, 3)
+		require.NoError(t, err)
+		require.Len(t, tasks, 3)
+		for _, task := range tasks {
+			require.NotEqual(t, "later", task.TaskUID)
+		}
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, time.Time{}, 100)
+		require.NoError(t, err)
+		require.Len(t, tasks, 4, "a zero startedBy bounds nothing")
 	})
 
 	t.Run("retention prunes whole inactive cohorts", func(t *testing.T) {

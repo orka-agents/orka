@@ -478,7 +478,7 @@ var usageSpace = func() string {
 	return space.String()
 }()
 
-func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]store.UsageTask, error) {
 	if len(sessions) == 0 {
 		return nil, nil
 	}
@@ -516,6 +516,10 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 			return nil, err
 		}
 		if !wanted[strings.TrimSpace(task.SessionName)] {
+			continue
+		}
+		// A Task that started after startedBy is outside the caller's period.
+		if !startedBy.IsZero() && task.StartedAt.After(startedBy) {
 			continue
 		}
 		if len(tasks) == limit {

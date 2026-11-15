@@ -317,7 +317,7 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		}
 	}
 	if ahpPerson(ui) {
-		if err := h.addHiddenAHPSessionTasks(c, ui, data, usageMaxRecords-loaded); err != nil {
+		if err := h.addHiddenAHPSessionTasks(c, ui, data, asOf, usageMaxRecords-loaded); err != nil {
 			return err
 		}
 	}
@@ -351,7 +351,7 @@ func ahpUsageTaskHidden(ui *UserInfo, task store.UsageTask, observed bool) bool 
 // as an operator's turn from before the report's period. A session's usage
 // counter spans its turns, so the report then credits nothing on it to a
 // visible Task: a gain on it may be such a Task's.
-func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *store.UsageData, remaining int) error {
+func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *store.UsageData, asOf time.Time, remaining int) error {
 	backend, ok := h.executionEventStore.(store.UsageStore)
 	if !ok {
 		return nil
@@ -387,11 +387,13 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 	// remaining is what the report's record limit leaves: one budget covers
 	// every team of the report and the records it already loaded. Each
 	// lookup may also return the report's own rows again, which it skips, so
-	// only rows the report did not load count against the budget.
+	// only rows the report did not load count against the budget. Turns that
+	// started after asOf are outside the report and not looked up.
 	tooLarge := fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
 	remaining = max(remaining, 0)
 	for _, namespace := range slices.Sorted(maps.Keys(sessions)) {
-		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining+loaded[namespace])
+		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])),
+			asOf, remaining+loaded[namespace])
 		if errors.Is(err, store.ErrUsageSelectionTooLarge) {
 			return tooLarge
 		}

@@ -670,9 +670,9 @@ type limitRecordingStore struct {
 	limits []int
 }
 
-func (s *limitRecordingStore) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+func (s *limitRecordingStore) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]store.UsageTask, error) {
 	s.limits = append(s.limits, limit)
-	return s.Store.ListUsageTasksInSessions(ctx, namespace, namespaceUID, sessions, limit)
+	return s.Store.ListUsageTasksInSessions(ctx, namespace, namespaceUID, sessions, startedBy, limit)
 }
 
 // The lookup of a report's AHP session rows has one budget across all its
@@ -770,4 +770,11 @@ func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
 	// One record more and the turns no longer fit.
 	_, status = report(1)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
+	// A turn that started after the report's asOf is outside it and uses
+	// none of its budget.
+	require.NoError(t, backend.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: "after-asof",
+		TaskName: "after-asof", SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start.Add(2 * time.Hour)}))
+	data, status = report(0)
+	require.Equal(t, http.StatusOK, status, "a later turn does not push a historical report past its limit")
+	require.NotContains(t, data.HiddenTasks, "team-a/after-asof")
 }

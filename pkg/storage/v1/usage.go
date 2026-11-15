@@ -175,8 +175,10 @@ type UsageStore interface {
 	// namespace's Tasks that continued any of the named sessions, by name
 	// without surrounding space, whatever their period. A namespace UID, when
 	// given, keeps out the rows of an earlier namespace of the same name.
-	// Past the limit it returns ErrUsageSelectionTooLarge.
-	ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]UsageTask, error)
+	// Rows of Tasks that started after startedBy, when it is not zero, are
+	// left out and do not count against the limit. Past the limit it returns
+	// ErrUsageSelectionTooLarge.
+	ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]UsageTask, error)
 	PruneUsage(context.Context, time.Time) error
 }
 
