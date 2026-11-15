@@ -125,6 +125,23 @@ var (
 	startPortForwardFn = startPortForward
 )
 
+// cachedPortForwardServer returns the server of a cached port-forward that
+// still accepts connections, or "" when there is none.
+func cachedPortForwardServer() string {
+	cached := loadPortForwardCache()
+	if cached == nil {
+		return ""
+	}
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cached.Port), 500*time.Millisecond)
+	if err != nil {
+		return ""
+	}
+	conn.Close() //nolint:errcheck
+	fmt.Fprintf(os.Stderr, "Connected to %s in %s (cached port %d)\n",
+		cached.Service, cached.Namespace, cached.Port)
+	return fmt.Sprintf("http://localhost:%d", cached.Port)
+}
+
 // newClientWithTunnel is newClientFromCmdWithServer for a command that handles
 // interrupts itself. A port-forward this call starts normally ends on the
 // first interrupt. With ownTunnel the caller decides instead: no interrupt
@@ -177,15 +194,7 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 
 	// Try cached port-forward first
 	if server == "" {
-		if cached := loadPortForwardCache(); cached != nil {
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cached.Port), 500*time.Millisecond)
-			if err == nil {
-				conn.Close() //nolint:errcheck
-				server = fmt.Sprintf("http://localhost:%d", cached.Port)
-				fmt.Fprintf(os.Stderr, "Connected to %s in %s (cached port %d)\n",
-					cached.Service, cached.Namespace, cached.Port)
-			}
-		}
+		server = cachedPortForwardServer()
 	}
 
 	// Auto-discover server via K8s service discovery + port-forward
