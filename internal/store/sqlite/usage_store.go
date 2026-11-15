@@ -496,11 +496,21 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 	if err != nil {
 		return nil, err
 	}
+	// A Task that started after startedBy is outside the caller's period, and
+	// is left out before it is read: it does not count against limit, so
+	// decoding it would let a session's later turns push the lookup past the
+	// caller's budget. started_at is the start recorded when the row was
+	// first written, which later snapshots keep, so it is the decoded value.
+	startedByNano := int64(0)
+	if !startedBy.IsZero() {
+		startedByNano = startedBy.UnixNano()
+	}
 	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx,
 		`SELECT data FROM usage_tasks
-		 WHERE namespace = ? AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
+		 WHERE namespace = ? AND (? = 0 OR started_at <= ?)
+		   AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
 		   AND TRIM(COALESCE(json_extract(data, '$.sessionName'), ''), ?) IN (SELECT value FROM json_each(?))`,
-		namespace, namespaceUID, namespaceUID, usageSpace, string(names))
+		namespace, startedByNano, startedByNano, namespaceUID, namespaceUID, usageSpace, string(names))
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +528,7 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 		if !wanted[strings.TrimSpace(task.SessionName)] {
 			continue
 		}
-		// A Task that started after startedBy is outside the caller's period.
+		// The same check, on the decoded value.
 		if !startedBy.IsZero() && task.StartedAt.After(startedBy) {
 			continue
 		}
