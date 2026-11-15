@@ -249,6 +249,13 @@ func newClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) (*cl
 		server = defaultServer
 	}
 
+	if !session && strings.HasPrefix(token, sessionTokenPrefix) {
+		// A session passed with --token crosses the network only as a saved
+		// one does: over https, or over http only to this machine.
+		if err := sessionServerAllowed(server); err != nil {
+			cobra.CheckErr(err)
+		}
+	}
 	c := client.NewWithNamespace(server, token, ns)
 	if token != "" && (session || strings.HasPrefix(token, sessionTokenPrefix)) {
 		// A session goes only to its own server: never through a redirect,

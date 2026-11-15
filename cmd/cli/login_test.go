@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -769,5 +770,24 @@ func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 	defer cancel()
 	if err := waitForAgentHost(ctx, cmd, hosts, "github-alice"); err == nil || !strings.Contains(err.Error(), "an operator suspended") || wakes.Load() != 0 {
 		t.Fatalf("wait = %v, %d wakes", err, wakes.Load())
+	}
+}
+
+// An Orka session passed with --token never crosses the network in the clear:
+// the command stops before sending it, as a saved session's would. The CLI
+// exits on the refusal, so the command runs in a child process.
+func TestExplicitSessionStaysOffPlainHTTP(t *testing.T) {
+	if os.Getenv("ORKA_CLI_EXPLICIT_SESSION_CHILD") == "1" {
+		_, _ = runLoginCLI(t, "host", "status", "--server", "http://orka.example.com", "--token", "orka_s_explicit")
+		return
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestExplicitSessionStaysOffPlainHTTP$")
+	child.Env = append(os.Environ(), "ORKA_CLI_EXPLICIT_SESSION_CHILD=1", "HOME="+t.TempDir())
+	out, err := child.CombinedOutput()
+	if err == nil {
+		t.Fatalf("a session for a plain-http server was sent: %s", out)
+	}
+	if !strings.Contains(string(out), "in the clear") {
+		t.Fatalf("output = %s, want the in-the-clear refusal", out)
 	}
 }
