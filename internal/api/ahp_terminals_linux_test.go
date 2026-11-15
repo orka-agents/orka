@@ -149,3 +149,30 @@ func TestAHPStopSessionScriptWithoutTheLeader(t *testing.T) {
 	require.Eventually(t, func() bool { return len(ahpSessionMembers(t, sid)) == 0 }, 5*time.Second, 20*time.Millisecond,
 		"a running terminal's leftover processes are stopped")
 }
+
+// Disposing of a terminal and the end of its stream both stop its session, so
+// two runs race on its file, and rm -f fails when the file goes between its
+// check and its unlink. The run that lost still succeeds; one that cannot
+// remove the file still fails.
+func TestAHPStopSessionScriptLosesTheRaceForItsFile(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "terminal.pid")
+	ahpRecordedSession(t, pidFile, "sleep 60")
+	bin := t.TempDir()
+	// This rm removes the file, as the other run does, then fails as rm -f
+	// does when it loses the race.
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "rm"), []byte("#!/bin/sh\n/bin/rm -f \"$2\"\necho \"rm: can't remove '$2': No such file or directory\" >&2\nexit 1\n"), 0o755))
+	stop := exec.Command("/bin/sh", "-c", ahpStopSessionScript, "sh", pidFile, "stop")
+	stop.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	out, err := stop.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoFileExists(t, pidFile)
+
+	stuck := filepath.Join(dir, "stuck.pid")
+	ahpRecordedSession(t, stuck, "sleep 60")
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "rm"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	stop = exec.Command("/bin/sh", "-c", ahpStopSessionScript, "sh", stuck, "stop")
+	stop.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	_, err = stop.CombinedOutput()
+	require.Error(t, err, "a file that stays is a failed stop")
+}
