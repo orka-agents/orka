@@ -1977,7 +1977,8 @@ func TestContextTokenMemoryConsolidationFailures(t *testing.T) {
 		return CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: ai}
 	}
 	token := func(scopes ...string) *ContextToken { return &ContextToken{Scopes: scopes} }
-	reads := []string{ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead}
+	reads := make([]string, 0, 4)
+	reads = append(reads, ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead)
 
 	require.Empty(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg,
 		CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{}}), "an ordinary Task needs no more")
