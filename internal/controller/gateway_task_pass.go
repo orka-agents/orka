@@ -55,6 +55,11 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 			}
 			return nil, err
 		}
+		// A parent binds before it runs, so one that could delegate but has no
+		// binding, such as a native AI-worker Task, never will.
+		if parent.Status.AgentExecutionBinding == nil {
+			return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		}
 		inherited, err := loadGatewayPassSnapshot(ctx, reader, r.AgentExecutionSnapshots, parent)
 		if err != nil {
 			return nil, err

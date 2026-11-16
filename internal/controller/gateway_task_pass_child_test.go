@@ -196,6 +196,14 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 		_, err = r.freezeGatewayTaskGrant(t.Context(), forged, *childBody.MCPConfiguration)
 		require.True(t, isPermanentACPAgentConfigurationError(err))
 	}
+	// A parent with no agent execution binding, such as a native AI-worker
+	// Task, never gains one, so its child fails instead of retrying.
+	unbound := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "unbound-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
+	require.NoError(t, r.Create(t.Context(), unbound))
+	unboundChild := newGatewayPassChild(t, r, unbound, "unbound-parent-child")
+	_, err = r.freezeGatewayTaskGrant(t.Context(), unboundChild, *childBody.MCPConfiguration)
+	require.ErrorContains(t, err, "parent has no frozen gateway grant")
+	require.True(t, isPermanentACPAgentConfigurationError(err))
 	// The advertised but non-inherited tool never gets a pass.
 	forbidden := &corev1alpha1.Tool{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: child.Namespace, Name: "forbidden"}, forbidden))
