@@ -133,9 +133,10 @@ the `since` window (default 24 hours, at most 7 days), and blocked
 RepositoryMonitor work actions when the caller may also list
 `repositorymonitors` and `monitorworkactions`.
 
-Each item is a short safe summary: Task identity, tool name, action label,
-severity and deadline. It never includes the input preview, risk summary,
-wait reason or decision reasons; open the Task's Approvals tab or the
+Each item is a short safe summary: Task identity, the tool name when it is an
+identifier, a fixed label for parked sign-offs, severity and deadline. It never
+includes action labels built from call arguments, the input preview, risk
+summary, wait reason or decision reasons; open the Task's Approvals tab or the
 per-Task list for those before deciding. Each approval item carries
 `canApprove` and `canDecline`. They are hints from the same checks the
 decision endpoint runs, including the rule that only the requester may

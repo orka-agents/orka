@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/gofiber/fiber/v3"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -82,7 +81,7 @@ const (
 	attentionMonitorPageSize     = 100
 	attentionCursorMaxBytes      = 4096
 	attentionCursorVersion       = 1
-	attentionSafeTextMaxRunes    = 120
+	attentionIdentifierMaxBytes  = 128
 	attentionPodWaitingPrefix    = "pod waiting: "
 	attentionPodWaitingUnknown   = "Unknown"
 	attentionScopeAttention      = "attention"
@@ -704,16 +703,17 @@ func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Appr
 }
 
 func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval, source string) attentionEntry {
-	action := attentionSafeText(approval.Action)
-	tool := attentionSafeText(approval.TargetTool)
+	// Action labels are built from call arguments for brokered and worker
+	// approvals, so only the controller's fixed parked label is returned.
+	action := ""
+	tool := attentionSafeIdentifier(approval.TargetTool)
 	summary := "Approval requested"
 	switch {
 	case source == AttentionApprovalSourceParked:
+		action = taskwait.ParkedApprovalAction
 		summary = "Agent sign-off requested"
 	case tool != "":
 		summary = "Approval requested for " + tool
-	case action != "":
-		summary = "Approval requested: " + action
 	}
 	var expiresAt *time.Time
 	if approval.ExpiresAt != nil {
@@ -838,34 +838,20 @@ func attentionItemSortKey(item AttentionItem, namespace, name, uid string) atten
 	}
 }
 
-// attentionSafeText bounds a tool or action name: control and format
-// characters are dropped, whitespace is collapsed and the result is cut to a
-// short label.
-func attentionSafeText(value string) string {
-	var b strings.Builder
-	space := false
-	runes := 0
-	for _, r := range strings.TrimSpace(value) {
-		if unicode.IsSpace(r) {
-			space = true
-			continue
-		}
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			continue
-		}
-		if space && b.Len() > 0 {
-			b.WriteRune(' ')
-			runes++
-		}
-		space = false
-		if runes >= attentionSafeTextMaxRunes {
-			b.WriteRune('…')
-			break
-		}
-		b.WriteRune(r)
-		runes++
+// attentionSafeIdentifier keeps a tool name only when it is shaped like an
+// identifier, so the response never carries prose in that field.
+func attentionSafeIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > attentionIdentifierMaxBytes {
+		return ""
 	}
-	return b.String()
+	for i, r := range value {
+		alnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !alnum && (i == 0 || (r != '_' && r != '-' && r != '.' && r != ':' && r != '/')) {
+			return ""
+		}
+	}
+	return value
 }
 
 func attentionSafeSeverity(value string) string {

@@ -310,7 +310,12 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	require.Equal(t, AttentionApprovalSourceBrokered, response.Items[1].Approval.Source)
 	require.Equal(t, "warning", response.Items[1].Approval.Severity)
 	require.Equal(t, AttentionApprovalSourceWorker, response.Items[2].Approval.Source)
-	require.Equal(t, "github_pr", response.Items[2].Approval.TargetTool, "control characters are dropped")
+	require.Empty(t, response.Items[1].Approval.Action, "argument-derived action labels are never returned")
+	require.Equal(t, "ops", response.Items[1].Approval.TargetTool)
+	require.Equal(t, "Approval requested for ops", response.Items[1].Summary)
+	require.Empty(t, response.Items[2].Approval.TargetTool, "a tool name that is not an identifier is dropped")
+	require.Empty(t, response.Items[2].Approval.Action)
+	require.Equal(t, "Approval requested", response.Items[2].Summary)
 	require.Empty(t, response.Items[2].Approval.Severity, "unknown severities are dropped")
 	require.Equal(t, "ErrImagePull", response.Items[6].Reason)
 	require.Equal(t, attentionPodWaitingUnknown, response.Items[5].Reason)
@@ -719,11 +724,13 @@ func TestAttentionMonitorItemsAreAuthorizedSeparately(t *testing.T) {
 	require.Contains(t, attentionKinds(response.Items), "monitorBlocked/repo")
 }
 
-func TestAttentionSafeTextBounds(t *testing.T) {
-	require.Equal(t, "a b", attentionSafeText("  a \n\t b  "))
-	require.Equal(t, "ab", attentionSafeText("a\u200bb\u0007"))
-	long := attentionSafeText(strings.Repeat("x", 500))
-	require.Equal(t, attentionSafeTextMaxRunes+1, len([]rune(long)))
+func TestAttentionSafeIdentifiersAndCodes(t *testing.T) {
+	require.Equal(t, "github.create_pr", attentionSafeIdentifier(" github.create_pr "))
+	require.Equal(t, "mcp:server/tool-1", attentionSafeIdentifier("mcp:server/tool-1"))
+	require.Empty(t, attentionSafeIdentifier("delete everything now"))
+	require.Empty(t, attentionSafeIdentifier("_hidden"))
+	require.Empty(t, attentionSafeIdentifier("a\u200bb"))
+	require.Empty(t, attentionSafeIdentifier(strings.Repeat("x", attentionIdentifierMaxBytes+1)))
 	require.Empty(t, attentionSafeCode("Free text"))
 	require.Equal(t, "run_signal_failed", attentionSafeCode("run_signal_failed"))
 }
