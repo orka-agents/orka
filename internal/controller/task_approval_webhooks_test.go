@@ -496,6 +496,38 @@ func TestApprovalWebhooksRetireNoticesThatAreNoLongerSelected(t *testing.T) {
 	}
 }
 
+// An opt-out observed while the head notice waits out its retry backoff
+// retires every deselected notice at once, so selecting the event again
+// before the retry is due never sends a notice from before the opt-out.
+func TestApprovalWebhooksOptOutDuringBackoffRetiresNotices(t *testing.T) {
+	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusServiceUnavailable)
+	h.request(approvalWebhookTestUID, "approval-1")
+	h.request(approvalWebhookTestUID, "approval-2")
+	h.reconcile()
+	if got := len(h.receiver.all()); got != 1 {
+		t.Fatalf("receipts = %d, want one failed attempt", got)
+	}
+	head := h.task().Status.ApprovalWebhooks.Notices[0]
+	if head.NextAttemptTime == nil || !h.now.Before(head.NextAttemptTime.Time) {
+		t.Fatalf("head notice = %+v, want it waiting out a retry backoff", head)
+	}
+
+	// Still before NextAttemptTime: deselect requests, then select them again.
+	h.setWebhookEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
+	h.reconcile()
+	for _, notice := range h.task().Status.ApprovalWebhooks.Notices {
+		if notice.State != corev1alpha1.TaskWebhookDeliveryFailed {
+			t.Fatalf("notice %s = %s, want retired while the head was in backoff", notice.DeliveryID, notice.State)
+		}
+	}
+	h.setWebhookEvents(bothApprovalEvents...)
+	h.now = h.now.Add(time.Hour)
+	h.reconcile()
+	if got := len(h.receiver.all()); got != 1 {
+		t.Fatalf("receipts = %d after re-selecting, want no notice from before the opt-out", got)
+	}
+}
+
 func TestApprovalWebhooksRetryBoundIsShorterThanTerminal(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusBadGateway)
 	h.request(approvalWebhookTestUID, "approval-1")

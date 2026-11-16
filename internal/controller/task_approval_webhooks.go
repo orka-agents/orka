@@ -58,6 +58,9 @@ const (
 	// later one and fill the queue until it overflows.
 	approvalWebhookSigningWindow  = 5 * time.Minute
 	approvalWebhookSigningExpired = "webhook signing key unavailable past the approval notice window"
+	// approvalWebhookDeselectedReason retires a notice whose event is no
+	// longer selected in spec.webhookEvents.
+	approvalWebhookDeselectedReason = "the event is no longer selected in spec.webhookEvents"
 
 	// approvalWebhookAttemptsPerPass bounds the sends of one reconcile. Task
 	// reconciles share one worker, so, as for the terminal notice, a slow
@@ -607,6 +610,14 @@ func (w *WebhookNotifier) deliverApprovalNotices(
 	task *corev1alpha1.Task,
 	selected approvalWebhookSelection,
 ) (time.Duration, error) {
+	// Retire every deselected notice first, even while the head waits out a
+	// retry backoff, so an opt-out takes effect at once and re-selecting the
+	// event later never revives a notice from before the opt-out.
+	if retireDeselectedApprovalNotices(ctx, task.Status.ApprovalWebhooks, selected) {
+		if err := status.Update(ctx, task); err != nil {
+			return 0, err
+		}
+	}
 	for range approvalWebhookAttemptsPerPass {
 		index := firstPendingApprovalNotice(task.Status.ApprovalWebhooks)
 		if index < 0 {
@@ -618,7 +629,7 @@ func (w *WebhookNotifier) deliverApprovalNotices(
 			return head.NextAttemptTime.Sub(now), nil
 		}
 		if !selected.allows(head.Transition) {
-			retireApprovalNotice(ctx, head, "the event is no longer selected in spec.webhookEvents")
+			retireApprovalNotice(ctx, head, approvalWebhookDeselectedReason)
 			if err := status.Update(ctx, task); err != nil {
 				return 0, err
 			}
@@ -741,6 +752,23 @@ func firstPendingApprovalNotice(state *corev1alpha1.TaskApprovalWebhooks) int {
 	return slices.IndexFunc(state.Notices, func(notice corev1alpha1.TaskApprovalWebhookNotice) bool {
 		return notice.State == corev1alpha1.TaskWebhookDeliveryPending
 	})
+}
+
+// retireDeselectedApprovalNotices retires every pending notice whose event
+// is no longer selected. It reports whether any notice was retired.
+func retireDeselectedApprovalNotices(ctx context.Context, state *corev1alpha1.TaskApprovalWebhooks, selected approvalWebhookSelection) bool {
+	if state == nil {
+		return false
+	}
+	retired := false
+	for i := range state.Notices {
+		notice := &state.Notices[i]
+		if notice.State == corev1alpha1.TaskWebhookDeliveryPending && !selected.allows(notice.Transition) {
+			retireApprovalNotice(ctx, notice, approvalWebhookDeselectedReason)
+			retired = true
+		}
+	}
+	return retired
 }
 
 func retireApprovalNotice(ctx context.Context, notice *corev1alpha1.TaskApprovalWebhookNotice, reason string) {
