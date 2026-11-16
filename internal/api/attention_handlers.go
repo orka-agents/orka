@@ -27,11 +27,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/controller"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwait"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // The attention read model answers "what needs a person now?" across the
@@ -661,7 +664,11 @@ func (h *Handlers) listBoundedTaskApprovalEvents(ctx context.Context, namespace,
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		batch, err := reader.list(ctx, after, store.MaxExecutionEventLimit, approvals.EventTypes())
+		// Read no more than the remaining budget plus one event that proves
+		// the stream is over it, so an over-limit stream costs at most one
+		// event past the budget.
+		limit := min(store.MaxExecutionEventLimit, maxEvents-len(out)+1)
+		batch, err := reader.list(ctx, after, limit, approvals.EventTypes())
 		if err != nil {
 			return nil, false, err
 		}
@@ -673,7 +680,7 @@ func (h *Handlers) listBoundedTaskApprovalEvents(ctx context.Context, namespace,
 		}
 		out = append(out, batch...)
 		after = batch[len(batch)-1].Seq
-		if len(batch) < store.MaxExecutionEventLimit {
+		if len(batch) < limit {
 			return out, true, nil
 		}
 	}
@@ -929,19 +936,24 @@ func (h *Handlers) scanAttentionMonitors(c fiber.Ctx, req attentionRequest, scan
 	scan.monitors = attentionSourceIncluded
 	ctx := c.Context()
 	maxActions := h.attentionLimits().MonitorActions
-	monitorList := &corev1alpha1.RepositoryMonitorList{}
-	if err := h.client.List(ctx, monitorList, client.InNamespace(req.namespace)); err != nil {
-		return listPageError("repository monitors", err)
-	}
+	// Monitors are read only for names the bounded action scan reaches, so
+	// the cost stays bounded by the action limit, not the monitor count.
 	monitors := map[string]bool{}
-	for i := range monitorList.Items {
-		monitor := &monitorList.Items[i]
-		if h.contextTokenRepositoryMonitorAllowed(c, monitor) {
-			monitors[monitor.Name] = true
+	monitorAllowed := func(name string) (bool, error) {
+		if allowed, ok := monitors[name]; ok {
+			return allowed, nil
 		}
-	}
-	if len(monitors) == 0 {
-		return nil
+		monitor := &corev1alpha1.RepositoryMonitor{}
+		allowed := false
+		if err := h.client.Get(ctx, client.ObjectKey{Namespace: req.namespace, Name: name}, monitor); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return false, fiber.NewError(fiber.StatusInternalServerError, "failed to read repository monitor")
+			}
+		} else {
+			allowed = h.contextTokenRepositoryMonitorAllowed(c, monitor)
+		}
+		monitors[name] = allowed
+		return allowed, nil
 	}
 	type target struct {
 		monitor, kind string
@@ -975,7 +987,14 @@ func (h *Handlers) scanAttentionMonitors(c fiber.Ctx, req attentionRequest, scan
 				return nil
 			}
 			scanned++
-			if action.MonitorNamespace != req.namespace || !monitors[action.MonitorName] {
+			if action.MonitorNamespace != req.namespace {
+				continue
+			}
+			allowed, err := monitorAllowed(action.MonitorName)
+			if err != nil {
+				return err
+			}
+			if !allowed {
 				continue
 			}
 			key := target{monitor: action.MonitorName, kind: action.TargetKind, number: action.TargetNumber}
@@ -1142,15 +1161,41 @@ func (d *attentionDecisionChecker) decideTask(task *corev1alpha1.Task) *bool {
 	if result, ok := d.gateways[gatewayKey]; ok {
 		return result
 	}
-	var result *bool
-	err = access.authorizeGatewayTaskIdentity(d.c, "attentionDecideTaskApproval", task, identity, true)
-	var fiberErr *fiber.Error
-	switch {
-	case err == nil:
-		result = new(true)
-	case errors.As(err, &fiberErr) && (fiberErr.Code == fiber.StatusForbidden || fiberErr.Code == fiber.StatusNotFound):
-		result = new(false)
-	}
+	result := d.gatewayDecisionHint(access, task, identity)
 	d.gateways[gatewayKey] = result
 	return result
+}
+
+// gatewayDecisionHint is the three-way form of authorizeGatewayTaskIdentity
+// with operate access, for read-side hints: false for a denial, nil when a
+// check gave no usable answer. The decision route still enforces the
+// fail-closed form.
+func (d *attentionDecisionChecker) gatewayDecisionHint(access taskAccess, task *corev1alpha1.Task, identity gatewayruntime.TaskOwnerIdentity) *bool {
+	denial := func(err error) *bool {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) && (fiberErr.Code == fiber.StatusForbidden || fiberErr.Code == fiber.StatusNotFound) {
+			return new(false)
+		}
+		return nil
+	}
+	if err := access.verifyCurrentGatewayTaskIdentity(d.c, task, identity); err != nil {
+		return denial(err)
+	}
+	h := d.h
+	for _, scopes := range [][]string{h.contextTokenAuthorization.GatewayOperateScopes, h.contextTokenAuthorization.GatewayReadScopes} {
+		if err := h.authorizeContextTokenAction(d.c, "attentionDecideTaskApprovalGateway", scopes); err != nil {
+			return denial(err)
+		}
+	}
+	for _, verb := range []string{gatewayVerbGet, gatewayVerbUpdate} {
+		allowed, err := kubernetesResourceActionAllowed(d.c.Context(), h.clientset, GetUserInfo(d.c), identity.GatewayNamespace,
+			verb, gatewayv1alpha1.GroupVersion.Group, "gateways", identity.GatewayName)
+		if err != nil {
+			return nil
+		}
+		if !allowed {
+			return new(false)
+		}
+	}
+	return new(true)
 }
