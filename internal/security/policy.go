@@ -78,7 +78,7 @@ var (
 	// YAML block scalars put their value on following indented lines. Match
 	// the credential-bearing header here; yamlBlockScalarAssignmentsLookLikeSecret
 	// reconstructs all content lines before evaluating the value.
-	policySensitiveYAMLBlockHeaderPattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?$`)
+	policySensitiveYAMLBlockHeaderPattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*(?:[!&]\S*\s+)*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?$`)
 	// A credential key with no value on its line; the scalar (if any) sits
 	// on the following indented lines.
 	policySensitiveYAMLEmptyValuePattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*(?:#[^\r\n]*)?$`)
