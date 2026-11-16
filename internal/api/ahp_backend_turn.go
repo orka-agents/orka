@@ -328,12 +328,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		return
 	}
 	unlock()
-	if uid := string(task.UID); uid != "" {
-		turn.mu.Lock()
-		turn.taskUID = uid
-		turn.mu.Unlock()
-		turn.recordTaskUID(ctx, uid)
-	}
+	turn.adoptCreatedTask(ctx, task)
 	b.cancelIfClientCancelled(context.WithoutCancel(ctx), principal, turn, task)
 	sealRequesterStamp(ctx, b.h.client, task)
 
@@ -561,6 +556,19 @@ func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 // Task's name is taken for the turn's. It is recorded as the Task's UID, so a
 // later recovery knows the Task was gone too.
 const ahpTaskGoneUID = "\x00gone"
+
+// adoptCreatedTask makes the Task the turn just created its own: from then on
+// only events, approvals and a result of that Task are the turn's.
+func (t *ahpTurn) adoptCreatedTask(ctx context.Context, task *corev1alpha1.Task) {
+	uid := string(task.UID)
+	if uid == "" {
+		return
+	}
+	t.mu.Lock()
+	t.taskUID = uid
+	t.mu.Unlock()
+	t.recordTaskUID(ctx, uid)
+}
 
 // recordTaskUID keeps the UID of the turn's Task in its session's record, if
 // the session still runs the turn, so a later recovery follows the same Task.
