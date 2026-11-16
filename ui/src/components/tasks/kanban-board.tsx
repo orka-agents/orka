@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskListAll } from '@/hooks/use-tasks'
 import { useAttentionAll } from '@/hooks/use-attention'
 import { phaseStyle } from '@/lib/task-status'
-import { approvalsUnreadText, attentionLanes, attentionSourceNotes, groupByAttention, incompleteText, type AttentionLane, type KanbanView } from '@/lib/attention-lanes'
+import { attentionLanes, attentionSourceNotes, groupByAttention, incompleteText, needsYouEmptyText, type AttentionLane, type KanbanView } from '@/lib/attention-lanes'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/layout/page-header'
 import { AttentionItemCard } from '@/components/attention/attention-item-card'
@@ -210,9 +210,9 @@ function AttentionBoard() {
       {ranking?.incomplete && (
         <p className="text-sm text-status-failed" role="status">{incompleteText(ranking.incompleteReasons)}</p>
       )}
-      {notes?.approvalsUnread && (
+      {notes?.approvalsNote && (
         <p className="text-sm text-status-failed" role="status">
-          {approvalsUnreadText} Tasks waiting for approval are not in Needs you and may appear in Agent working or Done.
+          {notes.approvalsNote} Loaded Tasks whose own state shows an approval wait are in Needs you as Waiting for approval, without approval detail.
         </p>
       )}
       {ranking?.truncated && (
@@ -230,7 +230,8 @@ function AttentionBoard() {
         {attentionLanes.map(({ lane, label, description }) => {
           const needsYou = lane === 'needsYou'
           const blocked = needsYou ? Boolean(attentionError) : unsorted
-          const count = blocked ? undefined : needsYou ? ranking?.total : grouped[lane].length
+          // Needs you counts the whole ranking plus the Task-derived cards it has no item for.
+          const count = blocked ? undefined : needsYou ? (ranking ? ranking.total + grouped.needsYou.length - items.length : undefined) : grouped[lane].length
           // Agent working and Done wait for the ranking as well as the Tasks:
           // without it every Task that needs you would be classified as Done.
           const loading = !blocked && (attention.isPending || (!needsYou && isLoading))
@@ -243,9 +244,6 @@ function AttentionBoard() {
             >
               <LaneHeader label={label} count={count} loading={loading} />
               <p className="px-1 -mt-2 mb-3 text-xs text-muted-foreground">{description}</p>
-              {!needsYou && !loading && !blocked && notes?.approvalsUnread && (
-                <p className="px-1 -mt-1 mb-3 text-xs text-status-failed">May include Tasks waiting for approval.</p>
-              )}
               <div className="flex flex-col gap-2 min-h-[120px] pb-2">
                 {loading ? (
                   Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-20 w-full rounded-xl" />)
@@ -256,12 +254,10 @@ function AttentionBoard() {
                     <p className="text-xs text-muted-foreground text-center py-8">Not sorted: the attention ranking could not be loaded</p>
                   )
                 ) : needsYou ? (
-                  items.length === 0 ? (
-                    <p className="text-xs text-muted-foreground text-center py-8">
-                      {notes?.approvalsUnread ? 'Nothing else needs you right now, but approvals were not checked' : 'Nothing needs you right now'}
-                    </p>
+                  grouped.needsYou.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-8">{needsYouEmptyText(notes)}</p>
                   ) : (
-                    items.map((item) => <AttentionItemCard key={item.id} item={item} />)
+                    grouped.needsYou.map((item) => <AttentionItemCard key={item.id} item={item} />)
                   )
                 ) : grouped[lane].length === 0 ? (
                   <p className="text-xs text-muted-foreground text-center py-8">No {label.toLowerCase()} tasks</p>

@@ -92,6 +92,13 @@ A Task parked on a sign-off has ended its turn, so its phase is Succeeded,
 but it shows **Waiting for approval** everywhere until the sign-off is
 decided.
 
+On the board, a Task whose own state shows it waiting for approval (a
+waiting-for-approval condition or status message, or an armed parked
+sign-off) is never put in Agent working or Done. When the ranking has no
+item for it, because you cannot read its approvals or the ranking is behind,
+Needs you shows a **Waiting for approval** card built from the Task alone. It
+links to the Task and shows no approval detail.
+
 Items show only a short summary. The inbox shows **Review to approve** only
 when the server reports that you may approve; it opens the Task's
 **Approvals** tab, so you inspect the exact operation before approving there.
@@ -106,9 +113,10 @@ each view says the list may be incomplete.
 Agent working and Done wait for the attention ranking. If it cannot be
 loaded, they say the Tasks are not sorted instead of placing them in Done.
 When the controller has no execution event storage, approvals cannot be
-read: the views say so, an empty list says approvals were not checked, and
-the board warns that Agent working and Done may include Tasks waiting for
-approval. When your token cannot list repository monitors, a quiet note says
+read: the views say so and an empty list says approvals were not checked.
+When your token may list Tasks but cannot read some of those waiting for
+approval, for example a context token without `orka:tasks:get`, the views say
+some approvals could not be checked, and an empty list says so too. When your token cannot list repository monitors, a quiet note says
 blocked monitor actions are not shown. A permission error, or an inbox that
 becomes unavailable, replaces any list already on screen, so you never act
 on stale rows. Other refresh failures keep the last list with a note that it

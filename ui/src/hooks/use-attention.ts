@@ -4,6 +4,7 @@ import { executionEventApiPath } from '@/lib/execution-events'
 import { pageParams, pollUnlessForbidden, retryUnlessForbidden } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
+import { mergeApprovalsSource } from '@/lib/attention-lanes'
 import type { AttentionResponse } from '@/schemas/attention'
 import type { Approval } from '@/schemas/execution-event'
 
@@ -32,7 +33,9 @@ export interface AttentionWalk extends AttentionResponse {
  * Every attention item the board needs, walked page by page (bounded), so a
  * Task ranked past the first page is never shown as Done. The ranking totals
  * and incomplete flag come from the first page; scan bounds hit on any page
- * are kept.
+ * are kept. Each page rescans live state and some items sort on fields that
+ * change, so an item can come back on a later page: the walk keeps one copy
+ * per ID, the one from the latest page.
  */
 export function useAttentionAll(pageLimit = 200, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
@@ -43,7 +46,7 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
     queryFn: async (): Promise<AttentionWalk> => {
       let first: AttentionResponse | undefined
       let sources: AttentionResponse['sources'] | undefined
-      const items: AttentionResponse['items'] = []
+      const items = new Map<string, AttentionResponse['items'][number]>()
       const reasons = new Set<string>()
       const seen = new Set<string>()
       let incomplete = false
@@ -52,12 +55,17 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
       do {
         const page = await api.get<AttentionResponse>('/attention', pageParams({ namespace, limit: String(pageLimit) }, next))
         first ??= page
-        // A source any page skipped stays skipped for the whole walk.
+        // A source any page skipped stays skipped for the whole walk, and an
+        // unavailable approvals source wins over a partial one.
         sources = {
-          approvals: sources && sources.approvals !== 'included' ? sources.approvals : page.sources?.approvals,
+          approvals: (sources ? mergeApprovalsSource(sources.approvals, page.sources?.approvals) : page.sources?.approvals)!,
           monitors: sources && sources.monitors !== 'included' ? sources.monitors : page.sources?.monitors,
         }
-        items.push(...page.items)
+        for (const item of page.items) {
+          // Re-inserting moves a repeated item to its latest position.
+          items.delete(item.id)
+          items.set(item.id, item)
+        }
         incomplete ||= page.incomplete
         for (const reason of page.incompleteReasons ?? []) reasons.add(reason)
         next = page.metadata?.continue || undefined
@@ -65,7 +73,7 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
         if (next) seen.add(next)
         pages += 1
       } while (next && pages < maxAttentionWalkPages)
-      return { ...first!, sources: sources!, items, incomplete, incompleteReasons: [...reasons].sort(), metadata: {}, truncated: Boolean(next) }
+      return { ...first!, sources: sources!, items: [...items.values()], incomplete, incompleteReasons: [...reasons].sort(), metadata: {}, truncated: Boolean(next) }
     },
     retry: retryUnlessForbidden,
     refetchInterval: pollUnlessForbidden(refetchInterval),

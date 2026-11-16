@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { attentionSourceNotes, deadlineText, groupByAttention, incompleteText, isAgentWorking, parseKanbanView } from './attention-lanes'
+import {
+  attentionSourceNotes,
+  deadlineText,
+  groupByAttention,
+  incompleteText,
+  isAgentWorking,
+  isTaskDerivedItem,
+  mergeApprovalsSource,
+  needsYouEmptyText,
+  parseKanbanView,
+  taskApprovalWaitSummary,
+} from './attention-lanes'
 import type { AttentionItem } from '@/schemas/attention'
 import type { Task } from '@/schemas/task'
 
@@ -37,6 +48,44 @@ describe('attention lanes', () => {
     expect(grouped.done.map((t) => t.metadata.name)).toEqual(['failed-old'])
   })
 
+  it('puts a Task waiting for approval by its own state in Needs you when the ranking has no item for it', () => {
+    const items: AttentionItem[] = [
+      { id: 'approval:u-ranked:ap', kind: 'approval', rank: 1, since: '', summary: 'Approval requested', task: { namespace: 'default', name: 'ranked', uid: 'u-ranked' },
+        approval: { id: 'ap', source: 'worker', canApprove: true, canDecline: true } },
+      { id: 'failed:u-broken', kind: 'failed', rank: 3, since: '', summary: 'Task failed', task: { namespace: 'default', name: 'broken', uid: 'u-broken' } },
+    ]
+    const since = '2026-11-16T00:00:00Z'
+    const grouped = groupByAttention([
+      task('ranked', { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }, 'u-ranked'),
+      task('condition', { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True', lastTransitionTime: since }] }),
+      task('worker', { phase: 'Running', message: 'waiting for approval of write' }),
+      task('parked', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting', references: ['ap-1'] } }),
+      task('requested', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Requested', references: ['ap-2'] } }),
+      // A requested wait after a failed turn is abandoned and takes no decision.
+      task('abandoned', { phase: 'Failed', wait: { kind: 'Approval', state: 'Requested', references: ['ap-3'] } }),
+      task('decided', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Resumed', references: ['ap-4'] } }),
+      { ...task('deleting', { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }),
+        metadata: { name: 'deleting', namespace: 'default', uid: 'uid-deleting', deletionTimestamp: since } },
+      task('busy', { phase: 'Running' }),
+    ], items)
+    const names = (list: AttentionItem[]) => list.map((item) => item.task?.name)
+    // Ranked after the server's approvals and before lower-ranked kinds.
+    expect(names(grouped.needsYou)).toEqual(['ranked', 'condition', 'worker', 'parked', 'requested', 'broken'])
+    for (const item of grouped.needsYou.slice(1, 5)) {
+      expect(isTaskDerivedItem(item)).toBe(true)
+      expect(item.kind).toBe('approval')
+      expect(item.summary).toBe(taskApprovalWaitSummary)
+      expect(item.approval, 'no approval detail is derived from the Task').toBeUndefined()
+    }
+    expect(isTaskDerivedItem(grouped.needsYou[0])).toBe(false)
+    expect(grouped.needsYou[1].since).toBe(since)
+    expect(grouped.needsYou[1].task).toEqual({ namespace: 'default', name: 'condition', uid: 'uid-condition', phase: 'Running' })
+    expect(grouped.working.map((t) => t.metadata.name)).toEqual(['deleting', 'busy'])
+    expect(grouped.done.map((t) => t.metadata.name)).toEqual(['abandoned', 'decided'])
+    // Without any derived card the server items are returned as they are.
+    expect(groupByAttention([task('busy', { phase: 'Running' })], items).needsYou).toBe(items)
+  })
+
   it('matches Tasks by UID so a same-named replacement is not flagged', () => {
     const items: AttentionItem[] = [
       { id: 'a', kind: 'failed', rank: 3, since: '', summary: 'Task failed', task: { namespace: 'default', name: 'reused', uid: 'old-uid' } },
@@ -59,12 +108,35 @@ describe('attention lanes', () => {
   })
 
   it('reports skipped sources apart from scan limits', () => {
-    expect(attentionSourceNotes({ approvals: 'included', monitors: 'included' })).toEqual({ approvalsUnread: false })
-    expect(attentionSourceNotes({ approvals: 'included', monitors: 'notRequested' })).toEqual({ approvalsUnread: false })
-    expect(attentionSourceNotes({ approvals: 'unavailable', monitors: 'included' }).approvalsUnread).toBe(true)
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'included' })).toEqual({ approvalsUnread: false, approvalsPartial: false })
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'notRequested' })).toEqual({ approvalsUnread: false, approvalsPartial: false })
+    expect(attentionSourceNotes({ approvals: 'unavailable', monitors: 'included' })).toEqual({
+      approvalsUnread: true, approvalsPartial: false, approvalsNote: expect.stringMatching(/execution event storage is not enabled/),
+    })
+    expect(attentionSourceNotes({ approvals: 'partial', monitors: 'included' })).toEqual({
+      approvalsUnread: true, approvalsPartial: true, approvalsNote: expect.stringMatching(/^Some approvals could not be checked/),
+    })
     expect(attentionSourceNotes({ approvals: 'included', monitors: 'forbidden' }).monitorsNote).toMatch(/cannot list repository monitors/)
     expect(attentionSourceNotes({ approvals: 'included', monitors: 'unavailable' }).monitorsNote).toMatch(/monitor storage is not enabled/)
     // A response without a source state never reads as approvals checked.
     expect(attentionSourceNotes(undefined).approvalsUnread).toBe(true)
+    expect(attentionSourceNotes(undefined).approvalsNote).toBe('Approvals could not be checked.')
+  })
+
+  it('qualifies the empty Needs you text for partial and unread approvals', () => {
+    expect(needsYouEmptyText(attentionSourceNotes({ approvals: 'included', monitors: 'included' }))).toBe('Nothing needs you right now')
+    expect(needsYouEmptyText(attentionSourceNotes({ approvals: 'partial', monitors: 'included' })))
+      .toBe('Nothing else needs you right now, but some approvals could not be checked')
+    expect(needsYouEmptyText(attentionSourceNotes({ approvals: 'unavailable', monitors: 'included' })))
+      .toBe('Nothing else needs you right now, but approvals were not checked')
+  })
+
+  it('merges approval states across pages: unavailable over partial over included', () => {
+    expect(mergeApprovalsSource('included', 'included')).toBe('included')
+    expect(mergeApprovalsSource('included', 'partial')).toBe('partial')
+    expect(mergeApprovalsSource('partial', 'included')).toBe('partial')
+    expect(mergeApprovalsSource('partial', 'unavailable')).toBe('unavailable')
+    expect(mergeApprovalsSource('unavailable', 'partial')).toBe('unavailable')
+    expect(mergeApprovalsSource('included', undefined)).toBeUndefined()
   })
 })

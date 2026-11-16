@@ -128,4 +128,14 @@ describe('NeedsYouCard', () => {
     expect(monitors).toHaveClass('text-muted-foreground')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
+
+  it('qualifies the empty state when only some approvals were checked', async () => {
+    server.use(http.get('/api/v1/attention', () =>
+      HttpResponse.json(attention({ items: [], total: 0, counts: {}, sources: { approvals: 'partial', monitors: 'included' } }))))
+    renderWithClient()
+    expect(await screen.findByText('Nothing else needs you right now, but some approvals could not be checked.')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing needs you right now.')).not.toBeInTheDocument()
+    expect(screen.getByText(/^Some approvals could not be checked/)).toHaveAttribute('role', 'status')
+    expect(screen.queryByText(/execution event storage/)).not.toBeInTheDocument()
+  })
 })

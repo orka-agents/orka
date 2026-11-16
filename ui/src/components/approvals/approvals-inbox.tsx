@@ -11,7 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
 import { isTerminalInboxError, useInboxDecision, usePendingApprovals } from '@/hooks/use-attention'
 import { isNotImplementedError } from '@/lib/api-client'
-import { deadlineText, incompleteText } from '@/lib/attention-lanes'
+import { approvalsPartialText, deadlineText, incompleteText } from '@/lib/attention-lanes'
 import { timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { AttentionItem } from '@/schemas/attention'
@@ -105,6 +105,9 @@ export function ApprovalsInbox() {
   const items = [...new Map(pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()]
   const incomplete = pages.some((page) => page.incomplete)
   const incompleteReasons = [...new Set(pages.flatMap((page) => page.incompleteReasons ?? []))]
+  // Some Tasks that may be waiting for approval could not be read, so an
+  // empty or short list is not "nothing is pending".
+  const partial = pages.some((page) => page.sources?.approvals === 'partial')
 
   return (
     <div className="space-y-4">
@@ -116,6 +119,9 @@ export function ApprovalsInbox() {
       )}
       {incomplete && (
         <p className="text-sm text-status-failed" role="status">{incompleteText(incompleteReasons)}</p>
+      )}
+      {partial && (
+        <p className="text-sm text-status-failed" role="status">{approvalsPartialText} Their approvals are not listed.</p>
       )}
       {first && first.total > items.length && (
         <p className="text-sm text-muted-foreground" role="status">
@@ -135,7 +141,11 @@ export function ApprovalsInbox() {
               <ListAccessError error={shownError} resource="approvals" />
             )
           ) : items.length === 0 ? (
-            <EmptyState icon={Inbox} headline="No pending approvals" hint="Requests that need a decision appear here." />
+            <EmptyState
+              icon={Inbox}
+              headline={partial ? 'No pending approvals you can read' : 'No pending approvals'}
+              hint={partial ? 'Requests on Tasks your token cannot read are not listed.' : 'Requests that need a decision appear here.'}
+            />
           ) : (
             <>
               <ul className="divide-y" aria-label="Pending approvals">

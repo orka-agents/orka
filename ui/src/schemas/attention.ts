@@ -46,7 +46,11 @@ export interface AttentionItem {
   monitor?: AttentionMonitor
 }
 
-export type AttentionSourceState = 'included' | 'forbidden' | 'unavailable' | 'notRequested'
+/**
+ * Whether an optional source was read. partial (approvals only) means some
+ * Tasks that may be waiting for approval could not be read by the caller.
+ */
+export type AttentionSourceState = 'included' | 'partial' | 'forbidden' | 'unavailable' | 'notRequested'
 
 export interface AttentionResponse {
   namespace: string

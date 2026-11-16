@@ -141,6 +141,13 @@ describe('ApprovalsInbox', () => {
     expect(await screen.findByText('No pending approvals')).toBeInTheDocument()
     empty.unmount()
 
+    respond([], { sources: { approvals: 'partial', monitors: 'notRequested' } })
+    const partial = render(<ApprovalsInbox />)
+    expect(await screen.findByText('No pending approvals you can read')).toBeInTheDocument()
+    expect(screen.queryByText('No pending approvals')).not.toBeInTheDocument()
+    expect(screen.getByText(/^Some approvals could not be checked/)).toHaveAttribute('role', 'status')
+    partial.unmount()
+
     server.use(http.get('/api/v1/approvals', () => HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })))
     const forbidden = render(<ApprovalsInbox />)
     expect(await screen.findByText('Not authorized to view approvals')).toBeInTheDocument()

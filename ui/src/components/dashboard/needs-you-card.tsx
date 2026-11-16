@@ -4,7 +4,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { AttentionItemCard } from '@/components/attention/attention-item-card'
 import { useAttention } from '@/hooks/use-attention'
 import { isForbiddenError } from '@/lib/api-client'
-import { approvalsUnreadText, attentionKindLabels, attentionSourceNotes, incompleteText } from '@/lib/attention-lanes'
+import { attentionKindLabels, attentionSourceNotes, incompleteText, needsYouEmptyText } from '@/lib/attention-lanes'
 import type { AttentionKind } from '@/schemas/attention'
 
 const kinds: AttentionKind[] = ['approval', 'outcomeUnknown', 'failed', 'podWaiting', 'monitorBlocked']
@@ -49,7 +49,7 @@ export function NeedsYouCard({ limit = 5 }: { limit?: number }) {
           </p>
         ) : items.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            {notes?.approvalsUnread ? 'Nothing else needs you right now, but approvals were not checked.' : 'Nothing needs you right now.'}
+            {needsYouEmptyText(notes)}.
           </p>
         ) : (
           <>
@@ -72,8 +72,10 @@ export function NeedsYouCard({ limit = 5 }: { limit?: number }) {
         {data?.incomplete && (
           <p className="text-xs text-status-failed" role="status">{incompleteText(data.incompleteReasons)}</p>
         )}
-        {notes?.approvalsUnread && (
-          <p className="text-xs text-status-failed" role="status">{approvalsUnreadText} Tasks waiting for approval are not listed.</p>
+        {notes?.approvalsNote && (
+          <p className="text-xs text-status-failed" role="status">
+            {notes.approvalsNote} {notes.approvalsPartial ? 'Those Tasks are not listed.' : 'Tasks waiting for approval are not listed.'}
+          </p>
         )}
         {notes?.monitorsNote && <p className="text-xs text-muted-foreground">{notes.monitorsNote}</p>}
       </CardContent>

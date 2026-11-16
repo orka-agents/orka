@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@/test/test-utils'
+import { render, screen, waitFor, within } from '@/test/test-utils'
 import { delay, http, HttpResponse } from 'msw'
 import { render as rawRender } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -358,6 +358,35 @@ describe('KanbanBoard', () => {
     expect(screen.getByRole('region', { name: 'Done' })).not.toHaveTextContent('failed-b')
   })
 
+  it('attention view keeps the latest copy of an item a later page repeats', async () => {
+    const now = new Date().toISOString()
+    const blocked = (summary: string) => ({
+      id: 'monitor:repo:a1', kind: 'monitorBlocked', rank: 5, since: now, summary, monitor: { name: 'repo', actionID: 'a1' },
+    })
+    server.use(
+      http.get('/api/v1/tasks', () => HttpResponse.json({ items: [], metadata: {} })),
+      http.get('/api/v1/attention', ({ request }) => {
+        const second = new URL(request.url).searchParams.get('continue') === 'next'
+        return HttpResponse.json({
+          namespace: 'default', generatedAt: now, total: 2, counts: { monitorBlocked: 2 }, incomplete: false,
+          sources: { approvals: 'included', monitors: 'included' }, metadata: second ? {} : { continue: 'next' },
+          // The action was updated between pages while still blocked, so it sorts again after the cursor.
+          items: second
+            ? [{ ...blocked('Monitor review blocked on pull_request #8'), id: 'monitor:repo:a2', monitor: { name: 'repo', actionID: 'a2' } }, blocked('Monitor review blocked again')]
+            : [blocked('Monitor review blocked first')],
+        })
+      }),
+    )
+    const errors = vi.spyOn(console, 'error')
+    render(<KanbanBoard view="attention" />)
+    const needsYou = await screen.findByRole('region', { name: 'Needs you' })
+    await waitFor(() => expect(needsYou).toHaveTextContent('Monitor review blocked again'))
+    expect(needsYou).not.toHaveTextContent('Monitor review blocked first')
+    expect(within(needsYou).getAllByRole('link')).toHaveLength(2)
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
+    errors.mockRestore()
+  })
+
   it('attention view flags Tasks it could not classify past the walk bound', async () => {
     const now = new Date().toISOString()
     let page = 0
@@ -472,18 +501,61 @@ describe('KanbanBoard', () => {
       }
     })
 
-    it('qualifies the empty state and lanes when approvals were not read', async () => {
+    it('qualifies the empty state when approvals were not read', async () => {
       server.use(tasks(), http.get('/api/v1/attention', () =>
         ranking({ items: [], total: 0, counts: {}, sources: { approvals: 'unavailable', monitors: 'included' } })))
       render(<KanbanBoard view="attention" />)
       const needsYou = await screen.findByRole('region', { name: 'Needs you' })
       await waitFor(() => expect(needsYou).toHaveTextContent('Nothing else needs you right now, but approvals were not checked'))
       expect(needsYou).not.toHaveTextContent('Nothing needs you right now')
-      expect(screen.getByText(/Approvals could not be read/)).toHaveTextContent('may appear in Agent working or Done')
-      const done = screen.getByRole('region', { name: 'Done' })
-      await waitFor(() => expect(done).toHaveTextContent('parked-signoff'))
-      expect(done).toHaveTextContent('May include Tasks waiting for approval.')
-      expect(screen.getByRole('region', { name: 'Agent working' })).toHaveTextContent('May include Tasks waiting for approval.')
+      expect(screen.getByText(/Approvals could not be read/)).toHaveTextContent('in Needs you as Waiting for approval')
+      // The fixture's Task state shows no approval wait, so it is Done.
+      await waitFor(() => expect(screen.getByRole('region', { name: 'Done' })).toHaveTextContent('parked-signoff'))
+    })
+
+    it('qualifies the empty state when only some approvals were checked', async () => {
+      server.use(tasks(), http.get('/api/v1/attention', () =>
+        ranking({ items: [], total: 0, counts: {}, sources: { approvals: 'partial', monitors: 'included' } })))
+      render(<KanbanBoard view="attention" />)
+      const needsYou = await screen.findByRole('region', { name: 'Needs you' })
+      await waitFor(() => expect(needsYou).toHaveTextContent('Nothing else needs you right now, but some approvals could not be checked'))
+      expect(screen.getByText(/^Some approvals could not be checked/)).toHaveAttribute('role', 'status')
+      expect(screen.queryByText(/execution event storage/)).not.toBeInTheDocument()
+    })
+
+    it('puts a Task waiting for approval by its own state in Needs you when the ranking has no item for it', async () => {
+      for (const approvals of ['partial', 'included'] as const) {
+        server.use(
+          http.get('/api/v1/tasks', () =>
+            HttpResponse.json({
+              items: [
+                { metadata: { name: 'parked-signoff', namespace: 'default', uid: 'u-parked', creationTimestamp: now }, spec: { type: 'agent' },
+                  status: { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting', references: ['ap'] } } },
+                { metadata: { name: 'worker-wait', namespace: 'default', uid: 'u-worker', creationTimestamp: now }, spec: { type: 'agent' },
+                  status: { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] } },
+                { metadata: { name: 'busy', namespace: 'default', uid: 'u-busy', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Running' } },
+              ],
+              metadata: {},
+            }),
+          ),
+          http.get('/api/v1/attention', () => ranking({ items: [], total: 0, counts: {}, sources: { approvals, monitors: 'included' } })),
+        )
+        const { unmount } = render(<KanbanBoard view="attention" />)
+        const needsYou = await screen.findByRole('region', { name: 'Needs you' })
+        const working = screen.getByRole('region', { name: 'Agent working' })
+        const done = screen.getByRole('region', { name: 'Done' })
+        await waitFor(() => expect(working).toHaveTextContent('busy'))
+        for (const name of ['parked-signoff', 'worker-wait']) {
+          const card = within(needsYou).getByRole('link', { name: new RegExp(`Waiting for approval \\(${name}\\)`) })
+          expect(card).toHaveAttribute('href', '/tasks/$taskId')
+          expect(done).not.toHaveTextContent(name)
+          expect(working).not.toHaveTextContent(name)
+        }
+        expect(needsYou).not.toHaveTextContent('Nothing needs you right now')
+        expect(needsYou).not.toHaveTextContent(/Brokered tool|Agent tool|Parked sign-off/)
+        expect(within(needsYou).getByText('2')).toBeInTheDocument()
+        unmount()
+      }
     })
 
     it('notes hidden monitor actions quietly when the caller cannot list monitors', async () => {
