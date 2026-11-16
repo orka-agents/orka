@@ -58,6 +58,10 @@ const (
 	attemptIDField      = "attemptID"
 )
 
+// ACPTaskTimeoutReason is the execution reason of a Task its deadline
+// cancelled.
+const ACPTaskTimeoutReason = "TaskTimeout"
+
 const (
 	DefaultACPDispatchInterval               = time.Second
 	DefaultACPDispatchWorkers                = 4
@@ -66,7 +70,7 @@ const (
 	DefaultACPRateLimitReconcileInterval     = time.Second
 	defaultACPTaskTimeout                    = taskwait.DefaultAgentTaskTimeout
 	defaultPromptLeaseDuration               = 90 * time.Second
-	acpTaskTimeoutReason                     = "TaskTimeout"
+	acpTaskTimeoutReason                     = ACPTaskTimeoutReason
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
 	acpCancelledReason                       = "Cancelled"

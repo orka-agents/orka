@@ -89,6 +89,11 @@ func (h *Handlers) CreateAHPToken(c fiber.Ctx) error {
 		if ttl, err = time.ParseDuration(req.TTL); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, "ttl must be a duration such as 720h")
 		}
+		// A lifetime given is checked as given: zero would otherwise read as
+		// omitted, and mint a token with the default lifetime.
+		if ttl <= 0 {
+			return fiber.NewError(fiber.StatusBadRequest, "ttl must be at least 1m; omit it for the default lifetime")
+		}
 	}
 	mint := ahphost.MintRequest{
 		Issuer: ui.Issuer, Subject: ui.Subject, Username: ui.Username, Namespace: namespace,
