@@ -231,7 +231,7 @@ func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitor
 		case err == nil:
 			text := strings.TrimSuffix(string(line), "\n")
 			if overlong {
-				text = repositoryMonitorEvidenceCutRaw(text, len(text)) + " …"
+				text = repositoryMonitorEvidenceCutRaw(text, len(text)) + repositoryMonitorCILogCutMarker
 			}
 			scanner.add(text)
 			line, overlong = line[:0], false
@@ -243,7 +243,7 @@ func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitor
 				if len(line) > 0 {
 					text := string(line)
 					if overlong {
-						text = repositoryMonitorEvidenceCutRaw(text, len(text)) + " …"
+						text = repositoryMonitorEvidenceCutRaw(text, len(text)) + repositoryMonitorCILogCutMarker
 					}
 					scanner.add(text)
 				}
@@ -293,6 +293,10 @@ func repositoryMonitorCILogExcerptText(excerpt repositoryMonitorCILogExcerpt) st
 	return repositoryMonitorEvidenceBoundTail(lines, repositoryMonitorCILogExcerptBytes, repositoryMonitorCILogExcerptLines)
 }
 
+// repositoryMonitorCILogCutMarker ends a line that was longer than
+// repositoryMonitorCILogRawLineLimit and kept only its head.
+const repositoryMonitorCILogCutMarker = " …"
+
 // repositoryMonitorCILogWithholdOpenEdges withholds the lines at either edge
 // of the retained log that could belong to a credential wrapped from or into
 // a line that was not retained: the first line, which an escaped line break
@@ -315,12 +319,29 @@ func repositoryMonitorCILogWithholdOpenEdges(original, lines []string, openStart
 			repositoryMonitorEvidenceTokenEdge(words[i][len(words[i])-1], false) && repositoryMonitorEvidenceTokenEdge(words[i+1][0], true)
 	}
 	n := len(words)
-	if openStart && n > 0 && (len(words[0]) > 0 || escaped[0]) {
-		for i := range n {
+	// withholdFrom withholds line start, which a credential from an unseen
+	// line could continue into, and the lines it continues into.
+	withholdFrom := func(start int) {
+		for i := start; i < n; i++ {
 			lines[i] = repositoryMonitorEvidenceRedactedLine
 			if i+1 == n || !passes(i) || !continues(i) {
 				break
 			}
+		}
+	}
+	if openStart && n > 0 && (len(words[0]) > 0 || escaped[0]) {
+		withholdFrom(0)
+	}
+	// A line cut at the raw line limit lost its tail, which may have held a
+	// credential's recognizable start, so a wrapped body on the next lines
+	// can no longer be matched. The line after the cut is withheld when it
+	// begins with a credential character, with the lines it continues into;
+	// a line such as an ##[error] marker cannot continue one and is kept.
+	for i := 0; i+1 < n; i++ {
+		next := i + 1
+		if strings.HasSuffix(original[i], repositoryMonitorCILogCutMarker) && len(words[next]) > 0 &&
+			repositoryMonitorEvidenceTokenEdge(words[next][0], true) {
+			withholdFrom(next)
 		}
 	}
 	if openEnd && n > 0 && (escaped[n-1] || len(words[n-1]) > 0 && repositoryMonitorEvidenceTokenEdge(words[n-1][len(words[n-1])-1], false)) {

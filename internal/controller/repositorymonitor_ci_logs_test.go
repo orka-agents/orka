@@ -112,6 +112,10 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 			want: []string{"lint found 3 issues", "exit status 1"}, notWant: []string{"Post job cleanup", "git version", "orphan"}},
 		{name: "only a cleanup error", log: ts + "ok\n" + ts + "Post job cleanup.\n" + ts + "##[error]cache save failed\n", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail,
 			want: []string{"ok"}, notWant: []string{"cache save failed"}},
+		// A credential whose recognizable start falls past the raw line
+		// limit, with its body wrapped onto the next line.
+		{name: "credential cut at the raw line limit", log: ts + "dump " + strings.Repeat("ab ", repositoryMonitorCILogRawLineLimit/3) + "token=gh" + "p_" + repositoryMonitorEvidenceTestGitHubToken[4:20] + "\n" + ts + repositoryMonitorEvidenceTestGitHubToken[20:] + "\n" + ts + "##[error]failed\n",
+			limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError, want: []string{"dump ab", "##[error]failed"}, notWant: []string{repositoryMonitorEvidenceTestGitHubToken[20:], repositoryMonitorEvidenceTestGitHubToken[4:20]}},
 		{name: "huge single line", log: huge, limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError, want: []string{"panic: …", "##[error]boom"}, notWant: []string{"xxx"}},
 		{name: "empty", log: "", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail, notWant: []string{repositoryMonitorEvidenceRedactedLine}},
 		{name: "only group markers", log: ts + "##[group]\n" + ts + "##[endgroup]\n", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail,
