@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Codex session migration | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/codex-session-migration"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Codex session migration | Orka"><meta data-rh="true" name="description" content="Move supported native Codex conversation state between local homes and Orka Sessions."><meta data-rh="true" property="og:description" content="Move supported native Codex conversation state between local homes and Orka Sessions."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/codex-session-migration"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/codex-session-migration" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/codex-session-migration" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Codex session migration","item":"https://orka-agents.github.io/orka/docs/guides/codex-session-migration"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.aff5f232.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.a015ca10.js" defer="defer"></script>
 <script src="/orka/assets/js/main.5a4e78cf.js" defer="defer"></script>
 </head>
 <body>
@@ -98,16 +98,18 @@ it can lose uncommitted native history. This is an Orka transport restriction,
 not SessionKit&#x27;s native storage limit. Larger limits increase memory, temporary
 storage, and encrypted database usage; choose them for the expected workload.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="explicit-api-target-and-authentication">Explicit API target and authentication<a href="#explicit-api-target-and-authentication" class="hash-link" aria-label="Direct link to Explicit API target and authentication" title="Direct link to Explicit API target and authentication" translate="no">​</a></h2>
-<p>Native migration requires <code>--server</code> or a saved API endpoint. Automatic
-Kubernetes Service discovery is not used: a familiar name, labels, and Service
-UID do not establish the application&#x27;s identity. Select the trusted Orka API
-endpoint explicitly before sending portable history.</p>
-<p>Provide an API bearer credential (<code>--token</code>, a saved Orka token, or a static
-kubeconfig bearer credential) or a supported transaction token. Kubernetes exec,
-auth-provider, and certificate credentials are not automatically resolved into
-an Orka API credential. Missing API authentication fails before capture or
-persistence of the migration bundle. Configure the endpoint and authentication
-before running the commands below.</p>
+<p>Native migration requires <code>--server</code>, <code>ORKA_SERVER</code> or a saved API endpoint.
+Automatic Kubernetes Service discovery is not used: a familiar name, labels, and
+Service UID do not establish the application&#x27;s identity. Select the trusted Orka
+API endpoint explicitly before sending portable history.</p>
+<p>Provide an API bearer credential (<code>--token</code>, <code>--token-file</code>, <code>ORKA_TOKEN</code>, or a
+saved Orka token) or a supported transaction token. The CLI never sends a
+kubeconfig credential to an endpoint named this way, and Kubernetes exec,
+auth-provider, and certificate credentials are not API credentials. Name the
+namespace with <code>--namespace</code>, <code>ORKA_NAMESPACE</code>, or a saved namespace: the
+journal and the import receipt are bound to it. Missing API authentication or
+namespace fails before capture or persistence of the migration bundle. Configure
+the endpoint, authentication, and namespace before running the commands below.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="import-a-local-thread">Import a local thread<a href="#import-a-local-thread" class="hash-link" aria-label="Direct link to Import a local thread" title="Direct link to Import a local thread" translate="no">​</a></h2>
 <p>Stop every Codex process using the source home before capture. <code>--source-stopped</code>
 records that assertion; it does not terminate a local client. Use a new Session

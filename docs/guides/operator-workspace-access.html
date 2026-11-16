@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Operator workspace access | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Operator workspace access | Orka"><meta data-rh="true" name="description" content="Debug a running agent Task with orka task exec and orka task cp: enablement, permissions, the session taint, and audit."><meta data-rh="true" property="og:description" content="Debug a running agent Task with orka task exec and orka task cp: enablement, permissions, the session taint, and audit."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Operator workspace access","item":"https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.aff5f232.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.a015ca10.js" defer="defer"></script>
 <script src="/orka/assets/js/main.5a4e78cf.js" defer="defer"></script>
 </head>
 <body>
@@ -79,9 +79,10 @@ exactly one regular file. Copying in replaces the
 destination atomically, and only after the complete upload arrives. The parent
 directory must already exist. Copying out over an existing local file keeps
 that file&#x27;s permissions; a new local file is readable and writable only by you.</p>
-<p><code>-t</code> allocates a terminal. Because <code>-t</code> means <code>--tty</code> on <code>orka task exec</code>, use
-<code>--token</code> there for a bearer token. Without a terminal, the first Ctrl-C is
-forwarded to the remote command as <code>SIGINT</code> and a second abandons the stream.
+<p><code>-t</code> allocates a terminal. Because <code>-t</code> means <code>--tty</code> on <code>orka task exec</code>, pass
+a bearer token there with <code>--token</code>, <code>--token-file</code> or <code>ORKA_TOKEN</code>. Without a
+terminal, the first Ctrl-C is forwarded to the remote command as <code>SIGINT</code> and a
+second abandons the stream.
 Closing the stream kills the remote command and every process it started. Each
 operation carries a unique supplementary group that its processes cannot drop.
 So even descendants that start a new session or process group, or outlive the
