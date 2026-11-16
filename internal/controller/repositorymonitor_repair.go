@@ -1056,13 +1056,16 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskWithEvide
 		sessionKey = strings.ToLower(headRepo) + ":" + pr.HeadBranch
 	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
-	ciInput, err := r.repositoryMonitorRepairTaskCIInput(ctx, monitor, command.Intent, taskName, monitoredRepo, pr)
+	ciInput, legacyPrompt, err := r.repositoryMonitorRepairTaskCIInput(ctx, monitor, command.Intent, taskName, monitoredRepo, pr)
 	if err != nil {
 		return 0, ciInput, err
 	}
-	prompt, err := r.buildRepositoryMonitorRepairPromptWithCI(ctx, monitor, command.Intent, monitoredRepo, pr, item, ciInput)
-	if err != nil {
-		return 0, ciInput, err
+	prompt := legacyPrompt
+	if prompt == "" {
+		prompt, err = r.buildRepositoryMonitorRepairPromptWithCI(ctx, monitor, command.Intent, monitoredRepo, pr, item, ciInput)
+		if err != nil {
+			return 0, ciInput, err
+		}
 	}
 	commitMessage, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, command.Intent, taskName, pr, item)
 	if err != nil {
@@ -1206,9 +1209,15 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskWithEvide
 // repair attempt, or nil for other intents. The repair Task's prompt freezes
 // it: once the Task exists, its input is reused, so rebuilding the prompt
 // for a retried handoff yields the same bytes rather than fresher evidence.
-func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskCIInput(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName, repo string, pr repositoryMonitorPullRequest) (*repositoryMonitorRepairCIInput, error) {
+//
+// A repair Task an earlier controller created before CI evidence existed has
+// no frozen input to reuse, and a rebuilt prompt could never match it. For
+// such a Task the second result is its stored prompt, which the handoff
+// adopts as is, and no CI input is returned, so no evidence is recorded as
+// having informed it.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskCIInput(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName, repo string, pr repositoryMonitorPullRequest) (*repositoryMonitorRepairCIInput, string, error) {
 	if intent != repositoryMonitorCommandIntentFixCI {
-		return nil, nil
+		return nil, "", nil
 	}
 	var existing corev1alpha1.Task
 	err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &existing)
@@ -1216,14 +1225,44 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskCIInput(ctx con
 	case err == nil:
 		if metav1.IsControlledBy(&existing, monitor) {
 			if input, ok := repositoryMonitorRepairCIInputFromPrompt(existing.Spec.Prompt, pr.HeadSHA); ok {
-				return &input, nil
+				return &input, "", nil
+			}
+			if repositoryMonitorRepairPromptPredatesCIEvidence(existing.Spec.Prompt, pr.HeadSHA) {
+				return nil, existing.Spec.Prompt, nil
 			}
 		}
 	case !apierrors.IsNotFound(err):
-		return nil, err
+		return nil, "", err
 	}
 	input := r.buildRepositoryMonitorRepairCIInput(ctx, monitor, repo, pr)
-	return &input, nil
+	return &input, "", nil
+}
+
+// repositoryMonitorRepairPromptPredatesCIEvidence reports that prompt is a
+// fix_ci repair prompt for headSHA written before repair prompts carried
+// failingCheckEvidence. A prompt for another head, intent, or schema is not
+// adopted, so a stale Task still fails recovery validation.
+func repositoryMonitorRepairPromptPredatesCIEvidence(prompt, headSHA string) bool {
+	_, payload, ok := strings.Cut(prompt, "\n\nInput:\n")
+	if !ok {
+		return false
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		return false
+	}
+	if _, ok := decoded["failingCheckEvidence"]; ok {
+		return false
+	}
+	field := func(key string) string {
+		var value string
+		if raw, ok := decoded[key]; !ok || json.Unmarshal(raw, &value) != nil {
+			return ""
+		}
+		return value
+	}
+	return field("schemaVersion") == "orka.prRepair.input.v1" && field(intentField) == repositoryMonitorCommandIntentFixCI &&
+		field(repositoryMonitorFieldHeadSHA) == headSHA && headSHA != ""
 }
 
 // repositoryMonitorRepairCIEvidenceMetadata records which CI evidence

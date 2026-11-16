@@ -434,6 +434,94 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 	repositoryMonitorAssertRepairEvidenceRecorded(t, reconciler, monitorStore, monitor, monitorRun, command, pr, task.Name, second)
 }
 
+// A fix_ci repair Task that a controller created before repair prompts
+// carried CI evidence is recovered with its stored prompt, and no fresh
+// evidence is reported as having informed it. A pre-evidence prompt for
+// another head is not adopted.
+func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	run := repositoryMonitorEvidenceTestRun(302, "unit", "completed", "failure", 1)
+	run["head_sha"] = "head32"
+	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head32": {run}}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-evidence-legacy")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-ci-evidence-legacy", Intent: repositoryMonitorCommandIntentFixCI, Source: "api"}
+	pr := repositoryMonitorPullRequest{Number: 32, HeadSHA: "head32", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "32", Number: 32, HeadSHA: pr.HeadSHA}
+	monitorRun := &store.MonitorRun{ID: "run-ci-evidence-legacy"}
+	if created, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
+		t.Fatalf("first handoff = (%d, %v)", created, err)
+	}
+	key := types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}
+	legacyPrompt := func(headSHA string) string {
+		var task corev1alpha1.Task
+		if err := cl.Get(ctx, key, &task); err != nil {
+			t.Fatal(err)
+		}
+		_, payload, ok := strings.Cut(task.Spec.Prompt, "\n\nInput:\n")
+		if !ok {
+			t.Fatalf("prompt has no input: %q", task.Spec.Prompt)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		delete(decoded, "failingCheckEvidence")
+		delete(decoded, "failingCheckEvidenceDigest")
+		decoded[repositoryMonitorFieldHeadSHA] = headSHA
+		encoded, err := json.MarshalIndent(decoded, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "Repair this exact pull request head (wording from an earlier controller).\n\nInput:\n" + string(encoded) + "\n"
+	}
+	setPrompt := func(prompt string) {
+		var task corev1alpha1.Task
+		if err := cl.Get(ctx, key, &task); err != nil {
+			t.Fatal(err)
+		}
+		task.Spec.Prompt = prompt
+		if err := cl.Update(ctx, &task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stale := legacyPrompt("an-earlier-head")
+	setPrompt(stale)
+	if _, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err == nil {
+		t.Fatal("a pre-evidence prompt for another head was adopted")
+	}
+
+	legacy := legacyPrompt(pr.HeadSHA)
+	setPrompt(legacy)
+	created, input, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
+	if err != nil || created != 0 {
+		t.Fatalf("recovered handoff = (%d, %v), want the pre-evidence Task recovered", created, err)
+	}
+	if input != nil {
+		t.Fatalf("recovered handoff reported evidence %s for a Task that received none", input.digest())
+	}
+	var recovered corev1alpha1.Task
+	if err := cl.Get(ctx, key, &recovered); err != nil || recovered.Spec.Prompt != legacy {
+		t.Fatalf("recovered Task prompt changed: err=%v", err)
+	}
+}
+
 // repositoryMonitorAssertRepairEvidenceRecorded checks that the attempt's
 // work action and audit event record the evidence it used.
 func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *RepositoryMonitorReconciler, monitorStore *storageclient.Client, monitor *corev1alpha1.RepositoryMonitor, monitorRun *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, taskName string, input *repositoryMonitorRepairCIInput) {
