@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/security"
+
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
 
@@ -136,10 +138,34 @@ type repositoryMonitorCILogScanner struct {
 	errorAfter  int
 	cleanup     bool
 	tail        []string
+	// yamlIndent is the indentation of the credential YAML block scalar
+	// header whose body the scan is in, or -1 outside one.
+	yamlIndent int
 }
 
 func newRepositoryMonitorCILogScanner() *repositoryMonitorCILogScanner {
-	return &repositoryMonitorCILogScanner{errorAt: -1}
+	return &repositoryMonitorCILogScanner{errorAt: -1, yamlIndent: -1}
+}
+
+// withholdYAMLBlock withholds the body of a credential YAML block scalar as
+// it streams by, so pruning the rolling window cannot drop the header that
+// identifies it while its body lines survive.
+func (s *repositoryMonitorCILogScanner) withholdYAMLBlock(line string) string {
+	normalized := repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(line, ""))
+	if s.yamlIndent >= 0 {
+		if strings.TrimSpace(normalized) == "" {
+			return line
+		}
+		if repositoryMonitorEvidenceIndent(normalized) > s.yamlIndent {
+			return repositoryMonitorEvidenceRedactedLine
+		}
+		s.yamlIndent = -1
+	}
+	if security.SensitiveYAMLBlockHeader(normalized) {
+		s.yamlIndent = repositoryMonitorEvidenceIndent(normalized)
+		return repositoryMonitorEvidenceRedactedLine
+	}
+	return line
 }
 
 func (s *repositoryMonitorCILogScanner) windowBefore() int {
@@ -151,6 +177,7 @@ func (s *repositoryMonitorCILogScanner) add(line string) {
 	if !keep {
 		return
 	}
+	line = s.withholdYAMLBlock(line)
 	if !s.cleanup && repositoryMonitorCILogCleanupLine(line) {
 		s.cleanup = true
 		s.tail, s.tailSeen = append([]string(nil), s.recent...), s.seen
@@ -293,6 +320,17 @@ func repositoryMonitorCILogExcerptText(excerpt repositoryMonitorCILogExcerpt) st
 	return repositoryMonitorEvidenceBoundTail(lines, repositoryMonitorCILogExcerptBytes, repositoryMonitorCILogExcerptLines)
 }
 
+// repositoryMonitorCILogContinuesCut reports whether a line, given its words
+// and whether it ends in an escaped line break, could continue a credential
+// whose start a raw-line cut dropped: it begins with a credential character,
+// or it is only an escaped line break.
+func repositoryMonitorCILogContinuesCut(words []string, escaped bool) bool {
+	if len(words) == 0 {
+		return escaped
+	}
+	return repositoryMonitorEvidenceTokenEdge(words[0], true)
+}
+
 // repositoryMonitorCILogCutMarker ends a line that was longer than
 // repositoryMonitorCILogRawLineLimit and kept only its head.
 const repositoryMonitorCILogCutMarker = " …"
@@ -347,8 +385,7 @@ func repositoryMonitorCILogWithholdOpenEdges(original, lines []string, openStart
 	// a line such as an ##[error] marker cannot continue one and is kept.
 	for i := 0; i+1 < n; i++ {
 		next := i + 1
-		if strings.HasSuffix(original[i], repositoryMonitorCILogCutMarker) && len(words[next]) > 0 &&
-			repositoryMonitorEvidenceTokenEdge(words[next][0], true) {
+		if strings.HasSuffix(original[i], repositoryMonitorCILogCutMarker) && repositoryMonitorCILogContinuesCut(words[next], escaped[next]) {
 			withholdFrom(next)
 		}
 	}

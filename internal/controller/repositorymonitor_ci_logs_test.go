@@ -511,3 +511,46 @@ func TestRepositoryMonitorCILogOpenEdgesIgnoreFormatRunes(t *testing.T) {
 		t.Fatalf("an escaped break hidden by a format rune at the open end must be withheld: %q", got)
 	}
 }
+
+// A credential YAML block scalar whose header the rolling window prunes stays
+// withheld, including past blank lines in its body.
+func TestRepositoryMonitorCILogWithholdsYAMLBlockPastTheWindow(t *testing.T) {
+	const ts = "2026-11-16T10:00:00.1234567Z "
+	var log strings.Builder
+	log.WriteString(ts + "config:\n" + ts + "  password: |\n")
+	fragments := make([]string, 0, 80)
+	for i := range 80 {
+		fragment := fmt.Sprintf("Zq%02dvT8mK3pR6wN", i)
+		fragments = append(fragments, fragment)
+		log.WriteString(ts + "    " + fragment + "\n")
+		if i%10 == 9 {
+			log.WriteString(ts + "\n")
+		}
+	}
+	log.WriteString(ts + "  user: deploy-bot\n" + ts + "##[error]Process completed with exit code 1.\n")
+	scanner, truncated, err := readRepositoryMonitorCILog(strings.NewReader(log.String()), repositoryMonitorCILogReadLimit)
+	if err != nil || truncated {
+		t.Fatalf("readRepositoryMonitorCILog() truncated=%t err=%v", truncated, err)
+	}
+	excerpt, _ := scanner.excerpt(truncated)
+	text := repositoryMonitorCILogExcerptText(excerpt)
+	if !strings.Contains(text, "##[error]Process completed") || !strings.Contains(text, "user: deploy-bot") {
+		t.Fatalf("excerpt = %q, want the error and the sibling key", text)
+	}
+	for _, fragment := range fragments {
+		if strings.Contains(text, fragment) {
+			t.Fatalf("excerpt = %q, leaks block fragment %q", text, fragment)
+		}
+	}
+}
+
+// After a raw-line cut, a standalone backslash line continues a credential
+// into the lines after it.
+func TestRepositoryMonitorCILogCutThroughBackslashLine(t *testing.T) {
+	original := []string{"dump ab ab" + repositoryMonitorCILogCutMarker, "\\", "Q3xR9mP7tK2vL8nW4", "##[error]failed"}
+	lines := append([]string(nil), original...)
+	repositoryMonitorCILogWithholdOpenEdges(original, lines, false, false)
+	if lines[1] != repositoryMonitorEvidenceRedactedLine || lines[2] != repositoryMonitorEvidenceRedactedLine || lines[3] != original[3] {
+		t.Fatalf("lines = %q, want the backslash and fragment withheld and the error kept", lines)
+	}
+}
