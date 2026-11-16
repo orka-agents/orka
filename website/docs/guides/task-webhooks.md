@@ -286,6 +286,11 @@ How approvals reach a receiver:
   approval history. Notices start with the first transition recorded after
   the controller sees the selection. Removing an event retires its pending
   notices unsent.
+- Deleting a Task drops its pending approval notices. Scheduled-run history
+  pruning waits for them: a run, or any Task in its continuation chain, with
+  a pending approval notice is kept past `successfulRunsHistoryLimit` or
+  `failedRunsHistoryLimit` until the notice is delivered or marked `Failed`,
+  and is then pruned.
 - A Task with the same name as an earlier one never receives the earlier Task's
   approvals.
 

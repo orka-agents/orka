@@ -190,6 +190,22 @@ Removing an event from `spec.webhookEvents`, where the spec is still
 mutable, retires its pending notices unsent. Deleting a Task drops its pending
 notices, as for the terminal notice.
 
+**History retention.** Scheduled-run history pruning, from both the finished
+run and the scheduled parent, keeps a run beyond its history limit while any
+Task in its continuation chain has a pending approval notice. Only the Task's
+own reconcile sends its notices, so deleting the run after its request notice
+alone, as `successfulRunsHistoryLimit: 0` did, lost the resolution. The check
+reads the run's head and follows its verified continuation links with
+uncached reads, bounded by the chain limit, and keeps the run when any read
+fails. A held run still counts toward the limit, so no newer run is pruned in
+its place. Retention is retried without polling: the reconcile of the Task
+whose last notice settles reaches its parent's history enforcement again. The
+hold is bounded, since a pending approval notice settles within its retry
+window or signing deadline. Terminal notices do not hold back parent-triggered
+pruning: the finished run already prunes only after its own terminal notice
+settles, and ADR 0042 lets a terminal notice wait indefinitely for signing
+keys, so holding on it would let an outage keep every run.
+
 ## Consequences
 
 - Receivers must deduplicate on `deliveryId`. Delivery is at-least-once, not

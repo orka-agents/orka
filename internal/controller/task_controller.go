@@ -4353,13 +4353,23 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	sortByCreation(succeeded)
 	sortByCreation(failed)
 
+	// A run beyond the limit stays while its chain has a pending approval
+	// notice. It still counts, so no newer run is pruned in its place. The
+	// reconcile of the Task whose last notice settles reaches this again
+	// through enforceParentScheduledTaskHistory and prunes it then.
 	for i := 0; i < len(succeeded)-int(successLimit); i++ {
+		if r.approvalNoticesHoldRun(ctx, succeeded[i]) {
+			continue
+		}
 		if err := r.Delete(ctx, succeeded[i]); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting old succeeded child: %w", err)
 		}
 	}
 
 	for i := 0; i < len(failed)-int(failedLimit); i++ {
+		if r.approvalNoticesHoldRun(ctx, failed[i]) {
+			continue
+		}
 		if err := r.Delete(ctx, failed[i]); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting old failed child: %w", err)
 		}
@@ -5266,6 +5276,45 @@ func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *
 		return nil, false
 	}
 	return tail, true
+}
+
+// approvalNoticesHoldRun reports whether a run must be kept because a Task in
+// its continuation chain, from head, still has a pending approval notice
+// (ADR 0053). Deleting a Task drops its queued notices, and only a reconcile
+// of the Task itself can send them. It reads uncached state, because the
+// notices may have been queued earlier in the same reconcile, and follows at
+// most the chain bound. A failed read keeps the run. Only a configured
+// notifier ever settles a notice, so without one nothing is held.
+func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev1alpha1.Task) bool {
+	if r.WebhookNotifier == nil || head == nil {
+		return false
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	current := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(head), current); err != nil {
+		return !apierrors.IsNotFound(err)
+	}
+	if current.UID != head.UID {
+		// Another incarnation holds the name; it is not this run to judge.
+		return true
+	}
+	for range taskwait.MaxChainLength + 1 {
+		if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) >= 0 {
+			return true
+		}
+		next, err := taskwait.Continuation(ctx, reader, current)
+		switch {
+		case apierrors.IsNotFound(err):
+			// The rest of the chain is gone, and its notices with it.
+			return false
+		case err != nil:
+			return true
+		case next == nil:
+			return false
+		}
+		current = next
+	}
+	return true
 }
 
 // taskIsLinkedContinuation reports whether task continues a parked Task that
