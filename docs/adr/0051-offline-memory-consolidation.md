@@ -132,7 +132,11 @@ creates; a run that proposes one cites the Sessions it drew on.
     only finished turns, and releasing its lock does not change it again, so skipping it
     could miss it for good. Tool messages are dropped, so memory a run recalled cannot be
     read back as new evidence.
-  - 200,000 characters in all, memories first; the report says when the input was cut.
+  - at most 60,000 characters of memories and, separately, 60,000 characters of
+    transcripts, so memories never crowd out the evidence; the report says when either was
+    cut. That stays inside a model's context even at one token per character. The run makes
+    one model call and never drops input to fit: a model that cannot take it fails the run,
+    which leaves its Sessions to the next.
   - Fewer eligible Sessions than `minNewSessions` (default 5) skips the run without calling
     the model.
 - Orka cannot tell from a stored Session which Task wrote it, so this version does not
@@ -164,8 +168,8 @@ creates; a run that proposes one cites the Sessions it drew on.
   recalls. Counting adds one small write per recall.
 - Excluding scheduled or continuation turns needs the turn's origin recorded on Session
   messages. That is a follow-up.
-- A run reads at most 50 Sessions and 200,000 characters. When more changed, the oldest of
-  them are not read.
+- A run reads at most 50 Sessions and 60,000 characters of transcripts. When more changed,
+  the oldest of them are not read.
 - The storage contract gains a revision and new methods that every provider must
   implement, checked by the shared suite.
 - Ranking recalls by relevance, an index of memory titles loaded into every prompt, and
