@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -741,6 +742,57 @@ func TestTaskReconcilerDeliversApprovalNoticesForAFinishedTask(t *testing.T) {
 	// their own order.
 	if terminal != 1 || !slices.Equal(approvalEvents, []string{"task.approval_requested", "task.approval_resolved"}) {
 		t.Fatalf("terminal notices = %d, approval events = %v", terminal, approvalEvents)
+	}
+}
+
+// approvalListFailAfterExpiryStore fails the first approval history read
+// that follows the controller's first ApprovalExpired append.
+type approvalListFailAfterExpiryStore struct {
+	*storageclient.Client
+	appended atomic.Bool
+	failed   atomic.Bool
+}
+
+func (s *approvalListFailAfterExpiryStore) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	appended, err := s.Client.AppendExecutionEvent(ctx, event)
+	if err == nil && event.Type == events.ExecutionEventTypeApprovalExpired {
+		s.appended.Store(true)
+	}
+	return appended, err
+}
+
+func (s *approvalListFailAfterExpiryStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	if s.appended.Load() && s.failed.CompareAndSwap(false, true) {
+		return nil, errors.New("injected list failure")
+	}
+	return s.Client.ListExecutionEvents(ctx, filter)
+}
+
+// A Task that selects approval resolutions late, while a brokered review is
+// already past its expiry grace, persists its selection boundary before the
+// controller records the expiry, so a failed read after that append cannot
+// leave the expiry behind an unpersisted boundary and suppress it.
+func TestApprovalWebhooksLateSelectionPersistsBoundaryBeforeRecordingExpiry(t *testing.T) {
+	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning)
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	h := newApprovalWebhookHarness(t, task)
+	expiresAt := approvalWebhookTestNow.Add(10 * time.Minute)
+	h.boundRequest("approval-bound", expiresAt)
+	h.reconcile()
+
+	wrapped := &approvalListFailAfterExpiryStore{Client: h.storage}
+	h.events = wrapped
+	h.now = expiresAt.Add(approvalExpiryGrace)
+	h.setWebhookEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
+	for range 4 {
+		h.reconcile()
+	}
+	if !wrapped.failed.Load() {
+		t.Fatal("the injected read failure never ran after the expiry append")
+	}
+	receipts := h.receipts()
+	if got := eventTypes(receipts); !slices.Equal(got, []string{"task.approval_resolved"}) || receipts[0].payload.Resolution != approvals.StatusExpired {
+		t.Fatalf("events = %v, want the expiry resolution notified once", got)
 	}
 }
 

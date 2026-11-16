@@ -516,7 +516,7 @@ func (w *WebhookNotifier) prepareApprovalNotices(
 			return 0, err
 		}
 	}
-	return minPositiveDuration(requeue, projected.nextExpiry), nil
+	return minPositiveDuration(requeue, projected.nextExpiry, projected.requeue), nil
 }
 
 // sendApprovalNotices advances the delivery of the Task's recorded approval
@@ -532,7 +532,14 @@ func (w *WebhookNotifier) sendApprovalNotices(ctx context.Context, status taskSt
 type approvalProjection struct {
 	changed    bool
 	nextExpiry time.Duration
+	// requeue asks for another projection pass soon, after a pass that only
+	// recorded a new selection boundary.
+	requeue time.Duration
 }
+
+// approvalWebhookTrackingRequeue paces the projection pass that follows a
+// newly recorded selection boundary.
+const approvalWebhookTrackingRequeue = time.Second
 
 func (w *WebhookNotifier) projectTaskApprovalEvents(
 	ctx context.Context,
@@ -546,7 +553,16 @@ func (w *WebhookNotifier) projectTaskApprovalEvents(
 		return approvalProjection{}, err
 	}
 	var result approvalProjection
-	result.changed = startApprovalWebhookTracking(ctx, task, listed)
+	if startApprovalWebhookTracking(ctx, task, listed) {
+		// Persist the selection boundary before anything can append to the
+		// stream. Recording a due expiry here could append an event that a
+		// failed write or follow-up read would leave past an unpersisted
+		// boundary, and the next pass would raise the boundary over it and
+		// treat a selected resolution as earlier history.
+		result.changed = true
+		result.requeue = approvalWebhookTrackingRequeue
+		return result, nil
+	}
 	own := taskApprovals(listed, uid)
 	if selected.allows(corev1alpha1.TaskApprovalWebhookResolved) {
 		attempted, next, err := recordDueApprovalExpiries(ctx, eventStore, task, own, w.now())
