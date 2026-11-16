@@ -155,9 +155,10 @@ destination atomically, and only after the complete upload arrives. The parent
 directory must already exist. Copying out over an existing local file keeps
 that file's permissions; a new local file is readable and writable only by you.
 
-`-t` allocates a terminal. Because `-t` means `--tty` on `orka task exec`, use
-`--token` there for a bearer token. Without a terminal, the first Ctrl-C is
-forwarded to the remote command as `SIGINT` and a second abandons the stream.
+`-t` allocates a terminal. Because `-t` means `--tty` on `orka task exec`, pass
+a bearer token there with `--token`, `--token-file` or `ORKA_TOKEN`. Without a
+terminal, the first Ctrl-C is forwarded to the remote command as `SIGINT` and a
+second abandons the stream.
 Closing the stream kills the remote command and every process it started. Each
 operation carries a unique supplementary group that its processes cannot drop.
 So even descendants that start a new session or process group, or outlive the

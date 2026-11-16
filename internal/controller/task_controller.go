@@ -114,9 +114,12 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                    client.Reader
-	Scheme                       *runtime.Scheme
-	JobBuilder                   *JobBuilder
+	APIReader  client.Reader
+	Scheme     *runtime.Scheme
+	JobBuilder *JobBuilder
+	// TaskProvenanceProtected is the existing built-in/external admission declaration.
+	// Child gateway grants require it; root grants do not.
+	TaskProvenanceProtected      bool
 	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
@@ -4099,10 +4102,9 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	sched, err := parser.Parse(task.Spec.Schedule)
 	if err != nil {
-		task.Status.Phase = corev1alpha1.TaskPhaseFailed
-		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
-		_ = r.Status().Update(ctx, task)
-		return ctrl.Result{}, nil
+		// A schedule edited to an invalid expression on an existing Task is
+		// terminal like the initial parse failure in handleScheduledTask.
+		return r.failTask(ctx, task, fmt.Sprintf("invalid cron expression: %v", err))
 	}
 
 	// Determine time zone
