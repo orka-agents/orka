@@ -112,7 +112,7 @@ func TestCollectInputsReadsUserAndAssistantTextOfChangedSessions(t *testing.T) {
 		"tool records past the newest 40 do not hide a Session's text")
 	require.Len(t, input.Memories[0].Tags, MaxTags, "a memory's tags are bounded")
 	require.Len(t, []rune(input.Memories[0].Tags[0]), MaxTagChars+1)
-	require.False(t, input.Truncated)
+	require.True(t, input.Truncated, "a message and a memory's tags were cut to their limits")
 }
 
 func TestCollectInputsBoundsTheWholeInput(t *testing.T) {
@@ -398,6 +398,19 @@ func TestCollectInputsMarksEveryLimitItReaches(t *testing.T) {
 	moreSessions := small()
 	moreSessions.eligible = 2
 	require.True(t, collect(moreSessions).Truncated, "more changed Sessions than the run read")
+
+	for name, memory := range map[string]store.Memory{
+		"long content": {ID: "m", Generation: 1, Content: strings.Repeat("x", MaxMemoryChars+1)},
+		"many tags":    {ID: "m", Generation: 1, Content: "x", Tags: strings.Split(strings.Repeat("t,", MaxTags+1), ",")[:MaxTags+1]},
+		"long tag":     {ID: "m", Generation: 1, Content: "x", Tags: []string{strings.Repeat("t", MaxTagChars+1)}},
+	} {
+		cut := small()
+		cut.memories = []store.Memory{memory}
+		require.True(t, collect(cut).Truncated, "a memory cut to its limits: %s", name)
+	}
+	longMessage := small()
+	longMessage.transcripts["s"] = []store.SessionMessage{{ID: "m", Role: "user", Content: strings.Repeat("x", MaxMessageChars+1)}}
+	require.True(t, collect(longMessage).Truncated, "a message cut to its limit")
 }
 
 // Applying a proposal takes its tags from the first "Tags:" line of its

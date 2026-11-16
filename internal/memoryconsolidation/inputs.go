@@ -62,6 +62,9 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 	}
 	budget := MaxMemoryInputChars
 	for _, memory := range memories {
+		if memoryCut(memory) {
+			input.Truncated = true
+		}
 		read := InputMemory{ID: memory.ID, Generation: memory.Generation, Content: truncateRunes(memory.Content, MaxMemoryChars),
 			Tags: boundedTags(memory.Tags), RecalledCount: memory.RecalledCount, LastRecalledAt: memory.LastRecalledAt,
 			UpdatedAt: memory.UpdatedAt.UTC()}
@@ -94,6 +97,9 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 			content := strings.TrimSpace(message.Content)
 			if (role != "user" && role != "assistant") || content == "" || message.ToolCalls != nil || message.ToolCallID != "" {
 				continue
+			}
+			if utf8.RuneCountInString(content) > MaxMessageChars {
+				input.Truncated = true
 			}
 			messages = append(messages, InputMessage{ID: message.ID, Role: role, Content: truncateRunes(content, MaxMessageChars)})
 		}
@@ -150,4 +156,18 @@ func truncateRunes(value string, limit int) string {
 	}
 	runes := []rune(value)
 	return string(runes[:limit]) + "…"
+}
+
+// memoryCut reports whether a run reads less of a memory than it holds: its
+// content or one of its tags is longer than a run reads, or it has more tags.
+func memoryCut(memory store.Memory) bool {
+	if utf8.RuneCountInString(memory.Content) > MaxMemoryChars || len(memory.Tags) > MaxTags {
+		return true
+	}
+	for _, tag := range memory.Tags {
+		if utf8.RuneCountInString(tag) > MaxTagChars {
+			return true
+		}
+	}
+	return false
 }
