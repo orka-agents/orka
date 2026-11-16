@@ -569,3 +569,50 @@ func TestMemoryCreateRefusesACallerSuppliedSourceProposal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
+
+func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	grant := func(verb, resource string) authorizationv1.ResourceAttributes {
+		return authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Version: "v1alpha1", Resource: resource, Verb: verb}
+	}
+	body := func(name, mode string) string {
+		return `{"name":"` + name + `","namespace":"default","type":"ai","ai":{"provider":"anthropic","model":"model",` +
+			`"memoryConsolidation":{"mode":"` + mode + `"}}}`
+	}
+	created := func(name string) bool {
+		err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: name}, &corev1alpha1.Task{})
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	createTasks := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "create"}
+	readSessions := []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions"), grant("get", "sessions")}
+
+	for name, tc := range map[string]struct {
+		mode    string
+		grants  []authorizationv1.ResourceAttributes
+		allowed bool
+	}{
+		"a dry run with only list on sessions": {mode: "DryRun", grants: []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions")}},
+		"a dry run that can read sessions":     {mode: "DryRun", grants: readSessions, allowed: true},
+		"a proposing run that cannot propose":  {mode: "Propose", grants: readSessions},
+		"a proposing run": {mode: "Propose", allowed: true,
+			grants: append(append([]authorizationv1.ResourceAttributes{}, readSessions...), grant("create", "memoryproposals"))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			taskName := strings.ReplaceAll(name, " ", "-")
+			f.allowOnly(t, tc.grants...)
+			status, response := f.request(t, http.MethodPost, "/api/v1/tasks", body(taskName, tc.mode))
+			if !tc.allowed {
+				require.Equal(t, http.StatusForbidden, status, response)
+				require.Contains(t, response, "memory consolidation")
+				require.False(t, created(taskName), "the API checks the caller, not its own identity")
+				return
+			}
+			require.Equal(t, http.StatusCreated, status, response)
+			require.True(t, created(taskName))
+		})
+	}
+}

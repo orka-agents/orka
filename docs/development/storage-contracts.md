@@ -96,6 +96,7 @@ Kubernetes authority remains separate from either boundary.
 | `SessionCleanupPersistenceStore`, `SessionTurnCleanupReceiptStore` | Cleanup identity, durable intents, completion tombstones and retained turn receipts; state. | Kubernetes composite and cleanup recovery. These close crash windows across Kubernetes deletion and transcript deletion. |
 | `GatewayEventStore`, `GatewayDeliveryStore` | Ingress deduplication/claims, canonical transcript projection, deliveries, budgets, retries and event tombstones; state. | Gateway service, adapters, task reconciliation and conversation reply tools. Existing grouped admission/projection and delivery idempotency must survive a future adapter. |
 | `GatewayTaskCleanupReceiptStore`, `GatewayTaskCleanupReceiptMaintenanceStore`, `GatewaySessionCleanupCandidateStore` | Compaction ownership evidence and retained transcript candidates; state. | Gateway retention/recovery. Live uncached Kubernetes absence checks precede receipt deletion. |
+| `MemoryConsolidationStore` | Memory consolidation runs: one per Task UID, the window of Sessions each reads, its report, and the namespace cursor that only completed runs move; state. | Internal memory consolidation routes. Completion creates the run's proposals in the same transaction; Orka redacts them and the report first. |
 | `MemoryStore`, `MemoryProposalStore` | Durable namespace memories and governance proposals/review/application history; state. | Memory APIs and worker tools. Proposal review does not apply a memory. Redaction and authorization remain Orka responsibilities. |
 | `PlanStore`, `ExecutionEventStore`, `DeduplicatingExecutionEventStore`, `AtomicExecutionEventPlanStore` | Plan state, ordered event streams, sequence projections and deduplication; state. | Task reconciliation, runtime event capture, SSE/API and worker tools. Plan-aware append groups event and plan update. Existing event retention is preserved. |
 | `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. A consuming read is a write that marks exactly the messages it returns, and its replay returns the same messages (see "Messages, counters and chat turns"). |
@@ -310,6 +311,8 @@ the observable parts.
   gives every memory a `Generation` and adds the consolidation proposal
   types `memory_merge`, `memory_supersede` and `memory_retire`, which apply
   only while every target memory is at the generation the proposal names.
+  Revision 11 adds `MemoryConsolidationStore`, which records memory
+  consolidation runs and creates a run's proposals with its report.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

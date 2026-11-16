@@ -1263,6 +1263,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - memoryproposals
+  verbs:
+  - create
+- apiGroups:
+  - core.orka.ai
+  resources:
   - sessions
   verbs:
   - delete
@@ -3847,6 +3853,39 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: '!variables.checkedRun || (authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''list'').allowed()
+      && authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''get'').allowed())'
+    message: caller is not authorized to list and get Sessions, which a memory consolidation
+      run reads
+    reason: Forbidden
+  - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
+      != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'
+    message: caller is not authorized to create memory proposals, which a Propose
+      memory consolidation run creates
+    reason: Forbidden
+  variables:
+  - expression: has(object.spec.ai) && has(object.spec.ai.memoryConsolidation) &&
+      (oldObject == null || object.spec != oldObject.spec)
+    name: checkedRun
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-task-workspace-class-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3999,6 +4038,15 @@ metadata:
   name: orka-namespace-mode-protection
 spec:
   policyName: orka-namespace-mode-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  policyName: orka-task-memory-consolidation.orka.ai
   validationActions:
   - Deny
 ---

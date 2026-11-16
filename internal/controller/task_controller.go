@@ -205,6 +205,10 @@ type TaskReconciler struct {
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
+// The controller creates the scheduled runs of a Propose memory consolidation
+// Task, which the memory consolidation admission policy checks for create on
+// memoryproposals, as it checked the parent's creator.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -1385,8 +1389,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+// isMemoryConsolidationTask reports a memory consolidation run (ADR 0051).
+// A run is one model call that submits one result, so it never iterates
+// autonomously or parks on an approval, whatever its Agent configures.
+func isMemoryConsolidationTask(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
+}
+
 func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	return task != nil &&
+		!isMemoryConsolidationTask(task) &&
 		task.Spec.Type == corev1alpha1.TaskTypeAI &&
 		agent != nil &&
 		agent.Spec.Coordination != nil &&
@@ -5191,7 +5203,7 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 // taskAutonomousMode preserves lookup errors when the mode affects a terminal
 // decision. Other callers retain the existing best-effort boolean behavior.
 func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if task.Spec.AgentRef == nil {
+	if task.Spec.AgentRef == nil || isMemoryConsolidationTask(task) {
 		return false, nil
 	}
 

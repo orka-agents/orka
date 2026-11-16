@@ -172,6 +172,16 @@ func (p *stateProvider) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 	return err
 }
 
+func (p *stateProvider) BeginMemoryConsolidationRun(ctx context.Context, a1 *storagev1.MemoryConsolidationRun) error {
+	_, err := p.injector.call(ctx, p.contract, "BeginMemoryConsolidationRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.BeginMemoryConsolidationRun(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
 	var r0 storagev1.DatasetBinding
 	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
@@ -350,6 +360,22 @@ func (p *stateProvider) CompleteDatasetBootstrap(ctx context.Context, a1 string)
 		return p.inner.CompleteDatasetBootstrap(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) CompleteMemoryConsolidationRun(ctx context.Context, a1 storagev1.MemoryConsolidationCompletion) (*storagev1.MemoryConsolidationRun, error) {
+	var r0 *storagev1.MemoryConsolidationRun
+	injected, err := p.injector.call(ctx, p.contract, "CompleteMemoryConsolidationRun", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.CompleteMemoryConsolidationRun(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.MemoryConsolidationRun
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) CompleteOutboxProjectionRecord(ctx context.Context, a1 storagev1.CompleteOutboxProjectionRequest) (*storagev1.OutboxProjection, error) {
@@ -1151,6 +1177,32 @@ func (p *stateProvider) GetMemory(ctx context.Context, a1 string, a2 string) (*s
 	return r0, err
 }
 
+func (p *stateProvider) GetMemoryConsolidationCursor(ctx context.Context, a1 string, a2 string) (*time.Time, error) {
+	var r0 *time.Time
+	injected, err := p.injector.call(ctx, p.contract, "GetMemoryConsolidationCursor", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetMemoryConsolidationCursor(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *time.Time
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetMemoryConsolidationRun(ctx context.Context, a1 string, a2 string) (*storagev1.MemoryConsolidationRun, error) {
+	var r0 *storagev1.MemoryConsolidationRun
+	injected, err := p.injector.call(ctx, p.contract, "GetMemoryConsolidationRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetMemoryConsolidationRun(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.MemoryConsolidationRun
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetMemoryProposal(ctx context.Context, a1 string, a2 string) (*storagev1.MemoryProposal, error) {
 	var r0 *storagev1.MemoryProposal
 	injected, err := p.injector.call(ctx, p.contract, "GetMemoryProposal", func(ctx context.Context) (err error) {
@@ -1788,6 +1840,21 @@ func (p *stateProvider) ListMemories(ctx context.Context, a1 storagev1.MemoryFil
 		return z0, err
 	}
 	return r0, err
+}
+
+func (p *stateProvider) ListMemoryConsolidationSessions(ctx context.Context, a1 string, a2 time.Time, a3 time.Time, a4 int) ([]storagev1.SessionMetadata, int, error) {
+	var r0 []storagev1.SessionMetadata
+	var r1 int
+	injected, err := p.injector.call(ctx, p.contract, "ListMemoryConsolidationSessions", func(ctx context.Context) (err error) {
+		r0, r1, err = p.inner.ListMemoryConsolidationSessions(ctx, a1, a2, a3, a4)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.SessionMetadata
+		var z1 int
+		return z0, z1, err
+	}
+	return r0, r1, err
 }
 
 func (p *stateProvider) ListMemoryProposals(ctx context.Context, a1 storagev1.MemoryProposalFilter) ([]storagev1.MemoryProposal, error) {

@@ -33,6 +33,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, reader client.Reader, cl
 	if err := authorizeTaskProviderUse(ctx, reader, clientset, userInfo, task); err != nil {
 		return err
 	}
+	if err := authorizeTaskMemoryConsolidation(ctx, clientset, userInfo, task); err != nil {
+		return err
+	}
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
 		return nil
 	}
@@ -220,4 +223,52 @@ func isWorkerServiceAccount(userInfo *UserInfo) bool {
 	}
 	name := userInfo.Username[strings.LastIndex(userInfo.Username, ":")+1:]
 	return slices.Contains(workerServiceAccountNames, name)
+}
+
+// authorizeTaskMemoryConsolidation checks, as the original caller, the grants
+// a memory consolidation run needs: it reads every user's Sessions, and in
+// Propose mode creates memory proposals. The API creates Tasks with its own
+// identity, so the admission policy alone would check the controller rather
+// than the caller. It fails closed for any caller it cannot review.
+func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.AI == nil || task.Spec.AI.MemoryConsolidation == nil {
+		return nil
+	}
+	denied := fiber.NewError(fiber.StatusForbidden,
+		"not authorized to create a memory consolidation run: it needs list and get on sessions, and create on memoryproposals in Propose mode")
+	username := ""
+	if userInfo != nil {
+		username = strings.TrimSpace(userInfo.Username)
+	}
+	if username == "" || strings.TrimSpace(task.Namespace) == "" || kubernetesClientsetIsNil(clientset) {
+		return denied
+	}
+	checks := []authorizationv1.ResourceAttributes{
+		{Verb: apiObjectList, Resource: usageSessionResource},
+		{Verb: gatewayVerbGet, Resource: usageSessionResource},
+	}
+	if task.Spec.AI.MemoryConsolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
+		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: "memoryproposals"})
+	}
+	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
+	for key, values := range userInfo.Extra {
+		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+	}
+	for _, check := range checks {
+		check.Namespace = task.Namespace
+		check.Group = corev1alpha1.GroupVersion.Group
+		check.Version = corev1alpha1.GroupVersion.Version
+		review, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{
+			Spec: authorizationv1.SubjectAccessReviewSpec{
+				User: username, UID: userInfo.UID, Groups: append([]string(nil), userInfo.Groups...), Extra: extra,
+				ResourceAttributes: &check,
+			},
+		}, metav1.CreateOptions{})
+		if err != nil || review == nil || !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
+			log.Info("memory consolidation run authorization denied", "username", username, "namespace", task.Namespace,
+				"task", task.Name, "verb", check.Verb, "resource", check.Resource)
+			return denied
+		}
+	}
+	return nil
 }

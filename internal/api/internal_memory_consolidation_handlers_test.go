@@ -1,0 +1,240 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/memoryconsolidation"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
+)
+
+type consolidationFixture struct {
+	app   *fiber.App
+	store *storageclient.Client
+}
+
+func newConsolidationFixture(t *testing.T, consolidation *corev1alpha1.MemoryConsolidationSpec) consolidationFixture {
+	t.Helper()
+	// A run's window ends a second before now; begin as if a few seconds
+	// passed after the test wrote its Sessions.
+	previous := memoryConsolidationNow
+	memoryConsolidationNow = func() time.Time { return time.Now().Add(5 * time.Second) }
+	t.Cleanup(func() { memoryConsolidationNow = previous })
+	scheme := internalCallerAuthScheme(t)
+	task := internalCallerAuthTask()
+	task.Spec = corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,
+		AgentRef: &corev1alpha1.AgentReference{Name: "curator"},
+		AI:       &corev1alpha1.AISpec{Prompt: "Consolidate", MemoryConsolidation: consolidation}}
+	job := internalCallerAuthJob(task, "job-a", "job-uid")
+	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	backing := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	h := NewInternalHandlers(backing, backing, backing, backing, backing, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient,
+		MemoryStore: backing, MemoryProposalStore: backing, MemoryConsolidationStore: backing})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+		return c.Next()
+	})
+	app.Post("/internal/v1/memory-consolidation/:namespace/begin", h.BeginMemoryConsolidation)
+	app.Post("/internal/v1/memory-consolidation/:namespace/complete", h.CompleteMemoryConsolidation)
+	return consolidationFixture{app: app, store: backing}
+}
+
+func (f consolidationFixture) post(t *testing.T, path string, body any, out any) int {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-consolidation/default/"+path, bytes.NewReader(encoded))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.app.Test(req)
+	require.NoError(t, err)
+	if out != nil && resp.StatusCode == http.StatusOK {
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(out))
+	}
+	return resp.StatusCode
+}
+
+func (f consolidationFixture) seedSessions(t *testing.T, count int) {
+	t.Helper()
+	for i := range count {
+		name := fmt.Sprintf("session-%d", i)
+		require.NoError(t, f.store.CreateSession(t.Context(), &store.SessionRecord{Namespace: "default", Name: name, SessionType: store.SessionTypeChat}))
+		require.NoError(t, f.store.AppendMessages(t.Context(), "default", name, []store.SessionMessage{
+			{ID: name + "-user", Role: "user", Content: "How do we release?"},
+			{ID: name + "-assistant", Role: "assistant", Content: "Run make test, then tag the release."},
+		}))
+	}
+}
+
+func TestMemoryConsolidationRunProposesValidatedOperations(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: id, Namespace: "default", Content: "Release with make test"}))
+	}
+	require.NoError(t, f.store.CreateSession(t.Context(), &store.SessionRecord{Namespace: "default", Name: "gateway-chat", SessionType: store.SessionTypeGateway}))
+
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.Equal(t, memoryconsolidation.StatusRunning, begin.Status)
+	require.NotNil(t, begin.Input)
+	require.Len(t, begin.Input.Sessions, 5, "gateway Sessions are never read")
+	require.Len(t, begin.Input.Memories, 2)
+
+	var retried memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &retried))
+	require.Equal(t, memoryconsolidation.StatusRunning, retried.Status, "a retried worker resumes the same run")
+
+	submission := memoryconsolidation.Submission{Summary: "Two memories say the same thing.", Operations: []memoryconsolidation.Operation{
+		{Type: "merge", Title: "Release checklist", Content: "Run make test, then tag the release.", Reason: "Duplicates",
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}},
+			Sources: []store.MemoryProposalSource{{SessionName: "session-0", MessageID: "session-0-assistant"}}},
+		{Type: "retire", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-unknown", Generation: 1}}},
+	}}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", submission, &report))
+	require.Equal(t, memoryconsolidation.StatusCompleted, report.Status)
+	require.Len(t, report.Operations, 1)
+	require.Len(t, report.Rejected, 1)
+	require.Len(t, report.ProposalIDs, 1)
+	require.Equal(t, 5, report.ReadSessions)
+
+	proposal, err := f.store.GetMemoryProposal(t.Context(), "default", report.ProposalIDs[0])
+	require.NoError(t, err)
+	require.Equal(t, store.MemoryProposalTypeMerge, proposal.Type)
+	require.Equal(t, store.MemoryProposalStatusPending, proposal.Status, "a run only proposes; a person reviews")
+	require.Equal(t, "task-a", proposal.TaskName)
+	require.Equal(t, "curator", proposal.AgentName)
+	memory, err := f.store.GetMemory(t.Context(), "default", "mem-a")
+	require.NoError(t, err)
+	require.False(t, memory.Deleted, "no memory changes before review and apply")
+
+	var again memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{}, &again))
+	require.Equal(t, report.ProposalIDs, again.ProposalIDs, "a finished run returns its report unchanged")
+	var finished memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &finished))
+	require.Equal(t, memoryconsolidation.StatusCompleted, finished.Status)
+	require.Nil(t, finished.Input, "a finished run returns its report, not its inputs")
+	require.NotNil(t, finished.Report)
+}
+
+func TestMemoryConsolidationDryRunCreatesNoProposals(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{})
+	f.seedSessions(t, 5)
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{
+		{Type: "add", Content: "Tag releases after make test.", Sources: []store.MemoryProposalSource{{SessionName: "session-1"}}},
+	}}, &report))
+	require.Equal(t, corev1alpha1.MemoryConsolidationDryRun, report.Mode)
+	require.Len(t, report.Operations, 1, "a dry run reports what it would propose")
+	require.Empty(t, report.ProposalIDs)
+	proposals, err := f.store.ListMemoryProposals(t.Context(), store.MemoryProposalFilter{Namespace: "default"})
+	require.NoError(t, err)
+	require.Empty(t, proposals)
+}
+
+func TestMemoryConsolidationSkipsWithoutEnoughSessions(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{})
+	f.seedSessions(t, 2)
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.Equal(t, memoryconsolidation.StatusSkipped, begin.Status)
+	require.Nil(t, begin.Input)
+	require.NotNil(t, begin.Report)
+	require.Contains(t, begin.Report.SkippedReason, "2 Sessions changed")
+	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
+	require.NoError(t, err)
+	cursor, err := f.store.GetMemoryConsolidationCursor(t.Context(), "default", "DryRun")
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	require.True(t, run.WindowStart.Equal(*cursor), "a skipped run keeps its start for the next run")
+}
+
+func TestMemoryConsolidationRoutesRefuseOtherTasks(t *testing.T) {
+	f := newConsolidationFixture(t, nil)
+	require.Equal(t, http.StatusForbidden, f.post(t, "begin", struct{}{}, nil))
+	require.Equal(t, http.StatusForbidden, f.post(t, "complete", memoryconsolidation.Submission{}, nil))
+}
+
+func TestMemoryConsolidationRefusesASecondRunningRun(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	now := time.Now().UTC()
+	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+		TaskUID: "other-run", TaskName: "other", Mode: "DryRun", Status: store.MemoryConsolidationRunning,
+		WindowStart: now.Add(-time.Hour), WindowEnd: now, CreatedAt: now}))
+	require.Equal(t, http.StatusConflict, f.post(t, "begin", struct{}{}, nil),
+		"a run never proposes over memories another run is still reading")
+}
+
+func TestMemoryConsolidationValidatesAgainstWhatTheRunRead(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	for _, id := range []string{"mem-a", "mem-b", "mem-c"} {
+		require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: id, Namespace: "default", Content: "note " + id}))
+	}
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+
+	// While the model works, a cited Session moves on and a target is edited.
+	require.NoError(t, f.store.AppendMessages(t.Context(), "default", "session-0", []store.SessionMessage{
+		{ID: "session-0-later", Role: "user", Content: "A later turn"}}))
+	edited, err := f.store.GetMemory(t.Context(), "default", "mem-c")
+	require.NoError(t, err)
+	edited.Content = "edited by a person"
+	require.NoError(t, f.store.UpdateMemory(t.Context(), edited))
+	var resumed memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &resumed))
+	require.Equal(t, begin.Input, resumed.Input, "a resumed worker reads the same input")
+
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{
+		{Type: "merge", Content: "merged", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}},
+			Sources: []store.MemoryProposalSource{{SessionName: "session-0", MessageID: "session-0-user"}}},
+		{Type: "retire", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}},
+		{Type: "add", Content: "x", Sources: []store.MemoryProposalSource{{SessionName: "session-0", MessageID: "session-0-later"}}},
+	}}, &report))
+	require.Len(t, report.Operations, 1, "evidence the run read stays valid after its Session changes")
+	require.Len(t, report.Rejected, 2)
+	require.Contains(t, report.Rejected[0].Reason, "changed since the run read it")
+	require.Contains(t, report.Rejected[1].Reason, `message "session-0-later" is not one the run read`)
+}
+
+func TestMemoryConsolidationAbandonedRunCannotResumeOrComplete(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
+	require.NoError(t, err)
+	successor := time.Now().UTC().Add(store.MemoryConsolidationRunLease + time.Minute)
+	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+		TaskUID: "successor", TaskName: "successor", Mode: "Propose", Status: store.MemoryConsolidationRunning,
+		WindowStart: run.WindowStart, WindowEnd: successor, CreatedAt: successor}))
+	require.Equal(t, http.StatusConflict, f.post(t, "begin", struct{}{}, nil), "a run taken over cannot resume")
+	require.Equal(t, http.StatusConflict, f.post(t, "complete", memoryconsolidation.Submission{}, nil), "nor complete")
+}

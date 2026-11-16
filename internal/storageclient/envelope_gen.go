@@ -137,6 +137,22 @@ func (p envelopedState) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 	})
 }
 
+func (p envelopedState) BeginMemoryConsolidationRun(ctx context.Context, a1 *storagev1.MemoryConsolidationRun) error {
+	var w1 *storagev1.MemoryConsolidationRun
+	err := p.ops.run(ctx, writeCall{method: "BeginMemoryConsolidationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		c1 := attemptCopy(a1)
+		if err := p.StateProvider.BeginMemoryConsolidationRun(ctx, c1); err != nil {
+			return err
+		}
+		w1 = c1
+		return nil
+	})
+	if err == nil {
+		writeBack(a1, w1)
+	}
+	return err
+}
+
 func (p envelopedState) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	var w1 *storagev1.PatchProposal
 	err := p.ops.run(ctx, writeCall{method: "BindPatchProposalPublicationEvidence", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -243,6 +259,16 @@ func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 storagev1.Comm
 	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CommitSessionTurn(ctx, a1)
 	})
+}
+
+func (p envelopedState) CompleteMemoryConsolidationRun(ctx context.Context, a1 storagev1.MemoryConsolidationCompletion) (*storagev1.MemoryConsolidationRun, error) {
+	var r0 *storagev1.MemoryConsolidationRun
+	err := p.ops.run(ctx, writeCall{method: "CompleteMemoryConsolidationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.CompleteMemoryConsolidationRun(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) CompleteOutboxProjectionRecord(ctx context.Context, a1 storagev1.CompleteOutboxProjectionRequest) (*storagev1.OutboxProjection, error) {

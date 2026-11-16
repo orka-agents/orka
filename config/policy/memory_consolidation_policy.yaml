@@ -1,0 +1,47 @@
+# A memory consolidation run (Task spec.ai.memoryConsolidation, ADR 0051)
+# reads the transcripts of every user's Sessions in its namespace and, in
+# Propose mode, creates memory proposals. The live caller that creates such a
+# Task, or changes its spec, must hold those permissions itself: list and get
+# on sessions, and create on memoryproposals for Propose. A scheduled run is
+# created by the controller from a parent that passed this check.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: task-memory-consolidation.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tasks"]
+  variables:
+  # Any change to a run's spec is checked, not only to the run itself: its
+  # prompt steers the run, and its Agent and provider decide where the
+  # Sessions it reads are sent.
+  - name: checkedRun
+    expression: >-
+      has(object.spec.ai) && has(object.spec.ai.memoryConsolidation) &&
+      (oldObject == null || object.spec != oldObject.spec)
+  validations:
+  - expression: >-
+      !variables.checkedRun ||
+      (authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('list').allowed() &&
+      authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('get').allowed())
+    message: caller is not authorized to list and get Sessions, which a memory consolidation run reads
+    reason: Forbidden
+  - expression: >-
+      !variables.checkedRun ||
+      object.spec.ai.memoryConsolidation.?mode.orValue('DryRun') != 'Propose' ||
+      authorizer.group('core.orka.ai').resource('memoryproposals').namespace(request.namespace).check('create').allowed()
+    message: caller is not authorized to create memory proposals, which a Propose memory consolidation run creates
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: task-memory-consolidation.orka.ai
+spec:
+  policyName: task-memory-consolidation.orka.ai
+  validationActions: [Deny]

@@ -424,7 +424,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 			rows := applicationRows(t, db)
 			require.NotContains(t, rows, "operation_receipts")
 			rows["operation_receipts"] = nil
-			rows = consolidatedApplicationRows(t, stampedApplicationRows(t, rows))
+			rows = runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, rows)))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -432,7 +432,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema174,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -493,7 +493,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -620,14 +620,14 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 			path, db := schemaVersion2StoreDB(t, state.origin, state.complete, state.installation)
 			identity, err := readDataset(db)
 			require.NoError(t, err)
-			rows := consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db)))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema174,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -740,7 +740,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, datasetBinding{installation: "installation-a"}, binding)
@@ -847,14 +847,14 @@ func TestSchemaVersion3StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, state.installation, binding.installation)
 			require.Equal(t, state.bound, binding.state == bindingStateBound)
-			rows := consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db)))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema174,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -925,7 +925,7 @@ func TestSchemaVersion3UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)
@@ -1007,14 +1007,14 @@ func TestSchemaVersion4StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, state.installation, binding.installation)
 			require.Equal(t, state.bound, binding.state == bindingStateBound)
-			rows := consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db)))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema174,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -1085,7 +1085,7 @@ func TestSchemaVersion4UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

@@ -192,6 +192,9 @@ type (
 	MemoryProposalApplyTarget                 = storagev1.MemoryProposalApplyTarget
 	MemoryProposalApplication                 = storagev1.MemoryProposalApplication
 	MemoryProposalTarget                      = storagev1.MemoryProposalTarget
+	MemoryConsolidationRun                    = storagev1.MemoryConsolidationRun
+	MemoryConsolidationCompletion             = storagev1.MemoryConsolidationCompletion
+	MemoryConsolidationStore                  = storagev1.MemoryConsolidationStore
 	MemoryProposalSource                      = storagev1.MemoryProposalSource
 	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
@@ -268,6 +271,15 @@ const (
 	MemoryProposalTypeRetire          = storagev1.MemoryProposalTypeRetire
 	MaxMemoryProposalTargets          = storagev1.MaxMemoryProposalTargets
 	MaxMemoryProposalSources          = storagev1.MaxMemoryProposalSources
+	MemoryConsolidationRunning        = storagev1.MemoryConsolidationRunning
+	MemoryConsolidationCompleted      = storagev1.MemoryConsolidationCompleted
+	MemoryConsolidationSkipped        = storagev1.MemoryConsolidationSkipped
+	MaxMemoryConsolidationReportBytes = storagev1.MaxMemoryConsolidationReportBytes
+	MaxMemoryConsolidationProposals   = storagev1.MaxMemoryConsolidationProposals
+	MemoryConsolidationRunLease       = storagev1.MemoryConsolidationRunLease
+	MemoryConsolidationAbandoned      = storagev1.MemoryConsolidationAbandoned
+	MaxMemoryConsolidationInputBytes  = storagev1.MaxMemoryConsolidationInputBytes
+	MaxMemoryConsolidationSessions    = storagev1.MaxMemoryConsolidationSessions
 	MemoryProposalStatusPending       = storagev1.MemoryProposalStatusPending
 	MemoryProposalStatusAccepted      = storagev1.MemoryProposalStatusAccepted
 	MemoryProposalStatusRejected      = storagev1.MemoryProposalStatusRejected

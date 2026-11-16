@@ -1,0 +1,45 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-task-memory-consolidation
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tasks"]
+  variables:
+  # Any change to a run's spec is checked, not only to the run itself: its
+  # prompt steers the run, and its Agent and provider decide where the
+  # Sessions it reads are sent.
+  - name: checkedRun
+    expression: >-
+      has(object.spec.ai) && has(object.spec.ai.memoryConsolidation) &&
+      (oldObject == null || object.spec != oldObject.spec)
+  validations:
+  - expression: >-
+      !variables.checkedRun ||
+      (authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('list').allowed() &&
+      authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('get').allowed())
+    message: caller is not authorized to list and get Sessions, which a memory consolidation run reads
+    reason: Forbidden
+  - expression: >-
+      !variables.checkedRun ||
+      object.spec.ai.memoryConsolidation.?mode.orValue('DryRun') != 'Propose' ||
+      authorizer.group('core.orka.ai').resource('memoryproposals').namespace(request.namespace).check('create').allowed()
+    message: caller is not authorized to create memory proposals, which a Propose memory consolidation run creates
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-task-memory-consolidation
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-task-memory-consolidation
+  validationActions: [Deny]
