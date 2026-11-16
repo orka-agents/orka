@@ -315,15 +315,9 @@ func explicitNamespace(cmd *cobra.Command) (string, string) {
 	return "", ""
 }
 
-// configuredToken returns the bearer token from --token, --token-file,
-// ORKA_TOKEN or the config file, in that order.
-func configuredToken(cmd *cobra.Command, cfg orkaConfig) (string, error) {
-	token, _, err := configuredTokenSource(cmd, cfg)
-	return token, err
-}
-
-// configuredTokenSource is configuredToken that also reports whether the
-// token is the config file's, as a session saved by orka login is.
+// configuredTokenSource returns the bearer token from --token, --token-file,
+// ORKA_TOKEN or the config file, in that order, and whether it is the config
+// file's, as a session saved by orka login is.
 func configuredTokenSource(cmd *cobra.Command, cfg orkaConfig) (string, bool, error) {
 	token, err := flagToken(cmd)
 	if err != nil || token != "" {
