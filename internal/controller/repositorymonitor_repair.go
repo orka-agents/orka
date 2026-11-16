@@ -1333,15 +1333,6 @@ func repositoryMonitorReviewRecordSecuritySensitive(record *store.ReviewRecord) 
 		strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictSecuritySensitive)
 }
 
-func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
-	var ciInput *repositoryMonitorRepairCIInput
-	if intent == repositoryMonitorCommandIntentFixCI {
-		input := r.buildRepositoryMonitorRepairCIInput(ctx, monitor, repo, pr)
-		ciInput = &input
-	}
-	return r.buildRepositoryMonitorRepairPromptWithCI(ctx, monitor, intent, repo, pr, item, ciInput)
-}
-
 // buildRepositoryMonitorRepairPromptWithCI builds the repair prompt with the
 // given CI input, which a fix_ci repair carries even when its lookup failed.
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPromptWithCI(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem, ciInput *repositoryMonitorRepairCIInput) (string, error) {

@@ -696,7 +696,7 @@ func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *tes
 	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt")
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
 	pr := repositoryMonitorPullRequest{Number: 31, BaseSHA: "base31", HeadSHA: "head31"}
-	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, pr, &store.MonitorItem{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -949,7 +949,7 @@ func TestRepositoryMonitorCIRepairPromptQualifiesChecksSharingAName(t *testing.T
 	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt-shared")
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
 	pr := repositoryMonitorPullRequest{Number: 32, BaseSHA: "base32", HeadSHA: "head32"}
-	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, pr, &store.MonitorItem{})
 	if err != nil {
 		t.Fatal(err)
 	}
