@@ -894,3 +894,23 @@ func TestAttentionWithoutEventStorage(t *testing.T) {
 	status, body := f.get("/api/v1/approvals?namespace=default")
 	require.Equal(t, http.StatusNotImplemented, status, body)
 }
+
+func TestAttentionOutcomeUnknownUsesLatestExecutionTransition(t *testing.T) {
+	now := time.Now().UTC()
+	recent := attentionTask("recent-unknown", string(corev1alpha1.TaskPhaseFailed))
+	recent.Status.CompletionTime = &metav1.Time{Time: now.Add(-48 * time.Hour)}
+	recent.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateOutcomeUnknown, Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
+		LastTransitionTime: &metav1.Time{Time: now.Add(-10 * time.Minute)},
+	}
+	stale := attentionTask("stale-unknown", string(corev1alpha1.TaskPhaseFailed))
+	stale.Status.CompletionTime = &metav1.Time{Time: now.Add(-48 * time.Hour)}
+	stale.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateOutcomeUnknown, Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
+		LastTransitionTime: &metav1.Time{Time: now.Add(-47 * time.Hour)},
+	}
+
+	f := newAttentionFixture(t, []client.Object{recent, stale})
+	response := f.list("/api/v1/attention?namespace=default")
+	require.Equal(t, []string{"outcomeUnknown/recent-unknown"}, attentionKinds(response.Items))
+}
