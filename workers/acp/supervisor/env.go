@@ -3,6 +3,7 @@ package supervisor
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -567,7 +568,16 @@ func claudeSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	options := map[string]any{"maxTurns": request.AgentConfiguration.MaxTurns}
+	options := map[string]any{
+		"maxTurns": request.AgentConfiguration.MaxTurns,
+		// claude-agent-acp otherwise loads user, project, and local settings.
+		// Project settings come from the cloned repository and can define
+		// hooks that run shell commands outside the tool policy and env that
+		// redirects ANTHROPIC_BASE_URL with the provider credential; user
+		// settings live in the agent-writable session home. Orka projects
+		// every option it needs through this metadata instead.
+		"settingSources": []string{},
+	}
 	var environment map[string]string
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
@@ -845,13 +855,61 @@ func providerProfile(
 					openCodeProviderEnvName:                     proxy.Credential,
 				}, nil
 			},
-			PrepareSession: prepareOpenCodeConfig,
+			ValidateWorkspace: rejectOpenCodeProjectConfiguration,
+			PrepareSession:    prepareOpenCodeConfig,
 		}, nil
 	case providerKindAgentKit, providerKindFoundry:
 		adapter, _ := externalACPAdapterFor(kind)
 		return adapter.profile(model)
 	default:
 		return ProviderProfile{}, fmt.Errorf("unsupported ACP provider %q", kind)
+	}
+}
+
+// openCodeProjectConfigNames are the entries OpenCode's location config loader
+// discovers while walking up from the session directory. That loader honors
+// neither OPENCODE_DISABLE_PROJECT_CONFIG nor --pure, and it imports plugin
+// modules named by these files or placed in .opencode/plugin(s), so their
+// presence would run repository code outside the Orka tool policy.
+var openCodeProjectConfigNames = []string{".opencode", "opencode.json", "opencode.jsonc"}
+
+// rejectOpenCodeProjectConfiguration fails closed when the session directory
+// or any ancestor holds OpenCode project configuration. Rewriting the
+// workspace would alter repository content that may later be published, so
+// such workspaces are refused. Every session open, including a cold resume
+// of a durable workspace, passes through this check before OpenCode starts.
+func rejectOpenCodeProjectConfiguration(paths acp.SessionPaths) error {
+	if strings.TrimSpace(paths.Workspace) == "" {
+		return fmt.Errorf("OpenCode workspace path is required")
+	}
+	var found []string
+	for directory := filepath.Clean(paths.Workspace); ; directory = filepath.Dir(directory) {
+		for _, name := range openCodeProjectConfigNames {
+			candidate := filepath.Join(directory, name)
+			if _, err := os.Lstat(candidate); err == nil {
+				found = append(found, candidate)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect OpenCode project configuration: %w", err)
+			}
+		}
+		if parent := filepath.Dir(directory); parent == directory {
+			break
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	for index, candidate := range found {
+		if relative, err := filepath.Rel(paths.Workspace, candidate); err == nil && filepath.IsLocal(relative) {
+			found[index] = relative
+		}
+	}
+	return &workspaceRejectedError{
+		publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage,
+		detail: fmt.Sprintf(
+			"OpenCode %s loads project plugins even when project configuration is disabled; found %s",
+			acp.OpenCodeVersion, strings.Join(found, ", "),
+		),
 	}
 }
 

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"os"
@@ -242,6 +243,120 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 	if options["maxTurns"] != int32(7) || options["effort"] != "max" || !slices.Equal(options["tools"].([]string), []string{providerToolRead, providerToolWebFetch}) ||
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
+	}
+	// The adapter defaults to user, project, and local settings; repository
+	// settings can define hooks and redirect the provider base URL.
+	if sources, ok := options["settingSources"].([]string); !ok || sources == nil || len(sources) != 0 {
+		t.Fatalf("Claude settingSources = %#v, want an explicit empty list", options["settingSources"])
+	}
+	encoded, err := json.Marshal(projection.NewSessionMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"settingSources":[]`) {
+		t.Fatalf("Claude session metadata does not serialize an empty settingSources list: %s", encoded)
+	}
+	unrestricted := testProviderProjectionRequest(t, providerKindClaude, "claude-test", "", "", nil, nil, true)
+	projection, err = claude.ProjectSession(unrestricted, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options = projection.NewSessionMeta["claudeCode"].(map[string]any)["options"].(map[string]any)
+	if sources, ok := options["settingSources"].([]string); !ok || len(sources) != 0 {
+		t.Fatalf("unrestricted Claude settingSources = %#v, want an explicit empty list", options["settingSources"])
+	}
+}
+
+func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentWrite, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ValidateWorkspace == nil {
+		t.Fatal("OpenCode profile does not validate the workspace")
+	}
+	for _, kind := range []string{providerKindCodex, providerKindClaude, providerKindCopilot} {
+		other, err := providerProfile(kind, "model-test", harnessv2.WorkspaceIntentWrite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other.ValidateWorkspace != nil {
+			t.Fatalf("%s profile unexpectedly validates the workspace", kind)
+		}
+	}
+	newPaths := func(t *testing.T) acp.SessionPaths {
+		t.Helper()
+		workspace := filepath.Join(t.TempDir(), "session", "workspace")
+		if err := os.MkdirAll(filepath.Join(workspace, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return acp.SessionPaths{Workspace: workspace}
+	}
+
+	clean := newPaths(t)
+	for _, name := range []string{"AGENTS.md", "opencode.md", ".opencodeignore", filepath.Join("pkg", "opencode.json"), filepath.Join("pkg", ".opencode")} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(clean.Workspace, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(clean.Workspace, name), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := profile.ValidateWorkspace(clean); err != nil {
+		t.Fatalf("workspace without discoverable OpenCode configuration was rejected: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		create func(t *testing.T, workspace string)
+		want   string
+	}{
+		{name: "opencode.json", want: "opencode.json", create: func(t *testing.T, workspace string) {
+			writeTestFile(t, filepath.Join(workspace, "opencode.json"), `{"plugin":["./evil.js"]}`)
+		}},
+		{name: "opencode.jsonc", want: "opencode.jsonc", create: func(t *testing.T, workspace string) {
+			writeTestFile(t, filepath.Join(workspace, "opencode.jsonc"), `{}`)
+		}},
+		{name: ".opencode directory", want: ".opencode", create: func(t *testing.T, workspace string) {
+			writeTestFile(t, filepath.Join(workspace, ".opencode", "plugin", "evil.js"), `export {}`)
+		}},
+		{name: "dangling symlink", want: "opencode.json", create: func(t *testing.T, workspace string) {
+			if err := os.Symlink(filepath.Join(workspace, "missing"), filepath.Join(workspace, "opencode.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "ancestor directory", create: func(t *testing.T, workspace string) {
+			writeTestFile(t, filepath.Join(filepath.Dir(workspace), "opencode.json"), `{}`)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := newPaths(t)
+			tt.create(t, paths.Workspace)
+			err := profile.ValidateWorkspace(paths)
+			if err == nil {
+				t.Fatal("workspace with OpenCode project configuration was accepted")
+			}
+			rejected, ok := errors.AsType[*workspaceRejectedError](err)
+			if !ok || rejected.publicMessage != acp.OpenCodeProjectConfigurationRejectedMessage {
+				t.Fatalf("rejection = %v", err)
+			}
+			if tt.name != "ancestor directory" && !strings.HasSuffix(rejected.detail, "found "+tt.want) {
+				t.Fatalf("rejection detail %q does not name %q relative to the workspace", rejected.detail, tt.want)
+			}
+			if tt.name == "ancestor directory" && !strings.HasSuffix(rejected.detail, "found "+filepath.Join(filepath.Dir(paths.Workspace), "opencode.json")) {
+				t.Fatalf("rejection detail %q does not name the ancestor configuration", rejected.detail)
+			}
+		})
+	}
+}
+
+func writeTestFile(t *testing.T, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

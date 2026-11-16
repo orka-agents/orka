@@ -30,6 +30,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -859,6 +860,19 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	}
 	if got := runtimeSessionStartFailureMessage(errors.New("raw-secret")); got != fallback {
 		t.Fatalf("raw error message = %q", got)
+	}
+	for _, message := range []string{acp.WorkspaceValidationFailedMessage, acp.OpenCodeProjectConfigurationRejectedMessage} {
+		rejected := &harnessv2.ClientError{StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest, Message: message}
+		if got := runtimeSessionStartFailureMessage(rejected); got != message {
+			t.Fatalf("workspace rejection message = %q, want %q", got, message)
+		}
+	}
+	rejectedWithDetail := &harnessv2.ClientError{
+		StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest,
+		Message: acp.OpenCodeProjectConfigurationRejectedMessage + ": found secret-path",
+	}
+	if got := runtimeSessionStartFailureMessage(rejectedWithDetail); got != fallback {
+		t.Fatalf("workspace rejection with appended detail = %q", got)
 	}
 }
 

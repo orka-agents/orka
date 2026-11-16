@@ -304,6 +304,48 @@ func compareVersionCore(left, right [3]int) int {
 	return 0
 }
 
+// Repository-controlled agent configuration must not run commands outside the
+// Orka tool policy: Codex must not trust the cloned session root, and Copilot
+// must only load hooks from a root-owned managed policy.
+func TestRuntimeImagesBlockRepositoryAgentConfiguration(t *testing.T) {
+	t.Parallel()
+	patch, err := os.ReadFile(filepath.Join("codex", "patch-agent-mode.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(patch)
+	if got := hex.EncodeToString(sum[:]); got != acp.CodexACPOrkaPatchSHA256 {
+		t.Fatalf("patch-agent-mode.mjs SHA-256 = %s, want %s", got, acp.CodexACPOrkaPatchSHA256)
+	}
+	for _, required := range []string{`trust_level: "trusted",`, "            projects: {},", "exactly once"} {
+		if !strings.Contains(string(patch), required) {
+			t.Errorf("Codex adapter patch is missing %q", required)
+		}
+	}
+	codex, err := os.ReadFile(filepath.Join("codex", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const patchStep = "node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts /src/src/CodexAcpClient.ts;"
+	if !strings.Contains(string(codex), patchStep) {
+		t.Error("Codex Dockerfile does not patch the adapter's session root trust")
+	}
+	copilot, err := os.ReadFile(filepath.Join("copilot", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"install -d -o 0 -g 0 -m 0755 /etc/github-copilot;",
+		`printf '%s\n' '{"allowManagedHooksOnly":true}' > /etc/github-copilot/managed-settings.json;`,
+		"chown 0:0 /etc/github-copilot/managed-settings.json;",
+		"chmod 0644 /etc/github-copilot/managed-settings.json",
+	} {
+		if !strings.Contains(string(copilot), required) {
+			t.Errorf("Copilot Dockerfile is missing managed hook policy step %q", required)
+		}
+	}
+}
+
 func TestDockerContextIncludesCopilotLicenseInputs(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", ".dockerignore"))

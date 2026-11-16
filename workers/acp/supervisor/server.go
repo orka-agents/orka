@@ -186,6 +186,9 @@ type sessionCreationError struct {
 	stage               string
 	cause               error
 	workspaceResumeLost bool
+	// rejectedMessage marks a permanent, caller-visible rejection of the
+	// request itself; it must not contain workspace contents or secrets.
+	rejectedMessage string
 }
 
 const sessionCreationStageDurableResumeVerification = "durable resume verification"
@@ -226,6 +229,38 @@ func sessionCreationResumeLost(err error) error {
 func isSessionCreationResumeLost(err error) bool {
 	creation, ok := errors.AsType[*sessionCreationError](err)
 	return ok && creation.workspaceResumeLost
+}
+
+// workspaceRejectedError is returned by ProviderProfile.ValidateWorkspace when
+// the workspace itself is unsupported. publicMessage is one of the fixed
+// acp.*Message constants the controller surfaces; detail is logged only.
+type workspaceRejectedError struct {
+	publicMessage string
+	detail        string
+}
+
+func (e *workspaceRejectedError) Error() string {
+	return e.publicMessage + ": " + e.detail
+}
+
+func sessionCreationRejected(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := acp.WorkspaceValidationFailedMessage
+	if rejected, ok := errors.AsType[*workspaceRejectedError](err); ok {
+		message = rejected.publicMessage
+		slog.Warn("ACP runtime session workspace rejected", "reason", rejected.detail)
+	}
+	return &sessionCreationError{stage: "workspace validation", cause: err, rejectedMessage: message}
+}
+
+func sessionCreationRejection(err error) (string, bool) {
+	creation, ok := errors.AsType[*sessionCreationError](err)
+	if !ok || creation.rejectedMessage == "" {
+		return "", false
+	}
+	return creation.rejectedMessage, true
 }
 
 func durableWorkspacePreparationFailed(expectResume bool, err error) error {
@@ -926,6 +961,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
 				statusCode: statusCode, code: code, message: message, retryable: retryable,
 			}
+		} else if rejection, rejected := sessionCreationRejection(createErr); rejected {
+			// Retrying the same workspace cannot succeed: fail the attempt
+			// instead of consuming another child identity per retry.
+			statusCode = http.StatusBadRequest
+			code = harnessv2.ErrorCodeInvalidRequest
+			retryable = false
+			message = rejection
+			replay = &failedCreateReplay{
+				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
+				statusCode: statusCode, code: code, message: message, retryable: retryable,
+			}
 		}
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
@@ -1197,6 +1243,11 @@ func (s *Server) createSession(
 		baseline, err = workspacedelta.CaptureContext(ctx, paths.Workspace, s.baselineCaptureOptions())
 		if err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+		}
+	}
+	if s.cfg.Provider.ValidateWorkspace != nil {
+		if err := s.cfg.Provider.ValidateWorkspace(paths); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationRejected(err)
 		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {

@@ -273,6 +273,28 @@ read-intent workspaces, Orka also disables Bash and OpenCode Grep because Grep
 cannot carry the secret-file exclusions applied to OpenCode Read; Read and Glob
 remain available when allowed by policy.
 
+The cloned repository is untrusted input, so built-in runtimes do not load
+agent configuration from it that could run commands or change provider
+routing outside the Orka tool policy:
+
+- **Claude** loads no settings files, neither from the repository's `.claude/`
+  directory nor from the session home. Repository hooks, `env`, and
+  `CLAUDE.md` are ignored.
+- **Codex** does not trust the session workspace, so it ignores the
+  repository's `.codex/config.toml`, including MCP servers and shell
+  environment settings. It still reads `AGENTS.md`.
+- **Copilot** runs only hooks from the image's managed policy. Repository
+  hooks in `.github/hooks`, `.github/copilot/settings.json`, and
+  `.claude/settings.json`, and hooks in the session home, do not run.
+  Copilot CLI 1.0.96 still reads repository instruction files, such as
+  `AGENTS.md` and `.github/copilot-instructions.md`, as prompt context.
+- **OpenCode** 1.19.0 imports project plugins even when project
+  configuration is disabled. Orka therefore refuses an OpenCode session whose
+  workspace root contains `.opencode/`, `opencode.json`, or `opencode.jsonc`,
+  and fails the Task with `RuntimeSessionStartFailed`. It does not remove
+  those files, because they may be published. The check runs on every
+  session start, including a resume.
+
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
 
 ### Cap what Tasks can request
@@ -549,6 +571,7 @@ cross-namespace Vekil ingress boundary.
 ## Troubleshooting
 
 - **Task fails before queueing**: for a built-in runtime, verify the Agent has `runtime.type: codex`, `claude`, `copilot`, or `opencode`, ACP is enabled, and the matching digest-pinned image is configured. For `runtimeRef`, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.
+- **OpenCode Task fails with `RuntimeSessionStartFailed`: "the OpenCode runtime refuses workspaces containing .opencode, opencode.json, or opencode.jsonc"**: the workspace root contains one of those entries; the runtime log names it. Run the Task with another built-in runtime, or remove those entries from the repository or branch it uses.
 - **Task remains queued**: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.
 - **Agent warnings in Task results**: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex's missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its `Info:` lines into the reply.
 - **Task reports `OutcomeUnknown`**: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.
