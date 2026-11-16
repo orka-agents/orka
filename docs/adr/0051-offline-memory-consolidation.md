@@ -125,8 +125,9 @@ creates; a run that proposes one cites the Sessions it drew on.
   later one falls in the next window, never between the two.
   A window starts at its mode's cursor: the window end of the latest completed run in that mode,
   or, before any completed, the window start of the mode's first run, so skipped and failed
-  runs read their Sessions again however long they wait. A cursor is followed back at most
-  720 hours. With no run at all, the window starts the lookback (default 7 days) before
+  runs read their Sessions again. A cursor is followed back at most 720 hours: after a longer
+  gap, such as a suspended schedule, the window starts 720 hours back, and the report names
+  the cursor it was cut from, so the Sessions changed before then are known to be unread. With no run at all, the window starts the lookback (default 7 days) before
   now. `DryRun` and `Propose` keep separate cursors, so dry runs never use up the Sessions
   a proposing run has yet to read. A retried Pod of the same Task gets the same window.
 - At most one run reads a namespace's memory at a time. Beginning a run while another in the
@@ -137,7 +138,10 @@ creates; a run that proposes one cites the Sessions it drew on.
 - Beginning a run records its input with it. A retried Pod reads the same input, and
   completion is checked against exactly what the model saw, plus each target's current
   generation, so a target edited during the model call is dropped. The recorded input is
-  cleared when the run finishes or is abandoned, so transcript excerpts never outlive it.
+  cleared when the run finishes or is abandoned, and the controller clears it when the run's
+  Task ends or is deleted, without waiting for a later run, so transcript excerpts never
+  outlive the run. Deleting the Task also clears the run's report and removes the runs no
+  cursor needs.
 - A run sends transcripts to the model of its Agent or Provider, resolved when each run
   starts. Whoever can edit them can redirect every Task that uses them, as for any Task;
   Orka does not freeze them for consolidation runs. A namespace that enables consolidation
@@ -155,9 +159,11 @@ creates; a run that proposes one cites the Sessions it drew on.
     read back as new evidence.
   - at most 60,000 characters of memories and, separately, 60,000 characters of
     transcripts, so memories never crowd out the evidence; the report says when either was
-    cut. That stays inside a model's context even at one token per character. The run makes
-    one model call and never drops input to fit: a model that cannot take it fails the run,
-    which leaves its Sessions to the next.
+    cut. With the prompt, tool schema and the result, a run needs a model with about 130,000
+    tokens of context at one token per character, and less for typical text. The run makes
+    one model call, without the context-overflow truncation of ordinary AI Tasks, and never
+    drops input to fit: a model that cannot take it fails the run, which leaves its Sessions
+    to the next.
   - Fewer eligible Sessions than `minNewSessions` (default 5) skips the run without calling
     the model.
 - Orka cannot tell from a stored Session which Task wrote it, so this version does not
@@ -167,7 +173,8 @@ creates; a run that proposes one cites the Sessions it drew on.
 - Completing a run is one provider write. It records the report and, in `Propose` mode,
   creates the proposals with deterministic IDs. Orka validates each operation first:
   - every target was in the inputs, at the generation shown;
-  - every source was an input Session;
+  - every source was an input Session, and a cited message one the run read; an add, which
+    has no target, cites at least one source, so a reviewer can see where it came from;
   - no memory is targeted twice;
   - content is non-empty and at most 1,200 characters;
   - at most `maxOperations` operations (default 10, at most 20);
