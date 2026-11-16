@@ -493,6 +493,11 @@ func (w *WebhookNotifier) reconcileApprovalNotices(
 	log := logf.FromContext(ctx)
 	requeue := time.Duration(0)
 	if len(selected) > 0 && eventStore != nil && task.UID != "" {
+		// Projection decides overflow irreversibly, so notices whose wait for
+		// signing keys has ended must free their slots first.
+		if err := w.retireUnsignableApprovalNotices(ctx, status, task); err != nil {
+			return 0, err
+		}
 		projected, err := w.projectTaskApprovalEvents(ctx, eventStore, task, selected)
 		switch {
 		case err != nil:
@@ -644,6 +649,32 @@ func (w *WebhookNotifier) approvalRetry() webhookRetryPolicy {
 func approvalSigningDeadline(queuedAt time.Time) *metav1.Time {
 	deadline := metav1.NewTime(ceilToSecond(queuedAt.UTC().Add(approvalWebhookSigningWindow)))
 	return &deadline
+}
+
+// retireUnsignableApprovalNotices retires, before projection, the pending
+// notices whose signing deadline has passed while signing keys are still
+// unavailable. Delivery retires them too, but only after projection, and a
+// controller that was stopped or reconciled rarely during an outage could
+// otherwise count them as pending and latch overflow when new transitions
+// arrive. Keys are only loaded when some notice is past its deadline.
+func (w *WebhookNotifier) retireUnsignableApprovalNotices(ctx context.Context, status taskStatusWriter, task *corev1alpha1.Task) error {
+	state := task.Status.ApprovalWebhooks
+	if w.keys == nil || state == nil {
+		return nil
+	}
+	now := w.now()
+	if !slices.ContainsFunc(state.Notices, func(notice corev1alpha1.TaskApprovalWebhookNotice) bool {
+		return notice.State == corev1alpha1.TaskWebhookDeliveryPending && notice.SigningDeadline != nil && !now.Before(notice.SigningDeadline.Time)
+	}) {
+		return nil
+	}
+	if _, err := w.keys.SigningKeys(ctx); err == nil {
+		return nil
+	}
+	if changed, _ := expireUnsignedApprovalNotices(ctx, task, now); changed {
+		return status.Update(ctx, task)
+	}
+	return nil
 }
 
 // expireUnsignedApprovalNotices runs while signing keys are unavailable.

@@ -165,6 +165,9 @@ and it is not part of the body. Whenever the keys are unavailable, every
 pending approval notice at or past its deadline is retired `Failed` unsent,
 with no attempt consumed and the bounded `lastError` "webhook signing key
 unavailable past the approval notice window", and the next notice goes ahead.
+This also runs before projection, because overflow cannot be undone: a
+controller that was stopped or reconciled rarely during the outage never counts
+an expired notice toward the 15.
 Only the head notice is ever attempted, so no retired notice holds a lease.
 A retired notice is never regenerated: the cursor already covers its
 transition, and the retained record keeps its delivery ID. A notice recorded

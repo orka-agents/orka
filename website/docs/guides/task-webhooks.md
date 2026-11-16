@@ -323,8 +323,8 @@ whose `streamSeq` is the first transition it did not notify, sets
 `overflowed: true`, and notifies no later transition for that Task. `omitted`
 counts the transitions it skipped. Read the approvals API after an overflow
 notice. A signing outage alone overflows the queue only if 15 notices are
-queued within five minutes of each other, because each notice is marked
-`Failed` at its signing deadline and frees its slot.
+queued within five minutes of each other. Each notice is marked `Failed` at
+its signing deadline, before new transitions are queued, and frees its slot.
 
 ## Signing keys and rotation
 

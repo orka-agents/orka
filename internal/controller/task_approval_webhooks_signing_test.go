@@ -261,3 +261,43 @@ func TestApprovalWebhooksSigningOutageLeavesTerminalNoticePending(t *testing.T) 
 		t.Fatalf("terminal delivery = %+v with %d receipts after signing returned", stored.Status.WebhookDelivery, len(h.receiver.all()))
 	}
 }
+
+// Projection decides overflow irreversibly, so a controller that comes back
+// after an outage outlived the pending notices' deadlines retires them before
+// projecting the transitions recorded meanwhile.
+func TestApprovalWebhooksSigningOutageRetiresStaleNoticesBeforeProjection(t *testing.T) {
+	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskWebhookEventApprovalRequested))
+	h.signingUnavailable = true
+	limit := corev1alpha1.MaxTaskApprovalWebhookNotices - 1
+	for i := range limit - 1 {
+		h.request(approvalWebhookTestUID, fmt.Sprintf("approval-%02d", i))
+	}
+	h.reconcile()
+	if state := h.task().Status.ApprovalWebhooks; countPendingApprovalNotices(state) != limit-1 {
+		t.Fatalf("%d pending before the restart, want %d", countPendingApprovalNotices(state), limit-1)
+	}
+
+	// The controller is down past every deadline while approvals continue.
+	h.now = h.now.Add(time.Hour)
+	h.request(approvalWebhookTestUID, "approval-late-1")
+	h.request(approvalWebhookTestUID, "approval-late-2")
+	h.reconcile()
+	state := h.task().Status.ApprovalWebhooks
+	if state.Overflowed || state.Omitted != 0 || countPendingApprovalNotices(state) != 2 {
+		t.Fatalf("after restart: overflowed=%v omitted=%d pending=%d", state.Overflowed, state.Omitted, countPendingApprovalNotices(state))
+	}
+	for _, id := range []string{"approval-late-1", "approval-late-2"} {
+		if notice := h.requestedNotice(id); notice.State != corev1alpha1.TaskWebhookDeliveryPending {
+			t.Fatalf("%s = %+v, want pending", id, notice)
+		}
+	}
+
+	h.signingUnavailable = false
+	for range 4 {
+		h.reconcile()
+	}
+	receipts := h.receipts()
+	if len(receipts) != 2 || receipts[0].payload.ApprovalID != "approval-late-1" || receipts[1].payload.ApprovalID != "approval-late-2" {
+		t.Fatalf("receipts = %d, want the two notices still inside their window", len(receipts))
+	}
+}
