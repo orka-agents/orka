@@ -1963,3 +1963,30 @@ func TestContextTokenTaskToolFailuresAcceptsGenericDenyAll(t *testing.T) {
 	})
 	require.Empty(t, failures)
 }
+
+// A transaction token creates a memory consolidation run only with the
+// scopes its run's access needs.
+func TestContextTokenMemoryConsolidationFailures(t *testing.T) {
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	run := func(mode corev1alpha1.MemoryConsolidationMode, inSpec bool) CreateTaskRequest {
+		ai := &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{Mode: mode}}
+		if inSpec {
+			return CreateTaskRequest{Spec: &corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: ai}}
+		}
+		return CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: ai}
+	}
+	token := func(scopes ...string) *ContextToken { return &ContextToken{Scopes: scopes} }
+	reads := []string{ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead}
+
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg,
+		CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{}}), "an ordinary Task needs no more")
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)), 2)
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead), cfg,
+		run(corev1alpha1.MemoryConsolidationDryRun, true)), 1, "the field is found in spec too")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)))
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationPropose, false)), 1,
+		"a Propose run also creates proposals")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(append(reads, ContextTokenScopeMemoryWrite)...), cfg,
+		run(corev1alpha1.MemoryConsolidationPropose, false)))
+}

@@ -5757,3 +5757,19 @@ func TestHandlers_MemoryConsolidationReport_ContextTokenAuthorization(t *testing
 		})
 	}
 }
+
+func TestHandlers_CreateTask_ContextTokenMemoryConsolidationNeedsReadScopes(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeTaskCreate})
+	body, err := json.Marshal(CreateTaskRequest{Name: "consolidate", Namespace: "default", Type: corev1alpha1.TaskTypeAI,
+		AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "model", MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(body))
+	req.Header.Set(TransactionTokenHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode, "task create scope alone does not start a run that reads every Session")
+}
