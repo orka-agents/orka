@@ -148,8 +148,11 @@ creates; a run that proposes one cites the Sessions it drew on.
   must restrict who can edit the Agent and Provider a run uses, as it restricts Session
   reads.
 - Inputs:
-  - every active memory in the namespace (at most 200), with its generation and recall
-    counts, each cut to 2,000 characters with at most 10 tags of 40 characters;
+  - the namespace's active memories, at most the 200 most recently updated, with their
+    generations and recall counts, each cut to 2,000 characters with at most 10 tags of 40
+    characters. A namespace with more has its older memories left out of the run, which can
+    target only memories it read, and the report says its input was truncated; reading the
+    rest in later runs is future work;
   - chat and task Sessions, never gateway ones, that changed inside the window: the 50 most
     recently changed, found by a store query on when they changed, and the newest 40 user
     and assistant messages of each, found among its newest 200 records, each cut to 2,000
