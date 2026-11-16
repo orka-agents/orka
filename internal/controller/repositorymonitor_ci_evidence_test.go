@@ -55,6 +55,17 @@ func TestRepositoryMonitorEvidenceTextRedactsCredentials(t *testing.T) {
 		{name: "authorization value wrapped at the space", input: "> Authorization: Bearer\n" + repositoryMonitorEvidenceTestBearer + "\n< HTTP/1.1 401",
 			leak: []string{repositoryMonitorEvidenceTestBearer}},
 		{name: "a redacted value does not withhold the next line", input: "deploy token=abc123 to stage\nnext step", want: []string{"next step"}},
+		{name: "authorization header continued after the scheme", input: "curl -sS \\\n  -H \"Authorization: Bearer \\\n  " + repositoryMonitorEvidenceTestBearer + "\" \\\n  https://api.example/x\n(exit status 22)",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:12], repositoryMonitorEvidenceTestBearer[12:]}, want: []string{"curl -sS", "(exit status 22)"}},
+		{name: "authorization header continued after the colon", input: "curl -sS \\\n  -H \"Authorization: \\\n  Bearer " + repositoryMonitorEvidenceTestBearer + "\" \\\n  https://api.example/x",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:12], repositoryMonitorEvidenceTestBearer[12:]}, want: []string{"curl -sS", "https://api.example/x"}},
+		{name: "authorization value quoted after the colon and continued", input: "curl -H Authorization:\"Bearer \\\n" + repositoryMonitorEvidenceTestBearer + "\" https://api.example/x\n(after)",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:12], repositoryMonitorEvidenceTestBearer[12:]}, want: []string{"(after)"}},
+		{name: "authorization token scheme continued", input: "-H 'Authorization: token \\\n" + repositoryMonitorEvidenceTestBearer + "'\n(after)",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:12], repositoryMonitorEvidenceTestBearer[12:]}, want: []string{"(after)"}},
+		{name: "authorization header wrapped after the colon", input: "Authorization:\nBearer " + repositoryMonitorEvidenceTestBearer + "\n(after)",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:12], repositoryMonitorEvidenceTestBearer[12:]}, want: []string{"(after)"}},
+		{name: "a complete authorization header keeps its continuation", input: "curl -sS \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  https://api.example/x", want: []string{"https://api.example/x"}},
 		{name: "ansi and controls", input: "\x1b[31;1merror\x1b[0m: \x1b]8;;https://x\x07link\x1b]8;;\x07 bad\x07 \u202eevil", want: []string{"error: link bad evil"}, notWant: []string{"\x1b", "\x07", "\u202e"}},
 		{name: "crlf", input: "first\r\nsecond\rthird", want: []string{"first\nsecond\nthird"}},
 	} {
@@ -423,6 +434,94 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 	repositoryMonitorAssertRepairEvidenceRecorded(t, reconciler, monitorStore, monitor, monitorRun, command, pr, task.Name, second)
 }
 
+// A fix_ci repair Task that a controller created before repair prompts
+// carried CI evidence is recovered with its stored prompt, and no fresh
+// evidence is reported as having informed it. A pre-evidence prompt for
+// another head is not adopted.
+func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	run := repositoryMonitorEvidenceTestRun(302, "unit", "completed", "failure", 1)
+	run["head_sha"] = "head32"
+	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head32": {run}}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-evidence-legacy")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-ci-evidence-legacy", Intent: repositoryMonitorCommandIntentFixCI, Source: "api"}
+	pr := repositoryMonitorPullRequest{Number: 32, HeadSHA: "head32", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "32", Number: 32, HeadSHA: pr.HeadSHA}
+	monitorRun := &store.MonitorRun{ID: "run-ci-evidence-legacy"}
+	if created, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
+		t.Fatalf("first handoff = (%d, %v)", created, err)
+	}
+	key := types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}
+	legacyPrompt := func(headSHA string) string {
+		var task corev1alpha1.Task
+		if err := cl.Get(ctx, key, &task); err != nil {
+			t.Fatal(err)
+		}
+		_, payload, ok := strings.Cut(task.Spec.Prompt, "\n\nInput:\n")
+		if !ok {
+			t.Fatalf("prompt has no input: %q", task.Spec.Prompt)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		delete(decoded, "failingCheckEvidence")
+		delete(decoded, "failingCheckEvidenceDigest")
+		decoded[repositoryMonitorFieldHeadSHA] = headSHA
+		encoded, err := json.MarshalIndent(decoded, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "Repair this exact pull request head (wording from an earlier controller).\n\nInput:\n" + string(encoded) + "\n"
+	}
+	setPrompt := func(prompt string) {
+		var task corev1alpha1.Task
+		if err := cl.Get(ctx, key, &task); err != nil {
+			t.Fatal(err)
+		}
+		task.Spec.Prompt = prompt
+		if err := cl.Update(ctx, &task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stale := legacyPrompt("an-earlier-head")
+	setPrompt(stale)
+	if _, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err == nil {
+		t.Fatal("a pre-evidence prompt for another head was adopted")
+	}
+
+	legacy := legacyPrompt(pr.HeadSHA)
+	setPrompt(legacy)
+	created, input, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
+	if err != nil || created != 0 {
+		t.Fatalf("recovered handoff = (%d, %v), want the pre-evidence Task recovered", created, err)
+	}
+	if input != nil {
+		t.Fatalf("recovered handoff reported evidence %s for a Task that received none", input.digest())
+	}
+	var recovered corev1alpha1.Task
+	if err := cl.Get(ctx, key, &recovered); err != nil || recovered.Spec.Prompt != legacy {
+		t.Fatalf("recovered Task prompt changed: err=%v", err)
+	}
+}
+
 // repositoryMonitorAssertRepairEvidenceRecorded checks that the attempt's
 // work action and audit event record the evidence it used.
 func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *RepositoryMonitorReconciler, monitorStore *storageclient.Client, monitor *corev1alpha1.RepositoryMonitor, monitorRun *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, taskName string, input *repositoryMonitorRepairCIInput) {
@@ -630,5 +729,119 @@ func TestRepositoryMonitorCIEvidenceBoundsPendingChecks(t *testing.T) {
 				t.Fatalf("evidence entries are %d bytes, over %d", total, repositoryMonitorCIEvidenceTotalEncodedBytes)
 			}
 		})
+	}
+}
+
+func TestRepositoryMonitorEvidenceWithholdsCredentialYAMLBlocks(t *testing.T) {
+	// Twelve opaque value lines, each too short and plain for any check.
+	value := make([]string, 0, 12)
+	for i := range 12 {
+		value = append(value, strings.Repeat(string(rune('A'+i)), 4)+"x9Q2mP7rT4")
+	}
+	block := func(indent string, lines []string) string { return indent + strings.Join(lines, "\n"+indent) }
+	// A header ending in a chomping or indentation indicator also continues
+	// a chain into its block, which can reach the next key; the sibling key
+	// shows where the block ends only for the other headers.
+	for _, tc := range []struct {
+		name        string
+		header      string
+		body        string
+		keepSibling bool
+	}{
+		{name: "literal", header: "  password: |", body: block("    ", value), keepSibling: true},
+		{name: "folded", header: "  password: >", body: block("    ", value), keepSibling: true},
+		{name: "literal strip", header: "  client_secret: |-", body: block("    ", value)},
+		{name: "folded keep", header: "  api_key: >+", body: block("    ", value)},
+		{name: "indentation indicator", header: "  token: |2 # rotated", body: block("    ", value), keepSibling: true},
+		{name: "indentation and chomping", header: "  private_key: >2-", body: block("    ", value)},
+		{name: "quoted key", header: "  \"password\": |", body: block("    ", value), keepSibling: true},
+		{name: "sequence item", header: "  - password: |", body: block("      ", value), keepSibling: true},
+		{name: "blank lines inside", header: "  password: |", body: block("    ", value[:3]) + "\n\n" + block("    ", value[3:]), keepSibling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "config:\n" + tc.header + "\n" + tc.body + "\n  user: deploy-bot\nnext step"
+			got, _ := repositoryMonitorEvidenceText(input, 4096, 50)
+			for _, line := range value {
+				if strings.Contains(got, line) {
+					t.Fatalf("evidence kept block line %q: %q", line, got)
+				}
+			}
+			want := []string{"next step"}
+			if tc.keepSibling {
+				want = append(want, "  user: deploy-bot")
+			}
+			for _, want := range want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("evidence = %q, want %q kept", got, want)
+				}
+			}
+		})
+	}
+	// A block under a key that names no credential is kept.
+	kept := "description: |\n" + block("  ", value) + "\nnext step"
+	if got, _ := repositoryMonitorEvidenceText(kept, 4096, 50); !strings.Contains(got, value[11]) {
+		t.Fatalf("evidence withheld a plain block: %q", got)
+	}
+}
+
+// TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence checks the
+// evidence limits against the repair prompt itself, which indents each entry
+// three levels deep: annotation-heavy entries grow most when indented.
+func TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence(t *testing.T) {
+	runs := make([]map[string]any, 0, 16)
+	annotations := map[int64][]map[string]any{}
+	for i := range 6 {
+		id := int64(500 + i)
+		runs = append(runs, repositoryMonitorEvidenceTestRun(id, fmt.Sprintf("check-%d", i), "completed", "failure", 10))
+		for k := range 10 {
+			annotations[id] = append(annotations[id], map[string]any{
+				"annotation_level": "failure", "path": fmt.Sprintf("internal/pkg%d/file_%d.go", i, k), "start_line": k + 1, "end_line": k + 2,
+				"title": fmt.Sprintf("annotation %d", k), "message": fmt.Sprintf("failure %d: ", k) + strings.Repeat("expected value but got other ", 13),
+			})
+		}
+	}
+	for i := range repositoryMonitorCIEvidenceMaxPendingChecks {
+		runs = append(runs, repositoryMonitorEvidenceTestRun(int64(600+i), fmt.Sprintf("pending-%02d", i), "in_progress", "", 0))
+	}
+	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head51": runs}, annotations: annotations}
+	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-indented")
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}, &store.MonitorItem{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, input, ok := strings.Cut(prompt, "Input:\n")
+	if !ok {
+		t.Fatalf("prompt has no input: %s", prompt)
+	}
+	// RawMessage keeps each entry's bytes exactly as the prompt has them.
+	var payload struct {
+		Evidence struct {
+			Checks        []json.RawMessage `json:"checks"`
+			PendingChecks []json.RawMessage `json:"pendingChecks"`
+			OmittedChecks int               `json:"omittedChecks"`
+		} `json:"failingCheckEvidence"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Evidence.Checks) == 0 || payload.Evidence.OmittedChecks == 0 {
+		t.Fatalf("evidence has %d checks and %d omitted, want the total budget exercised", len(payload.Evidence.Checks), payload.Evidence.OmittedChecks)
+	}
+	total, largest := 0, 0
+	for _, entry := range append(payload.Evidence.Checks, payload.Evidence.PendingChecks...) {
+		if !strings.Contains(string(entry), "\n"+repositoryMonitorCIEvidenceEntryPrefix+"}") {
+			t.Fatalf("entry is not indented as the prompt nests it: %s", entry)
+		}
+		if len(entry) > repositoryMonitorCIEvidenceEntryEncodedBytes {
+			t.Fatalf("prompt entry is %d bytes, over %d", len(entry), repositoryMonitorCIEvidenceEntryEncodedBytes)
+		}
+		largest = max(largest, len(entry))
+		total += len(entry) + repositoryMonitorCIEvidenceEntrySeparatorBytes
+	}
+	if total > repositoryMonitorCIEvidenceTotalEncodedBytes {
+		t.Fatalf("prompt entries are %d bytes with separators, over %d", total, repositoryMonitorCIEvidenceTotalEncodedBytes)
+	}
+	if largest < repositoryMonitorCIEvidenceEntryEncodedBytes*3/4 {
+		t.Fatalf("largest entry is %d bytes, want one near the %d byte limit", largest, repositoryMonitorCIEvidenceEntryEncodedBytes)
 	}
 }
