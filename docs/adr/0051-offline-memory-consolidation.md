@@ -176,8 +176,15 @@ creates; a run that proposes one cites the Sessions it drew on.
     always possible, and a run that only supersedes or proposes nothing is within it.
 - Orka drops an operation that fails these checks and records why. The rest still apply.
 - The report holds the window, the input counts, each accepted operation, each rejected one
-  with its reason, the conflicts the model reported, and the proposal IDs. It becomes the
-  Task result. A run with nothing to propose is a normal, reported outcome.
+  with its reason, the conflicts the model reported, and the proposal IDs. A run with nothing
+  to propose is a normal, reported outcome.
+- The Task result is only the report's structure: each operation's type, targets and
+  sources, each rejection's index and reason, the memories each conflict names, the proposal
+  IDs and the counts. Anyone who can read a Task can read its result, and a report's text is
+  drawn from everyone's Sessions and from memories, so the full report is served by
+  `GET /api/v1/tasks/:id/memory-consolidation-report`, which also requires `list` and `get`
+  on `sessions` and `list` on `memories`, while the Task exists. A rejection's reason never
+  repeats a value the model supplied, only memories the run read.
 
 ## Consequences
 
