@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -127,6 +129,7 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		if memories == nil {
 			memories = []store.Memory{}
 		}
+		recordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
 		return marshalMemoryToolResult(memories)
 	}
 
@@ -144,6 +147,9 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if a.IncludeDisabled || a.IncludeDisabledCamel {
 		values.Set("includeDisabled", trueStr)
 	}
+	// Mark the request as a recall, so the controller counts the memories it
+	// returns. A prompt's memory context uses the same route without it.
+	values.Set(MemoryListPurposeParam, MemoryListPurposeRecall)
 
 	endpoint := cfg.url("/internal/v1/memories/"+url.PathEscape(cfg.Namespace), values)
 	body, err := doInternalControllerRequest(ctx, cfg, http.MethodGet, endpoint, nil)
@@ -151,6 +157,32 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("failed to recall memory: %w", err)
 	}
 	return body, nil
+}
+
+// MemoryListPurposeParam and MemoryListPurposeRecall mark an internal memory
+// list request as an agent recall, which the controller counts.
+const (
+	MemoryListPurposeParam  = "purpose"
+	MemoryListPurposeRecall = "recall"
+)
+
+// recordMemoryRecall counts the memories a recall returned. Counting is
+// best effort: a failure is logged and never fails the recall.
+func recordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
+	if recorder == nil || len(memories) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(memories))
+	for _, memory := range memories {
+		ids = append(ids, memory.ID)
+	}
+	if len(ids) > store.MaxMemoryRecallIDs {
+		ids = ids[:store.MaxMemoryRecallIDs]
+	}
+	err := recorder.RecordMemoryRecall(ctx, store.MemoryRecall{Namespace: namespace, IDs: ids, RecalledAt: time.Now().UTC()})
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
+	}
 }
 
 // ProposeMemoryTool submits memory-adjacent governance proposals for coordinator review.

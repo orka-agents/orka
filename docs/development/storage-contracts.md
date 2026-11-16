@@ -305,7 +305,8 @@ the observable parts.
   carries (see "Messages, counters and chat turns" and "Lease clocks").
   Revision 8 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
-  artifact replacement order").
+  artifact replacement order"). Revision 9 adds `RecordMemoryRecall`, which
+  counts an agent recall of memories without updating them.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

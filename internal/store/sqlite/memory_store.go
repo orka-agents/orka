@@ -205,6 +205,64 @@ func (s *Store) setMemoryDisabledWrite(ctx context.Context, namespace, id string
 	return ensureRowsAffected(res)
 }
 
+// RecordMemoryRecall counts an agent recall of the named memories. It changes
+// only the recall fields, so a recall never reorders memories by update time.
+func (s *Store) RecordMemoryRecall(ctx context.Context, recall store.MemoryRecall) error {
+	return writeOperationErr(ctx, s, "RecordMemoryRecall", func(ctx context.Context) error {
+		return s.recordMemoryRecallWrite(ctx, recall)
+	})
+}
+
+func (s *Store) recordMemoryRecallWrite(ctx context.Context, recall store.MemoryRecall) error {
+	if strings.TrimSpace(recall.Namespace) == "" {
+		return store.ValidationErrorf("namespace is required")
+	}
+	if len(recall.IDs) > store.MaxMemoryRecallIDs {
+		return store.ValidationErrorf("a recall records at most %d memories, not %d", store.MaxMemoryRecallIDs, len(recall.IDs))
+	}
+	if recall.RecalledAt.IsZero() {
+		return store.ValidationErrorf("recalledAt is required")
+	}
+	ids := distinctExactStrings(recall.IDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	encodedIDs, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("encode recalled memory ids: %w", err)
+	}
+	recalledAt := recall.RecalledAt.UTC()
+	_, err = s.taskDataExecutor(ctx).ExecContext(ctx,
+		`UPDATE memories
+		 SET recalled_count = recalled_count + 1,
+		     last_recalled_at = CASE
+		         WHEN last_recalled_at IS NULL OR last_recalled_at < ? THEN ?
+		         ELSE last_recalled_at
+		     END
+		 WHERE namespace = ? AND deleted = FALSE AND id IN (SELECT value FROM json_each(?))`,
+		recalledAt, recalledAt, recall.Namespace, string(encodedIDs),
+	)
+	return err
+}
+
+// distinctExactStrings returns the nonblank values in order, without exact
+// duplicates. Unlike compactStrings it keeps case, as memory IDs do.
+func distinctExactStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 // SearchTranscript searches transcript content and returns compact snippets.
 func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	var results []store.TranscriptSearchResult

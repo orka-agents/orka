@@ -159,6 +159,15 @@ func init() {
 			observe: observeMemories,
 		},
 		usageCase{
+			method: "RecordMemoryRecall",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.CreateMemory(t.Context(), catalogMemory("first")))
+			},
+			args: fixed(storagev1.MemoryRecall{Namespace: memoryTenant, IDs: []string{"mem-1"},
+				RecalledAt: writeCaseCreated.Add(time.Minute)}),
+			observe: observeMemories,
+		},
+		usageCase{
 			method: "CreateMemoryProposal",
 			args: rebuiltArgs(func() []any {
 				return []any{&storagev1.MemoryProposal{ID: "mprop-catalog", Namespace: memoryTenant, Title: "Retry skill", SkillName: "retry",

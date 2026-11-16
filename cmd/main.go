@@ -2521,7 +2521,7 @@ func main() {
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
 				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil

@@ -1423,3 +1423,40 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 		})
 	}
 }
+
+func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
+	ctx := context.Background()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "deploy note " + id}))
+	}
+
+	list := func(query string) {
+		t.Helper()
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default"+query, nil))
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	counts := func() map[string]int {
+		t.Helper()
+		memories, err := ss.ListMemories(ctx, store.MemoryFilter{Namespace: "default"})
+		require.NoError(t, err)
+		out := map[string]int{}
+		for _, memory := range memories {
+			out[memory.ID] = memory.RecalledCount
+		}
+		return out
+	}
+
+	list("?limit=5")
+	require.Equal(t, map[string]int{"mem-a": 0, "mem-b": 0}, counts(), "a prompt's memory context is not a recall")
+	list("?purpose=recall&query=mem-a")
+	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts(), "a recall counts the memories it returned")
+	list("?purpose=recall&query=nothing-matches")
+	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts())
+
+	recalled, err := ss.GetMemory(ctx, "default", "mem-a")
+	require.NoError(t, err)
+	require.NotNil(t, recalled.LastRecalledAt)
+}

@@ -9,10 +9,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestRememberMemoryToolExecute_BlankContent(t *testing.T) {
@@ -135,5 +139,80 @@ func TestRememberMemoryToolExecute_DerivesTitleWhenOmitted(t *testing.T) {
 	}
 	if payload.Type != "memory" {
 		t.Errorf("type = %q", payload.Type)
+	}
+}
+
+type recordingMemoryRecalls struct {
+	memories []store.Memory
+	recalls  []store.MemoryRecall
+	err      error
+}
+
+func (r *recordingMemoryRecalls) ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error) {
+	return r.memories, nil
+}
+
+func (r *recordingMemoryRecalls) RecordMemoryRecall(_ context.Context, recall store.MemoryRecall) error {
+	r.recalls = append(r.recalls, recall)
+	return r.err
+}
+
+func TestRecallMemoryToolRecordsBrokeredRecall(t *testing.T) {
+	for name, recordErr := range map[string]error{"recorded": nil, "record fails": errors.New("store unavailable")} {
+		t.Run(name, func(t *testing.T) {
+			memories := &recordingMemoryRecalls{
+				memories: []store.Memory{{ID: "mem-a", Namespace: "test-ns"}, {ID: "mem-b", Namespace: "test-ns"}},
+				err:      recordErr,
+			}
+			ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
+				MemoryReader: memories, MemoryRecallRecorder: memories})
+
+			got, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{"query":"deploy"}`))
+			if err != nil {
+				t.Fatalf("Execute() error = %v; a failed count must not fail the recall", err)
+			}
+			if !strings.Contains(got, `"id":"mem-a"`) || !strings.Contains(got, `"id":"mem-b"`) {
+				t.Fatalf("Execute() = %s", got)
+			}
+			if len(memories.recalls) != 1 {
+				t.Fatalf("recorded %d recalls, want 1", len(memories.recalls))
+			}
+			recall := memories.recalls[0]
+			if recall.Namespace != "test-ns" || !slices.Equal(recall.IDs, []string{"mem-a", "mem-b"}) || recall.RecalledAt.IsZero() {
+				t.Fatalf("recall = %#v", recall)
+			}
+		})
+	}
+}
+
+func TestRecallMemoryToolRecordsNothingForAnEmptyRecall(t *testing.T) {
+	memories := &recordingMemoryRecalls{}
+	ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
+		MemoryReader: memories, MemoryRecallRecorder: memories})
+	if _, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(memories.recalls) != 0 {
+		t.Fatalf("recorded %#v for a recall that returned nothing", memories.recalls)
+	}
+}
+
+func TestRecallMemoryToolMarksNativeRecall(t *testing.T) {
+	purposes := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		purposes <- r.URL.Query().Get(MemoryListPurposeParam)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAME", "task-a")
+	t.Setenv("ORKA_SA_TOKEN", "test-token")
+
+	if _, err := NewRecallMemoryTool().Execute(context.Background(), json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := <-purposes; got != MemoryListPurposeRecall {
+		t.Fatalf("purpose = %q, want %q so the controller counts the recall", got, MemoryListPurposeRecall)
 	}
 }

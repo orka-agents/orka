@@ -6,7 +6,8 @@ import (
 )
 
 // Memory represents durable namespace-scoped memory captured from tasks,
-// sessions, or explicit worker calls.
+// sessions, or explicit worker calls. LastRecalledAt and RecalledCount record
+// agent recalls of the memory; only RecordMemoryRecall changes them.
 type Memory struct {
 	ID               string     `json:"id"`
 	Namespace        string     `json:"namespace"`
@@ -41,6 +42,22 @@ type MemoryFilter struct {
 	IncludeDeleted  bool
 	Limit           int
 }
+
+// MemoryRecall records that an agent's recall returned the named memories.
+// Only a recall counts: Orka records one when an agent's recall_memory call
+// returns memories, never when it injects memories into a prompt or when an
+// operator lists them.
+type MemoryRecall struct {
+	Namespace string
+	// IDs names the memories the recall returned, at most MaxMemoryRecallIDs.
+	IDs []string
+	// RecalledAt is when the recall returned them.
+	RecalledAt time.Time
+}
+
+// MaxMemoryRecallIDs bounds the memories one recall records. It equals the
+// largest recall a provider returns.
+const MaxMemoryRecallIDs = 200
 
 // MemoryProposal represents a proposed memory-adjacent change such as a reusable skill.
 type MemoryProposal struct {
@@ -154,6 +171,15 @@ const (
 //     ErrConflict.
 //   - DeleteMemory keeps the record, marking it deleted and disabled.
 //     SetMemoryDisabled on a deleted memory returns ErrNotFound.
+//   - RecordMemoryRecall requires a namespace and at most MaxMemoryRecallIDs
+//     IDs, and returns ErrValidation otherwise. For each distinct ID that
+//     names a memory in the namespace that is not deleted, it adds one to
+//     RecalledCount and sets LastRecalledAt to RecalledAt unless the stored
+//     time is later. It ignores any other ID, because a memory can be
+//     deleted between a recall and its record, and changes no other field:
+//     a recall is not an update, so UpdatedAt and list order stay as they
+//     were. A repeat of the same operation is safe through its receipt; a new
+//     operation for the same recall counts it again.
 type MemoryStore interface {
 	CreateMemory(ctx context.Context, memory *Memory) error
 	GetMemory(ctx context.Context, namespace, id string) (*Memory, error)
@@ -161,6 +187,7 @@ type MemoryStore interface {
 	UpdateMemory(ctx context.Context, memory *Memory) error
 	DeleteMemory(ctx context.Context, namespace, id string) error
 	SetMemoryDisabled(ctx context.Context, namespace, id string, disabled bool) error
+	RecordMemoryRecall(ctx context.Context, recall MemoryRecall) error
 }
 
 // MemoryProposalStore holds governance proposals for worker-proposed memory

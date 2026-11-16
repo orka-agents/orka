@@ -80,6 +80,12 @@ Durable memory injection is bounded to keep prompts stable:
 
 The worker also truncates individual memory entries before prompt injection. Memory infrastructure is best-effort: failure to load memory should not prevent task execution.
 
+### Recall counts
+
+Each memory records how often agents recalled it: `recalledCount` and `lastRecalledAt`. Only a recall counts. When an agent's `recall_memory` call returns memories, each memory it returned gains one count, and its `lastRecalledAt` becomes the time of the call. Memories loaded into a prompt's durable memory section, and memories an operator lists through the API or CLI, are not counted.
+
+Counting a recall does not update the memory: `updatedAt`, and so the order in which memories are listed and loaded into prompts, stay as they were. Counting is best effort, so a failure to count never fails the recall. Deleted memories are not counted.
+
 ## Durable memory API
 
 All public endpoints require a ServiceAccount bearer token and are under `/api/v1`.
