@@ -117,12 +117,12 @@ creates; a run that proposes one cites the Sessions it drew on.
   Orka-owned system prompt, and no injected memory context. `spec.ai.prompt`, when set, is
   passed as the operator's focus.
 - Orka keeps one run record per Task UID. Beginning a run fixes its window, which ends on
-  a whole second one minute before now. The store stamps some Session changes with
-  whole-second times, and a change is stamped before its transaction commits, so a window
-  that ended at the instant it began could miss a change stamped inside it but committed
-  just after the run read the store. A minute is far longer than any Session write takes,
-  so a change stamped at or before the end has committed before the run reads, and any
-  later one falls in the next window, never between the two.
+  a whole second 15.5 minutes before now: the storage contract's `MaxOperationAge` plus its
+  `MaxClockSkew`. A Session change is stamped with its write's issue time, or with the
+  provider's whole-second clock, before its transaction commits, and a retried write can
+  commit well after it was stamped; a provider refuses a write more than `MaxOperationAge`
+  after its issue time, so no change stamped at or before a window's end can commit after
+  the run reads. Any later one falls in the next window, never between the two.
   A window starts at its mode's cursor: the window end of the latest completed run in that mode,
   or, before any completed, the window start of the mode's first run, so skipped and failed
   runs read their Sessions again. A cursor is followed back at most 720 hours: after a longer
