@@ -798,6 +798,11 @@ func attentionTaskStateEntry(task *corev1alpha1.Task, since time.Time) (attentio
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown):
 		kind, summary = AttentionKindOutcomeUnknown, "Task outcome is unknown"
 		at = attentionTaskEndedAt(task)
+		// The outbox projection can record an unknown outcome long after an
+		// earlier completion time; the newer transition is when it began.
+		if execution.LastTransitionTime != nil && execution.LastTransitionTime.After(at) {
+			at = execution.LastTransitionTime.Time
+		}
 	case task.Status.Phase == corev1alpha1.TaskPhaseFailed:
 		kind, summary = AttentionKindFailed, "Task failed"
 		at = attentionTaskEndedAt(task)
