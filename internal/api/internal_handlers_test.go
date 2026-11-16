@@ -1593,6 +1593,12 @@ func TestInternalRoutesRefuseToReviewOrApplyConsolidationProposals(t *testing.T)
 	}
 	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+pending.ID+"/review", `{"status":"accepted"}`))
 	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+accepted.ID+"/apply", `{}`))
+	// However a client pads the ID, the request is refused and changes nothing.
+	for _, path := range []string{"/internal/v1/memory-proposals/default/%20" + accepted.ID + "%20/apply",
+		"/internal/v1/memory-proposals/default/%20" + pending.ID + "/review"} {
+		status := post(path, `{"status":"accepted"}`)
+		require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, status, path)
+	}
 
 	reviewed, err := ss.GetMemoryProposal(ctx, "default", pending.ID)
 	require.NoError(t, err)

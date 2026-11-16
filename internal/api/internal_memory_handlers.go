@@ -220,7 +220,9 @@ func (h *InternalHandlers) ReviewMemoryProposal(c fiber.Ctx) error {
 // so it is reviewed and applied through the API, which authorizes the person
 // doing it against each target.
 func (h *InternalHandlers) refuseInternalConsolidationProposal(c fiber.Ctx, namespace, id string) error {
-	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), namespace, id)
+	// The store trims the ID it reviews or applies, so the check reads the
+	// same proposal.
+	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), strings.TrimSpace(namespace), strings.TrimSpace(id))
 	if err != nil {
 		return memoryStoreError("get memory proposal", "memory proposal", err)
 	}
