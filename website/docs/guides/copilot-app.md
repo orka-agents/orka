@@ -267,9 +267,12 @@ EOF
 Then invite them by their GitHub login:
 
 ```bash
-orka host invite alice --server https://orka.example.com \
-  --token "$(kubectl -n orka-system create token orka-client)"
+kubectl -n orka-system create token orka-client |
+  orka host invite alice --server https://orka.example.com --token-file -
 ```
+
+The token comes in on stdin, so it stays out of the process list while the command waits
+for alice, up to 16 minutes.
 
 ```text
 Ask alice to open https://github.com/login/device and enter the code WDJB-MJHT before 3:42PM.
