@@ -605,6 +605,190 @@ func TestAHPBackendShowsATurnItsDeadlineStoppedAsAnError(t *testing.T) {
 	require.Contains(t, failed.Part.Error.Message, task.Spec.Timeout.Duration.String()+" time limit")
 }
 
+// A turn follows the Task it created, not its name: events from a Task
+// created later under the same name are not the turn's, and that Task's
+// result does not settle it.
+func TestAHPBackendFollowsTheTaskItCreatedNotItsName(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && current.ActiveTaskUID == string(task.UID)
+	}, 5*time.Second, 20*time.Millisecond, "the session records the UID of the Task it created")
+
+	say := func(uid, text string) {
+		env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, TaskUID: uid, Runtime: &harnessv2.Event{
+			Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+				AssistantMessage: &harnessv2.AssistantMessageChunk{Text: text}}}})
+	}
+	say("uid-of-another-task", "intruder")
+	say(string(task.UID), "mine")
+	raw := waitForActionType(t, chatSub, "chat/delta")
+	require.Contains(t, string(raw), "mine")
+	require.NotContains(t, string(raw), "intruder")
+
+	// The Task is deleted and another is created under its name; it succeeds.
+	require.NoError(t, env.kube.Delete(ctx, task))
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
+		Spec: task.Spec}
+	require.NoError(t, env.kube.Create(ctx, replacement))
+	replacement.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	require.NoError(t, env.kube.Status().Update(ctx, replacement))
+	failed := waitForActionType(t, chatSub, "chat/error")
+	require.Contains(t, string(failed), "TaskDeleted", "the turn's own Task is gone; another's result does not settle it")
+	state, err := ahphost.ChannelState(ctx, env.backend.store, alice, chat)
+	require.NoError(t, err)
+	require.NotContains(t, ahpTurnText(state.Chat.Turns[len(state.Chat.Turns)-1].ResponseParts), "intruder")
+}
+
+// A turn recorded before Task UIDs were kept takes, on recovery, the UID of
+// the Task under its name before it follows any event, and keeps it in the
+// record for the next recovery.
+func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+
+	// The leader stops; its record, written before UIDs were kept, has none.
+	env.backend.forgetTurn(turn)
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.ActiveTaskUID = "" }))
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+	env.backend.recoverTurns(ctx, alice)
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.Equal(t, string(task.UID), record.ActiveTaskUID, "recovery keeps the UID of the Task it follows")
+
+	say := func(uid, text string) {
+		env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, TaskUID: uid, Runtime: &harnessv2.Event{
+			Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+				AssistantMessage: &harnessv2.AssistantMessageChunk{Text: text}}}})
+	}
+	say("uid-of-another-task", "intruder")
+	say(string(task.UID), "mine")
+	raw := waitForActionType(t, chatSub, "chat/delta")
+	require.Contains(t, string(raw), "mine")
+	require.NotContains(t, string(raw), "intruder", "an event of another Task under the name is not the recovered turn's")
+}
+
+// A legacy turn whose Task is already gone when it is recovered takes no
+// Task created afterwards under the name for its own: it ends as deleted.
+func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+	env.backend.forgetTurn(turn)
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.ActiveTaskUID = "" }))
+	require.NoError(t, env.kube.Delete(ctx, task))
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+	env.backend.recoverTurns(ctx, alice)
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.Equal(t, ahpTaskGoneUID, record.ActiveTaskUID, "a later recovery knows the Task was gone too")
+
+	// Another Task is created under the name, says something and succeeds.
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
+		Spec: task.Spec}
+	require.NoError(t, env.kube.Create(ctx, replacement))
+	env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, TaskUID: "uid-of-another-task", Runtime: &harnessv2.Event{
+		Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "intruder"}}}})
+	replacement.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	require.NoError(t, env.kube.Status().Update(ctx, replacement))
+	failed := waitForActionType(t, chatSub, "chat/error")
+	require.Contains(t, string(failed), "TaskDeleted")
+	state, err := ahphost.ChannelState(ctx, env.backend.store, alice.UserKey, chat)
+	require.NoError(t, err)
+	require.NotContains(t, ahpTurnText(state.Chat.Turns[len(state.Chat.Turns)-1].ResponseParts), "intruder")
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.NotEqual(t, "uid-of-another-task", record.ActiveTaskUID)
+}
+
+// Results are kept by the Task's name: a result a Task created since under
+// the name wrote is not the turn's answer.
+func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("the turn's answer")))
+	read := func() ([]byte, error) {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		return turn.readResult(task)
+	}
+	data, err := read()
+	require.NoError(t, err)
+	require.Equal(t, "the turn's answer", string(data))
+
+	// When the Task cannot be read to confirm it, the result is not shown.
+	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("the API server timed out")
+		}})
+	_, err = read()
+	require.ErrorIs(t, err, store.ErrNotFound, "an unconfirmed result is withheld")
+	env.backend.h.apiReader = nil
+
+	require.NoError(t, env.kube.Delete(ctx, task))
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
+		Spec: task.Spec}
+	require.NoError(t, env.kube.Create(ctx, replacement))
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("intruder")))
+	_, err = read()
+	require.ErrorIs(t, err, store.ErrNotFound, "another Task's result is not the turn's answer")
+}
+
 // A client's turn cancel that fails is tried again, so the Task does not run
 // on while the client shows the turn cancelled.
 func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
