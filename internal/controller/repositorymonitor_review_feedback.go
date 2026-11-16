@@ -142,6 +142,10 @@ type repositoryMonitorReviewFeedbackSnapshot struct {
 	Reviews        []repositoryMonitorFeedbackReview     `json:"changesRequestedReviews"`
 	OmittedReviews int                                   `json:"omittedReviews,omitempty"`
 	authorized     []repositoryMonitorFeedbackAuthorized `json:"-"`
+	// unverified maps the IDs of included entries whose author's permission
+	// was not read to why: the lookup failed, or the lookup limit was
+	// reached. Whether they may start a repair is unknown, not refused.
+	unverified map[string]string
 }
 
 // repositoryMonitorFeedbackThread is one unresolved review thread.
@@ -627,6 +631,16 @@ type repositoryMonitorFeedbackNormalizer struct {
 	policy      repositoryMonitorReviewFeedbackPolicy
 	prAuthor    string
 	permissions *repositoryMonitorFeedbackPermissions
+	unverified  map[string]string
+}
+
+// noteUnverified records an entry whose author's authority is unknown
+// because their permission lookup failed or was not made.
+func (n *repositoryMonitorFeedbackNormalizer) noteUnverified(id string, author repositoryMonitorFeedbackAuthor) {
+	switch author.authority.reason {
+	case repositoryMonitorFeedbackAuthorityLookupFailed, repositoryMonitorFeedbackAuthorityLookupLimit:
+		n.unverified[id] = author.authority.reason
+	}
 }
 
 func (n *repositoryMonitorFeedbackNormalizer) author(actor *repositoryMonitorFeedbackActor) repositoryMonitorFeedbackAuthor {
@@ -849,6 +863,7 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		policy:      policy,
 		prAuthor:    strings.TrimSpace(raw.prAuthor),
 		permissions: &repositoryMonitorFeedbackPermissions{lookup: permissionOf, known: map[string]string{}, failed: map[string]bool{}},
+		unverified:  map[string]string{},
 	}
 	var threads []repositoryMonitorFeedbackPendingThread
 	for _, node := range raw.threads {
@@ -922,7 +937,27 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 	if (snapshot.OmittedThreads > 0 || snapshot.OmittedReviews > 0) && snapshot.Availability == repositoryMonitorEvidenceAvailable {
 		snapshot.Availability, snapshot.Reason = repositoryMonitorEvidenceTruncated, repositoryMonitorEvidenceReasonEvidenceBudget
 	}
+	snapshot.unverified = normalizer.unverified
 	return snapshot
+}
+
+// authorityLookupFailed reports whether an included entry's author's
+// permission lookup failed, so the entry's authority is unknown for now.
+func (s repositoryMonitorReviewFeedbackSnapshot) authorityLookupFailed(id string) bool {
+	return s.unverified[id] == repositoryMonitorFeedbackAuthorityLookupFailed
+}
+
+// unverifiedFeedback counts the included entries whose author's permission
+// lookup failed, and those past the lookup limit.
+func (s repositoryMonitorReviewFeedbackSnapshot) unverifiedFeedback() (failed, limited int) {
+	for _, reason := range s.unverified {
+		if reason == repositoryMonitorFeedbackAuthorityLookupFailed {
+			failed++
+		} else {
+			limited++
+		}
+	}
+	return failed, limited
 }
 
 func repositoryMonitorBoolRank(first bool) int {
@@ -977,6 +1012,7 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		if strings.TrimSpace(body) == "" {
 			continue
 		}
+		n.noteUnverified(commentID, author)
 		comment := repositoryMonitorFeedbackComment{
 			ID: commentID, Author: author.login, AuthorType: author.kind, Permission: author.permission,
 			Body: body, URL: repositoryMonitorEvidenceURL(raw.URL), CreatedAt: raw.CreatedAt.UTC(),
@@ -1042,6 +1078,7 @@ func (n *repositoryMonitorFeedbackNormalizer) review(node repositoryMonitorFeedb
 	if !author.evidence || author.kind == repositoryMonitorFeedbackAuthorBot {
 		return repositoryMonitorFeedbackPendingReview{}, false
 	}
+	n.noteUnverified(id, author)
 	body, hidden, truncated := repositoryMonitorFeedbackBody(node.Body)
 	review := repositoryMonitorFeedbackReview{
 		ID: id, Author: author.login, AuthorType: author.kind, Permission: author.permission,

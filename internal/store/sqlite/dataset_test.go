@@ -120,9 +120,9 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables, adds an empty operation
-	// receipt table and gives existing results and artifacts the write stamp
-	// (0, 0); every other value is unchanged.
+	// The upgrade drops the empty harness v1 tables, adds empty operation
+	// receipt and feedback attempt tables and gives existing results and
+	// artifacts the write stamp (0, 0); every other value is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -130,7 +130,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	}
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
-	before = stampedApplicationRows(t, before)
+	before = feedbackLedgerApplicationRows(t, stampedApplicationRows(t, before))
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

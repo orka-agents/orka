@@ -511,3 +511,52 @@ type MonitorEventFilter struct {
 	Limit       int
 	Cursor      string
 }
+
+// MonitorFeedbackAttempt is one immutable attempt to address one piece of
+// reviewer feedback on a pull request: a review comment or a
+// changes-requested review. Attempts of one feedback ID are numbered from 1
+// without gaps, and each number is admitted once, so they count the
+// feedback's lifetime attempts. Edits to the feedback keep its ID.
+type MonitorFeedbackAttempt struct {
+	ID               string `json:"id"`
+	MonitorNamespace string `json:"monitorNamespace"`
+	MonitorName      string `json:"monitorName"`
+	Repo             string `json:"repo"`
+	PRNumber         int64  `json:"prNumber"`
+	// FeedbackID names the feedback, such as review_comment:123 or
+	// review:456.
+	FeedbackID string `json:"feedbackID"`
+	Attempt    int    `json:"attempt"`
+	// HeadSHA is the pull request head the attempt was admitted for.
+	HeadSHA string `json:"headSHA"`
+	// SnapshotDigest identifies the feedback snapshot that admitted it.
+	SnapshotDigest string `json:"snapshotDigest"`
+	CommandEventID string `json:"commandEventID"`
+	RepairJobID    string `json:"repairJobID"`
+	// CreatedAt is when the attempt was admitted, in UTC. A provider keeps
+	// the time the caller set and uses its own clock only when it is zero.
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// MonitorFeedbackAttemptFilter constrains feedback attempt list queries.
+type MonitorFeedbackAttemptFilter struct {
+	Namespace      string
+	MonitorName    string
+	Repo           string
+	PRNumber       int64
+	FeedbackID     string
+	CommandEventID string
+	Limit          int
+	Cursor         string
+}
+
+// MonitorFeedbackAdmission admits one feedback repair: the command event
+// that queues it and the attempt of each feedback ID it addresses.
+type MonitorFeedbackAdmission struct {
+	Command  CommandEvent             `json:"command"`
+	Attempts []MonitorFeedbackAttempt `json:"attempts"`
+}
+
+// MaxMonitorFeedbackAttemptsPerAdmission bounds the attempts one admission
+// records.
+const MaxMonitorFeedbackAttemptsPerAdmission = 50

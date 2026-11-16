@@ -470,6 +470,7 @@ type RepositoryMonitorReviewPublishInlineSpec struct {
 }
 
 // RepositoryMonitorRepairSpec configures bounded repair behavior.
+// +kubebuilder:validation:XValidation:rule="!has(self.humanFeedback) || !self.humanFeedback.enabled || self.enabled",message="humanFeedback.enabled requires repair.enabled"
 type RepositoryMonitorRepairSpec struct {
 	// Enabled enables repair jobs.
 	// +optional
@@ -516,6 +517,63 @@ type RepositoryMonitorRepairSpec struct {
 	// +listType=set
 	// +optional
 	CIOnlyLabels []string `json:"ciOnlyLabels,omitempty"`
+
+	// HumanFeedback lets reviewers' unresolved review threads and
+	// changes-requested reviews drive repairs of pull requests in full repair
+	// scope. Orka never replies to, resolves, or dismisses them.
+	// +optional
+	HumanFeedback *RepositoryMonitorHumanFeedbackSpec `json:"humanFeedback,omitempty"`
+}
+
+// RepositoryMonitorHumanFeedbackSpec configures repairs driven by reviewer
+// feedback. All review text is untrusted evidence; only authors with
+// minPermission, or allowlisted bots, can start a repair, and the pull
+// request author never can.
+type RepositoryMonitorHumanFeedbackSpec struct {
+	// Enabled turns on feedback-driven repairs. Defaults to false.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MinPermission is the minimum repository permission an author needs for
+	// their feedback to start a repair. Defaults to
+	// spec.triggers.github.labels.requireActorPermission;
+	// spec.policy.allowedRepositoryPermissions also applies.
+	// +kubebuilder:validation:Enum=write;maintain;admin
+	// +optional
+	MinPermission string `json:"minPermission,omitempty"`
+
+	// BotLogins allowlists the bots whose inline comments on a current diff
+	// line are evidence and can start a repair. Other bots are ignored.
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:MaxLength=44
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$`
+	// +listType=set
+	// +optional
+	BotLogins []string `json:"botLogins,omitempty"`
+
+	// ChangesRequestedReviews lets an authorized reviewer's current
+	// changes-requested review start a repair. Defaults to true.
+	// +kubebuilder:default=true
+	// +optional
+	ChangesRequestedReviews *bool `json:"changesRequestedReviews,omitempty"`
+
+	// MaxCommentsPerRepair bounds the comments and reviews one repair
+	// addresses. Defaults to 10.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MaxCommentsPerRepair *int32 `json:"maxCommentsPerRepair,omitempty"`
+
+	// MaxAttemptsPerComment bounds the repairs that address one comment or
+	// review over its lifetime; editing it does not reset the count.
+	// Defaults to 2.
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	MaxAttemptsPerComment *int32 `json:"maxAttemptsPerComment,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.

@@ -63,6 +63,22 @@ func (p *stateProvider) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p *stateProvider) AdmitMonitorFeedbackRepair(ctx context.Context, a1 storagev1.MonitorFeedbackAdmission) (bool, error) {
+	var r0 bool
+	injected, err := p.injector.call(ctx, p.contract, "AdmitMonitorFeedbackRepair", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.AdmitMonitorFeedbackRepair(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 bool
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
 	var r0 storagev1.ControllerEpochMirrorState
 	injected, err := p.injector.call(ctx, p.contract, "AdvanceControllerEpoch", func(ctx context.Context) (err error) {
@@ -1812,6 +1828,21 @@ func (p *stateProvider) ListMonitorEvents(ctx context.Context, a1 storagev1.Moni
 	})
 	if injected {
 		var z0 []storagev1.MonitorEvent
+		var z1 string
+		return z0, z1, err
+	}
+	return r0, r1, err
+}
+
+func (p *stateProvider) ListMonitorFeedbackAttempts(ctx context.Context, a1 storagev1.MonitorFeedbackAttemptFilter) ([]storagev1.MonitorFeedbackAttempt, string, error) {
+	var r0 []storagev1.MonitorFeedbackAttempt
+	var r1 string
+	injected, err := p.injector.call(ctx, p.contract, "ListMonitorFeedbackAttempts", func(ctx context.Context) (err error) {
+		r0, r1, err = p.inner.ListMonitorFeedbackAttempts(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.MonitorFeedbackAttempt
 		var z1 string
 		return z0, z1, err
 	}

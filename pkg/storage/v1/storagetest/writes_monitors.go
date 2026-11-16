@@ -130,6 +130,24 @@ func observeRepairJob(t *testing.T, p storagev1.StateProvider) any {
 	return observed(t, job, err)
 }
 
+func catalogFeedbackAdmission() storagev1.MonitorFeedbackAdmission {
+	command := storagev1.CommandEvent{ID: "feedback-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
+		Kind: "pull_request", Number: 12, DedupeKey: "feedback-1", CommentID: "feedback-1", Command: "fix", Intent: "fix", Status: "accepted", CreatedAt: workflowAt(0)}
+	return storagev1.MonitorFeedbackAdmission{Command: command, Attempts: []storagev1.MonitorFeedbackAttempt{{
+		ID: "attempt-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, Repo: "org/repo", PRNumber: 12,
+		FeedbackID: "review_comment:1", Attempt: 1, HeadSHA: "head-1", SnapshotDigest: "sha256:aa", CommandEventID: "feedback-1",
+		RepairJobID: "repair-feedback-1", CreatedAt: workflowAt(0),
+	}}}
+}
+
+func observeFeedbackAdmission(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	event, err := p.GetCommandEvent(t.Context(), workflowNamespace, "feedback-1")
+	attempts, _, listErr := p.ListMonitorFeedbackAttempts(t.Context(), storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace})
+	require.NoError(t, listErr)
+	return []any{observed(t, event, err), attempts}
+}
+
 func observeMonitorEvents(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	events, _, err := p.ListMonitorEvents(t.Context(), storagev1.MonitorEventFilter{Namespace: workflowNamespace})
@@ -330,6 +348,11 @@ func init() {
 				return []any{job}
 			}),
 			observe: observeRepairJob,
+		},
+		monitorCase{
+			method:  "AdmitMonitorFeedbackRepair",
+			args:    rebuiltArgs(func() []any { return []any{catalogFeedbackAdmission()} }),
+			observe: observeFeedbackAdmission,
 		},
 		monitorCase{
 			method: "CreateMonitorEvent",

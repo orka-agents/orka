@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -801,6 +802,109 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 			Operation: "comment"})
 		require.NoError(t, err)
 		require.Len(t, everywhere, 2)
+	})
+
+	t.Run("feedback attempts are an immutable gapless ledger", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		admission := func(command string, attempts ...storagev1.MonitorFeedbackAttempt) storagev1.MonitorFeedbackAdmission {
+			for i := range attempts {
+				attempts[i].MonitorNamespace, attempts[i].MonitorName, attempts[i].Repo, attempts[i].PRNumber = workflowNamespace, workflowMonitor, "org/repo", 12
+				attempts[i].CommandEventID, attempts[i].RepairJobID, attempts[i].HeadSHA = command, "repair-"+command, "head-1"
+				if attempts[i].ID == "" {
+					attempts[i].ID = command + "|" + attempts[i].FeedbackID
+				}
+			}
+			return storagev1.MonitorFeedbackAdmission{Command: storagev1.CommandEvent{ID: command, MonitorNamespace: workflowNamespace,
+				MonitorName: workflowMonitor, Kind: "pull_request", Number: 12, DedupeKey: command, CommentID: command, Intent: "fix", Status: "accepted"}, Attempts: attempts}
+		}
+		attempt := func(feedback string, n int) storagev1.MonitorFeedbackAttempt {
+			return storagev1.MonitorFeedbackAttempt{FeedbackID: feedback, Attempt: n, SnapshotDigest: "sha256:aa"}
+		}
+
+		created, err := p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-1", attempt("review_comment:1", 1), attempt("review:2", 1)))
+		require.NoError(t, err)
+		require.True(t, created)
+		created, err = p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-1", attempt("review_comment:1", 1), attempt("review:2", 1)))
+		require.NoError(t, err)
+		require.False(t, created, "admitting the same command again is a replay")
+
+		// A concurrent admission that chose overlapping feedback loses, and
+		// creates neither its command nor its other attempts.
+		_, err = p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-2", attempt("review_comment:3", 1), attempt("review_comment:1", 1)))
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = p.GetCommandEvent(ctx, workflowNamespace, "cmd-2")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+		third, _, err := p.ListMonitorFeedbackAttempts(ctx, storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace, FeedbackID: "review_comment:3"})
+		require.NoError(t, err)
+		require.Empty(t, third)
+		// The same command reused with other attempts conflicts.
+		_, err = p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-1", attempt("review_comment:1", 2)))
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		// The same command ID for another pull request is not a replay.
+		elsewhere := admission("cmd-1", attempt("review_comment:1", 1), attempt("review:2", 1))
+		elsewhere.Command.Number = 13
+		for i := range elsewhere.Attempts {
+			elsewhere.Attempts[i].PRNumber = 13
+		}
+		_, err = p.AdmitMonitorFeedbackRepair(ctx, elsewhere)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		// A command that shares another command's dedupe key is not a replay.
+		reused := admission("cmd-7", attempt("review_comment:8", 1))
+		reused.Command.DedupeKey = "cmd-1"
+		_, err = p.AdmitMonitorFeedbackRepair(ctx, reused)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		// Attempts are numbered without gaps.
+		_, err = p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-3", attempt("review_comment:1", 3)))
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		created, err = p.AdmitMonitorFeedbackRepair(ctx, admission("cmd-4", attempt("review_comment:1", 2)))
+		require.NoError(t, err)
+		require.True(t, created)
+
+		ledger, _, err := p.ListMonitorFeedbackAttempts(ctx, storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace, MonitorName: workflowMonitor,
+			Repo: "org/repo", PRNumber: 12, FeedbackID: "review_comment:1"})
+		require.NoError(t, err)
+		require.Len(t, ledger, 2)
+		numbers := []int{ledger[0].Attempt, ledger[1].Attempt}
+		slices.Sort(numbers)
+		require.Equal(t, []int{1, 2}, numbers)
+		byCommand, _, err := p.ListMonitorFeedbackAttempts(ctx, storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace, CommandEventID: "cmd-1"})
+		require.NoError(t, err)
+		require.Len(t, byCommand, 2)
+		for _, recorded := range byCommand {
+			require.Equal(t, "head-1", recorded.HeadSHA)
+			require.Equal(t, "sha256:aa", recorded.SnapshotDigest)
+			require.Equal(t, "repair-cmd-1", recorded.RepairJobID)
+			require.False(t, recorded.CreatedAt.IsZero())
+		}
+		other, _, err := p.ListMonitorFeedbackAttempts(ctx, storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowOtherNamespace})
+		require.NoError(t, err)
+		require.Empty(t, other)
+
+		for name, invalid := range map[string]storagev1.MonitorFeedbackAdmission{
+			"no attempts":        admission("cmd-5"),
+			"duplicate feedback": admission("cmd-5", attempt("review_comment:9", 1), attempt("review_comment:9", 1)),
+			"attempt zero":       admission("cmd-5", attempt("review_comment:9", 0)),
+			"another command": func() storagev1.MonitorFeedbackAdmission {
+				a := admission("cmd-5", attempt("review_comment:9", 1))
+				a.Attempts[0].CommandEventID = "cmd-6"
+				return a
+			}(),
+			"another pull request": func() storagev1.MonitorFeedbackAdmission {
+				a := admission("cmd-5", attempt("review_comment:9", 1))
+				a.Attempts[0].PRNumber = 13
+				return a
+			}(),
+		} {
+			_, err := p.AdmitMonitorFeedbackRepair(ctx, invalid)
+			require.ErrorIs(t, err, storagev1.ErrValidation, name)
+		}
+
+		// The ledger belongs to the monitor's identity.
+		require.NoError(t, p.UpsertRepositoryMonitor(ctx, monitorRecord("uid-1", 1)))
+		require.NoError(t, p.DeleteRepositoryMonitor(ctx, workflowNamespace, workflowMonitor))
+		remaining, _, err := p.ListMonitorFeedbackAttempts(ctx, storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace})
+		require.NoError(t, err)
+		require.Empty(t, remaining)
 	})
 
 	t.Run("monitor events page newest first", func(t *testing.T) {

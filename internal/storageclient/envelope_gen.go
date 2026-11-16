@@ -46,6 +46,16 @@ func (p envelopedState) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p envelopedState) AdmitMonitorFeedbackRepair(ctx context.Context, a1 storagev1.MonitorFeedbackAdmission) (bool, error) {
+	var r0 bool
+	err := p.ops.run(ctx, writeCall{method: "AdmitMonitorFeedbackRepair", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.AdmitMonitorFeedbackRepair(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	var w1 *storagev1.ExecutionEvent

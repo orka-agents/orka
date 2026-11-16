@@ -65,8 +65,20 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		}
 	}
 	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst, ciFirst)
-	if err != nil || intent == "" {
+	if err != nil {
 		return false, err
+	}
+	if intent == "" {
+		// With nothing else to repair, authorized reviewer feedback can
+		// start a fix of a pull request in full repair scope, once any
+		// exhaustive review of the head has finished its passes.
+		if !full || ciFirst || !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) {
+			return false, nil
+		}
+		if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
+			return false, err
+		}
+		return r.tryRepositoryMonitorFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, labelled)
 	}
 	// The policy helper counts durable attempts, including commands exhausted
 	// before Task creation, before another command identity can be created.

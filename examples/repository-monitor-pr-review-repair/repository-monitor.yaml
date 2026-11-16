@@ -42,6 +42,12 @@ spec:
     enabled: true
     maxRepairsPerPR: 5
     maxRepairsPerHead: 2
+    # Uncomment to let reviewers with write access drive bounded repairs
+    # from unresolved review threads and changes-requested reviews. Orka
+    # never replies to, resolves, or dismisses them.
+    # humanFeedback:
+    #   enabled: true
+    #   maxAttemptsPerComment: 2
   policy:
     protectedLabels:
     - security

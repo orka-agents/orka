@@ -130,9 +130,21 @@ key on the first five fields and a contiguity check make attempt `n` admissible
 only once, and only after attempt `n-1`.
 
 The rows are written in the same transaction as the repair's command event.
-Admission is atomic with the existing repair admission, so two reconciles that
-pick different targets cannot both schedule a repair. A replay of the same
-command is idempotent. Editing a comment keeps its ID, so the edit does not reset
+The command's dedupe key names the budget slot it takes: the pull request, its
+head, and the repair counts the budget check saw. Admission is therefore atomic
+with the existing repair admission. Two reconciles that pick different targets
+cannot both schedule a repair, or both fit into one remaining slot. Replaying
+the same command for the same monitor and pull request is idempotent. A
+queued feedback repair is rechecked before its Task starts. Feedback that was
+resolved, turned outdated, or was deleted withdraws it. A snapshot that could
+not be read, was read for a moved head, or could not check a target author's
+permission defers it. An attempt charges its feedback's budget once its repair
+Task exists, or while its command is still queued. An attempt whose command
+ended before any Task ran addressed nothing, so it is not charged, though the
+pull request's repair budget still counts its command. A transient GitHub
+failure therefore never spends a comment's attempts. The command's budget
+slot ignores the monitor generation, because repair budgets outlive spec
+changes. Editing a comment keeps its ID, so the edit does not reset
 its lifetime budget of `maxAttemptsPerComment` (default 2). A new head
 re-triggers feedback only while attempts remain and the thread is still
 unresolved and current. The repair Task's prompt freezes the snapshot it
@@ -155,7 +167,9 @@ When `humanFeedback` is enabled, a head that would otherwise be ready stays
 `pending` ("Addressing N reviewer comments") while authorized current feedback
 has attempts left. It becomes a non-success status saying a person is needed
 once that feedback's attempts are exhausted, or when authorized feedback is
-open but automation will not act on it, such as an outdated thread. An
+open but automation will not act on it, such as an outdated thread. A
+reviewer whose permission lookup failed keeps the head `pending` until a
+lookup answers, and reviewers past the lookup limit need a person. An
 unreadable or partial snapshot never reports success. Readiness never resolves
 or replies to threads.
 

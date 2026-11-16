@@ -472,6 +472,18 @@ type RepositoryMonitorStore interface {
 
 	CreateMonitorEvent(ctx context.Context, event *MonitorEvent) error
 	ListMonitorEvents(ctx context.Context, filter MonitorEventFilter) ([]MonitorEvent, string, error)
+
+	// AdmitMonitorFeedbackRepair creates admission's command event and its
+	// feedback attempts in one transaction and reports whether it created
+	// them. Every attempt names the command and its monitor and pull
+	// request, and its feedback IDs are distinct. Attempt n of a feedback ID
+	// is admitted only when attempts 1 to n-1 exist. Admitting the same
+	// command again with the same attempts creates nothing and returns false;
+	// an attempt number already taken by another command, or one that skips
+	// a number, fails with ErrConflict and creates nothing.
+	AdmitMonitorFeedbackRepair(ctx context.Context, admission MonitorFeedbackAdmission) (bool, error)
+	// ListMonitorFeedbackAttempts lists feedback attempts newest first.
+	ListMonitorFeedbackAttempts(ctx context.Context, filter MonitorFeedbackAttemptFilter) ([]MonitorFeedbackAttempt, string, error)
 }
 
 // MaxMessageBatch is the most messages one ListUnreadMessages or

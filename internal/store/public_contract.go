@@ -90,6 +90,9 @@ type (
 	RepairJobFilter                           = storagev1.RepairJobFilter
 	MonitorEvent                              = storagev1.MonitorEvent
 	MonitorEventFilter                        = storagev1.MonitorEventFilter
+	MonitorFeedbackAttempt                    = storagev1.MonitorFeedbackAttempt
+	MonitorFeedbackAttemptFilter              = storagev1.MonitorFeedbackAttemptFilter
+	MonitorFeedbackAdmission                  = storagev1.MonitorFeedbackAdmission
 	OutboxPersistenceStore                    = storagev1.OutboxPersistenceStore
 	ScanTaskIdentity                          = storagev1.ScanTaskIdentity
 	ScanTaskIngestion                         = storagev1.ScanTaskIngestion

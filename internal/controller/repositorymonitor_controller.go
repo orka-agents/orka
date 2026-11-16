@@ -882,7 +882,7 @@ func repositoryMonitorRunFailureState(err error) string {
 		return repositoryMonitorRunRetryScheduled
 	}
 	// Partial CI results settle on their own; retry rather than terminalize.
-	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
+	if errors.Is(err, errRepositoryMonitorCIIncomplete) || errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) {
 		return repositoryMonitorRunRetryScheduled
 	}
 	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {
