@@ -54,26 +54,35 @@ const (
 	repositoryMonitorEvidenceReasonCredentialMissing = "credential_unavailable"
 
 	// Evidence bounds. Text limits are UTF-8 bytes after sanitizing; encoded
-	// limits are bytes of the entry's JSON encoding.
-	repositoryMonitorCIEvidenceMaxChecks             = 10
-	repositoryMonitorCIEvidenceMaxPendingChecks      = 10
-	repositoryMonitorCIEvidenceMaxAnnotationChecks   = 5
-	repositoryMonitorCIEvidenceAnnotationPages       = 2
-	repositoryMonitorCIEvidenceAnnotationsPerPage    = 50
-	repositoryMonitorCIEvidenceMaxAnnotations        = 10
-	repositoryMonitorCIEvidenceNameBytes             = 200
-	repositoryMonitorCIEvidenceTitleBytes            = 256
-	repositoryMonitorCIEvidenceSummaryBytes          = 1536
-	repositoryMonitorCIEvidenceSummaryLines          = 30
-	repositoryMonitorCIEvidenceDescriptionBytes      = 512
-	repositoryMonitorCIEvidenceAnnotationTitleBytes  = 200
-	repositoryMonitorCIEvidenceAnnotationBytes       = 512
-	repositoryMonitorCIEvidenceAnnotationLines       = 8
-	repositoryMonitorCIEvidencePathBytes             = 300
-	repositoryMonitorCIEvidenceURLBytes              = 512
-	repositoryMonitorCIEvidenceEntryEncodedBytes     = 4 << 10
-	repositoryMonitorCIEvidenceTotalEncodedBytes     = 16 << 10
-	repositoryMonitorCIEvidenceFetchBudget           = 20 * time.Second
+	// limits are bytes of an entry as the repair prompt's indented JSON
+	// encodes it (see repositoryMonitorEvidenceEncodedSize).
+	repositoryMonitorCIEvidenceMaxChecks            = 10
+	repositoryMonitorCIEvidenceMaxPendingChecks     = 10
+	repositoryMonitorCIEvidenceMaxAnnotationChecks  = 5
+	repositoryMonitorCIEvidenceAnnotationPages      = 2
+	repositoryMonitorCIEvidenceAnnotationsPerPage   = 50
+	repositoryMonitorCIEvidenceMaxAnnotations       = 10
+	repositoryMonitorCIEvidenceNameBytes            = 200
+	repositoryMonitorCIEvidenceTitleBytes           = 256
+	repositoryMonitorCIEvidenceSummaryBytes         = 1536
+	repositoryMonitorCIEvidenceSummaryLines         = 30
+	repositoryMonitorCIEvidenceDescriptionBytes     = 512
+	repositoryMonitorCIEvidenceAnnotationTitleBytes = 200
+	repositoryMonitorCIEvidenceAnnotationBytes      = 512
+	repositoryMonitorCIEvidenceAnnotationLines      = 8
+	repositoryMonitorCIEvidencePathBytes            = 300
+	repositoryMonitorCIEvidenceURLBytes             = 512
+	repositoryMonitorCIEvidenceEntryEncodedBytes    = 4 << 10
+	repositoryMonitorCIEvidenceTotalEncodedBytes    = 16 << 10
+	repositoryMonitorCIEvidenceFetchBudget          = 20 * time.Second
+	// The repair prompt encodes its payload with json.MarshalIndent(payload,
+	// "", "  "), which puts an entry of failingCheckEvidence.checks or
+	// .pendingChecks three levels deep: its lines carry this prefix, and it
+	// follows a line break and the prefix and, but for the last entry,
+	// precedes a comma.
+	repositoryMonitorCIEvidenceEntryPrefix           = "      "
+	repositoryMonitorCIEvidenceEntryIndent           = "  "
+	repositoryMonitorCIEvidenceEntrySeparatorBytes   = len(",\n") + len(repositoryMonitorCIEvidenceEntryPrefix)
 	repositoryMonitorEvidenceMinRawTextLimit         = 2 << 10
 	repositoryMonitorEvidenceRawTextFactor           = 4
 	repositoryMonitorEvidenceSecretCheckBudget       = 32 << 10
@@ -284,6 +293,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 	if fetch.baseURL == "" {
 		fetch.baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
+	// used counts each entry with its separator, as the prompt encodes it.
 	used := 0
 	for i, failure := range failures.introduced {
 		if i == repositoryMonitorCIEvidenceMaxChecks {
@@ -293,11 +303,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 		entry := r.repositoryMonitorCheckEvidenceFor(ctx, fetch, failure, pr.HeadSHA)
 		entry = fitRepositoryMonitorCheckEvidence(entry, repositoryMonitorCIEvidenceEntryEncodedBytes)
 		size := repositoryMonitorEvidenceEncodedSize(entry)
-		if size > repositoryMonitorCIEvidenceEntryEncodedBytes || used+size > repositoryMonitorCIEvidenceTotalEncodedBytes {
+		if size > repositoryMonitorCIEvidenceEntryEncodedBytes || used+size+repositoryMonitorCIEvidenceEntrySeparatorBytes > repositoryMonitorCIEvidenceTotalEncodedBytes {
 			evidence.OmittedChecks++
 			continue
 		}
-		used += size
+		used += size + repositoryMonitorCIEvidenceEntrySeparatorBytes
 		evidence.Checks = append(evidence.Checks, entry)
 	}
 	// Pending checks share the total entry budget, after the failing checks.
@@ -313,7 +323,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 			App:    repositoryMonitorEvidenceToken(pending.appSlug),
 			Status: repositoryMonitorEvidenceToken(pending.status),
 		}
-		size := repositoryMonitorEvidenceEncodedSize(entry)
+		size := repositoryMonitorEvidenceEncodedSize(entry) + repositoryMonitorCIEvidenceEntrySeparatorBytes
 		if used+size > repositoryMonitorCIEvidenceTotalEncodedBytes {
 			evidence.OmittedPendingChecks++
 			continue
@@ -463,7 +473,7 @@ func repositoryMonitorAnnotationLevelRank(level string) int {
 }
 
 // fitRepositoryMonitorCheckEvidence keeps one entry within maxBytes of
-// encoded JSON, measured as the payload encodes it, escaping included. It
+// encoded JSON, measured as the repair prompt encodes it. It
 // drops annotations from the least severe end first, then the summary,
 // title, and URL, then shortens the description and finally the name. The
 // caller omits an entry that still does not fit.
@@ -525,8 +535,11 @@ func fitRepositoryMonitorCheckEvidence(entry repositoryMonitorCheckEvidence, max
 	return entry
 }
 
+// repositoryMonitorEvidenceEncodedSize is the number of bytes an evidence
+// entry takes in the repair prompt, from its opening to its closing brace,
+// escaping and indentation included.
 func repositoryMonitorEvidenceEncodedSize(value any) int {
-	encoded, err := json.Marshal(value)
+	encoded, err := json.MarshalIndent(value, repositoryMonitorCIEvidenceEntryPrefix, repositoryMonitorCIEvidenceEntryIndent)
 	if err != nil {
 		return repositoryMonitorCIEvidenceTotalEncodedBytes + 1
 	}
@@ -642,9 +655,10 @@ func repositoryMonitorEvidenceCutRaw(value string, limit int) string {
 }
 
 // repositoryMonitorEvidenceWithholdJoinedSecrets withholds each sanitized
-// line that still looks like a credential, every line of a PEM block, and
-// the lines a credential wrapped across line breaks spans, such as a JWT or
-// an Authorization header value split over lines.
+// line that still looks like a credential, every line of a PEM block or of a
+// credential's YAML block scalar, and the lines a credential wrapped across
+// line breaks spans, such as a JWT or an Authorization header value split
+// over lines.
 //
 // A wrapped credential continues from the last word of one line into the
 // first word of the next, through any number of lines that are a single
@@ -655,7 +669,9 @@ func repositoryMonitorEvidenceCutRaw(value string, limit int) string {
 // a value a credential, such as an Authorization header name. Joined text
 // that forms a credential the line alone does not withholds that line
 // through the end of its chain, so no fragment of the credential stays
-// behind. Each check charges its last word and continuation words against
+// behind. A line ending inside a credential header's value, such as
+// "Authorization: Bearer \", withholds its chain without a check. Each
+// check charges its last word and continuation words against
 // repositoryMonitorEvidenceSecretCheckBudget; past it, chains are withheld
 // unchecked. The original, unredacted lines are joined: redaction can
 // replace the head of a wrapped credential and hide its tail from the
@@ -668,6 +684,7 @@ func repositoryMonitorEvidenceWithholdJoinedSecrets(original, lines []string) {
 		}
 	}
 	repositoryMonitorEvidenceWithholdPEMBlocks(original, lines)
+	repositoryMonitorEvidenceWithholdYAMLBlocks(original, lines)
 	words, escaped := repositoryMonitorEvidenceLineWords(original)
 	// chainEnd[i] is the last line the chain from line i's last word reaches.
 	chainEnd := make([]int, len(original))
@@ -700,8 +717,10 @@ func repositoryMonitorEvidenceWithholdJoinedSecrets(original, lines []string) {
 		}
 		// Text built to defeat the check by splitting into many tiny lines
 		// would make it quadratic; past the budget, chains are withheld
-		// unchecked.
-		withhold := spent > repositoryMonitorEvidenceSecretCheckBudget
+		// unchecked. A credential header whose value starts past the line
+		// break is withheld through its chain unchecked too: the value may
+		// be any opaque word, which no check recognizes without the header.
+		withhold := spent > repositoryMonitorEvidenceSecretCheckBudget || repositoryMonitorEvidenceOpensHeaderValue(original[i])
 		if !withhold {
 			var continued strings.Builder
 			for j := i + 1; j <= chainEnd[i] && continued.Len() < repositoryMonitorEvidenceSecretJoinBytes; j++ {
@@ -788,6 +807,53 @@ func repositoryMonitorEvidenceWithholdPEMBlocks(original, lines []string) {
 			lines[i] = repositoryMonitorEvidenceRedactedLine
 		}
 	}
+}
+
+// repositoryMonitorEvidenceWithholdYAMLBlocks withholds every non-blank line
+// of a YAML block scalar (| or >, with any chomping or indentation indicator)
+// whose key names a credential, from its header through its last line. The
+// block ends at the first non-blank line indented no deeper than the header
+// line. The value's lines are each too short or too plain for any check to
+// recognize, and a block of literal lines forms no continuation chain. The
+// scan is linear and independent of the check budget.
+func repositoryMonitorEvidenceWithholdYAMLBlocks(original, lines []string) {
+	for i := 0; i < len(original); i++ {
+		if !security.SensitiveYAMLBlockHeader(original[i]) {
+			continue
+		}
+		indent := repositoryMonitorEvidenceIndent(original[i])
+		lines[i] = repositoryMonitorEvidenceRedactedLine
+		for i+1 < len(original) && (strings.TrimSpace(original[i+1]) == "" || repositoryMonitorEvidenceIndent(original[i+1]) > indent) {
+			i++
+			if strings.TrimSpace(original[i]) != "" {
+				lines[i] = repositoryMonitorEvidenceRedactedLine
+			}
+		}
+	}
+}
+
+// repositoryMonitorEvidenceIndent is the number of leading spaces and tabs.
+func repositoryMonitorEvidenceIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// repositoryMonitorEvidenceCredentialHeaderPattern matches the name and
+// colon of a header the redactor treats as carrying a credential.
+var repositoryMonitorEvidenceCredentialHeaderPattern = regexp.MustCompile(`(?i)\b(?:authorization|txn-token|cookie)\s*:`)
+
+// repositoryMonitorEvidenceOpensHeaderValue reports whether line ends before
+// the value of a credential header is complete: after the line's last
+// credential header name, it has at most one word, such as a Bearer scheme,
+// and no quote closing the header. A quote opening the value, as in
+// Authorization:"Bearer, does not close it.
+func repositoryMonitorEvidenceOpensHeaderValue(line string) bool {
+	matches := repositoryMonitorEvidenceCredentialHeaderPattern.FindAllStringIndex(line, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	rest := strings.Trim(line[matches[len(matches)-1][1]:], " \t\\")
+	rest = strings.TrimLeft(rest, `"' `+"\t")
+	return !strings.ContainsAny(rest, `"'`) && len(strings.Fields(rest)) <= 1
 }
 
 // repositoryMonitorEvidenceLineWords splits lines into words. A line ending

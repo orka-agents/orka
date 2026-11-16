@@ -664,6 +664,15 @@ func LooksLikeSecret(text string) bool {
 	return looksLikeSecret(newSecretScan(stripUnsafeTextRunes(text)))
 }
 
+// SensitiveYAMLBlockHeader reports whether line opens a YAML block scalar
+// (| or >, with optional chomping and indentation indicators) for a
+// credential-bearing key, the header LooksLikeSecret reconstructs a block
+// from. The scalar's value is on the following lines indented deeper than
+// line.
+func SensitiveYAMLBlockHeader(line string) bool {
+	return policySensitiveYAMLBlockHeaderPattern.MatchString(line)
+}
+
 func looksLikeSecret(scan *secretScan) bool {
 	if scan.matchAny(policySensitivePrefixPattern, sensitivePrefixKeywords, 0) {
 		return true

@@ -394,7 +394,7 @@ A `fix_ci` repair prompt carries CI evidence for the exact PR head next to the c
 
 Every entry has an `availability`: `available`, `truncated` (the `truncated` list names the bounded fields), `unavailable` or `rate_limited` (with a `reason` such as `github_api_status_404`), `unsupported` (commit statuses), or `stale` (GitHub reported the check for another commit; its output is left out). When the CI lookup itself fails, the prompt still runs: `failingCheckEvidence` has no checks and its `reason` says why. A rate limit stops further annotation reads. Evidence never fails or delays a repair.
 
-CI output is untrusted. Orka strips ANSI escapes, control, and format characters, then redacts or withholds credential-shaped text, including tokens and header values wrapped across lines and whole PEM blocks, before it bounds the text on line boundaries. Links lose credentials, query strings, and fragments. The prompt tells the repairer that CI output is untrusted data, separate from review findings and from Orka's instructions.
+CI output is untrusted. Orka strips ANSI escapes, control, and format characters, then redacts or withholds credential-shaped text, including tokens and header values wrapped or backslash-continued across lines, whole PEM blocks, and whole YAML block scalars (`password: |`) under credential keys, before it bounds the text on line boundaries. Links lose credentials, query strings, and fragments. The prompt tells the repairer that CI output is untrusted data, separate from review findings and from Orka's instructions.
 
 Evidence limits:
 
@@ -406,8 +406,8 @@ Evidence limits:
 | Annotations kept per check | 10 |
 | `output.summary` | 1,536 bytes and 30 lines |
 | Annotation message | 512 bytes and 8 lines |
-| One entry, encoded | 4 KiB |
-| All entries, encoded | 16 KiB, pending checks included; entries that do not fit are counted as omitted |
+| One entry, as indented in the prompt | 4 KiB |
+| All entries, as indented in the prompt with their separators | 16 KiB, pending checks included; entries that do not fit are counted as omitted |
 | Time for annotation reads | 20 seconds |
 
 The repair Task's prompt freezes the evidence for that attempt. If Orka retries the handoff after the Task was created, it reuses the evidence in the Task's prompt rather than reading GitHub again. The repair work action's metadata records `ciEvidenceDigest`, `ciEvidenceIDs`, and `ciEvidenceAvailability`, and so does the `repair_task_created` monitor event. Reading check runs and annotations uses the `forgeCredentialRef` token and needs Checks read access.
