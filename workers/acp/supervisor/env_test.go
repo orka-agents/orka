@@ -286,11 +286,17 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 	}
 	newPaths := func(t *testing.T) acp.SessionPaths {
 		t.Helper()
-		workspace := filepath.Join(t.TempDir(), "session", "workspace")
-		if err := os.MkdirAll(filepath.Join(workspace, "pkg"), 0o755); err != nil {
-			t.Fatal(err)
+		root := filepath.Join(t.TempDir(), "session")
+		paths := acp.SessionPaths{
+			Root: root, Home: filepath.Join(root, "home"), Workspace: filepath.Join(root, "workspace"),
+			Config: filepath.Join(root, "xdg", "config"),
 		}
-		return acp.SessionPaths{Workspace: workspace}
+		for _, dir := range []string{filepath.Join(paths.Workspace, "pkg"), paths.Home, paths.Config} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return paths
 	}
 
 	clean := newPaths(t)
@@ -365,6 +371,93 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 	}
 	if err := profile.ValidateWorkspace(linked); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("workspace replaced by a link = %v, want rejection", err)
+	}
+}
+
+// OPENCODE_CONFIG_DIR is OpenCode's global configuration folder and lives in
+// the agent-writable session tree. An idle adapter restart must refuse
+// anything there that Orka or OpenCode did not put there, and $HOME/.opencode.
+func TestOpenCodeRejectsSessionConfigurationWrittenAfterCreation(t *testing.T) {
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentWrite, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := func(t *testing.T) acp.SessionPaths {
+		t.Helper()
+		root := filepath.Join(t.TempDir(), "session")
+		paths := acp.SessionPaths{
+			Root: root, Home: filepath.Join(root, "home"), Workspace: filepath.Join(root, "workspace"),
+			Config: filepath.Join(root, "xdg", "config"),
+		}
+		for _, dir := range []string{paths.Workspace, paths.Home, paths.Config} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Before PrepareSession the folder does not exist yet.
+		if err := profile.ValidateWorkspace(paths); err != nil {
+			t.Fatalf("fresh session tree was rejected: %v", err)
+		}
+		if err := profile.PrepareSession(paths); err != nil {
+			t.Fatal(err)
+		}
+		// What OpenCode and Orka add while the session runs.
+		configDir := filepath.Join(paths.Config, "opencode")
+		writeTestFile(t, filepath.Join(configDir, ".gitignore"), "node_modules\n")
+		writeTestFile(t, filepath.Join(configDir, "skills", "code-review", "SKILL.md"), "---\nname: code-review\n---\n")
+		return paths
+	}
+	if err := profile.ValidateWorkspace(prepared(t)); err != nil {
+		t.Fatalf("prepared OpenCode configuration was rejected: %v", err)
+	}
+	for _, tt := range []struct {
+		name   string
+		change func(t *testing.T, paths acp.SessionPaths)
+	}{
+		{name: "plugin folder", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "plugin", "extra.js"), "export {}")
+		}},
+		{name: "plugins folder", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "plugins", "extra.ts"), "export {}")
+		}},
+		{name: "global opencode.json", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "opencode.json"), "{}")
+		}},
+		{name: "global opencode.jsonc", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "opencode.jsonc"), "{}")
+		}},
+		{name: "changed package.json", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "package.json"), `{"dependencies":{}}`)
+		}},
+		{name: "node_modules replaced by a file", change: func(t *testing.T, paths acp.SessionPaths) {
+			dir := filepath.Join(paths.Config, "opencode", "node_modules")
+			if err := os.RemoveAll(dir); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, dir, "")
+		}},
+		{name: "home .opencode", change: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Home, ".opencode", "opencode.json"), "{}")
+		}},
+		{name: "configuration folder replaced by a link", change: func(t *testing.T, paths acp.SessionPaths) {
+			elsewhere := t.TempDir()
+			writeTestFile(t, filepath.Join(elsewhere, "config", "opencode", "plugin", "extra.js"), "export {}")
+			xdg := filepath.Dir(paths.Config)
+			if err := os.RemoveAll(xdg); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, xdg); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := prepared(t)
+			tt.change(t, paths)
+			if err := profile.ValidateWorkspace(paths); err == nil {
+				t.Fatal("OpenCode configuration written after creation was accepted")
+			}
+		})
 	}
 }
 

@@ -39,10 +39,11 @@ resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-
   `agents/openai.yaml`, which Codex reads for tool dependencies it may install.
 - **Images are referenced by digest** and must come from a registry the operator
   allowed. Nothing is fetched over the network inside the runtime Pod.
-- **Each session gets its own copy.** The read-only source is never writable by a
-  session; the copy belongs to the session's unique UID and GID and is deleted with the
-  session. OpenCode's file-editing tools are denied in the skill folders. A session that
-  may run shell commands can still change its own copy, which no other session sees.
+- **Each session gets its own copy, except on Claude.** The read-only source is never
+  writable by a session; the copy belongs to the session's unique UID and GID and is
+  deleted with the session. OpenCode's file-editing tools are denied in the skill folders.
+  A session that may run shell commands can still change its own copy, which no other
+  session sees. Claude sessions share one read-only copy instead; see the table below.
   Orka reserves room for the copies: for every skill, 5 MiB per resident session the
   pool allows (`maxResidentSessions`) is added to the session volume limit and to the
   runtime Pod's ephemeral-storage request and limit.
@@ -53,7 +54,7 @@ resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-
 
 | Runtime | Native skills folder in the session | What else Orka sets |
 | --- | --- | --- |
-| Claude | `$CLAUDE_CONFIG_DIR/skills/<name>/` (`~/.claude/skills`) | The SDK `skills` option lists exactly the Orka skills, so Claude Code hides every other skill and its `Skill` tool rejects them. `disableSkillShellExecution` is on. With a restricted tool policy, Orka adds `Skill` to the allowed tools; it only loads skill instructions. |
+| Claude | `skills/<name>/` in a local plugin named `orka`, outside every session tree | Claude loads no settings files, so it never reads `~/.claude/skills`. Orka instead passes one plugin folder through the SDK `plugins` option, with MCP discovery off. The folder belongs to the runtime's supervisor and every session of the runtime only reads it, because a plugin could also carry hooks. Claude lists the skills as `orka:<name>`. The SDK `skills` option lists exactly those names, so Claude Code hides every other skill and its `Skill` tool rejects them. `disableSkillShellExecution` is on. With a restricted tool policy, Orka adds `Skill` to the allowed tools; it only loads skill instructions. |
 | Codex | `$HOME/.agents/skills/<name>/` | Nothing: Codex always loads user skills. |
 | OpenCode | `$OPENCODE_CONFIG_DIR/skills/<name>/` | The `skill` permission allows exactly the Orka skill names and denies everything else, including OpenCode's built-in skills. `external_directory` stays denied except for each Orka skill folder, so the `read` tool (when allowed) can open a skill's supporting files. That exception is dropped when the session may edit files with a model OpenCode gives `apply_patch` (GPT models other than `gpt-4` and `gpt-oss`), because that tool checks only a move's source against the edit rules: the `skill` tool still returns `SKILL.md`, but supporting files are unreadable. |
 | Copilot | — | Not supported. Copilot CLI in ACP mode keeps loading repository skills (`.github/skills`, `.agents/skills`, `.claude/skills`) whatever its settings say, so enabling its `skill` tool would also hand the model untrusted repository skills. Agents are rejected at admission. |

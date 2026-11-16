@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -576,7 +577,7 @@ func codexReadOnlySessionPolicy(request harnessv2.CreateRuntimeSessionRequest, p
 
 func claudeSessionProjection(
 	request harnessv2.CreateRuntimeSessionRequest,
-	_ acp.SessionPaths,
+	paths acp.SessionPaths,
 	_ ProviderProxyBinding,
 	model string,
 ) (ProviderSessionProjection, error) {
@@ -591,7 +592,8 @@ func claudeSessionProjection(
 		// hooks that run shell commands outside the tool policy and env that
 		// redirects ANTHROPIC_BASE_URL with the provider credential; user
 		// settings live in the agent-writable session home. Orka projects
-		// every option it needs through this metadata instead.
+		// every option it needs through this metadata instead, including its
+		// skills, which arrive as a plugin rather than as user skills.
 		"settingSources": []string{},
 	}
 	var environment map[string]string
@@ -621,10 +623,21 @@ func claudeSessionProjection(
 		options["disallowedTools"] = disallowed
 	}
 	if len(skills) > 0 {
-		// Expose exactly the Orka skills: the SDK hides every other skill and
-		// its Skill tool rejects them. Inline shell execution in skills and
-		// slash commands from any source is turned off as well.
-		options["skills"] = skills
+		if !filepath.IsAbs(paths.Root) {
+			return ProviderSessionProjection{}, fmt.Errorf("claude skills require an absolute session root")
+		}
+		// The skills come from Orka's read-only plugin folder. Its MCP
+		// discovery is skipped, so the plugin can only add skills.
+		options["plugins"] = []map[string]any{{"type": "local", "path": claudeSkillPluginRoot(paths), "skipMcpDiscovery": true}}
+		// Expose exactly the Orka skills, by their plugin-qualified names: the
+		// SDK hides every other skill and its Skill tool rejects them. Inline
+		// shell execution in skills and slash commands from any source is
+		// turned off as well.
+		qualified := make([]string, 0, len(skills))
+		for _, name := range skills {
+			qualified = append(qualified, claudeSkillPluginName+":"+name)
+		}
+		options["skills"] = qualified
 		options["settings"] = map[string]any{"disableSkillShellExecution": true}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
@@ -888,7 +901,7 @@ func providerProfile(
 					openCodeProviderEnvName:                     proxy.Credential,
 				}, nil
 			},
-			ValidateWorkspace: rejectOpenCodeProjectConfiguration,
+			ValidateWorkspace: validateOpenCodeSession,
 			PrepareSession:    prepareOpenCodeConfig,
 		}, nil
 	case providerKindAgentKit, providerKindFoundry:
@@ -955,12 +968,94 @@ func rejectOpenCodeProjectConfiguration(paths acp.SessionPaths) error {
 	}
 }
 
-func prepareOpenCodeConfig(paths acp.SessionPaths) error {
-	configDir := filepath.Join(paths.Config, "opencode")
-	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+// validateOpenCodeSession is OpenCode's workspace check. Session creation
+// runs it before the session tree exists for the child, and an idle adapter
+// restart runs it again, as the child, before the replacement starts.
+func validateOpenCodeSession(paths acp.SessionPaths) error {
+	if err := rejectOpenCodeProjectConfiguration(paths); err != nil {
 		return err
 	}
-	files := map[string][]byte{
+	return rejectOpenCodeSessionConfiguration(paths)
+}
+
+// rejectOpenCodeSessionConfiguration refuses OpenCode configuration the agent
+// could have written into its own session tree since creation. OpenCode 1.19
+// treats OPENCODE_CONFIG_DIR as its global configuration folder: it loads
+// opencode.json and opencode.jsonc there and imports plugin(s)/*.{js,ts}
+// from it even in pure mode, and it also reads $HOME/.opencode. Only what
+// prepareOpenCodeConfig writes, OpenCode's own .gitignore and dependency
+// folder, and Orka's skills may be there. At creation the folder does not
+// exist yet.
+func rejectOpenCodeSessionConfiguration(paths acp.SessionPaths) error {
+	if _, err := os.Lstat(filepath.Join(paths.Home, ".opencode")); err == nil {
+		return fmt.Errorf("OpenCode home configuration folder exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect OpenCode home configuration: %w", err)
+	}
+	dir := filepath.Join(paths.Config, "opencode")
+	relative, err := filepath.Rel(paths.Root, dir)
+	if strings.TrimSpace(paths.Root) == "" || err != nil || !filepath.IsLocal(relative) {
+		return fmt.Errorf("OpenCode configuration folder must be inside the session root")
+	}
+	// The child owns the session root, so each folder down to the
+	// configuration folder must still be a real folder, not a link.
+	current := paths.Root
+	for part := range strings.SplitSeq(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration folder: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("OpenCode configuration path is not a directory")
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list OpenCode configuration folder: %w", err)
+	}
+	expected := openCodeConfigFiles()
+	for _, entry := range entries {
+		name := entry.Name()
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration entry: %w", err)
+		}
+		switch want, prepared := expected[name]; {
+		case prepared:
+			if !info.Mode().IsRegular() || info.Size() != int64(len(want)) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return fmt.Errorf("read OpenCode configuration file %s: %w", name, err)
+			}
+			if !bytes.Equal(data, want) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+		case name == "node_modules" || name == "skills":
+			if !info.IsDir() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a directory", name)
+			}
+		case name == ".gitignore":
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a regular file", name)
+			}
+		default:
+			return fmt.Errorf("OpenCode configuration folder holds unexpected entry %q", name)
+		}
+	}
+	return nil
+}
+
+// openCodeConfigFiles are the files prepareOpenCodeConfig writes into
+// OPENCODE_CONFIG_DIR. They pin OpenCode's plugin dependency, so OpenCode does
+// not fetch one at startup.
+func openCodeConfigFiles() map[string][]byte {
+	return map[string][]byte{
 		"package.json": fmt.Appendf(nil,
 			"{\n  \"private\": true,\n  \"dependencies\": {\n    \"@opencode-ai/plugin\": %q\n  }\n}\n",
 			acp.OpenCodeVersion,
@@ -970,7 +1065,14 @@ func prepareOpenCodeConfig(paths acp.SessionPaths) error {
 			acp.OpenCodeVersion,
 		),
 	}
-	for name, data := range files {
+}
+
+func prepareOpenCodeConfig(paths acp.SessionPaths) error {
+	configDir := filepath.Join(paths.Config, "opencode")
+	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+		return err
+	}
+	for name, data := range openCodeConfigFiles() {
 		if err := os.WriteFile(filepath.Join(configDir, name), data, 0o600); err != nil {
 			return err
 		}

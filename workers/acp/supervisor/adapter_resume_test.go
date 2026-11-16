@@ -168,23 +168,7 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 	}
 	// The poisoned session is retired by the supervisor's own cleanup; the
 	// controller recreates a fresh generation from the canonical transcript.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		status := server.status()
-		retired := len(status.Sessions) == 0
-		for _, session := range status.Sessions {
-			if session.RuntimeSessionUID == create.Metadata.Fence.RuntimeSessionUID {
-				retired = session.State == harnessv2.RuntimeSessionStatePoisoned || session.State == harnessv2.RuntimeSessionStateDeleting
-			}
-		}
-		if retired {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lost-adapter session was not retired: %#v", status.Sessions)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	awaitSessionRetired(t, server, create)
 	server.mu.Lock()
 	_, resident := server.sessions[create.RuntimeSessionID]
 	_, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
@@ -200,22 +184,71 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 	}
 }
 
+// awaitSessionRetired waits until the supervisor has poisoned, is deleting,
+// or has dropped the session create made.
+func awaitSessionRetired(t *testing.T, server *Server, create harnessv2.CreateRuntimeSessionRequest) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status := server.status()
+		retired := len(status.Sessions) == 0
+		for _, session := range status.Sessions {
+			if session.RuntimeSessionUID == create.Metadata.Fence.RuntimeSessionUID {
+				retired = session.State == harnessv2.RuntimeSessionStatePoisoned || session.State == harnessv2.RuntimeSessionStateDeleting
+			}
+		}
+		if retired {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session was not retired: %#v", status.Sessions)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // Creation validates the workspace once, but the agent can write it between
 // prompts. An idle adapter restart must re-run that check before launching a
 // replacement, and retire the session rather than start the provider over
-// configuration that creation would have refused.
+// configuration that creation would have refused. This includes OpenCode's
+// own configuration folders, which live in the agent-writable session tree.
 func TestSupervisorRevalidatesWorkspaceBeforeIdleAdapterRelaunch(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		write func(t *testing.T, paths acp.SessionPaths)
+	}{
+		{name: "workspace opencode.json", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Workspace, "opencode.json"), "{}")
+		}},
+		{name: "workspace plugin", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Workspace, ".opencode", "plugin", "extra.js"), "export {}")
+		}},
+		{name: "config folder plugin", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "plugin", "extra.js"), "export {}")
+		}},
+		{name: "home .opencode", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Home, ".opencode", "opencode.json"), "{}")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRelaunchRefusesWorkspaceChange(t, tt.write)
+		})
+	}
+}
+
+func assertRelaunchRefusesWorkspaceChange(t *testing.T, write func(*testing.T, acp.SessionPaths)) {
+	t.Helper()
 	var validations atomic.Int32
 	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(server *Server) {
 		server.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
 			validations.Add(1)
-			return rejectOpenCodeProjectConfiguration(paths)
+			return validateOpenCodeSession(paths)
 		}
 	})
 	if got := validations.Load(); got != 1 {
 		t.Fatalf("workspace validations after create = %d, want 1", got)
 	}
-	writeTestFile(t, filepath.Join(state.paths.Workspace, "opencode.json"), "{}")
+	write(t, state.paths)
 	exited := state.runtime.Process()
 
 	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
@@ -239,4 +272,5 @@ func TestSupervisorRevalidatesWorkspaceBeforeIdleAdapterRelaunch(t *testing.T) {
 	if _, exists := state.runtime.Tombstone(string(next.Metadata.PromptID)); exists {
 		t.Fatal("rejected relaunch submitted the next ACP prompt")
 	}
+	awaitSessionRetired(t, server, create)
 }
