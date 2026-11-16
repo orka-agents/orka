@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -50,15 +51,24 @@ const attentionFreeText = "FREE-TEXT-MUST-NOT-LEAK"
 
 type attentionCountingEventStore struct {
 	*storetest.FakeExecutionEventStore
-	mu    sync.Mutex
-	reads map[string]int
+	mu       sync.Mutex
+	reads    map[string]int
+	returned map[string]int
 }
 
 func (s *attentionCountingEventStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	listed, err := s.FakeExecutionEventStore.ListExecutionEvents(ctx, filter)
 	s.mu.Lock()
 	s.reads[filter.StreamID]++
+	s.returned[filter.StreamID] += len(listed)
 	s.mu.Unlock()
-	return s.FakeExecutionEventStore.ListExecutionEvents(ctx, filter)
+	return listed, err
+}
+
+func (s *attentionCountingEventStore) returnedEvents(stream string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.returned[stream]
 }
 
 func (s *attentionCountingEventStore) readStreams() map[string]int {
@@ -89,6 +99,7 @@ func newAttentionFixture(t *testing.T, objects []client.Object, options ...atten
 	f.events = &attentionCountingEventStore{
 		FakeExecutionEventStore: storetest.NewFakeExecutionEventStoreWithClock(func() time.Time { return f.clock }),
 		reads:                   map[string]int{},
+		returned:                map[string]int{},
 	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -661,6 +672,17 @@ func TestAttentionGatewayOwnedTasks(t *testing.T) {
 	require.False(t, *response.Items[0].Approval.CanApprove, "deciding needs Gateway update")
 	require.False(t, *response.Items[0].Approval.CanDecline)
 
+	f.sar = func(attrs authorizationv1.ResourceAttributes) (bool, error) {
+		if attrs.Resource == "gateways" && attrs.Verb == "update" {
+			return false, errors.New("access review unavailable")
+		}
+		return true, nil
+	}
+	response = f.list("/api/v1/attention?namespace=default")
+	require.Len(t, response.Items, 1)
+	require.Nil(t, response.Items[0].Approval.CanApprove, "a failed Gateway review is unknown, not a denial")
+	require.Nil(t, response.Items[0].Approval.CanDecline)
+
 	f.sar = nil
 	response = f.list("/api/v1/attention?namespace=default")
 	require.True(t, *response.Items[0].Approval.CanDecline)
@@ -713,6 +735,25 @@ func TestAttentionReportsIncompleteScans(t *testing.T) {
 	require.Equal(t, []string{attentionIncompleteApprovalEventLimit}, response.IncompleteReasons)
 	require.Equal(t, []string{"approval/waiting-b", "approval/waiting-c"}, attentionKinds(response.Items),
 		"a stream past its bound is left out, never derived from a prefix")
+}
+
+// A stream over its approval-event budget is detected with at most one event
+// past the budget, not another full page.
+func TestAttentionApprovalEventReadsStopAtBudget(t *testing.T) {
+	f := newAttentionFixture(t, []client.Object{attentionWaitingTask("busy")})
+	for i := range 50 {
+		f.appendApproval("busy", map[string]any{"approvalID": fmt.Sprintf("approval-%d", i), "action": "write"})
+	}
+	f.h.attentionBounds = attentionBounds{ApprovalEvents: 5}
+	response := f.list("/api/v1/approvals?namespace=default")
+	require.Equal(t, []string{attentionIncompleteApprovalEventLimit}, response.IncompleteReasons)
+	require.Empty(t, response.Items)
+	require.LessOrEqual(t, f.events.returnedEvents("busy"), 6)
+
+	f.h.attentionBounds = attentionBounds{ApprovalEvents: 50}
+	response = f.list("/api/v1/approvals?namespace=default")
+	require.False(t, response.Incomplete, "a stream exactly at its budget is complete")
+	require.Len(t, response.Items, 50)
 }
 
 func TestAttentionHonorsCancellation(t *testing.T) {
