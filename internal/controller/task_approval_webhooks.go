@@ -62,14 +62,11 @@ const (
 	// longer selected in spec.webhookEvents.
 	approvalWebhookDeselectedReason = "the event is no longer selected in spec.webhookEvents"
 
-	// approvalWebhookAttemptsPerPass bounds the sends of one reconcile. Task
-	// reconciles share one worker, so, as for the terminal notice, a slow
-	// receiver holds it for at most one request per pass.
+	// approvalWebhookAttemptsPerPass bounds the sends of one delivery pass.
+	// As for the terminal notice, a slow receiver holds a delivery worker
+	// for at most one request per pass, and other Tasks' notices go ahead
+	// on the other workers.
 	approvalWebhookAttemptsPerPass = 1
-	// approvalWebhookSettledRequeue requeues a Task promptly after its last
-	// pending approval notice settled, so the phase work that ran before the
-	// attempt, such as parent history enforcement, runs again.
-	approvalWebhookSettledRequeue = time.Second
 	// approvalWebhookReadRetry paces retries after an event store failure.
 	approvalWebhookReadRetry = 30 * time.Second
 	// approvalExpiryGrace lets the broker, which owns a live review, record
@@ -473,7 +470,7 @@ func approvalExpiryEvent(task *corev1alpha1.Task, listed []store.ExecutionEvent,
 
 // prepareApprovalNotices projects the Task's approval events into notices
 // and records them, with any due expiry, before the Task's phase work. It
-// sends nothing: sendApprovalNotices does that after the phase work, so a
+// sends nothing: sendApprovalNotices does that in the delivery runnable, so a
 // slow receiver never delays the Task. It returns how long to wait before
 // projecting again (zero when nothing is due). An event store failure never
 // blocks the Task: it is logged and retried later, while recorded notices are

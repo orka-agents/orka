@@ -109,3 +109,18 @@ lease.
 - 2026-11-16: [ADR 0053](0053-approval-webhook-events.md) adds opt-in approval
   events through `spec.webhookEvents`, recorded in `status.approvalWebhooks` and
   sent on this delivery path. Terminal notices are unchanged.
+- 2026-11-16: Attempts no longer run in the Task reconcile worker, which every
+  Task shares: a receiver that hung for the 30-second request timeout stalled
+  all Task processing until its attempts ran out. The reconciler now only
+  decides that a notice is due and hands the Task to a leader-elected delivery
+  runnable with a bounded worker pool (`--task-webhook-delivery-workers`,
+  default 8). A worker re-reads the Task uncached and runs the same claim,
+  send and record steps, so the persisted lease, attempt bound, signing,
+  dial-time checks and supersession are unchanged. The work queue never gives
+  one Task to two workers, so a Task's notices still go one attempt at a time.
+  Because the reconciler and other controllers can now write the Task's status
+  while an attempt is in flight, a result write that conflicts is applied again
+  to a fresh read, but only while the record still holds that attempt's claim
+  (same attempt count and lease). The reconciler still holds back parent
+  history enforcement until the terminal notice settles; the runnable's status
+  writes reconcile the Task again.

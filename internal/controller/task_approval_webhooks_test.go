@@ -749,10 +749,11 @@ func TestTaskReconcilerDeliversApprovalNoticesForAFinishedTask(t *testing.T) {
 	h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
 	notifier := newTestWebhookNotifier(t, h.keys, nil)
 	reconciler := &TaskReconciler{Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events, WebhookNotifier: notifier}
+	attachTestWebhookDispatcher(t, reconciler)
 
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 	for range 4 {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1012,7 +1013,7 @@ func TestTaskReconcilerInitializesApprovalTrackingWithStatus(t *testing.T) {
 			h := newApprovalWebhookHarness(t, task)
 			reconciler := &TaskReconciler{Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events}
 			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
-			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+			if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 				t.Fatal(err)
 			}
 			stored := h.task()

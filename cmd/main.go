@@ -351,6 +351,7 @@ func main() {
 	var gatewayTaskPassCredentialsFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
+	var taskWebhookDeliveryWorkers int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -618,6 +619,9 @@ func main() {
 		"Name of the Secret in --task-webhook-signing-namespace that holds the Ed25519 keys signing Task webhook "+
 			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
 			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
+	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
+		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
+			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -970,6 +974,11 @@ func main() {
 		watchNamespace, currentPodNamespace(), acpRuntimeNamespace, agentHostNamespace); err != nil {
 		// The logger is not set up yet, so setupLog would drop this.
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
+		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
+			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
 		os.Exit(1)
 	}
 
@@ -1965,6 +1974,7 @@ func main() {
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
+		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,

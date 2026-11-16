@@ -102,11 +102,12 @@ func TestScheduledRunHistoryKeepsARunUntilItsApprovalNoticesSettle(t *testing.T)
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 	var sent []string
 	for range 6 {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 		sent = sent[:0]
@@ -260,6 +261,7 @@ func approvalHistoryHarness(t *testing.T, run *corev1alpha1.Task) (*approvalWebh
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 	return h, reconciler
 }
 
@@ -269,7 +271,7 @@ func reconcileApprovalHistoryRun(t *testing.T, h *approvalWebhookHarness, reconc
 	t.Helper()
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 	for range rounds {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 		if historyRunPruned(t, h.client, approvalWebhookTestTask) {

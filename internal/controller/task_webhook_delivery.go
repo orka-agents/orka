@@ -13,6 +13,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/taskwait"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,34 +37,17 @@ type taskStatusWriter interface {
 // lease to expire. Receivers deduplicate on the stable delivery ID.
 func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStatusWriter, task *corev1alpha1.Task) (time.Duration, error) {
 	log := logf.FromContext(ctx)
-	if task.Spec.WebhookURL == "" || task.Status.WebhookDelivered {
-		return 0, nil
+	now := w.now()
+	outstanding, wait := terminalNoticeOutstanding(task, now)
+	if !outstanding || wait > 0 {
+		return wait, nil
 	}
 	delivery := task.Status.WebhookDelivery
-	if delivery != nil && delivery.State != corev1alpha1.TaskWebhookDeliveryPending {
-		return 0, nil
-	}
-	now := w.now()
-	// Honor the lease of an in-flight attempt and the backoff of a failed one
-	// before anything else, so newer Task state never accelerates retries.
-	if delivery != nil && delivery.NextAttemptTime != nil && now.Before(delivery.NextAttemptTime.Time) {
-		return delivery.NextAttemptTime.Sub(now), nil
-	}
-
 	eventType, disposition := taskWebhookEvent(task)
-	switch disposition {
-	case webhookNoticeDeferred:
-		// The turn parked and its wait can still resume the work. The wait's
-		// own status transitions reconcile this Task again, so nothing is
-		// written and nothing is requeued.
-		return 0, nil
-	case webhookNoticeContinued:
+	if disposition == webhookNoticeContinued {
 		// The continuation inherited spec.webhookURL and reports the chain's
 		// outcome. A notice recorded before this rule existed is retired
 		// rather than left pending forever.
-		if delivery == nil {
-			return 0, nil
-		}
 		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
 		delivery.NextAttemptTime = nil
 		delivery.LastError = boundedWebhookError(errors.New("the parked turn resumed as a continuation Task, which sends the notice for the chain"))
@@ -96,6 +80,38 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	return w.attemptNotice(ctx, status, task, terminalWebhookRecord, notice, superseded, w.terminalRetry(), func(task *corev1alpha1.Task) {
 		task.Status.WebhookDelivered = true
 	})
+}
+
+// terminalNoticeOutstanding reports whether the Task's terminal notice still
+// needs delivery work and, while the lease of an in-flight attempt or the
+// backoff of a failed one runs, how long until it may be attempted again.
+// reconcileDelivery and the Task reconciler share it, so the reconciler holds
+// back the Task's completion work exactly while delivery has work left.
+func terminalNoticeOutstanding(task *corev1alpha1.Task, now time.Time) (bool, time.Duration) {
+	if task.Spec.WebhookURL == "" || task.Status.WebhookDelivered {
+		return false, 0
+	}
+	delivery := task.Status.WebhookDelivery
+	if delivery != nil && delivery.State != corev1alpha1.TaskWebhookDeliveryPending {
+		return false, 0
+	}
+	// Honor the lease and the backoff before anything else, so newer Task
+	// state never accelerates retries.
+	if delivery != nil && delivery.NextAttemptTime != nil && now.Before(delivery.NextAttemptTime.Time) {
+		return true, delivery.NextAttemptTime.Sub(now)
+	}
+	switch _, disposition := taskWebhookEvent(task); disposition {
+	case webhookNoticeDeferred:
+		// The turn parked and its wait can still resume the work. The wait's
+		// own status transitions reconcile this Task again, so nothing is
+		// written and nothing is requeued.
+		return false, 0
+	case webhookNoticeContinued:
+		// Only a notice recorded before the continuation rule existed is
+		// left to retire.
+		return delivery != nil, 0
+	}
+	return true, 0
 }
 
 // webhookRecordRef returns the live delivery record of one notice in task's
@@ -205,38 +221,94 @@ func (w *WebhookNotifier) attemptNotice(
 
 	result := w.deliver(leaseCtx, task, notice, attempt, keys.Current)
 
-	delivery = record(task)
-	if delivery == nil {
+	requeue := time.Duration(0)
+	var nextAttempt *metav1.Time
+	if result.Err != nil && attempt < retry.maxAttempts {
+		requeue = w.backoffUpTo(attempt, retry.maxBackoff)
+		next := metav1.NewTime(w.now().Add(requeue))
+		nextAttempt = &next
+	}
+	// recordResult applies the result to a record that still holds this
+	// attempt's claim. It reports false when the claim is gone.
+	recordResult := func(task *corev1alpha1.Task) bool {
+		delivery := record(task)
+		if !holdsWebhookAttemptClaim(delivery, attempt, &lease) {
+			return false
+		}
+		delivery.LastStatusCode = result.StatusCode
+		switch {
+		case result.Err == nil:
+			delivery.State = corev1alpha1.TaskWebhookDeliveryDelivered
+			delivery.NextAttemptTime = nil
+			delivery.LastError = ""
+			if delivered != nil {
+				delivered(task)
+			}
+		case nextAttempt == nil:
+			delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
+			delivery.NextAttemptTime = nil
+			delivery.LastError = boundedWebhookError(result.Err)
+		default:
+			delivery.NextAttemptTime = nextAttempt.DeepCopy()
+			delivery.LastError = boundedWebhookError(result.Err)
+		}
+		return true
+	}
+	if !recordResult(task) {
 		// The claim persisted, so its lease still bounds the next attempt.
 		return 0, errors.New("webhook notice record is missing from Task status after its claim")
 	}
-	delivery.LastStatusCode = result.StatusCode
-	requeue := time.Duration(0)
-	if result.Err == nil {
-		delivery.State = corev1alpha1.TaskWebhookDeliveryDelivered
-		delivery.NextAttemptTime = nil
-		delivery.LastError = ""
-		if delivered != nil {
-			delivered(task)
-		}
-	} else {
-		delivery.LastError = boundedWebhookError(result.Err)
-		if attempt >= retry.maxAttempts {
-			delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
-			delivery.NextAttemptTime = nil
-			log.Info("webhook delivery exhausted its attempts", "deliveryID", delivery.DeliveryID, "attempts", attempt, "reason", delivery.LastError)
-		} else {
-			requeue = w.backoffUpTo(attempt, retry.maxBackoff)
-			next := metav1.NewTime(w.now().Add(requeue))
-			delivery.NextAttemptTime = &next
-			log.Info("webhook delivery attempt failed", "deliveryID", delivery.DeliveryID, "attempt", attempt, "retryIn", requeue, "reason", delivery.LastError)
-		}
+	switch {
+	case result.Err == nil:
+	case nextAttempt == nil:
+		log.Info("webhook delivery exhausted its attempts", "deliveryID", notice.DeliveryID, "attempts", attempt, "reason", boundedWebhookError(result.Err))
+	default:
+		log.Info("webhook delivery attempt failed", "deliveryID", notice.DeliveryID, "attempt", attempt, "retryIn", requeue, "reason", boundedWebhookError(result.Err))
 	}
-	if err := status.Update(ctx, task); err != nil {
+	if err := recordWebhookAttemptResult(ctx, status, task, recordResult); err != nil {
 		// The claimed lease still bounds the next attempt.
 		return 0, err
 	}
 	return requeue, nil
+}
+
+// holdsWebhookAttemptClaim reports whether delivery still records the claim
+// of attempt under lease: no result was recorded for it and no later claim
+// replaced it.
+func holdsWebhookAttemptClaim(delivery *corev1alpha1.TaskWebhookDelivery, attempt int32, lease *metav1.Time) bool {
+	return delivery != nil &&
+		delivery.State == corev1alpha1.TaskWebhookDeliveryPending &&
+		delivery.Attempts == attempt &&
+		delivery.NextAttemptTime != nil && delivery.NextAttemptTime.Equal(lease)
+}
+
+// recordWebhookAttemptResult persists an attempt's result, already applied
+// to task. Delivery runs beside the Task reconciler and other controllers
+// that write Task status, so a conflicting write is expected. When the
+// writer can re-read the Task, the result is applied again to the current
+// record, but only while that record still holds this attempt's claim: a
+// claim that was replaced or settled is not this attempt's to record. A
+// result that is never recorded leaves the claim's lease to bound the next
+// attempt, as a crash does.
+func recordWebhookAttemptResult(
+	ctx context.Context,
+	status taskStatusWriter,
+	task *corev1alpha1.Task,
+	recordResult func(*corev1alpha1.Task) bool,
+) error {
+	err := status.Update(ctx, task)
+	rereader, ok := status.(taskStatusRereader)
+	for retries := 0; ok && apierrors.IsConflict(err) && retries < webhookResultRecordRetries; retries++ {
+		if err := rereader.reread(ctx, task); err != nil {
+			return err
+		}
+		if !recordResult(task) {
+			logf.FromContext(ctx).Info("webhook attempt result not recorded: its claim no longer holds")
+			return nil
+		}
+		err = status.Update(ctx, task)
+	}
+	return err
 }
 
 // currentNotice rebuilds the pending notice for the Task's current state. When
