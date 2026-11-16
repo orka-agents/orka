@@ -19,7 +19,7 @@ The current model has three related concepts:
 | **Memory proposal** | A worker- or user-submitted suggestion for memory, policy, workflow, or skill changes | Stored in SQLite as `memory_proposals` for review |
 | **Transcript search** | Compact search over prior session messages | Stored in SQLite session transcript tables |
 
-Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
+Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` or a [consolidation type](#consolidation-proposals) can then be applied explicitly. A `memory` apply creates (or idempotently returns) durable memory linked back to the proposal; a consolidation apply changes the memories it targets.
 
 Both steps record who took them: `reviewer` on the review and `appliedBy` on the apply. The server takes these names from the signed-in identity of the request. A client cannot set them: a request body with a non-empty `reviewer` or `appliedBy` is rejected with `400 Bad Request`, and a request without an identity is refused.
 
@@ -234,7 +234,7 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/ap
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` or a consolidation type can be applied; rejected and archived proposals cannot be applied. A consolidation apply returns the memory a merge or supersede created, or a retire's first target, and returns `409 Conflict` when a target changed since the proposal was written; see [Consolidation proposals](#consolidation-proposals).
 
 ## Safety model
 
