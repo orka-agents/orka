@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2, Inbox } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { to: '/security', label: 'Security', icon: Shield },
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
   { to: '/kanban', label: 'Board', icon: Columns3 },
+  { to: '/approvals', label: 'Approvals', icon: Inbox },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },

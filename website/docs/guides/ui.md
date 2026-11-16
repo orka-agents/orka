@@ -54,14 +54,15 @@ CLI, `orka dashboard` opens the dashboard already signed in.
 
 | Page | Route | What it shows |
 |------|-------|---------------|
-| Dashboard | `/` | Task, session, agent, and tool counts, and recent Tasks |
+| Dashboard | `/` | A **Needs you** card with the top attention items, Task, session, agent, and tool counts, and recent Tasks |
 | Usage | `/usage` | Model usage and tokens per merged pull request by team. See [Usage and PR outcomes](usage-and-pr-outcomes.md) |
 | Chat | `/chat` | The chat orchestrator, with streamed tool calls. See [Interactive chat](chat.md) |
 | Monitors | `/monitors` | Repository monitors: runs, pull request and issue queues, workflow timeline, blocked reasons, implementation jobs, and GitHub mutation audit. See [Repository monitors](repository-monitors.md) |
 | Security | `/security` | Repository scans, threat models, findings, validation, patch proposals, and remediation pull requests. See [Security scanning](repository-security-scanning.md) |
 | Tasks | `/tasks` | Create, monitor, and manage Tasks, with log streaming |
 | Task detail | `/tasks/:taskId` | Overview (current activity, progress, delivery, tokens, derived checks, child tasks), Activity (trace and raw events), Approvals, Result and artifacts, Logs, Spec (the Task resource), and Plan for autonomous runs |
-| Board | `/kanban` | Tasks as a Kanban board by status |
+| Board | `/kanban` | Tasks as a Kanban board. `?view=phase` (the default) groups by status; `?view=attention` groups into **Needs you**, **Agent working**, and **Done** |
+| Approvals | `/approvals` | Every approval in the namespace that can still be decided, including parked sign-offs, soonest deadline first |
 | Gateways | `/gateways` | Gateway readiness, bindings, per-Session queues, event timelines, and delivery attempts. See [Gateways](gateways.md) |
 | Sessions | `/sessions` | Sessions with message counts and token use; each one's transcript and timeline across its Tasks |
 | Runtimes | `/runtimes` | RuntimePool capacity and admission, and external AgentRuntime registrations |
@@ -69,6 +70,36 @@ CLI, `orka dashboard` opens the dashboard already signed in.
 | Tools | `/tools` | Built-in and custom tools, with their parameter schemas |
 | Connectors | `/settings/connectors` | Link your own accounts, such as GitHub, for agents to act as you. See [Connectors](connectors.md) |
 | Login | `/login` | Sign in with a token |
+
+## Needs you
+
+The dashboard card, the attention board and the approvals inbox read the
+namespace's attention view (`GET /api/v1/attention`) and approvals inbox
+(`GET /api/v1/approvals?status=pending`). See
+[Find pending approvals across Tasks](human-approval-v2.md#find-pending-approvals-across-tasks)
+for what each item holds and who can see it.
+
+- **Needs you** lists, in order: approvals that can still be decided (soonest
+  deadline first), Tasks with an unknown outcome, failed Tasks from the last
+  24 hours, Tasks whose Pod cannot start, and blocked repository monitor
+  actions when your token may list monitors.
+- **Agent working** holds Pending, Scheduled, Running, and Finalizing Tasks,
+  Tasks waiting for runtime or workspace capacity, and Tasks parked on child
+  Tasks or a timer.
+- **Done** holds every other Task.
+
+A Task parked on a sign-off has ended its turn, so its phase is Succeeded,
+but it shows **Waiting for approval** everywhere until the sign-off is
+decided.
+
+Items show only a short summary. The inbox shows **Review to approve** only
+when the server reports that you may approve; it opens the Task's
+**Approvals** tab, so you inspect the exact operation before approving there.
+**Decline** appears only when you may decline and posts the decision for the
+exact Task the inbox listed. If someone else decided first, the row says
+**Already decided**. When neither hint is settled, the row links to the Task
+instead. When a scan bound was hit, each view says the list may be
+incomplete.
 
 ## Execution events
 

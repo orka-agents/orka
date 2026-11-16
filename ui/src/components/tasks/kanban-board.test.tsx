@@ -268,4 +268,64 @@ describe('KanbanBoard', () => {
     render(<KanbanBoard />)
     expect(await screen.findByText('Column counts use 20 loaded tasks in resource-key order. More tasks exist.')).toBeInTheDocument()
   })
+
+  it('attention view groups Tasks into Needs you, Agent working and Done', async () => {
+    const now = new Date().toISOString()
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            { metadata: { name: 'needs-approval', namespace: 'default', uid: 'u-approval', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Running' } },
+            { metadata: { name: 'busy', namespace: 'default', uid: 'u-busy', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Running' } },
+            { metadata: { name: 'capacity', namespace: 'default', uid: 'u-cap', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Pending', conditions: [{ type: 'WaitingForCapacity', status: 'True' }] } },
+            { metadata: { name: 'timer', namespace: 'default', uid: 'u-timer', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Waiting' } } },
+            { metadata: { name: 'finished', namespace: 'default', uid: 'u-done', creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Succeeded' } },
+          ],
+          metadata: {},
+        }),
+      ),
+      http.get('/api/v1/attention', () =>
+        HttpResponse.json({
+          namespace: 'default', generatedAt: now, total: 1, counts: { approval: 1 }, incomplete: false,
+          sources: { approvals: 'included', monitors: 'included' }, metadata: {},
+          items: [{
+            id: 'approval:u-approval:ap', kind: 'approval', rank: 1, since: now, summary: 'Approval requested for github',
+            task: { namespace: 'default', name: 'needs-approval', uid: 'u-approval', phase: 'Running' },
+            approval: { id: 'ap', source: 'brokered', targetTool: 'github', canApprove: true, canDecline: true },
+          }],
+        }),
+      ),
+    )
+    render(<KanbanBoard view="attention" />)
+    const needsYou = await screen.findByRole('region', { name: 'Needs you' })
+    await waitFor(() => expect(needsYou).toHaveTextContent('Approval requested for github'))
+    const working = screen.getByRole('region', { name: 'Agent working' })
+    const done = screen.getByRole('region', { name: 'Done' })
+    await waitFor(() => expect(working).toHaveTextContent('busy'))
+    expect(working).toHaveTextContent('capacity')
+    expect(working).toHaveTextContent('timer')
+    expect(working).not.toHaveTextContent('needs-approval')
+    expect(done).toHaveTextContent('finished')
+    expect(done).not.toHaveTextContent('needs-approval')
+  })
+
+  it('attention view says when the ranking is incomplete', async () => {
+    server.use(
+      http.get('/api/v1/attention', () =>
+        HttpResponse.json({
+          namespace: 'default', generatedAt: new Date().toISOString(), total: 0, counts: {}, incomplete: true,
+          incompleteReasons: ['approvalCandidateLimit'], sources: { approvals: 'included', monitors: 'forbidden' }, metadata: {}, items: [],
+        }),
+      ),
+    )
+    render(<KanbanBoard view="attention" />)
+    expect(await screen.findByText(/may be incomplete: too many Tasks were waiting for approval/)).toBeInTheDocument()
+  })
+
+  it('offers both board views', async () => {
+    render(<KanbanBoard view="phase" />)
+    const nav = screen.getByRole('navigation', { name: 'Board view' })
+    expect(nav).toHaveTextContent('Needs you')
+    expect(nav).toHaveTextContent('By phase')
+  })
 })
