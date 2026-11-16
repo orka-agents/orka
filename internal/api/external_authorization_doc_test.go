@@ -154,8 +154,8 @@ var apiAuthorizationDocNamespaceCodes = map[apiNamespaceSource]string{
 // apiAuthorizationDocRowProblems compares a table row's structured columns
 // with its route policy: the first permission fills the group, resource, verb,
 // name, and namespace columns, and every further permission must be named in
-// the additional-checks column by its verb and resource. Rows that defer to
-// another row ("Same ...") are checked through that row.
+// the additional-checks column by its verb and resource, so a row may not
+// defer its permissions to another row.
 func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRoutePolicy) []string {
 	var problems []string
 	check := func(column, got, want string) {
@@ -193,9 +193,6 @@ func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRouteP
 		check("namespace", row.namespace, code)
 	} else {
 		problems = append(problems, fmt.Sprintf("namespace source %d has no documented code", policy.namespace))
-	}
-	if strings.HasPrefix(row.additional, "Same ") {
-		return problems
 	}
 	for _, extra := range policy.permissions[1:] {
 		if !strings.Contains(row.additional, "`"+extra.verb+"`") ||
