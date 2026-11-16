@@ -650,6 +650,48 @@ func TestAttentionContextTokenAuthorization(t *testing.T) {
 	require.True(t, *response.Items[0].Approval.CanDecline)
 }
 
+// A caller that may list Tasks but not read them gets no approval detail,
+// and sources.approvals says the approval coverage is partial.
+func TestAttentionReportsPartialApprovalCoverage(t *testing.T) {
+	failed := attentionTask("failed", string(corev1alpha1.TaskPhaseFailed))
+	failed.Status.CompletionTime = &metav1.Time{Time: time.Now().Add(-time.Minute)}
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	f := newAttentionFixture(t, []client.Object{failed, attentionWaitingTask("waiting")}, func(cfg *HandlersConfig) {
+		cfg.ContextTokenAuthorization = authz
+	})
+	f.appendApproval("waiting", map[string]any{"approvalID": "waiting-approval", "action": "write"})
+	f.user = &UserInfo{AuthType: AuthTypeContextToken, Issuer: "https://tts.example", Subject: "agent", ContextToken: &ContextToken{
+		Scopes: []string{ContextTokenScopeTaskList}, TransactionContext: map[string]any{"namespace": "default"},
+	}}
+
+	response := f.list("/api/v1/attention?namespace=default")
+	require.Equal(t, attentionSourcePartial, response.Sources.Approvals)
+	require.Equal(t, []string{"failed/failed"}, attentionKinds(response.Items), "non-approval items are still returned")
+	for _, item := range response.Items {
+		require.Nil(t, item.Approval)
+	}
+	require.False(t, response.Incomplete, "an authorization skip is not a scan bound")
+	require.Empty(t, f.events.readStreams(), "an unreadable Task's approval history is never read")
+
+	_, body := f.get("/api/v1/attention?namespace=default")
+	require.NotContains(t, body, "waiting-approval")
+
+	inbox := f.list("/api/v1/approvals?namespace=default")
+	require.Equal(t, attentionSourcePartial, inbox.Sources.Approvals)
+	require.Empty(t, inbox.Items)
+
+	f.user.ContextToken.Scopes = append(f.user.ContextToken.Scopes, ContextTokenScopeTaskGet)
+	response = f.list("/api/v1/attention?namespace=default")
+	require.Equal(t, attentionSourceIncluded, response.Sources.Approvals)
+	require.Equal(t, []string{"approval/waiting", "failed/failed"}, attentionKinds(response.Items))
+
+	f.user.ContextToken.Scopes = []string{ContextTokenScopeTaskList}
+	f.h.executionEventStore = nil
+	response = f.list("/api/v1/attention?namespace=default")
+	require.Equal(t, attentionSourceUnavailable, response.Sources.Approvals, "unavailable takes precedence over partial")
+}
+
 func TestAttentionGatewayOwnedTasks(t *testing.T) {
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "ns-uid"}}
 	gateway := &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "chat", UID: "gw-uid"}}

@@ -60,9 +60,10 @@ const (
 	AttentionApprovalSourceWorker   = "worker"
 )
 
-// Monitor source states reported in AttentionSources.
+// Source states reported in AttentionSources.
 const (
 	attentionSourceIncluded    = "included"
+	attentionSourcePartial     = "partial"
 	attentionSourceForbidden   = "forbidden"
 	attentionSourceUnavailable = "unavailable"
 	attentionSourceNotRequired = "notRequested"
@@ -160,8 +161,13 @@ type AttentionResponse struct {
 
 // AttentionSources reports whether optional sources were included.
 type AttentionSources struct {
-	// Approvals is included, or unavailable when execution event storage is
-	// not enabled and no approval can be read.
+	// Approvals is included; partial when at least one Task that may be
+	// waiting for approval was skipped because the caller may not read its
+	// approvals (a context token without a Task read scope or outside the
+	// token's Task identity), so an empty approval list does not mean none is
+	// pending; or unavailable when execution event storage is not enabled and
+	// no approval can be read. Unavailable takes precedence over partial.
+	// Scan bounds do not set partial; they are reported in IncompleteReasons.
 	Approvals string `json:"approvals"`
 	// Monitors is included, forbidden (the caller may not list
 	// repositorymonitors and monitorworkactions), unavailable (no monitor
@@ -299,6 +305,9 @@ type attentionScan struct {
 	incomplete map[string]bool
 	monitors   string
 	approvals  string
+	// approvalsSkipped records that an approval candidate was left out
+	// because the caller may not read its approvals.
+	approvalsSkipped bool
 }
 
 func (s *attentionScan) markIncomplete(reason string) {
@@ -533,6 +542,7 @@ func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionReques
 				return nil, err
 			}
 			if !readable {
+				scan.approvalsSkipped = true
 				continue
 			}
 			if approvalCandidates >= limits.ApprovalCandidates {
@@ -562,6 +572,9 @@ func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionReques
 		if continueToken == "" || scan.incomplete[attentionIncompleteTaskScanLimit] {
 			break
 		}
+	}
+	if scan.approvalsSkipped && scan.approvals == attentionSourceIncluded {
+		scan.approvals = attentionSourcePartial
 	}
 	if req.scope == attentionScopeAttention {
 		if err := h.scanAttentionMonitors(c, req, scan); err != nil {

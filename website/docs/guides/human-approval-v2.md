@@ -152,7 +152,12 @@ the `since` window. Scans are bounded; when a bound is hit the response sets
 `incomplete: true` and names it in `incompleteReasons`, and the ranking must
 not be read as complete. `sources.approvals` and `sources.monitors` report
 whether approval history and monitor items were included, unavailable, or
-forbidden to the caller. See the
+forbidden to the caller. `sources.approvals` is `partial` when the caller may
+list a Task that reports a pending approval but may not read that Task's
+approvals, for example a context token with `orka:tasks:list` but not
+`orka:tasks:get`. Those approvals are left out without detail, so an empty
+inbox does not mean nothing is pending. `unavailable` takes precedence over
+`partial`; scan bounds are reported in `incompleteReasons` instead. See the
 [authorization reference](../reference/api-authorization.md#route-permissions).
 
 ## Waiting and cancellation
