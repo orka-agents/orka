@@ -1313,8 +1313,14 @@ func (t *ahpTurn) nameStillOwned(namespace, name string) bool {
 	}
 	current := &corev1alpha1.Task{}
 	err := t.b.h.uncachedReader().Get(t.ctx, types.NamespacedName{Namespace: namespace, Name: name}, current)
-	if err != nil {
+	if apierrors.IsNotFound(err) {
+		// No Task holds the name: none took it to write the result.
 		return true
+	}
+	if err != nil {
+		// Unverified, the result may be another Task's: it is not shown.
+		log.Info("check an AHP turn's Task before showing its result", "namespace", namespace, "task", name, "reason", err.Error())
+		return false
 	}
 	return string(current.UID) == uid
 }

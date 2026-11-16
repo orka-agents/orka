@@ -771,6 +771,15 @@ func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "the turn's answer", string(data))
 
+	// When the Task cannot be read to confirm it, the result is not shown.
+	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("the API server timed out")
+		}})
+	_, err = read()
+	require.ErrorIs(t, err, store.ErrNotFound, "an unconfirmed result is withheld")
+	env.backend.h.apiReader = nil
+
 	require.NoError(t, env.kube.Delete(ctx, task))
 	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
 		Spec: task.Spec}
