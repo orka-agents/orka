@@ -618,3 +618,53 @@ func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *tes
 		})
 	}
 }
+
+// A consolidation run's Task result is only its structure; its full report
+// quotes the Sessions and memories it read, so reading it needs what
+// reading those needs.
+func TestExternalAPIMemoryConsolidationReportRequiresTheRunsInputs(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default", UID: "consolidate-uid"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "model",
+			MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	require.NoError(t, f.kube.Create(t.Context(), task))
+	at := time.Now().UTC()
+	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+		TaskUID: string(task.UID), TaskName: task.Name, Mode: "DryRun", Status: store.MemoryConsolidationRunning,
+		WindowStart: at.Add(-time.Hour), WindowEnd: at, CreatedAt: at}))
+	_, err := f.store.CompleteMemoryConsolidationRun(t.Context(), store.MemoryConsolidationCompletion{Namespace: "default",
+		TaskUID: string(task.UID), Status: store.MemoryConsolidationCompleted, CompletedAt: at,
+		Report: []byte(`{"status":"completed","summary":"transcript-derived-text"}`)})
+	require.NoError(t, err)
+
+	readTask := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "get", Name: "consolidate"}
+	inputs := []authorizationv1.ResourceAttributes{
+		{Namespace: "default", Group: "core.orka.ai", Resource: "sessions", Verb: "list"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "sessions", Verb: "get"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "list"},
+	}
+	const path = "/api/v1/tasks/consolidate/memory-consolidation-report?namespace=default"
+	f.allowOnly(t, readTask)
+	status, body := f.request(t, http.MethodGet, path, "")
+	require.Equal(t, http.StatusForbidden, status, body)
+	require.NotContains(t, body, "transcript-derived-text")
+	for skipped := range inputs {
+		grants := []authorizationv1.ResourceAttributes{readTask}
+		for i, input := range inputs {
+			if i != skipped {
+				grants = append(grants, input)
+			}
+		}
+		f.allowOnly(t, grants...)
+		status, body = f.request(t, http.MethodGet, path, "")
+		require.Equal(t, http.StatusForbidden, status, "without %s %s: %s", inputs[skipped].Verb, inputs[skipped].Resource, body)
+	}
+	f.allowOnly(t, append([]authorizationv1.ResourceAttributes{readTask}, inputs...)...)
+	status, body = f.request(t, http.MethodGet, path, "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "transcript-derived-text")
+
+	f.allowAll()
+	status, body = f.request(t, http.MethodGet, "/api/v1/tasks/protected/memory-consolidation-report?namespace=default", "")
+	require.Equal(t, http.StatusNotFound, status, "a Task that is not a run has no report: %s", body)
+}

@@ -315,9 +315,9 @@ the observable parts.
   consolidation runs and creates a run's proposals with its report. Its
   begin, complete, get and session-list methods check a Task data fence;
   begin refuses a window whose mode's cursor has since moved; and the
-  controller releases the run of a Task that ended or was deleted, which
-  abandons an unfinished run, clears its transcripts and report, and
-  removes the runs no cursor needs.
+  controller releases the run of a Task that ended, which abandons an
+  unfinished run and clears its transcripts, and, once the Task is
+  deleted, clears its report and removes the runs no cursor needs.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

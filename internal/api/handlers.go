@@ -117,6 +117,7 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
+	memoryConsolidationStore  store.MemoryConsolidationStore
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
@@ -153,14 +154,16 @@ type HandlersConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	Connectors                ConnectorConfig
-	SubstrateMCPProxy         SubstrateMCPProxyConfig
+	// MemoryConsolidationStore serves memory consolidation run reports.
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	Connectors               ConnectorConfig
+	SubstrateMCPProxy        SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -186,6 +189,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		artifactStore:             cfg.ArtifactStore,
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
+		memoryConsolidationStore:  cfg.MemoryConsolidationStore,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,

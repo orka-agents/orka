@@ -189,7 +189,7 @@ func init() {
 					TaskUID: "uid-catalog", TaskName: "run", Mode: "DryRun", Status: storagev1.MemoryConsolidationRunning,
 					WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour), Input: []byte(`{}`), CreatedAt: writeCaseCreated}))
 			},
-			args:    fixed(memoryTenant, "uid-catalog"),
+			args:    fixed(memoryTenant, "uid-catalog", true),
 			observe: observeMemoryConsolidationRun,
 		},
 		usageCase{

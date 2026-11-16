@@ -98,13 +98,14 @@ const (
 //     proposals. A finished or abandoned run is returned unchanged and
 //     creates nothing. It returns the stored run.
 //   - ReleaseMemoryConsolidationRun releases the run of a namespace and
-//     TaskUID whose Task ended or is being deleted: a running run becomes
-//     MemoryConsolidationAbandoned, and every run's Input and Report are
-//     cleared. A run the namespace's cursors no longer need is removed, as is
-//     any earlier released run in its mode that a later completed run
-//     supersedes, so released runs keep no transcripts or reports and do not
-//     accumulate; neither mode's cursor moves. A missing run is left alone.
-//     It requires a namespace and a TaskUID.
+//     TaskUID whose Task ended: a running run becomes
+//     MemoryConsolidationAbandoned, and the run's Input is cleared, so it
+//     keeps no transcripts. With deleted, for a Task being deleted, its
+//     Report is cleared too, and a run the namespace's cursors no longer
+//     need is removed, as is any earlier deleted run in its mode that a later
+//     completed run supersedes, so runs do not accumulate with Task history.
+//     Neither mode's cursor moves. A missing run is left alone. It requires a
+//     namespace and a TaskUID.
 //   - GetMemoryConsolidationRun returns the run of a namespace and TaskUID,
 //     or ErrNotFound.
 //   - ListMemoryConsolidationSessions returns the namespace's chat and task
@@ -127,7 +128,7 @@ const (
 type MemoryConsolidationStore interface {
 	BeginMemoryConsolidationRun(ctx context.Context, run *MemoryConsolidationRun) error
 	CompleteMemoryConsolidationRun(ctx context.Context, completion MemoryConsolidationCompletion) (*MemoryConsolidationRun, error)
-	ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error
+	ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string, deleted bool) error
 	GetMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) (*MemoryConsolidationRun, error)
 	GetMemoryConsolidationCursor(ctx context.Context, namespace, mode string) (*time.Time, error)
 	ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]SessionMetadata, int, error)

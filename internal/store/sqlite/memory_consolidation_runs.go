@@ -209,11 +209,11 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	return completed, nil
 }
 
-// ReleaseMemoryConsolidationRun releases the run of a Task that ended or is
-// being deleted: it clears the run's input and report, removes the run when
-// no cursor needs it, and removes earlier released runs a later completed run
-// supersedes.
-func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error {
+// ReleaseMemoryConsolidationRun releases the run of a Task that ended: it
+// abandons an unfinished run and clears its input. For a deleted Task it also
+// clears the report, removes the run when no cursor needs it, and removes
+// earlier deleted runs a later completed run supersedes.
+func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string, deleted bool) error {
 	return writeOperationErr(ctx, s, "ReleaseMemoryConsolidationRun", func(ctx context.Context) error {
 		if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
 			return store.ValidationErrorf("namespace and Task UID are required")
@@ -223,7 +223,7 @@ func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, ta
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if err := releaseMemoryConsolidationRun(ctx, tx, namespace, taskUID); err != nil {
+		if err := releaseMemoryConsolidationRun(ctx, tx, namespace, taskUID, deleted); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -245,7 +245,7 @@ const (
 		AND (n.window_start < r.window_start OR (n.window_start = r.window_start AND n.task_uid < r.task_uid))))`
 )
 
-func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, taskUID string) error {
+func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, taskUID string, deleted bool) error {
 	var mode string
 	err := tx.QueryRowContext(ctx, `SELECT mode FROM memory_consolidation_runs WHERE namespace = ? AND task_uid = ?`,
 		namespace, taskUID).Scan(&mode)
@@ -257,10 +257,14 @@ func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, 
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_consolidation_runs
-		 SET status = CASE WHEN status = ? THEN ? ELSE status END, input = NULL, report = NULL
+		 SET status = CASE WHEN status = ? THEN ? ELSE status END, input = NULL,
+		     report = CASE WHEN ? THEN NULL ELSE report END
 		 WHERE namespace = ? AND task_uid = ?`,
-		store.MemoryConsolidationRunning, store.MemoryConsolidationAbandoned, namespace, taskUID); err != nil {
+		store.MemoryConsolidationRunning, store.MemoryConsolidationAbandoned, deleted, namespace, taskUID); err != nil {
 		return err
+	}
+	if !deleted {
+		return nil
 	}
 	// This run goes when no cursor needs it.
 	if _, err := tx.ExecContext(ctx,
@@ -270,9 +274,10 @@ func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, 
 		namespace, taskUID); err != nil {
 		return err
 	}
-	// An earlier released completed run kept as its mode's cursor goes once
-	// a later completed run supersedes it. A completed run that still has its
-	// report was not released, so its Task may still read it.
+	// An earlier deleted completed run kept as its mode's cursor goes once a
+	// later completed run supersedes it. A completed run that still has its
+	// report belongs to a Task that was not deleted, whose report is still
+	// served.
 	_, err = tx.ExecContext(ctx,
 		`DELETE FROM memory_consolidation_runs AS r
 		 WHERE r.namespace = ? AND r.mode = ? AND r.status = 'completed' AND r.report IS NULL AND `+supersededCompletedRunSQL,

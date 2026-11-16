@@ -108,6 +108,10 @@ func SettingsFor(spec *corev1alpha1.MemoryConsolidationSpec) Settings {
 	return settings
 }
 
+// WindowCommitGrace is how long before a run begins its window ends: far
+// longer than any Session write takes to commit after it is stamped.
+const WindowCommitGrace = time.Minute
+
 // Window returns the Sessions a run reads: those changed after start and no
 // later than end. A namespace's first run in a mode starts the lookback
 // before now. A later run starts at the mode's cursor: where the latest
@@ -115,12 +119,13 @@ func SettingsFor(spec *corev1alpha1.MemoryConsolidationSpec) Settings {
 // started, so a skipped run's Sessions are read again. A cursor is never
 // followed further back than MaxLookback.
 //
-// The window ends on a whole second, one before now: the store stamps some
-// Session changes with whole-second times, so a change stored at or before
-// the end happened before the run read the store, and any later one falls
-// in the next window rather than between the two.
+// The window ends on a whole second, WindowCommitGrace before now. The store
+// stamps some Session changes with whole-second times, and a change is
+// stamped before its transaction commits, so a change stamped at or before
+// the end has committed before the run reads, and any later one falls in the
+// next window rather than between the two.
 func Window(cursor *time.Time, now time.Time, lookback time.Duration) (start, end time.Time) {
-	end = now.UTC().Truncate(time.Second).Add(-time.Second)
+	end = now.UTC().Truncate(time.Second).Add(-WindowCommitGrace)
 	if cursor == nil {
 		return end.Add(-lookback), end
 	}
@@ -223,6 +228,10 @@ type Report struct {
 	// Abridged reports that detail was dropped to fit the report's size
 	// limit; see Report.Encode.
 	Abridged bool `json:"abridged,omitempty"`
+	// Structural reports that the report holds only its structure; see
+	// Report.Structure. The full report is served to callers who may read
+	// the run's inputs.
+	Structural bool `json:"structural,omitempty"`
 }
 
 // BeginResponse is the internal API's answer to a run that begins. Input is

@@ -56,10 +56,10 @@ func (s *movedCursorStore) BeginMemoryConsolidationRun(ctx context.Context, run 
 func newConsolidationFixtureWith(t *testing.T, consolidation *corev1alpha1.MemoryConsolidationSpec,
 	wrap func(store.MemoryConsolidationStore) store.MemoryConsolidationStore) consolidationFixture {
 	t.Helper()
-	// A run's window ends a second before now; begin as if a few seconds
+	// A run's window ends a commit grace before now; begin as if that long
 	// passed after the test wrote its Sessions.
 	previous := memoryConsolidationNow
-	memoryConsolidationNow = func() time.Time { return time.Now().Add(5 * time.Second) }
+	memoryConsolidationNow = func() time.Time { return time.Now().Add(memoryconsolidation.WindowCommitGrace + 5*time.Second) }
 	t.Cleanup(func() { memoryConsolidationNow = previous })
 	scheme := internalCallerAuthScheme(t)
 	task := internalCallerAuthTask()
@@ -142,6 +142,9 @@ func TestMemoryConsolidationRunProposesValidatedOperations(t *testing.T) {
 	var report memoryconsolidation.Report
 	require.Equal(t, http.StatusOK, f.post(t, "complete", submission, &report))
 	require.Equal(t, memoryconsolidation.StatusCompleted, report.Status)
+	require.True(t, report.Structural, "the worker records only the structure as the Task result")
+	require.Empty(t, report.Summary)
+	require.Empty(t, report.Operations[0].Content)
 	require.Len(t, report.Operations, 1)
 	require.Len(t, report.Rejected, 1)
 	require.Len(t, report.ProposalIDs, 1)
@@ -248,7 +251,7 @@ func TestMemoryConsolidationValidatesAgainstWhatTheRunRead(t *testing.T) {
 	require.Len(t, report.Operations, 1, "evidence the run read stays valid after its Session changes")
 	require.Len(t, report.Rejected, 2)
 	require.Contains(t, report.Rejected[0].Reason, "changed since the run read it")
-	require.Contains(t, report.Rejected[1].Reason, `message "session-0-later" is not one the run read`)
+	require.Equal(t, "a source message is not one the run read in its Session", report.Rejected[1].Reason)
 }
 
 func TestMemoryConsolidationAbandonedRunCannotResumeOrComplete(t *testing.T) {
@@ -258,7 +261,7 @@ func TestMemoryConsolidationAbandonedRunCannotResumeOrComplete(t *testing.T) {
 	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
 	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
 	require.NoError(t, err)
-	successor := time.Now().UTC().Add(store.MemoryConsolidationRunLease + time.Minute)
+	successor := run.CreatedAt.Add(store.MemoryConsolidationRunLease + time.Minute)
 	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
 		TaskUID: "successor", TaskName: "successor", Mode: "Propose", Status: store.MemoryConsolidationRunning,
 		WindowStart: run.WindowStart, WindowEnd: successor, CreatedAt: successor}))

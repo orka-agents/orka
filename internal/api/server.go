@@ -206,6 +206,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -453,6 +454,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.GetTaskMemoryConsolidationReport)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)

@@ -974,9 +974,9 @@ func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 storag
 	})
 }
 
-func (p envelopedState) ReleaseMemoryConsolidationRun(ctx context.Context, a1 string, a2 string) error {
-	return p.ops.run(ctx, writeCall{method: "ReleaseMemoryConsolidationRun", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
-		return p.StateProvider.ReleaseMemoryConsolidationRun(ctx, a1, a2)
+func (p envelopedState) ReleaseMemoryConsolidationRun(ctx context.Context, a1 string, a2 string, a3 bool) error {
+	return p.ops.run(ctx, writeCall{method: "ReleaseMemoryConsolidationRun", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.ReleaseMemoryConsolidationRun(ctx, a1, a2, a3)
 	})
 }
 

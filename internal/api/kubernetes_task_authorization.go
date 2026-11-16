@@ -225,11 +225,15 @@ func isWorkerServiceAccount(userInfo *UserInfo) bool {
 	return slices.Contains(workerServiceAccountNames, name)
 }
 
+// memoriesResource is the Kubernetes resource name of durable memories.
+const memoriesResource = "memories"
+
 // authorizeTaskMemoryConsolidation checks, as the original caller, the grants
-// a memory consolidation run needs: it reads every user's Sessions, and in
-// Propose mode creates memory proposals. The API creates Tasks with its own
-// identity, so the admission policy alone would check the controller rather
-// than the caller. It fails closed for any caller it cannot review.
+// a memory consolidation run needs: it reads every user's Sessions and the
+// namespace's memories, and in Propose mode creates memory proposals. The API
+// creates Tasks with its own identity, so the admission policy alone would
+// check the controller rather than the caller. It fails closed for any caller
+// it cannot review.
 func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
 	if task == nil || task.Spec.AI == nil || task.Spec.AI.MemoryConsolidation == nil {
 		return nil
@@ -247,7 +251,7 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 	checks := []authorizationv1.ResourceAttributes{
 		{Verb: apiObjectList, Resource: usageSessionResource},
 		{Verb: gatewayVerbGet, Resource: usageSessionResource},
-		{Verb: apiObjectList, Resource: "memories"},
+		{Verb: apiObjectList, Resource: memoriesResource},
 	}
 	if task.Spec.AI.MemoryConsolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
 		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: "memoryproposals"})

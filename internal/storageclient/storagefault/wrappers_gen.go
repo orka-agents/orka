@@ -2550,9 +2550,9 @@ func (p *stateProvider) ReleaseLockWithTokenUsage(ctx context.Context, a1 storag
 	return err
 }
 
-func (p *stateProvider) ReleaseMemoryConsolidationRun(ctx context.Context, a1 string, a2 string) error {
+func (p *stateProvider) ReleaseMemoryConsolidationRun(ctx context.Context, a1 string, a2 string, a3 bool) error {
 	_, err := p.injector.call(ctx, p.contract, "ReleaseMemoryConsolidationRun", func(ctx context.Context) error {
-		return p.inner.ReleaseMemoryConsolidationRun(ctx, a1, a2)
+		return p.inner.ReleaseMemoryConsolidationRun(ctx, a1, a2, a3)
 	})
 	return err
 }

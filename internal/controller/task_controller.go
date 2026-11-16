@@ -854,7 +854,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
-		if err := r.releaseMemoryConsolidationRun(ctx, task); err != nil {
+		if err := r.releaseMemoryConsolidationRun(ctx, task, true); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.ResultStore != nil {
@@ -2961,7 +2961,7 @@ func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1al
 // Job cleanup included, then cancels what it delegated, and requeues it soon
 // while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
-	if err := r.releaseMemoryConsolidationRun(ctx, task); err != nil {
+	if err := r.releaseMemoryConsolidationRun(ctx, task, false); err != nil {
 		return ctrl.Result{}, err
 	}
 	result, err := r.handleCompleted(ctx, task)
@@ -2973,11 +2973,11 @@ func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *c
 }
 
 // releaseMemoryConsolidationRun releases the run of a memory consolidation
-// Task that ended or is being deleted. A run it did not finish is abandoned,
-// and every run's recorded transcripts and report are cleared; the store
-// removes runs no cursor needs, so a recurring run's history does not grow
-// the store. Releasing again is a no-op.
-func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task) error {
+// Task that ended, abandoning a run it did not finish and clearing the
+// transcripts the run recorded. For a Task being deleted it also clears the
+// run's report and lets the store remove runs no cursor needs, so a recurring
+// run's history does not grow the store. Releasing again is a no-op.
+func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task, deleted bool) error {
 	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
 		return nil
 	}
@@ -2985,7 +2985,7 @@ func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task
 	if !ok {
 		return nil
 	}
-	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID)); err != nil {
+	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID), deleted); err != nil {
 		return fmt.Errorf("release memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
 	}
 	return nil

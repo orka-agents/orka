@@ -188,7 +188,9 @@ func (h *InternalHandlers) CompleteMemoryConsolidation(c fiber.Ctx) error {
 	}); err != nil {
 		return err
 	}
-	return c.JSON(report)
+	// The worker records the report as the Task result: see
+	// finishedMemoryConsolidation.
+	return c.JSON(report.Structure())
 }
 
 func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Context, namespace string, task *corev1alpha1.Task,
@@ -295,7 +297,10 @@ func finishedMemoryConsolidation(settings memoryconsolidation.Settings, run *sto
 	if err != nil {
 		return memoryconsolidation.BeginResponse{}, err
 	}
-	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Report: report}, nil
+	// The worker records what it is given as the Task result, which anyone
+	// who can read the Task can read, so it gets only the structure.
+	structure := report.Structure()
+	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Report: &structure}, nil
 }
 
 func decodeMemoryConsolidationReport(run *store.MemoryConsolidationRun) (*memoryconsolidation.Report, error) {

@@ -33,8 +33,8 @@ func TestSettingsForAppliesDefaultsAndBounds(t *testing.T) {
 func TestWindowStartsAtTheCursorButNeverBeforeMaxLookback(t *testing.T) {
 	now := time.Date(2026, 11, 16, 3, 0, 1, 500_000_000, time.UTC)
 	start, end := Window(nil, now, 24*time.Hour)
-	require.Equal(t, time.Date(2026, 11, 16, 3, 0, 0, 0, time.UTC), end,
-		"the window ends on a whole second before now, as whole-second Session stamps need")
+	require.Equal(t, time.Date(2026, 11, 16, 2, 59, 1, 0, time.UTC), end,
+		"the window ends on a whole second, a commit grace before now, as whole-second Session stamps need")
 	require.Equal(t, end.Add(-24*time.Hour), start, "the first run reads the lookback")
 	ahead := now.Add(time.Hour)
 	start, _ = Window(&ahead, now, 24*time.Hour)
@@ -189,8 +189,8 @@ func TestValidateKeepsOnlyOperationsThatMatchTheInput(t *testing.T) {
 	require.Contains(t, reasons[3], "already changed by an earlier operation")
 	require.Contains(t, reasons[4], "generation 1, not 2")
 	require.Contains(t, reasons[5], "not one the run read")
-	require.Contains(t, reasons[6], "Session \"unread\" is not one the run read")
-	require.Contains(t, reasons[7], "message \"m9\"")
+	require.Equal(t, "a source Session is not one the run read", reasons[6], "a reason never echoes what the model named")
+	require.Equal(t, "a source message is not one the run read in its Session", reasons[7])
 	require.Contains(t, reasons[8], "targets 2 to")
 	require.Contains(t, reasons[9], "longer than")
 	require.Contains(t, reasons[10], "unknown operation type")
@@ -330,4 +330,28 @@ func TestCollectInputsKeepsTheNewestTurnsUnderTheBudget(t *testing.T) {
 	require.Len(t, messages, MaxTranscriptInputChars/MaxMessageChars)
 	require.Equal(t, "m-39", messages[len(messages)-1].ID, "the newest turn is kept")
 	require.Equal(t, fmt.Sprintf("m-%02d", 40-len(messages)), messages[0].ID, "older turns are dropped, and order is kept")
+}
+
+func TestReportStructureKeepsNoTextAModelWroteOrARunRead(t *testing.T) {
+	const secret = "transcript-derived-secret"
+	report := Report{Status: StatusCompleted, Memories: 3, Summary: secret,
+		Operations: []Operation{{Type: OperationMerge, Title: secret, Content: secret, Reason: secret, Tags: []string{secret},
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}},
+			Sources: []store.MemoryProposalSource{{SessionName: "s", MessageID: "m"}}}},
+		Rejected:    []Rejection{{Index: 1, Type: secret, Title: secret, Reason: "unknown operation type"}, {Index: 2, Type: OperationRetire, Reason: "a target memory is not one the run read"}},
+		Conflicts:   []Conflict{{MemoryIDs: []string{"mem-a"}, Note: secret}},
+		ProposalIDs: []string{"mprop-1"}}
+	structure := report.Structure()
+	encoded, err := json.Marshal(structure)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), secret)
+	require.True(t, structure.Structural)
+	require.Equal(t, OperationMerge, structure.Operations[0].Type)
+	require.Len(t, structure.Operations[0].Targets, 2)
+	require.Equal(t, []string{"mprop-1"}, structure.ProposalIDs)
+	require.Equal(t, "", structure.Rejected[0].Type, "a type the model made up is dropped")
+	require.Equal(t, OperationRetire, structure.Rejected[1].Type)
+	require.Equal(t, "a target memory is not one the run read", structure.Rejected[1].Reason)
+	require.Equal(t, []string{"mem-a"}, structure.Conflicts[0].MemoryIDs)
+	require.Equal(t, secret, report.Summary, "the full report is unchanged")
 }

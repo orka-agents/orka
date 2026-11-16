@@ -79,7 +79,7 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 		}
 		wantTargets, ok := targetRule(op.Type)
 		if !ok {
-			reject(index, op, "unknown operation type %q", op.Type)
+			reject(index, op, "unknown operation type")
 			continue
 		}
 		if reason := wantTargets(len(op.Targets)); reason != "" {
@@ -189,7 +189,7 @@ func checkTargets(targets []store.MemoryProposalTarget, generations, current map
 		now, active := current[target.MemoryID]
 		switch {
 		case !read:
-			return fmt.Sprintf("target memory %q is not one the run read", target.MemoryID)
+			return "a target memory is not one the run read"
 		case generation != target.Generation:
 			return fmt.Sprintf("target memory %q is at generation %d, not %d", target.MemoryID, generation, target.Generation)
 		case current != nil && !active:
@@ -216,10 +216,10 @@ func checkSources(op Operation, messages map[string]map[string]bool) string {
 	for _, source := range op.Sources {
 		ids, read := messages[source.SessionName]
 		if !read {
-			return fmt.Sprintf("source Session %q is not one the run read", source.SessionName)
+			return "a source Session is not one the run read"
 		}
 		if source.MessageID != "" && !ids[source.MessageID] {
-			return fmt.Sprintf("source message %q is not one the run read in Session %q", source.MessageID, source.SessionName)
+			return "a source message is not one the run read in its Session"
 		}
 	}
 	return ""
@@ -381,4 +381,43 @@ func (r *Report) Encode(limit int) ([]byte, error) {
 		return nil, fmt.Errorf("memory consolidation report is %d bytes, more than %d", len(encoded), limit)
 	}
 	return encoded, nil
+}
+
+// Structure returns the report without any text a model wrote or a run
+// read: titles, content, reasons, tags, conflict notes and the summary. It
+// keeps each operation's type, targets and sources, each rejection's index,
+// known type and reason, which Orka writes and which name only memories the
+// run read, and the counts. A run's Task result is its structure, since
+// anyone who can read the Task can read the result; the full report needs
+// the permissions the run's inputs need.
+func (r Report) Structure() Report {
+	structure := r
+	structure.Summary = ""
+	structure.Structural = true
+	structure.Operations = make([]Operation, len(r.Operations))
+	for i, op := range r.Operations {
+		structure.Operations[i] = Operation{Type: op.Type, Targets: op.Targets, Sources: op.Sources}
+	}
+	structure.Rejected = make([]Rejection, len(r.Rejected))
+	for i, rejection := range r.Rejected {
+		kept := Rejection{Index: rejection.Index, Reason: rejection.Reason}
+		if _, known := targetRule(rejection.Type); known {
+			kept.Type = rejection.Type
+		}
+		structure.Rejected[i] = kept
+	}
+	structure.Conflicts = make([]Conflict, len(r.Conflicts))
+	for i, conflict := range r.Conflicts {
+		structure.Conflicts[i] = Conflict{MemoryIDs: conflict.MemoryIDs}
+	}
+	if len(r.Operations) == 0 {
+		structure.Operations = r.Operations
+	}
+	if len(r.Rejected) == 0 {
+		structure.Rejected = nil
+	}
+	if len(r.Conflicts) == 0 {
+		structure.Conflicts = nil
+	}
+	return structure
 }
