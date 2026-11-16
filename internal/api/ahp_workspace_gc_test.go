@@ -690,3 +690,44 @@ func TestAHPReapingTerminalsConsidersTheWorkspace(t *testing.T) {
 	}
 	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
 }
+
+// A client watching the files uses the workspace: an idle collector would
+// otherwise remove it under the watch, whose files would show as they were.
+func TestAHPWorkspaceWatchCountsAsUse(t *testing.T) {
+	env := newAHPTestEnv(t)
+	backend := env.backend
+	backend.cfg.WorkspaceIdleTimeout = time.Hour
+	backend.now = time.Now
+	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
+	clientset, err := kubernetes.NewForConfig(unreachable)
+	require.NoError(t, err)
+	w := &ahpWorkspaces{b: backend, clientset: clientset, rest: unreachable, namespace: "orka-ahp-workspaces",
+		image: "example.com/git@sha256:" + ahpHash("x")}
+	backend.workspaces = w
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	pod := w.podSpec(alice)
+	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-48 * time.Hour))
+	require.NoError(t, env.kube.Create(context.Background(), pod))
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: ahpWorkspaceContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}
+	require.NoError(t, env.kube.Status().Update(context.Background(), pod))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	recursive := true
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = backend.WatchResources(ctx, alice, ahptypes.CreateResourceWatchParams{Uri: "file:///workspace", Recursive: &recursive},
+			func([]ahptypes.ResourceChange) error { return nil })
+	}()
+	require.Eventually(t, func() bool {
+		current := &corev1.Pod{}
+		return env.kube.Get(context.Background(), client.ObjectKeyFromObject(pod), current) == nil &&
+			current.Annotations[ahpWorkspaceActiveAnnotation] != ""
+	}, 5*time.Second, 20*time.Millisecond, "the watch records a use")
+	cancel()
+	<-done
+
+	w.collectOnce(context.Background())
+	require.NoError(t, env.kube.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}), "a watched workspace is not idle")
+}

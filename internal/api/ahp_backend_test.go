@@ -3244,6 +3244,96 @@ func TestAHPBackendTakesBackAFailedTurnTheStoreRefusedAtFirst(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the session is free again")
 }
 
+// A message waiting behind a turn whose Task was not created runs once the
+// turn's take-back lands, also when the store refused it at first.
+func TestAHPBackendRunsAWaitingMessageAfterALateTakeBack(t *testing.T) {
+	env := newAHPTestEnv(t)
+	env.backend.sessionRetry = time.Millisecond
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	key := ahpPendingKey(alice.UserKey, ahpTestSession, "waiting")
+	env.backend.mu.Lock()
+	env.backend.pendingAuth = map[string]ahpPendingSender{key: {principal: alice, version: "v1"}}
+	env.backend.mu.Unlock()
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) {
+		s.Pending = []ahpPending{{ID: "waiting", Kind: string(ahptypes.PendingMessageKindQueued), Version: "v1",
+			Message: ahptypes.Message{Text: "run me", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}}}}
+	}))
+	var refused atomic.Int32
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
+		var session ahpSession
+		if json.Unmarshal(record.Value, &session) != nil || session.ActiveTurn != "" {
+			return false
+		}
+		refused.Add(1)
+		return true
+	}}
+	env.backend.store = failing
+	var creates atomic.Int32
+	env.onTaskCreate = func(*corev1alpha1.Task) error {
+		if creates.Add(1) == 1 {
+			failing.armed.Store(true)
+			return errors.New("the API server refused the Task")
+		}
+		return nil
+	}
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return refused.Load() >= 3 }, 5*time.Second, 5*time.Millisecond, "the take-back is tried again")
+	failing.armed.Store(false)
+	require.Eventually(t, func() bool { return creates.Load() >= 2 }, 5*time.Second, 10*time.Millisecond,
+		"the waiting message starts its turn once the take-back lands")
+}
+
+// The reply a turn ends with reaches the session's history, which a model
+// switch builds its prompt from, also when the store refused it at first.
+func TestAHPBackendKeepsTheReplyTheStoreRefusedAtFirst(t *testing.T) {
+	env := newAHPTestEnv(t)
+	env.backend.sessionRetry = time.Millisecond
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "what is the answer"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "42"}})
+
+	var refused atomic.Int32
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
+		var session ahpSession
+		// Every write of the session, the reply's included, fails for now.
+		if json.Unmarshal(record.Value, &session) != nil || session.Session != ahpTestSession {
+			return false
+		}
+		refused.Add(1)
+		return true
+	}}
+	failing.armed.Store(true)
+	env.backend.store = failing
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("42")))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, task))
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	require.NoError(t, env.kube.Status().Update(ctx, task))
+	require.Eventually(t, func() bool { return refused.Load() >= 3 }, 10*time.Second, 5*time.Millisecond, "the turn's end is tried again")
+	failing.armed.Store(false)
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		if env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) != nil || current.ActiveTurn != "" || len(current.History) == 0 {
+			return false
+		}
+		return current.History[len(current.History)-1].Reply == "42"
+	}, 5*time.Second, 10*time.Millisecond, "the reply is in the session's history")
+}
+
 // A waiting message the store refuses to take off the queue is tried again,
 // rather than wait for another turn to end or a restart.
 func TestAHPBackendRetriesDrainingAWaitingMessage(t *testing.T) {
