@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -273,4 +274,75 @@ func assertRelaunchRefusesWorkspaceChange(t *testing.T, write func(*testing.T, a
 		t.Fatal("rejected relaunch submitted the next ACP prompt")
 	}
 	awaitSessionRetired(t, server, create)
+}
+
+// Operator commands run as the session child. An idle adapter restart must
+// close operator admission and wait for every admitted operation to finish
+// before it checks the workspace, so no operator can change what the
+// replacement loads between the check and the launch.
+func TestSupervisorQuiescesOperatorsBeforeIdleAdapterRelaunch(t *testing.T) {
+	var (
+		server      *Server
+		create      harnessv2.CreateRuntimeSessionRequest
+		validations atomic.Int32
+		checked     atomic.Bool
+		closed      bool
+		live        int
+		admission   int
+		message     string
+	)
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(s *Server) {
+		s.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+			// Creation validates before the session is published; only the
+			// relaunch check observes operator state.
+			if validations.Add(1) == 2 {
+				server.mu.Lock()
+				current := server.sessions[create.RuntimeSessionID]
+				closed, live = current.operatorsClosed, len(current.operators)
+				server.mu.Unlock()
+				_, admission, message = server.operatorTargetFor(create.RuntimeSessionID, create.Metadata)
+				checked.Store(true)
+			}
+			return validateOpenCodeSession(paths)
+		}
+	})
+	// An operator operation is running when the next prompt arrives. Its
+	// handler releases the registration once the operation is killed, as
+	// finishOperation does.
+	process := newFakeOperatorProcess()
+	server.mu.Lock()
+	if state.operators == nil {
+		state.operators = map[uint64]*operatorRegistration{}
+	}
+	state.operatorSeq++
+	token := state.operatorSeq
+	state.operators[token] = &operatorRegistration{process: process}
+	server.mu.Unlock()
+	go func() {
+		_, _, _ = process.Wait()
+		server.mu.Lock()
+		delete(state.operators, token)
+		server.mu.Unlock()
+	}()
+
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prompt after adapter exit status = %d body=%s", response.Code, response.Body.String())
+	}
+	if !checked.Load() {
+		t.Fatal("the relaunch did not check the workspace")
+	}
+	if !process.killed.Load() {
+		t.Fatal("the running operator operation was not stopped before the relaunch")
+	}
+	if !closed || live != 0 {
+		t.Fatalf("at the relaunch check operator admission closed = %t with %d live operations; want closed with none", closed, live)
+	}
+	if admission != http.StatusConflict || !strings.Contains(message, "operator access is refused") {
+		t.Fatalf("operator admission during the relaunch = %d %q, want refusal", admission, message)
+	}
+	if state.runtime.AdapterRestarts() != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", state.runtime.AdapterRestarts())
+	}
 }

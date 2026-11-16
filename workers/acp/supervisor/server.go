@@ -276,6 +276,27 @@ func validateWorkspaceAsSessionChild(validate func(acp.SessionPaths) error, path
 	}
 }
 
+// quiesceOperatorsBeforeRelaunch closes operator admission for the session
+// whose exited adapter is about to be replaced and waits until every admitted
+// operation is gone. Operator commands run as the session child, so one that
+// ran between the workspace check and the replacement launch could change
+// what the provider loads. Admission reopens only when the replacement
+// accepts the prompt that triggered the restart (setSessionState); a failed
+// restart retires the session with admission still closed.
+func (s *Server) quiesceOperatorsBeforeRelaunch(sessionID harnessv2.RuntimeSessionID, runtime *acp.RuntimeSession) error {
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	current := state != nil && runtime != nil && state.runtime == runtime
+	s.mu.Unlock()
+	if !current {
+		return fmt.Errorf("runtime session changed before adapter relaunch")
+	}
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		return fmt.Errorf("quiesce operator access before adapter relaunch: %w", err)
+	}
+	return nil
+}
+
 func sessionCreationRejection(err error) (string, bool) {
 	creation, ok := errors.AsType[*sessionCreationError](err)
 	if !ok || creation.rejectedMessage == "" {
@@ -1416,9 +1437,21 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
-	var validateAdapterRelaunch func() error
+	var (
+		validateAdapterRelaunch func() error
+		// relaunched is set once the RuntimeSession exists, before it is
+		// published; a relaunch happens only after that.
+		relaunched *acp.RuntimeSession
+	)
 	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
-		validateAdapterRelaunch = validateWorkspaceAsSessionChild(validate, paths, uid, gid)
+		check := validateWorkspaceAsSessionChild(validate, paths, uid, gid)
+		sessionID := request.RuntimeSessionID
+		validateAdapterRelaunch = func() error {
+			if err := s.quiesceOperatorsBeforeRelaunch(sessionID, relaunched); err != nil {
+				return err
+			}
+			return check()
+		}
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
@@ -1455,6 +1488,7 @@ func (s *Server) createSession(
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	relaunched = runtimeSession
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
 		// creation that fails part-way leaves its binding pending, so the next

@@ -299,7 +299,10 @@ routing outside the Orka tool policy:
   session start, including a resume, and again before Orka restarts an
   adapter that exited while idle. That restart also checks the session's own
   OpenCode configuration folder and `~/.opencode`, which OpenCode reads as
-  global configuration and which the agent can write. If the agent added
+  global configuration and which the agent can write. Before that check,
+  Orka stops any running [operator access](../guides/operator-workspace-access.md)
+  command and refuses new ones until the restarted OpenCode accepts the
+  prompt, because those commands run as the session's identity. If the agent added
   configuration or plugins to any of these, Orka retires the session instead
   of restarting OpenCode. The replacement session gets fresh configuration
   folders but the same workspace, so it starts only if the workspace still
