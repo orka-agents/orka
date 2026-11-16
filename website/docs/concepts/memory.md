@@ -69,7 +69,7 @@ A consolidation proposal names each memory it changes in `targets`, with the `ge
 }
 ```
 
-Applying a consolidation proposal changes its targets in one transaction, and only while every target is still at the generation the proposal names and is not deleted. If any target changed, the apply returns `409 Conflict` and changes nothing: the proposal was written against content nobody reviewed since. It stays `accepted`, so archive it. Applying one also requires `update` permission on every target memory, besides the usual permission to apply proposals and create memories; see [API authorization](../reference/api-authorization.md).
+Applying a consolidation proposal changes its targets in one transaction, and only while every target is still at the generation the proposal names and is not deleted. If any target changed, the apply returns `409 Conflict` and changes nothing: the proposal was written against content nobody reviewed since. It stays `accepted`, so archive it. Applying one also requires `update` permission on every target memory, besides the usual permission to apply proposals and create memories; see [API authorization](../reference/api-authorization.md). Consolidation proposals are reviewed and applied only through `/api/v1`: the worker-facing internal routes check only the namespace, so they refuse to review or apply one with `403 Forbidden`.
 
 A merge or supersede marks each target deleted and disabled, and sets its `supersededBy` to the new memory, so the replaced record and its provenance stay readable: list with `includeDeleted=true&includeDisabled=true`, since deleted memories are disabled too. A retire only disables its targets, which you can enable again. The apply response is the memory created, or for a retire the first target.
 

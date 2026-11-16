@@ -208,7 +208,26 @@ func (h *InternalHandlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	if review.Namespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
 	}
+	if err := h.refuseInternalConsolidationProposal(c, namespace, review.ID); err != nil {
+		return err
+	}
 	return reviewNamespaceMemoryProposal(c, h.memoryProposalStore, review)
+}
+
+// refuseInternalConsolidationProposal keeps consolidation proposals off the
+// internal review and apply routes. Those routes check only the namespace,
+// and a consolidation proposal disables or deletes the memories it targets,
+// so it is reviewed and applied through the API, which authorizes the person
+// doing it against each target.
+func (h *InternalHandlers) refuseInternalConsolidationProposal(c fiber.Ctx, namespace, id string) error {
+	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), namespace, id)
+	if err != nil {
+		return memoryStoreError("get memory proposal", "memory proposal", err)
+	}
+	if store.IsMemoryConsolidationProposalType(strings.ToLower(strings.TrimSpace(proposal.Type))) {
+		return fiber.NewError(fiber.StatusForbidden, "consolidation proposals are reviewed and applied through the API")
+	}
+	return nil
 }
 
 // ArchiveMemoryProposal archives a proposal in the namespace in the internal route without applying it.
@@ -232,6 +251,9 @@ func (h *InternalHandlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	}
 	if apply.Namespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
+	}
+	if err := h.refuseInternalConsolidationProposal(c, namespace, apply.ID); err != nil {
+		return err
 	}
 	return applyNamespaceMemoryProposal(c, h.memoryProposalStore, apply)
 }
