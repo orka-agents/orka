@@ -42,6 +42,7 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
     enabled: Boolean(token),
     queryFn: async (): Promise<AttentionWalk> => {
       let first: AttentionResponse | undefined
+      let sources: AttentionResponse['sources'] | undefined
       const items: AttentionResponse['items'] = []
       const reasons = new Set<string>()
       const seen = new Set<string>()
@@ -51,6 +52,11 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
       do {
         const page = await api.get<AttentionResponse>('/attention', pageParams({ namespace, limit: String(pageLimit) }, next))
         first ??= page
+        // A source any page skipped stays skipped for the whole walk.
+        sources = {
+          approvals: sources && sources.approvals !== 'included' ? sources.approvals : page.sources?.approvals,
+          monitors: sources && sources.monitors !== 'included' ? sources.monitors : page.sources?.monitors,
+        }
         items.push(...page.items)
         incomplete ||= page.incomplete
         for (const reason of page.incompleteReasons ?? []) reasons.add(reason)
@@ -59,14 +65,19 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
         if (next) seen.add(next)
         pages += 1
       } while (next && pages < maxAttentionWalkPages)
-      return { ...first!, items, incomplete, incompleteReasons: [...reasons].sort(), metadata: {}, truncated: Boolean(next) }
+      return { ...first!, sources: sources!, items, incomplete, incompleteReasons: [...reasons].sort(), metadata: {}, truncated: Boolean(next) }
     },
     retry: retryUnlessForbidden,
     refetchInterval: pollUnlessForbidden(refetchInterval),
   })
 }
 
-const inboxStopsRetrying = (error: unknown) => error instanceof ApiError && (error.status === 403 || error.status === 501)
+/**
+ * A 403 or 501 from the inbox will not clear on its own: it stops retries
+ * and polling, and it replaces any cached rows so stale decision controls
+ * are never left on screen.
+ */
+export const isTerminalInboxError = (error: unknown) => error instanceof ApiError && (error.status === 403 || error.status === 501)
 
 /**
  * Decidable approvals across the namespace's Tasks, soonest deadline first,
@@ -82,8 +93,8 @@ export function usePendingApprovals(limit = 100, refetchInterval: number | false
       api.get<AttentionResponse>('/approvals', pageParams({ namespace, status: 'pending', limit: String(limit) }, pageParam || undefined)),
     initialPageParam: '',
     getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
-    retry: (failureCount, error) => !inboxStopsRetrying(error) && failureCount < 3,
-    refetchInterval: (query) => (inboxStopsRetrying(query.state.error) ? false : refetchInterval),
+    retry: (failureCount, error) => !isTerminalInboxError(error) && failureCount < 3,
+    refetchInterval: (query) => (isTerminalInboxError(query.state.error) ? false : refetchInterval),
   })
 }
 

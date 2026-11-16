@@ -9,7 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { ListAccessError } from '@/components/ui/list-access-error'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
-import { useInboxDecision, usePendingApprovals } from '@/hooks/use-attention'
+import { isTerminalInboxError, useInboxDecision, usePendingApprovals } from '@/hooks/use-attention'
 import { isNotImplementedError } from '@/lib/api-client'
 import { deadlineText, incompleteText } from '@/lib/attention-lanes'
 import { timeAgo } from '@/lib/time'
@@ -93,17 +93,27 @@ function ApprovalRow({ item }: { item: AttentionItem }) {
 /** Every decidable approval in the namespace, soonest deadline first. */
 export function ApprovalsInbox() {
   const { data, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage } = usePendingApprovals()
-  const pages = data?.pages ?? []
+  // A 403 or 501 replaces the cached rows: polling has stopped, so keeping
+  // them would leave stale decision controls up indefinitely. Any other
+  // failure keeps the last loaded rows with a note that they are stale.
+  const terminal = isTerminalInboxError(error)
+  const shownError = error && (terminal || !data) ? error : null
+  const staleError = error && !shownError ? error : null
+  const pages = shownError ? [] : (data?.pages ?? [])
   const first = pages[0]
   // The server re-ranks on every read, so a page boundary can repeat an item.
   const items = [...new Map(pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()]
   const incomplete = pages.some((page) => page.incomplete)
   const incompleteReasons = [...new Set(pages.flatMap((page) => page.incompleteReasons ?? []))]
-  const shownError = error && !data ? error : null
 
   return (
     <div className="space-y-4">
       <PageHeader title="Approvals" description="Requests from agents waiting on a person, soonest deadline first" />
+      {staleError && (
+        <p className="text-sm text-status-failed" role="status">
+          Couldn't refresh approvals ({staleError instanceof Error ? staleError.message : 'request failed'}). Showing the last loaded list.
+        </p>
+      )}
       {incomplete && (
         <p className="text-sm text-status-failed" role="status">{incompleteText(incompleteReasons)}</p>
       )}

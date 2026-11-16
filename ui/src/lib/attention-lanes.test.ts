@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deadlineText, groupByAttention, incompleteText, isAgentWorking, parseKanbanView } from './attention-lanes'
+import { attentionSourceNotes, deadlineText, groupByAttention, incompleteText, isAgentWorking, parseKanbanView } from './attention-lanes'
 import type { AttentionItem } from '@/schemas/attention'
 import type { Task } from '@/schemas/task'
 
@@ -56,5 +56,15 @@ describe('attention lanes', () => {
     expect(deadlineText(undefined, now)).toBeUndefined()
     expect(incompleteText(['taskScanLimit'])).toMatch(/may be incomplete: only the first Tasks/)
     expect(incompleteText(['somethingNew'])).toContain('somethingNew')
+  })
+
+  it('reports skipped sources apart from scan limits', () => {
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'included' })).toEqual({ approvalsUnread: false })
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'notRequested' })).toEqual({ approvalsUnread: false })
+    expect(attentionSourceNotes({ approvals: 'unavailable', monitors: 'included' }).approvalsUnread).toBe(true)
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'forbidden' }).monitorsNote).toMatch(/cannot list repository monitors/)
+    expect(attentionSourceNotes({ approvals: 'included', monitors: 'unavailable' }).monitorsNote).toMatch(/monitor storage is not enabled/)
+    // A response without a source state never reads as approvals checked.
+    expect(attentionSourceNotes(undefined).approvalsUnread).toBe(true)
   })
 })

@@ -103,6 +103,18 @@ up to 2,000 attention items before it groups Tasks; past that it says Agent
 working and Done may include Tasks that need you. When a scan bound was hit,
 each view says the list may be incomplete.
 
+Agent working and Done wait for the attention ranking. If it cannot be
+loaded, they say the Tasks are not sorted instead of placing them in Done.
+When the controller has no execution event storage, approvals cannot be
+read: the views say so, an empty list says approvals were not checked, and
+the board warns that Agent working and Done may include Tasks waiting for
+approval. When your token cannot list repository monitors, a quiet note says
+blocked monitor actions are not shown. A permission error, or an inbox that
+becomes unavailable, replaces any list already on screen, so you never act
+on stale rows. Other refresh failures keep the last list with a note that it
+could not be refreshed; on the board, Agent working and Done stay unsorted
+until the ranking loads again.
+
 ## Execution events
 
 Task and session detail pages surface the evented execution backbone (see the

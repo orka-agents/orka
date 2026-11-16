@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskListAll } from '@/hooks/use-tasks'
 import { useAttentionAll } from '@/hooks/use-attention'
 import { phaseStyle } from '@/lib/task-status'
-import { attentionLanes, groupByAttention, incompleteText, type AttentionLane, type KanbanView } from '@/lib/attention-lanes'
+import { approvalsUnreadText, attentionLanes, attentionSourceNotes, groupByAttention, incompleteText, type AttentionLane, type KanbanView } from '@/lib/attention-lanes'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/layout/page-header'
 import { AttentionItemCard } from '@/components/attention/attention-item-card'
@@ -163,12 +163,12 @@ const laneRail: Record<AttentionLane, string> = {
   done: 'border-status-succeeded bg-status-succeeded/5',
 }
 
-function LaneHeader({ label, count, loading }: { label: string; count: number; loading: boolean }) {
+function LaneHeader({ label, count, loading }: { label: string; count: number | undefined; loading: boolean }) {
   return (
     <div className="flex items-center gap-2 mb-3 px-1">
       <h2 className="font-semibold text-sm">{label}</h2>
       <span className="inline-flex items-center justify-center rounded-full border bg-card px-2 py-0.5 text-xs font-medium tabular-nums">
-        {loading ? '…' : count}
+        {loading ? '…' : count ?? '–'}
       </span>
     </div>
   )
@@ -176,29 +176,51 @@ function LaneHeader({ label, count, loading }: { label: string; count: number; l
 
 /**
  * The attention board: "Needs you" comes from the server's attention ranking,
- * and every other Task lands in "Agent working" or "Done" by its state.
+ * and every other Task lands in "Agent working" or "Done" by its state. Those
+ * two lanes depend on the ranking, so they wait for it, and a failed ranking
+ * leaves them unclassified rather than putting Tasks that need you in Done.
  */
 function AttentionBoard() {
   const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
   const attention = useAttentionAll(200, 10000)
   const error = listError && (isForbiddenError(listError) || !data) ? listError : null
+  // A 403 replaces the cached ranking (polling has stopped); any other
+  // refresh failure keeps the last loaded Needs you items with a note. Either
+  // way Agent working and Done stop classifying: the Task list keeps
+  // refreshing, and sorting it against a stale ranking could put a Task that
+  // newly needs you in Done.
   const attentionError = attention.error && (isForbiddenError(attention.error) || !attention.data) ? attention.error : null
-  const items = attention.data?.items ?? []
+  const attentionStale = attention.error && !attentionError ? attention.error : null
+  const unsorted = Boolean(attention.error)
+  const ranking = attentionError ? undefined : attention.data
+  const items = ranking?.items ?? []
   const grouped = groupByAttention(data?.items ?? [], items)
+  const notes = ranking ? attentionSourceNotes(ranking.sources) : undefined
 
   if (error) {
     return <Card><CardContent><ListAccessError error={error} resource="tasks" /></CardContent></Card>
   }
   return (
     <>
-      {attention.data?.incomplete && (
-        <p className="text-sm text-status-failed" role="status">{incompleteText(attention.data.incompleteReasons)}</p>
-      )}
-      {attention.data?.truncated && (
+      {attentionStale && (
         <p className="text-sm text-status-failed" role="status">
-          Needs you shows the first {items.length.toLocaleString()} of {attention.data.total.toLocaleString()} items. Agent working and Done may include Tasks that need you.
+          Couldn't refresh the attention ranking ({attentionStale instanceof Error ? attentionStale.message : 'request failed'}). Needs you shows the last loaded items; Agent working and Done are not sorted until it loads.
         </p>
       )}
+      {ranking?.incomplete && (
+        <p className="text-sm text-status-failed" role="status">{incompleteText(ranking.incompleteReasons)}</p>
+      )}
+      {notes?.approvalsUnread && (
+        <p className="text-sm text-status-failed" role="status">
+          {approvalsUnreadText} Tasks waiting for approval are not in Needs you and may appear in Agent working or Done.
+        </p>
+      )}
+      {ranking?.truncated && (
+        <p className="text-sm text-status-failed" role="status">
+          Needs you shows the first {items.length.toLocaleString()} of {ranking.total.toLocaleString()} items. Agent working and Done may include Tasks that need you.
+        </p>
+      )}
+      {notes?.monitorsNote && <p className="text-sm text-muted-foreground">{notes.monitorsNote}</p>}
       {data?.truncated && (
         <p className="text-sm text-muted-foreground" role="status">
           Agent working and Done use {(data.items ?? []).length.toLocaleString()} loaded tasks in resource-key order. More tasks exist.
@@ -206,24 +228,38 @@ function AttentionBoard() {
       )}
       <div className="flex gap-4 overflow-x-auto pb-4">
         {attentionLanes.map(({ lane, label, description }) => {
-          const count = lane === 'needsYou' ? (attention.data?.total ?? 0) : grouped[lane].length
-          const loading = lane === 'needsYou' ? attention.isLoading : isLoading
+          const needsYou = lane === 'needsYou'
+          const blocked = needsYou ? Boolean(attentionError) : unsorted
+          const count = blocked ? undefined : needsYou ? ranking?.total : grouped[lane].length
+          // Agent working and Done wait for the ranking as well as the Tasks:
+          // without it every Task that needs you would be classified as Done.
+          const loading = !blocked && (attention.isPending || (!needsYou && isLoading))
           return (
             <section
               key={lane}
               aria-label={label}
+              aria-busy={loading || undefined}
               className={cn('flex flex-col min-w-[280px] flex-1 rounded-lg border-t-2 px-1 pt-2', laneRail[lane])}
             >
               <LaneHeader label={label} count={count} loading={loading} />
               <p className="px-1 -mt-2 mb-3 text-xs text-muted-foreground">{description}</p>
+              {!needsYou && !loading && !blocked && notes?.approvalsUnread && (
+                <p className="px-1 -mt-1 mb-3 text-xs text-status-failed">May include Tasks waiting for approval.</p>
+              )}
               <div className="flex flex-col gap-2 min-h-[120px] pb-2">
                 {loading ? (
                   Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-20 w-full rounded-xl" />)
-                ) : lane === 'needsYou' ? (
-                  attentionError ? (
+                ) : blocked ? (
+                  needsYou ? (
                     <ListAccessError error={attentionError} resource="attention items" />
-                  ) : items.length === 0 ? (
-                    <p className="text-xs text-muted-foreground text-center py-8">Nothing needs you right now</p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground text-center py-8">Not sorted: the attention ranking could not be loaded</p>
+                  )
+                ) : needsYou ? (
+                  items.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-8">
+                      {notes?.approvalsUnread ? 'Nothing else needs you right now, but approvals were not checked' : 'Nothing needs you right now'}
+                    </p>
                   ) : (
                     items.map((item) => <AttentionItemCard key={item.id} item={item} />)
                   )

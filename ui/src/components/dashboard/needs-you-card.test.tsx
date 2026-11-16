@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '@/test/mocks/server'
+import type { AttentionResponse } from '@/schemas/attention'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -26,6 +29,23 @@ vi.mock('@tanstack/react-router', async () => {
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { NeedsYouCard } from './needs-you-card'
+
+function attention(extra: Partial<AttentionResponse> = {}): AttentionResponse {
+  return {
+    namespace: 'default', generatedAt: new Date().toISOString(), total: 1, counts: { failed: 1 }, incomplete: false,
+    sources: { approvals: 'included', monitors: 'included' }, metadata: {},
+    items: [{ id: 'f', kind: 'failed', rank: 3, since: new Date().toISOString(), summary: 'Task failed',
+      task: { namespace: 'default', name: 'broken', uid: 'u-broken', phase: 'Failed' } }],
+    ...extra,
+  }
+}
+
+function renderWithClient() {
+  // retryDelay 0 lets the hook's own retries for server errors settle quickly.
+  const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
+  rawRender(<QueryClientProvider client={client}><NeedsYouCard /></QueryClientProvider>)
+  return client
+}
 
 describe('NeedsYouCard', () => {
   beforeEach(() => {
@@ -69,5 +89,43 @@ describe('NeedsYouCard', () => {
     server.use(http.get('/api/v1/attention', () => HttpResponse.json({ error: { code: 403, message: 'no' } }, { status: 403 })))
     render(<NeedsYouCard />)
     expect(await screen.findByText('Your token cannot list tasks in this namespace.')).toBeInTheDocument()
+  })
+
+  it('a 403 after a successful load replaces the cached items', async () => {
+    server.use(http.get('/api/v1/attention', () => HttpResponse.json(attention())))
+    const client = renderWithClient()
+    expect(await screen.findByText('Task failed')).toBeInTheDocument()
+
+    server.use(http.get('/api/v1/attention', () => HttpResponse.json({ error: { code: 403, message: 'no' } }, { status: 403 })))
+    await client.refetchQueries({ queryKey: ['attention'] })
+
+    expect(await screen.findByText('Your token cannot list tasks in this namespace.')).toBeInTheDocument()
+    expect(screen.queryByText('Task failed')).not.toBeInTheDocument()
+    expect(screen.queryByText('1')).not.toBeInTheDocument()
+  })
+
+  it('keeps the last loaded items with a stale note when a refresh fails transiently', async () => {
+    server.use(http.get('/api/v1/attention', () => HttpResponse.json(attention())))
+    const client = renderWithClient()
+    expect(await screen.findByText('Task failed')).toBeInTheDocument()
+
+    server.use(http.get('/api/v1/attention', () => HttpResponse.json({ error: { code: 500, message: 'etcd slow' } }, { status: 500 })))
+    await client.refetchQueries({ queryKey: ['attention'] })
+
+    expect(await screen.findByText(/Couldn't refresh attention items \(etcd slow\)/)).toBeInTheDocument()
+    expect(screen.getByText('Task failed')).toBeInTheDocument()
+  })
+
+  it('qualifies the empty state when approvals were not read and notes hidden monitor actions quietly', async () => {
+    server.use(http.get('/api/v1/attention', () =>
+      HttpResponse.json(attention({ items: [], total: 0, counts: {}, sources: { approvals: 'unavailable', monitors: 'forbidden' } }))))
+    renderWithClient()
+    expect(await screen.findByText('Nothing else needs you right now, but approvals were not checked.')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing needs you right now.')).not.toBeInTheDocument()
+    expect(screen.getByText(/Approvals could not be read/)).toHaveAttribute('role', 'status')
+    const monitors = screen.getByText(/Blocked monitor actions are not shown: your token cannot list repository monitors/)
+    expect(monitors).not.toHaveAttribute('role')
+    expect(monitors).toHaveClass('text-muted-foreground')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

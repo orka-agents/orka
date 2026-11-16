@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '@/test/mocks/server'
 import type { AttentionItem, AttentionResponse } from '@/schemas/attention'
 
@@ -170,5 +172,36 @@ describe('ApprovalsInbox', () => {
     expect(seen).toContain('page-2')
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
     expect(screen.queryByText(/Showing 1 of 2/)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [403, 'Not authorized to view approvals'],
+    [501, 'Approvals are unavailable'],
+  ])('a %i after a successful load replaces the cached rows and decision controls', async (status, headline) => {
+    respond([approvalItem('cached', true, true)])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><ApprovalsInbox /></QueryClientProvider>)
+    expect(await screen.findByRole('button', { name: 'Decline' })).toBeInTheDocument()
+
+    server.use(http.get('/api/v1/approvals', () => HttpResponse.json({ error: { code: status, message: 'gone' } }, { status })))
+    await client.refetchQueries({ queryKey: ['approvals'] })
+
+    expect(await screen.findByText(headline)).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Pending approvals' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Review to approve' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the last loaded rows with a stale note when a refresh fails transiently', async () => {
+    respond([approvalItem('cached', true, true)])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><ApprovalsInbox /></QueryClientProvider>)
+    expect(await screen.findByRole('button', { name: 'Decline' })).toBeInTheDocument()
+
+    server.use(http.get('/api/v1/approvals', () => HttpResponse.json({ error: { code: 500, message: 'store timeout' } }, { status: 500 })))
+    await client.refetchQueries({ queryKey: ['approvals'] })
+
+    expect(await screen.findByText(/Couldn't refresh approvals \(store timeout\)/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
   })
 })

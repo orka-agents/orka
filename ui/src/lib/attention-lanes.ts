@@ -1,4 +1,4 @@
-import type { AttentionItem, AttentionKind } from '@/schemas/attention'
+import type { AttentionItem, AttentionKind, AttentionResponse } from '@/schemas/attention'
 import { humanizeDuration } from '@/lib/time'
 import type { Task } from '@/schemas/task'
 
@@ -62,6 +62,37 @@ const incompleteReasonText: Record<string, string> = {
 export function incompleteText(reasons: string[] | undefined): string {
   const parts = (reasons ?? []).map((reason) => incompleteReasonText[reason] ?? reason)
   return parts.length > 0 ? `This list may be incomplete: ${parts.join('; ')}.` : 'This list may be incomplete.'
+}
+
+export interface AttentionSourceNotes {
+  /**
+   * Approvals were not read, so the ranking cannot be trusted for them: an
+   * empty list is not "nothing needs you", and a Task waiting for approval
+   * may be classified as working or done.
+   */
+  approvalsUnread: boolean
+  /** A quiet note for monitor actions that were not read, which is expected without monitor access. */
+  monitorsNote?: string
+}
+
+export const approvalsUnreadText = 'Approvals could not be read: execution event storage is not enabled on this controller.'
+
+/**
+ * What the response's optional sources leave out, kept apart from scan
+ * limits: a skipped source is not a bound that was hit, so `incomplete` can
+ * be false while approvals or monitor actions were never read. A missing
+ * approvals state counts as unread.
+ */
+export function attentionSourceNotes(sources: Partial<AttentionResponse['sources']> | undefined): AttentionSourceNotes {
+  const approvalsUnread = sources?.approvals !== 'included'
+  switch (sources?.monitors) {
+    case 'forbidden':
+      return { approvalsUnread, monitorsNote: 'Blocked monitor actions are not shown: your token cannot list repository monitors.' }
+    case 'unavailable':
+      return { approvalsUnread, monitorsNote: 'Blocked monitor actions are not shown: monitor storage is not enabled on this controller.' }
+    default:
+      return { approvalsUnread }
+  }
 }
 
 export const attentionKindLabels: Record<AttentionKind, string> = {
