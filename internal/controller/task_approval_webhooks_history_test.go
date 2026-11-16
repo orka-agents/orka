@@ -10,12 +10,15 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -216,5 +219,242 @@ func TestApprovalNoticeHoldFailsSafeOnLookupErrors(t *testing.T) {
 	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	if r.approvalNoticesHoldRun(context.Background(), head) {
 		t.Fatal("a chain without pending approval notices is not held")
+	}
+}
+
+// appendAfterProjectionStore appends once, right after the at-th approval
+// event list returns, as a decision committing between a reconcile's
+// projection and its history enforcement would.
+type appendAfterProjectionStore struct {
+	store.ExecutionEventStore
+	at     int
+	lists  int
+	append func()
+}
+
+func (s *appendAfterProjectionStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	listed, err := s.ExecutionEventStore.ListExecutionEvents(ctx, filter)
+	if err == nil && slices.Contains(filter.EventTypes, events.ExecutionEventTypeApprovalRequested) {
+		if s.lists++; s.lists == s.at {
+			s.append()
+		}
+	}
+	return listed, err
+}
+
+// approvalHistoryHarness is a finished run of approvalHistoryParent that
+// keeps no history and selects both approval events, served by a real event
+// store and receiver.
+func approvalHistoryHarness(t *testing.T, run *corev1alpha1.Task) (*approvalWebhookHarness, *TaskReconciler) {
+	t.Helper()
+	run.Finalizers = []string{labels.TaskFinalizer}
+	run.Spec.WebhookEvents = bothApprovalEvents
+	if run.Status.ApprovalWebhooks == nil {
+		run.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true}
+	}
+	h := newApprovalWebhookHarness(t, nil)
+	run.Spec.WebhookURL = h.receiver.server.URL + "/hook"
+	h.client = newWebhookTestClient(t, approvalHistoryParentTask(), run,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNS, UID: "namespace-uid"}})
+	reconciler := &TaskReconciler{
+		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
+		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
+	}
+	return h, reconciler
+}
+
+// reconcileApprovalHistoryRun reconciles the run until it is pruned, at most
+// rounds times, and returns the approval event types the receiver got.
+func reconcileApprovalHistoryRun(t *testing.T, h *approvalWebhookHarness, reconciler *TaskReconciler, rounds int) []string {
+	t.Helper()
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
+	for range rounds {
+		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		if historyRunPruned(t, h.client, approvalWebhookTestTask) {
+			break
+		}
+	}
+	var sent []string
+	for _, receipt := range h.receiver.all() {
+		if event := receipt.header.Get(taskwebhook.HeaderEvent); strings.HasPrefix(event, "task.approval_") {
+			sent = append(sent, event)
+		}
+	}
+	return sent
+}
+
+// A decision that commits after a run's projection read but before its
+// history enforcement is not yet a notice. Pruning then would delete the
+// stream and lose the resolution, so the run is held until a later
+// reconcile notifies it, once, and is pruned after that. The decision lands
+// after the first, then the second, approval read of the run's reconciles;
+// the second lands before the enforcement of the reconcile that settles the
+// request notice.
+func TestScheduledRunHistoryHoldsADecisionAppendedAfterProjection(t *testing.T) {
+	for at := 1; at <= 2; at++ {
+		t.Run(strconv.Itoa(at), func(t *testing.T) {
+			h, reconciler := approvalHistoryHarness(t, approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour))
+			h.request(approvalWebhookTestUID, "approval-1")
+			racing := &appendAfterProjectionStore{ExecutionEventStore: h.events, at: at, append: func() {
+				h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+			}}
+			reconciler.ExecutionEventStore = racing
+
+			sent := reconcileApprovalHistoryRun(t, h, reconciler, 10)
+			if racing.lists < at {
+				t.Fatalf("the run was pruned after %d approval reads, before the decision", racing.lists)
+			}
+			if !slices.Equal(sent, []string{"task.approval_requested", "task.approval_resolved"}) {
+				t.Fatalf("approval notices = %v, want the request and its resolution once each", sent)
+			}
+			if !historyRunPruned(t, h.client, approvalWebhookTestTask) {
+				t.Fatal("the run must be pruned once its resolution is notified")
+			}
+		})
+	}
+}
+
+// Parent-triggered pruning holds a run whose stream has approval events its
+// projection has not reached, and prunes it once the run's own reconcile
+// notified them.
+func TestScheduledRunHistoryParentHoldsUnprojectedApprovalEvents(t *testing.T) {
+	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
+	h, reconciler := approvalHistoryHarness(t, run)
+	h.request(approvalWebhookTestUID, "approval-1")
+	if sent := reconcileApprovalHistoryRun(t, h, reconciler, 1); !slices.Equal(sent, []string{"task.approval_requested"}) {
+		t.Fatalf("approval notices = %v, want the request", sent)
+	}
+	if historyRunPruned(t, h.client, approvalWebhookTestTask) {
+		t.Fatal("the run was pruned before the decision")
+	}
+	h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+
+	parent := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), ctrlclient.ObjectKey{Namespace: defaultNS, Name: approvalHistoryParent}, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.enforceHistoryLimits(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if historyRunPruned(t, h.client, approvalWebhookTestTask) {
+		t.Fatal("the parent pruned a run whose decision was not yet notified")
+	}
+
+	sent := reconcileApprovalHistoryRun(t, h, reconciler, 6)
+	if !slices.Equal(sent, []string{"task.approval_requested", "task.approval_resolved"}) {
+		t.Fatalf("approval notices = %v, want the request and its resolution once each", sent)
+	}
+	if !historyRunPruned(t, h.client, approvalWebhookTestTask) {
+		t.Fatal("the run must be pruned once its resolution is notified")
+	}
+}
+
+// unprojectedApprovalRun is a finished run that tracks both approval events,
+// with its cursor at seq.
+func unprojectedApprovalRun(seq int64) *corev1alpha1.Task {
+	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
+	run.Spec.WebhookURL = "https://receiver.example/hook"
+	run.Spec.WebhookEvents = bothApprovalEvents
+	completed := metav1.NewTime(approvalWebhookTestNow.Add(-time.Minute))
+	run.Status.CompletionTime = &completed
+	run.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true, ProjectedSeq: seq}
+	return run
+}
+
+func approvalHoldReconciler(t *testing.T, run *corev1alpha1.Task, eventStore store.ExecutionEventStore, now time.Time) *TaskReconciler {
+	t.Helper()
+	r := newUnitReconciler(newTestScheme(), run)
+	r.ExecutionEventStore = eventStore
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	r.WebhookNotifier.now = func() time.Time { return now }
+	return r
+}
+
+// A failed event store read keeps a recently settled run, since it cannot
+// tell whether a decision is still to be notified, but not past the approval
+// notice window: a store that stays unavailable holds no run indefinitely.
+func TestApprovalEventHoldFailsSafeOnStoreErrorsWithinTheWindow(t *testing.T) {
+	failing := failingExecutionEventStore{err: errors.New("event store unavailable")}
+	run := unprojectedApprovalRun(0)
+	if r := approvalHoldReconciler(t, run.DeepCopy(), failing, approvalWebhookTestNow); !r.approvalNoticesHoldRun(context.Background(), run) {
+		t.Fatal("an event store failure must keep a run that settled within the window")
+	}
+	past := run.Status.CompletionTime.Add(approvalWebhookSigningWindow)
+	if r := approvalHoldReconciler(t, run.DeepCopy(), failing, past); r.approvalNoticesHoldRun(context.Background(), run) {
+		t.Fatal("an event store failure must not keep a run past the window")
+	}
+	unselected := unprojectedApprovalRun(0)
+	unselected.Spec.WebhookEvents = nil
+	if r := approvalHoldReconciler(t, unselected.DeepCopy(), failing, approvalWebhookTestNow); r.approvalNoticesHoldRun(context.Background(), unselected) {
+		t.Fatal("a run that selects no approval event never reads the store, so a failure cannot hold it")
+	}
+}
+
+// Only a transition projection would still notify holds a run. Events that
+// never become one never advance the cursor, so they must not hold it for
+// good.
+func TestApprovalEventHoldIgnoresEventsProjectionNeverNotifies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrange appends events and returns the run, its cursor set.
+		arrange func(h *approvalWebhookHarness) *corev1alpha1.Task
+		held    bool
+	}{
+		{name: "unprojected decision", held: true, arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			request := h.request(approvalWebhookTestUID, "approval-1")
+			h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+			return unprojectedApprovalRun(request.Seq)
+		}},
+		{name: "projected", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			h.request(approvalWebhookTestUID, "approval-1")
+			decision := h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+			return unprojectedApprovalRun(decision.Seq)
+		}},
+		{name: "execution update", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			h.request(approvalWebhookTestUID, "approval-1")
+			decision := h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+			h.append(&store.ExecutionEvent{Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "approval-1",
+				Content: []byte(`{"approvalID":"approval-1","taskUID":"` + string(approvalWebhookTestUID) + `"}`)})
+			return unprojectedApprovalRun(decision.Seq)
+		}},
+		{name: "duplicate request", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			request := h.request(approvalWebhookTestUID, "approval-1")
+			h.request(approvalWebhookTestUID, "approval-1")
+			return unprojectedApprovalRun(request.Seq)
+		}},
+		{name: "another incarnation", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			h.request("uid-earlier-incarnation", "approval-1")
+			return unprojectedApprovalRun(0)
+		}},
+		{name: "unselected resolution", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			request := h.request(approvalWebhookTestUID, "approval-1")
+			h.decide(approvalWebhookTestUID, "approval-1", events.ExecutionEventTypeApprovalApproved)
+			run := unprojectedApprovalRun(request.Seq)
+			run.Spec.WebhookEvents = []corev1alpha1.TaskWebhookEvent{corev1alpha1.TaskWebhookEventApprovalRequested}
+			return run
+		}},
+		{name: "untracked", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			h.request(approvalWebhookTestUID, "approval-1")
+			run := unprojectedApprovalRun(0)
+			run.Status.ApprovalWebhooks.Tracking = false
+			return run
+		}},
+		{name: "overflowed", arrange: func(h *approvalWebhookHarness) *corev1alpha1.Task {
+			h.request(approvalWebhookTestUID, "approval-1")
+			run := unprojectedApprovalRun(0)
+			run.Status.ApprovalWebhooks.Overflowed = true
+			return run
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newApprovalWebhookHarness(t, nil)
+			run := tc.arrange(h)
+			r := approvalHoldReconciler(t, run.DeepCopy(), h.events, approvalWebhookTestNow)
+			if got := r.approvalNoticesHoldRun(context.Background(), run); got != tc.held {
+				t.Fatalf("held = %v, want %v", got, tc.held)
+			}
+		})
 	}
 }

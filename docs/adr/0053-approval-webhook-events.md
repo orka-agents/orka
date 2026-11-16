@@ -198,17 +198,32 @@ notices, as for the terminal notice.
 
 **History retention.** Scheduled-run history pruning, from both the finished
 run and the scheduled parent, keeps a run beyond its history limit while any
-Task in its continuation chain has a pending approval notice. Only the Task's
-own reconcile sends its notices, so deleting the run after its request notice
-alone, as `successfulRunsHistoryLimit: 0` did, lost the resolution. The check
-reads the run's head and follows its verified continuation links with
-uncached reads, bounded by the chain limit, and keeps the run when any read
-fails. A held run still counts toward the limit, so no newer run is pruned in
-its place. Retention is retried without polling: the attempt that settles a
-Task's last pending notice requeues the Task promptly, and that reconcile
-reaches its parent's history enforcement again. The
-hold is bounded, since a pending approval notice settles within its retry
-window or signing deadline. Terminal notices do not hold back parent-triggered
+Task in its continuation chain has a pending approval notice, or a selected
+approval transition above its cursor that projection has not recorded yet.
+Only the Task's own reconcile projects and sends its notices, and deleting
+the run deletes its stream, so deleting the run after its request notice
+alone, as `successfulRunsHistoryLimit: 0` did, lost the resolution. So did a
+decision that committed after the reconcile's projection read but before its
+pruning, or before the parent's. The unprojected check applies only to a
+tracking Task that selects approval events and has not overflowed. It is one
+indexed read of the Task's request and terminal approval events past the
+cursor, limited to one. Only when that finds one is the stream derived as
+projection derives it, so an event that never becomes a transition, such as
+a duplicate request or another incarnation's, does not hold the run for good.
+The check reads the run's head and follows its verified continuation links
+with uncached reads, bounded by the chain limit, and keeps the run when any
+Task read fails. A failed event store read keeps it only within the five-minute
+approval notice window after the chain's tail completed: projection cannot
+read an unavailable store either, and holding beyond that would let an outage
+keep every run. A held run still counts toward the limit, so no newer run is
+pruned in its place. Retention is retried without polling: the attempt that
+settles a Task's last pending notice requeues the Task promptly, and that
+reconcile reaches its parent's history enforcement again. A decision lands
+with a reconcile of its own (see Prompt reconcile), which projects it, and the
+parent's next schedule enforces history again in any case. The hold is
+bounded, since an unprojected transition is projected by the Task's next
+reconcile and a pending approval notice settles within its retry window or
+signing deadline. Terminal notices do not hold back parent-triggered
 pruning: the finished run already prunes only after its own terminal notice
 settles, and ADR 0042 lets a terminal notice wait indefinitely for signing
 keys, so holding on it would let an outage keep every run.

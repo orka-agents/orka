@@ -4408,10 +4408,11 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	sortByCreation(failed)
 
 	// A run beyond the limit stays while its chain has a pending approval
-	// notice. It still counts, so no newer run is pruned in its place. The
-	// attempt that settles the Task's last notice requeues it, and that
-	// reconcile reaches this again through enforceParentScheduledTaskHistory
-	// and prunes it then.
+	// notice or approval events not yet projected. It still counts, so no
+	// newer run is pruned in its place. The Task's next reconcile projects
+	// the events as notices, the attempt that settles its last notice
+	// requeues it, and that reconcile reaches this again through
+	// enforceParentScheduledTaskHistory and prunes it then.
 	for i := 0; i < len(succeeded)-int(successLimit); i++ {
 		if r.approvalNoticesHoldRun(ctx, succeeded[i]) {
 			continue
@@ -5334,12 +5335,16 @@ func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *
 }
 
 // approvalNoticesHoldRun reports whether a run must be kept because a Task in
-// its continuation chain, from head, still has a pending approval notice
-// (ADR 0053). Deleting a Task drops its queued notices, and only a reconcile
-// of the Task itself can send them. It reads uncached state, because the
+// its continuation chain, from head, still has a pending approval notice, or
+// approval events its projection has not reached yet (ADR 0053). Deleting a
+// Task drops its queued notices and its stream, and only a reconcile of the
+// Task itself can project and send them. It reads uncached state, because the
 // notices may have been queued earlier in the same reconcile, and follows at
-// most the chain bound. A failed read keeps the run. Only a configured
-// notifier ever settles a notice, so without one nothing is held.
+// most the chain bound. A failed Task read keeps the run. A failed event
+// store read keeps it only within approvalWebhookSigningWindow of the chain
+// settling, so a store that stays unavailable, which projection cannot read
+// either, holds no run indefinitely. Only a configured notifier ever settles
+// a notice, so without one nothing is held.
 func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev1alpha1.Task) bool {
 	if r.WebhookNotifier == nil || head == nil {
 		return false
@@ -5353,23 +5358,93 @@ func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev
 		// Another incarnation holds the name; it is not this run to judge.
 		return true
 	}
+	storeFailed := false
 	for range taskwait.MaxChainLength + 1 {
 		if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) >= 0 {
+			return true
+		}
+		unprojected, err := r.approvalEventsAwaitProjection(ctx, current)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to read approval events for scheduled run history", "task", current.Name)
+			storeFailed = true
+		} else if unprojected {
 			return true
 		}
 		next, err := taskwait.Continuation(ctx, reader, current)
 		switch {
 		case apierrors.IsNotFound(err):
 			// The rest of the chain is gone, and its notices with it.
-			return false
+			return storeFailed && r.approvalEventReadFailureHolds(current)
 		case err != nil:
 			return true
 		case next == nil:
-			return false
+			return storeFailed && r.approvalEventReadFailureHolds(current)
 		}
 		current = next
 	}
 	return true
+}
+
+// approvalWebhookTransitionEventTypes are the approval events projection
+// turns into transitions. Execution updates never become one, so they do not
+// advance the cursor and must not hold a run.
+var approvalWebhookTransitionEventTypes = []string{
+	execevents.ExecutionEventTypeApprovalRequested,
+	execevents.ExecutionEventTypeApprovalApproved,
+	execevents.ExecutionEventTypeApprovalDeclined,
+	execevents.ExecutionEventTypeApprovalExpired,
+	execevents.ExecutionEventTypeApprovalCancelled,
+}
+
+// approvalEventsAwaitProjection reports whether task's stream has a selected
+// approval transition above its projection cursor, which a reconcile of task
+// would record as a notice. Only a tracking Task that selects approval events
+// and has not overflowed can still record one: an untracked selection starts
+// at the stream's high-water mark. One indexed read past the cursor answers
+// the common case. Only when it finds a transition event is the stream
+// derived as projection derives it, because an event that is not this
+// Task's transition, such as a duplicate request, never advances the cursor
+// and would otherwise hold the run for good.
+func (r *TaskReconciler) approvalEventsAwaitProjection(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	state := task.Status.ApprovalWebhooks
+	selected := selectedApprovalWebhookEvents(task)
+	if r.ExecutionEventStore == nil || task.UID == "" || !task.DeletionTimestamp.IsZero() ||
+		len(selected) == 0 || state == nil || !state.Tracking || state.Overflowed {
+		return false, nil
+	}
+	next, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		EventTypes: approvalWebhookTransitionEventTypes,
+		AfterSeq:   state.ProjectedSeq,
+		Limit:      1,
+	})
+	if err != nil || len(next) == 0 {
+		return false, err
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return false, err
+	}
+	for _, transition := range approvalWebhookTransitions(taskApprovals(listed, string(task.UID))) {
+		if transition.seq > state.ProjectedSeq && selected.allows(transition.transition) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// approvalEventReadFailureHolds reports whether a failed approval event read
+// still keeps a run whose chain ends at tail: only within
+// approvalWebhookSigningWindow of the tail's completion, the same window
+// after which an approval notice that cannot be signed is given up.
+func (r *TaskReconciler) approvalEventReadFailureHolds(tail *corev1alpha1.Task) bool {
+	settled := tail.CreationTimestamp.Time
+	if tail.Status.CompletionTime != nil {
+		settled = tail.Status.CompletionTime.Time
+	}
+	return r.WebhookNotifier.now().Before(settled.Add(approvalWebhookSigningWindow))
 }
 
 // taskIsLinkedContinuation reports whether task continues a parked Task that
