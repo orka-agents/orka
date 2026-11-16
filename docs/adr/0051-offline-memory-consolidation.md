@@ -90,6 +90,15 @@ port is mechanical.
   with `spec.schedule`. Admission refuses the field on other Task types and with a
   `sessionRef`. The mode is `DryRun`, the default, which reports what it would propose, or
   `Propose`, which also creates the proposals.
+- A run reads Sessions of every user in its namespace, which no ordinary Task can: the
+  internal transcript routes limit a Task to its own Session and its coordination tree.
+  So a `ValidatingAdmissionPolicy` checks the live caller that creates the Task, or
+  changes its `memoryConsolidation`: it needs `list` on `sessions` in the namespace, and in
+  `Propose` mode also `create` on `memoryproposals`. A scheduled run is created by the
+  controller from a parent that passed this check. The internal run routes accept only the
+  authenticated worker of an active Task that carries the field.
+- Memory and its proposals are namespace-wide. A namespace that enables consolidation
+  accepts that what one person's Session taught can reach everyone's prompts, after review.
 - In this mode the worker has one tool, `submit_memory_consolidation`, a fixed
   Orka-owned system prompt, and no injected memory context. `spec.ai.prompt`, when set, is
   passed as the operator's focus.
