@@ -126,7 +126,9 @@ port is mechanical.
   - no memory is targeted twice;
   - content is non-empty and at most 1,200 characters;
   - at most `maxOperations` operations (default 10, at most 20);
-  - the operations retire at most a quarter of the active memories, and at least one.
+  - the operations remove at most a quarter of the active memories, and at least one. A
+    merge of k memories removes k−1, a supersede none and a retire k, so merging two
+    duplicates is always possible.
 - Orka drops an operation that fails these checks and records why. The rest still apply.
 - The report holds the window, the input counts, each accepted operation, each rejected one
   with its reason, the conflicts the model reported, and the proposal IDs. It becomes the
