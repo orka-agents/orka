@@ -79,11 +79,16 @@ var repositoryMonitorCILogTimestampPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d
 
 // repositoryMonitorCILogCleanLine strips a log line's ANSI escapes and
 // timestamp, and reports false for a line that only closes or opens a group
-// marker without text.
+// marker without text. A line that progress output rewrote with carriage
+// returns keeps only the text after its last one, as a terminal renders it,
+// so no carriage return reaches the sanitizer to split the line.
 func repositoryMonitorCILogCleanLine(line string) (string, bool) {
-	line = strings.TrimRight(line, "\r")
-	line = strings.TrimPrefix(line, "\ufeff")
 	line = repositoryMonitorANSIEscapePattern.ReplaceAllString(line, "")
+	line = strings.TrimRight(line, "\r")
+	if i := strings.LastIndexByte(line, '\r'); i >= 0 {
+		line = line[i+1:]
+	}
+	line = strings.TrimPrefix(line, "\ufeff")
 	line = repositoryMonitorCILogTimestampPattern.ReplaceAllString(line, "")
 	if strings.HasPrefix(line, repositoryMonitorCILogEndGroupMarker) {
 		return "", false
@@ -252,11 +257,13 @@ func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitor
 }
 
 // repositoryMonitorCILogAtEOF reports whether body has nothing left after
-// the read limit was reached.
+// the read limit was reached. Only an EOF says so: a probe that fails
+// otherwise, such as on a timeout or a reset connection, leaves the read
+// truncated.
 func repositoryMonitorCILogAtEOF(body io.Reader) bool {
 	var probe [1]byte
-	n, _ := io.ReadFull(body, probe[:])
-	return n == 0
+	n, err := io.ReadFull(body, probe[:])
+	return n == 0 && errors.Is(err, io.EOF)
 }
 
 // repositoryMonitorCILogExcerptText sanitizes the selected lines together
@@ -265,6 +272,10 @@ func repositoryMonitorCILogAtEOF(body io.Reader) bool {
 // lines and repositoryMonitorCILogExcerptBytes bytes ending just after the
 // error line.
 func repositoryMonitorCILogExcerptText(excerpt repositoryMonitorCILogExcerpt) string {
+	if len(excerpt.lines) == 0 {
+		// Splitting the empty join would yield one line, not none.
+		return ""
+	}
 	raw := strings.Join(excerpt.lines, "\n")
 	lines, _ := repositoryMonitorEvidenceSanitizedLines(raw, len(raw))
 	if len(lines) != len(excerpt.lines) {
@@ -284,25 +295,40 @@ func repositoryMonitorCILogExcerptText(excerpt repositoryMonitorCILogExcerpt) st
 
 // repositoryMonitorCILogWithholdOpenEdges withholds the lines at either edge
 // of the retained log that could belong to a credential wrapped from or into
-// a line that was not retained: a first line starting with a credential
-// character, and the single-word lines it continues into; a last line ending
-// with one, and the single-word lines leading into it. Only an edge with
-// unkept lines beyond it is withheld.
+// a line that was not retained: the first line, which an escaped line break
+// on the unseen line before it could continue a credential into whatever its
+// first character, and the lines it continues into; a last line ending with
+// a credential character or in an escaped line break, and the lines leading
+// into it. Continuation follows the sanitizer's chains: a credential
+// continues past a line only when the line is a single word, or only a
+// backslash, and that line ends in an escaped line break or continues
+// through credential characters into the next. Only an edge with unkept
+// lines beyond it is withheld.
 func repositoryMonitorCILogWithholdOpenEdges(original, lines []string, openStart, openEnd bool) {
-	words := make([][]string, len(original))
-	for i, line := range original {
-		words[i] = strings.Fields(strings.ReplaceAll(line, "\t", ""))
+	words, escaped := repositoryMonitorEvidenceLineWords(original)
+	// passes reports that a credential can run through all of line i.
+	passes := func(i int) bool { return len(words[i]) == 1 || len(words[i]) == 0 && escaped[i] }
+	// continues reports that a credential ending line i continues into line
+	// i+1.
+	continues := func(i int) bool {
+		return escaped[i] || len(words[i]) > 0 && len(words[i+1]) > 0 &&
+			repositoryMonitorEvidenceTokenEdge(words[i][len(words[i])-1], false) && repositoryMonitorEvidenceTokenEdge(words[i+1][0], true)
 	}
-	for i := 0; openStart && i < len(words) && len(words[i]) > 0 && repositoryMonitorEvidenceTokenEdge(words[i][0], true); i++ {
-		lines[i] = repositoryMonitorEvidenceRedactedLine
-		if len(words[i]) > 1 || !repositoryMonitorEvidenceTokenEdge(words[i][0], false) {
-			break
+	n := len(words)
+	if openStart && n > 0 && (len(words[0]) > 0 || escaped[0]) {
+		for i := range n {
+			lines[i] = repositoryMonitorEvidenceRedactedLine
+			if i+1 == n || !passes(i) || !continues(i) {
+				break
+			}
 		}
 	}
-	for i := len(words) - 1; openEnd && i >= 0 && len(words[i]) > 0 && repositoryMonitorEvidenceTokenEdge(words[i][len(words[i])-1], false); i-- {
-		lines[i] = repositoryMonitorEvidenceRedactedLine
-		if len(words[i]) > 1 || !repositoryMonitorEvidenceTokenEdge(words[i][0], true) {
-			break
+	if openEnd && n > 0 && (escaped[n-1] || len(words[n-1]) > 0 && repositoryMonitorEvidenceTokenEdge(words[n-1][len(words[n-1])-1], false)) {
+		for i := n - 1; i >= 0; i-- {
+			lines[i] = repositoryMonitorEvidenceRedactedLine
+			if i == 0 || !passes(i) || !continues(i-1) {
+				break
+			}
 		}
 	}
 }

@@ -3,13 +3,16 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -43,6 +46,49 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 			long.WriteString(ts + "##[error]early failure\n")
 		}
 	}
+	// A credential wrapped with backslash continuations whose recognizable
+	// prefix line is just outside the retained window.
+	frags := repositoryMonitorCILogTestFragments(40)
+	// lead starts each wrapped line; an escaped break continues a
+	// credential into any character, such as a URL escape.
+	forwardLog := func(lead string) string {
+		var forward strings.Builder
+		for range 60 {
+			forward.WriteString(ts + "filler\n")
+		}
+		forward.WriteString(ts + "export GITHUB_TOKEN=gh" + "p_" + frags[0] + "\\\n")
+		for _, frag := range frags[1:30] {
+			forward.WriteString(ts + lead + frag + "\\\n")
+		}
+		for _, frag := range frags[30:39] {
+			forward.WriteString(ts + lead + frag + " \\\n")
+		}
+		forward.WriteString(ts + lead + frags[39] + "\n")
+		for i := range 8 {
+			fmt.Fprintf(&forward, "%s[step] output %d\n", ts, i)
+		}
+		forward.WriteString(ts + "##[error]Process completed with exit code 1.\n")
+		return forward.String()
+	}
+	// The tail window starts at a line that is only a backslash.
+	var standalone strings.Builder
+	standalone.WriteString(ts + "export GITHUB_TOKEN=gh" + "p_" + frags[0] + "\\\n" + ts + "\\\n")
+	for _, frag := range frags[1:22] {
+		standalone.WriteString(ts + frag + "\\\n")
+	}
+	standalone.WriteString(ts + frags[22] + "\n")
+	for i := range 26 {
+		fmt.Fprintf(&standalone, "%s[step] output %d\n", ts, i)
+	}
+	// A credential wrapped into the part of the log the read limit left
+	// unread: ending in a backslash word, and in single-word lines.
+	reverse := strings.Repeat(ts+"build output (step)\n", 20)
+	for _, frag := range frags[:5] {
+		reverse += ts + frag + "\\\n"
+	}
+	reverseWord := reverse + ts + frags[5] + " \\\n"
+	reverseSingle := reverse + ts + frags[5] + "\n"
+	fragmentsFrom := func(from, to int) []string { return frags[from:to] }
 	pemLog := func(bodyLines int) string {
 		lines := []string{ts + "-----" + "BEGIN RSA PRIVATE KEY-----"}
 		for _, line := range repositoryMonitorEvidenceTestPEMBody(bodyLines) {
@@ -67,7 +113,27 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 		{name: "only a cleanup error", log: ts + "ok\n" + ts + "Post job cleanup.\n" + ts + "##[error]cache save failed\n", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail,
 			want: []string{"ok"}, notWant: []string{"cache save failed"}},
 		{name: "huge single line", log: huge, limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError, want: []string{"panic: …", "##[error]boom"}, notWant: []string{"xxx"}},
-		{name: "empty", log: "", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail},
+		{name: "empty", log: "", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail, notWant: []string{repositoryMonitorEvidenceRedactedLine}},
+		{name: "only group markers", log: ts + "##[group]\n" + ts + "##[endgroup]\n", limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail,
+			notWant: []string{repositoryMonitorEvidenceRedactedLine}},
+		{name: "progress output before a failure", log: strings.Join([]string{
+			ts + "\x1b[2KDownloading: 10%\rDownloading: 50%\r\x1b[2KDownloading: 100%",
+			ts + "--- FAIL: TestThing (0.01s)",
+			ts + "    thing_test.go:12: got 1, want 2",
+			ts + "##[error]Process completed with exit code 1.",
+		}, "\n"), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError,
+			want:    []string{"Downloading: 100%", "--- FAIL: TestThing (0.01s)", "thing_test.go:12: got 1, want 2", "##[error]Process completed with exit code 1."},
+			notWant: []string{"10%", "50%", "\r", repositoryMonitorEvidenceRedactedLine}},
+		{name: "backslash-wrapped secret entering the window", log: forwardLog(""), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError,
+			want: []string{"[step] output 7", "##[error]Process completed"}, notWant: fragmentsFrom(1, 40)},
+		{name: "backslash-wrapped secret entering the window at punctuation", log: forwardLog("%2F"), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError,
+			want: []string{"[step] output 7", "##[error]Process completed"}, notWant: fragmentsFrom(1, 40)},
+		{name: "backslash-wrapped secret through a backslash line", log: standalone.String(), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptTail,
+			want: []string{"[step] output 25"}, notWant: fragmentsFrom(1, 23)},
+		{name: "backslash-wrapped secret leaving the read portion", log: reverseWord + strings.Repeat(ts+"rest\n", 10), limit: int64(len(reverseWord)), wantKind: repositoryMonitorCILogExcerptTailOfReadPart,
+			wantTruncated: true, want: []string{"build output (step)"}, notWant: fragmentsFrom(0, 6)},
+		{name: "single-word lines after backslash-wrapped lines", log: reverseSingle + strings.Repeat(ts+"rest\n", 10), limit: int64(len(reverseSingle)), wantKind: repositoryMonitorCILogExcerptTailOfReadPart,
+			wantTruncated: true, want: []string{"build output (step)"}, notWant: fragmentsFrom(0, 6)},
 		{name: "truncated read does not claim the last error", log: long.String(), limit: 4 << 10, wantKind: repositoryMonitorCILogExcerptErrorInReadPart, wantTruncated: true, want: []string{"##[error]early failure"}},
 		{name: "truncated read without an error", log: strings.Repeat(ts+"build output (step)\n", 1000), limit: 1 << 10, wantKind: repositoryMonitorCILogExcerptTailOfReadPart, wantTruncated: true, want: []string{"build output (step)"}},
 		{name: "single-word lines at an open edge are withheld", log: strings.Repeat(ts+"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n", 1000), limit: 1 << 10, wantKind: repositoryMonitorCILogExcerptTailOfReadPart, wantTruncated: true, notWant: []string{"QUJD"}},
@@ -101,6 +167,48 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 				if strings.Contains(text, notWant) {
 					t.Fatalf("excerpt = %q, want no %q", text, notWant)
 				}
+			}
+		})
+	}
+}
+
+// repositoryMonitorCILogTestFragments returns n distinct base62 fragments
+// of a synthetic wrapped credential.
+func repositoryMonitorCILogTestFragments(n int) []string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	fragments := make([]string, n)
+	for i := range fragments {
+		var fragment strings.Builder
+		for j := range 12 {
+			fragment.WriteByte(alphabet[(i*7+j*11+3)%len(alphabet)])
+		}
+		fragments[i] = fragment.String()
+	}
+	return fragments
+}
+
+// TestRepositoryMonitorCILogReadNeedsEOFAfterTheLimit covers a read that
+// reached the limit: only an EOF from the probe past it marks the log
+// complete, and a failed probe marks it truncated.
+func TestRepositoryMonitorCILogReadNeedsEOFAfterTheLimit(t *testing.T) {
+	const log = "2026-11-16T10:00:00Z ##[error]Process completed with exit code 1.\n"
+	for _, tc := range []struct {
+		name          string
+		after         io.Reader
+		wantTruncated bool
+		wantKind      string
+	}{
+		{name: "eof", after: strings.NewReader(""), wantKind: repositoryMonitorCILogExcerptLastError},
+		{name: "connection reset", after: iotest.ErrReader(errors.New("connection reset by peer")), wantTruncated: true, wantKind: repositoryMonitorCILogExcerptErrorInReadPart},
+		{name: "timeout", after: iotest.ErrReader(context.DeadlineExceeded), wantTruncated: true, wantKind: repositoryMonitorCILogExcerptErrorInReadPart},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scanner, truncated, err := readRepositoryMonitorCILog(io.MultiReader(strings.NewReader(log), tc.after), int64(len(log)))
+			if err != nil || truncated != tc.wantTruncated {
+				t.Fatalf("readRepositoryMonitorCILog() truncated=%t err=%v, want truncated=%t", truncated, err, tc.wantTruncated)
+			}
+			if _, kind := scanner.excerpt(truncated); kind != tc.wantKind {
+				t.Fatalf("excerpt kind = %q, want %q", kind, tc.wantKind)
 			}
 		})
 	}
@@ -351,5 +459,29 @@ func TestRepositoryMonitorCILogEvidenceRoundTripsThroughThePrompt(t *testing.T) 
 	rebuilt, err := reconciler.buildRepositoryMonitorRepairPromptWithCI(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{}, &frozen)
 	if err != nil || rebuilt != prompt {
 		t.Fatalf("rebuilt prompt differs: err=%v", err)
+	}
+}
+
+// TestRepositoryMonitorCILogEvidenceReportsEmptyLogs covers logs with no
+// line to excerpt: they are unavailable as log_empty, not a withheld
+// excerpt.
+func TestRepositoryMonitorCILogEvidenceReportsEmptyLogs(t *testing.T) {
+	blobs := newRepositoryMonitorCILogBlobServer(t)
+	blobs.logs["/logs/1001"] = ""
+	blobs.logs["/logs/1002"] = "2026-11-16T10:00:00Z ##[group]\n2026-11-16T10:00:01Z ##[endgroup]\n"
+	github := &repositoryMonitorRepairLabelsGitHub{
+		runs: map[string][]map[string]any{"head51": {
+			repositoryMonitorEvidenceTestRun(1001, "empty", "completed", "failure", 0),
+			repositoryMonitorEvidenceTestRun(1002, "markers", "completed", "failure", 0),
+		}},
+		jobs:            map[int64]map[string]any{1001: repositoryMonitorCILogTestJob(1001, "head51"), 1002: repositoryMonitorCILogTestJob(1002, "head51")},
+		jobLogLocations: map[int64]string{1001: blobs.url("/logs/1001"), 1002: blobs.url("/logs/1002")},
+	}
+	evidence := repositoryMonitorCILogTestEvidence(t, github, blobs, true)
+	for _, name := range []string{"empty", "markers"} {
+		log := repositoryMonitorEvidenceByName(t, evidence, name).Log
+		if log == nil || log.Availability != repositoryMonitorEvidenceUnavailable || log.Reason != repositoryMonitorCILogReasonEmpty || log.Excerpt != "" || log.ExcerptKind != "" || log.FailedStep != "Run tests" {
+			t.Fatalf("%s log = %+v", name, log)
+		}
 	}
 }
