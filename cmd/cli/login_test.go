@@ -791,3 +791,45 @@ func TestExplicitSessionStaysOffPlainHTTP(t *testing.T) {
 		t.Fatalf("output = %s, want the in-the-clear refusal", out)
 	}
 }
+
+// ORKA_TOKEN is used as given, never mistaken for the saved session, and
+// ORKA_SERVER naming another server does not receive the saved session.
+func TestEnvironmentCredentialsAndASavedSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
+	var sawAuth []string
+	var renewed bool
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/session/renew" {
+			renewed = true
+		}
+		sawAuth = append(sawAuth, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer orka.Close()
+	soon := time.Now().Add(time.Hour)
+	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: orka.URL, Token: "orka_s_saved", TokenKind: tokenKindGitHubSession,
+		SessionSubject: "1001", TokenExpiresAt: &soon, Namespace: "orka-system"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envToken, "plain-env-token")
+	_, _ = runLoginCLI(t, "host", "status")
+	if renewed || len(sawAuth) == 0 || sawAuth[len(sawAuth)-1] != "Bearer plain-env-token" {
+		t.Fatalf("ORKA_TOKEN must be sent as given, without renewing the saved session: renewed=%v auth=%q", renewed, sawAuth)
+	}
+
+	t.Setenv(envToken, "")
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Authorization"), "orka_s_") {
+			leaked = true
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer other.Close()
+	t.Setenv(envServer, other.URL)
+	_, _ = runLoginCLI(t, "host", "status")
+	if leaked {
+		t.Fatal("a saved session must not go to the server ORKA_SERVER names")
+	}
+}

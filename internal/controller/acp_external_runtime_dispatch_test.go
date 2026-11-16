@@ -71,6 +71,7 @@ type externalACPDispatchFixtureOptions struct {
 	// failDelete fails RuntimeSession deletion as unproven while it returns true.
 	failDelete                      func() bool
 	supportsPublicationFinalization bool
+	supportsBrokeredToolApprovals   bool
 	// registry is the broker registry the runtime's descriptors and the
 	// reconciler classify against; nil means the default registry.
 	registry *tools.Registry
@@ -292,6 +293,12 @@ func newExternalACPDispatchFixtureWithOptions(
 		runtimeEndpoint = faultProxy.URL
 	}
 
+	if options.supportsBrokeredToolApprovals {
+		runtimeEndpoint = newExternalRuntimeCapabilitiesProxy(t, runtimeEndpoint, func(capabilities *harnessv2.CapabilitiesResponse) {
+			capabilities.Provider.SupportsBrokeredToolApprovals = true
+		}).URL
+	}
+
 	config := conformancetest.Config{
 		ControllerBearerToken:           strings.Repeat("t", 32),
 		OperationCapabilitySecret:       []byte(strings.Repeat("s", 32)),
@@ -302,6 +309,7 @@ func newExternalACPDispatchFixtureWithOptions(
 		Limits:                          limits,
 		SupportsDrain:                   true,
 		SupportsPublicationFinalization: options.supportsPublicationFinalization,
+		SupportsBrokeredToolApprovals:   options.supportsBrokeredToolApprovals,
 		WorkspaceGovernance:             governance,
 	}
 	externalRuntime, authSecret := testAgentRuntimeAndSecret(t, runtimeEndpoint, config)
