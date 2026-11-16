@@ -808,6 +808,30 @@ func TestGitHubSignInBoundsATokenWithoutExpiry(t *testing.T) {
 	}
 }
 
+// A submitted lifetime is capped before it becomes a duration: one too large
+// for a Duration would otherwise overflow into an expiry already past.
+func TestGitHubSignInCapsAHugeSubmittedLifetime(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	before := time.Now()
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "expiresIn": 10_000_000_000})
+	if status != http.StatusCreated {
+		t.Fatalf("sign-in: %d", status)
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: session.Connection}, connection); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil || !held.ExpiresAt.After(before) || held.ExpiresAt.After(before.Add(maxGitHubAccessTokenLife+time.Minute)) {
+		t.Fatalf("custody expires at %v (%v), want within %s from now", held.ExpiresAt, err, maxGitHubAccessTokenLife)
+	}
+}
+
 // A Connection made elsewhere is linked only once it carries the custody
 // finalizer, which tombstones and revokes custody when it is deleted.
 func TestGitHubSignInWaitsForTheCustodyFinalizer(t *testing.T) {

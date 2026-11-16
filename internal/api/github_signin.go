@@ -496,9 +496,11 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
+	// The lifetime is capped in seconds, before it becomes a Duration: a
+	// large submitted expiresIn would overflow and land in the past.
 	expires := now.Add(maxGitHubAccessTokenLife)
-	if tokens.ExpiresIn > 0 {
-		expires = now.Add(min(time.Duration(tokens.ExpiresIn)*time.Second, maxGitHubAccessTokenLife))
+	if tokens.ExpiresIn > 0 && tokens.ExpiresIn < int(maxGitHubAccessTokenLife/time.Second) {
+		expires = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)
 	}
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
