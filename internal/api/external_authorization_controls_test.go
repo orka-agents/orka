@@ -544,3 +544,28 @@ func TestExternalAPIConsolidationApplyRequiresUpdateOnEveryTarget(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, retired.Deleted)
 }
+
+// Only applying a proposal links a memory to it: a memory created with a
+// proposal's ID would otherwise block a consolidation proposal from applying.
+func TestMemoryCreateRefusesACallerSuppliedSourceProposal(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	proposal := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "Merge", Content: "merged",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "protected", Generation: 1}, {MemoryID: "other", Generation: 1}}}
+	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "other", Namespace: "default", Content: "other"}))
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+	f.allowAll()
+	before := f.changes(t)
+	status, body := f.request(t, http.MethodPost, "/api/v1/memories",
+		`{"namespace":"default","content":"forged","sourceProposalId":"`+proposal.ID+`"}`)
+	require.Equal(t, http.StatusBadRequest, status, body)
+	require.Equal(t, before, f.changes(t))
+
+	h, app, _ := setupTestInternalHandlers()
+	app.Post("/internal/v1/memories/:namespace", h.CreateMemory)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memories/default",
+		strings.NewReader(`{"content":"forged","sourceProposalId":"`+proposal.ID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}

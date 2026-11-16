@@ -292,6 +292,12 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
+	// Only applying a proposal links a memory to it. A memory created with a
+	// proposal's ID would be returned as that proposal's application, or,
+	// for a consolidation proposal, would block it from ever applying.
+	if strings.TrimSpace(memory.SourceProposalID) != "" {
+		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId is set only by applying a memory proposal")
+	}
 	if err := memoryStore.CreateMemory(c.Context(), &memory); err != nil {
 		return memoryStoreError("create memory", "memory", err)
 	}

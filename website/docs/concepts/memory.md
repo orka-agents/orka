@@ -173,6 +173,8 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
   }'
 ```
 
+Only applying a proposal links a memory to it, so a create request with a `sourceProposalId` is rejected with `400 Bad Request`.
+
 ## Memory proposal API
 
 | Endpoint | Method | Description |
