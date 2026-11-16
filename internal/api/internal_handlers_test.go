@@ -1501,28 +1501,41 @@ func TestInternalListMemoriesCountsRecallsOnlyFromTaskWorkers(t *testing.T) {
 	}, 200*time.Millisecond, 10*time.Millisecond, "a caller that is no Task's worker cannot mark a listing as a recall")
 }
 
-// slowRecallStore keeps a recall count from finishing until its context ends,
-// like a storage write that keeps retrying.
+// slowRecallStore keeps a recall count from finishing until release is
+// closed, like a storage write that keeps retrying.
 type slowRecallStore struct {
 	store.MemoryStore
+	release <-chan struct{}
+	started chan<- struct{}
 }
 
 func (s slowRecallStore) RecordMemoryRecall(ctx context.Context, _ store.MemoryRecall) error {
-	<-ctx.Done()
-	return ctx.Err()
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	previous := tools.MemoryRecallRecordTimeout
-	tools.MemoryRecallRecordTimeout = 50 * time.Millisecond
+	tools.MemoryRecallRecordTimeout = time.Minute
 	t.Cleanup(func() { tools.MemoryRecallRecordTimeout = previous })
-	app, ss := recallFixture(t, func(backing *storageclient.Client) store.MemoryStore { return slowRecallStore{backing} },
-		internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+	release, started := make(chan struct{}), make(chan struct{}, 1)
+	app, ss := recallFixture(t, func(backing *storageclient.Client) store.MemoryStore {
+		return slowRecallStore{MemoryStore: backing, release: release, started: started}
+	}, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
 
-	started := time.Now()
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "a stuck count never fails the recall")
-	require.Less(t, time.Since(started), time.Second, "a stuck count never delays the recall")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the recall returns while its count is still blocked")
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the count never started")
+	}
+	close(release)
 }

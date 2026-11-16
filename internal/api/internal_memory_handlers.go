@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 
@@ -65,6 +66,9 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	// runs with the count, after the response, on a copy of the caller.
 	if c.Query(tools.MemoryListPurposeParam, "") == tools.MemoryListPurposeRecall && len(memories) > 0 {
 		if caller := GetUserInfo(c); caller != nil {
+			// Route parameters can share the request's buffers, which are
+			// reused once the handler returns, so the count keeps a copy.
+			namespace := strings.Clone(namespace)
 			callerCopy := *caller
 			authorizer := h.internalCallerAuthorizer()
 			tools.RecordAuthorizedMemoryRecall(c.Context(), func(ctx context.Context) bool {
