@@ -27,6 +27,14 @@ func (h *Handlers) GetTaskMemoryConsolidationReport(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// The route's Kubernetes checks cover ServiceAccount callers; a
+	// transaction token needs the scopes that reading the run's inputs needs,
+	// as well as reading the Task.
+	for _, scopes := range [][]string{h.contextTokenAuthorization.SessionReadScopes, h.contextTokenAuthorization.MemoryReadScopes} {
+		if err := h.authorizeContextTokenAction(c, "getMemoryConsolidationReport", scopes); err != nil {
+			return err
+		}
+	}
 	task, err := h.taskAccess().loadReadable(c, "getTaskResult", namespace, id)
 	if err != nil {
 		return err
