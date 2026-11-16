@@ -297,7 +297,7 @@ func TestLoadCustomTools_WithFakeClient(t *testing.T) {
 		WithObjects(tool).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool, got %d", len(result))
 	}
@@ -314,7 +314,7 @@ func TestLoadCustomTools_ToolNotFound(t *testing.T) {
 		WithScheme(newTestScheme()).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
 	if len(result) != 0 {
 		t.Errorf("expected 0 tools for missing CRD, got %d", len(result))
 	}
@@ -337,7 +337,7 @@ func TestLoadCustomTools_MixedBuiltinAndCustom(t *testing.T) {
 		Build()
 
 	// web_search is built-in and should be skipped; my-tool is custom
-	result := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool (builtin skipped), got %d", len(result))
 	}
@@ -366,6 +366,36 @@ func TestBuildLLMTools_CustomToolWithParameters(t *testing.T) {
 	}
 	if !strings.Contains(string(llmTools[0].Parameters), "query") {
 		t.Errorf("parameters should contain 'query', got %s", string(llmTools[0].Parameters))
+	}
+}
+
+// TestBuildLLMTools_HidesForwardingTools covers a native worker enabling both
+// a forwarding Tool, which serves a command-line client in an ACP runtime,
+// and an ordinary custom Tool: only the ordinary one is advertised as a
+// function.
+func TestBuildLLMTools_HidesForwardingTools(t *testing.T) {
+	customTools := map[string]*corev1alpha1.Tool{
+		"arm": {Spec: corev1alpha1.ToolSpec{
+			Description: "Azure Resource Manager",
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:     "https://management.azure.com",
+				Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+			},
+		}},
+		"lookup": {Spec: corev1alpha1.ToolSpec{
+			Description: "Look up an order",
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "https://orders.example.com/lookup"},
+		}},
+	}
+	customTools["arm"].Name, customTools["lookup"].Name = "arm", "lookup"
+
+	llmTools := buildLLMTools([]string{"arm", "lookup"}, customTools)
+	if len(llmTools) != 1 || llmTools[0].Name != "lookup" {
+		names := make([]string, 0, len(llmTools))
+		for _, tool := range llmTools {
+			names = append(names, tool.Name)
+		}
+		t.Fatalf("advertised tools = %v, want only the ordinary Tool", names)
 	}
 }
 
@@ -975,7 +1005,7 @@ func TestLoadCustomToolsSkipsToolWhenOutboundApprovalBindingFails(t *testing.T) 
 		}},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()
-	got := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
+	got, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
 	if len(got) != 0 {
 		t.Fatalf("loaded tools = %#v, want fail-closed omission", got)
 	}

@@ -27,9 +27,10 @@ var _ = Describe("Controller Feature Tests", func() {
 
 	Describe("Agent SystemPrompt from ConfigMap", func() {
 		const (
-			configMapName = "e2e-systemprompt-cm"
-			agentName     = "e2e-systemprompt-agent"
-			taskName      = "e2e-systemprompt-task"
+			configMapName      = "e2e-systemprompt-cm"
+			agentName          = "e2e-systemprompt-agent"
+			taskName           = "e2e-systemprompt-task"
+			systemPromptMarker = "[e2e:controller-system-prompt]"
 		)
 
 		AfterEach(func() {
@@ -119,9 +120,9 @@ var _ = Describe("Controller Feature Tests", func() {
 				"spec": {
 					"type": "ai",
 					"agentRef": {"name": "%s"},
-					"prompt": "What are you?"
+					"prompt": "What are you? %s"
 				}
-			}`, taskName, namespace, agentName)
+			}`, taskName, namespace, agentName, systemPromptMarker)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(taskManifest)
@@ -139,6 +140,12 @@ var _ = Describe("Controller Feature Tests", func() {
 				g.Expect(output).To(ContainSubstring("ORKA_AI_SYSTEM_PROMPT"),
 					"Job should have ORKA_AI_SYSTEM_PROMPT env var")
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			if e2eMockOpenAI {
+				By("verifying the ConfigMap system prompt reached the model")
+				requests := expectMockLLMServed(systemPromptMarker, 3*time.Minute)
+				Expect(requests[0].RoleText("system")).To(ContainSubstring("You are an e2e test assistant."))
+			}
 		})
 	})
 
@@ -146,9 +153,10 @@ var _ = Describe("Controller Feature Tests", func() {
 
 	Describe("Agent Skills from Skill CRD", func() {
 		const (
-			skillName = "e2e-research-skill"
-			agentName = "e2e-skill-agent"
-			taskName  = "e2e-skill-task"
+			skillName   = "e2e-research-skill"
+			agentName   = "e2e-skill-agent"
+			taskName    = "e2e-skill-task"
+			skillMarker = "[e2e:controller-skills]"
 		)
 
 		AfterEach(func() {
@@ -239,9 +247,9 @@ var _ = Describe("Controller Feature Tests", func() {
 				"spec": {
 					"type": "ai",
 					"agentRef": {"name": "%s"},
-					"prompt": "What are you?"
+					"prompt": "What are you? %s"
 				}
-			}`, taskName, namespace, agentName)
+			}`, taskName, namespace, agentName, skillMarker)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(taskManifest)
@@ -258,101 +266,12 @@ var _ = Describe("Controller Feature Tests", func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(ContainSubstring("/workspace/.skills"))
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
-		})
-	})
 
-	// --- AllowBash Override ---
-
-	Describe("AllowBash Task Override", func() {
-		const (
-			agentName = "e2e-allowbash-agent"
-			taskName  = "e2e-allowbash-task"
-		)
-
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			cmd := exec.Command("kubectl", "delete", "task", taskName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", agentName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		})
-
-		It("should set ORKA_ALLOW_BASH from task override", func() {
-			skipIfNoKey("E2E_OPENAI_API_KEY")
-
-			By("creating a Provider")
-			createProviderCRD("e2e-bash-provider", "openai", "e2e-openai-secret", "api-key",
-				e2eOpenAIBaseURL, e2eOpenAIModel)
-			DeferCleanup(func() {
-				cmd := exec.Command("kubectl", "delete", "provider", "e2e-bash-provider",
-					"-n", namespace, "--ignore-not-found")
-				_, _ = utils.Run(cmd)
-			})
-
-			model := e2eOpenAIModel
-			if model == "" {
-				model = "gpt-4o-mini"
+			if e2eMockOpenAI {
+				By("verifying the skill content reached the model's system prompt")
+				requests := expectMockLLMServed(skillMarker, 3*time.Minute)
+				Expect(requests[0].RoleText("system")).To(ContainSubstring("Always include E2E_SKILL_ACTIVE"))
 			}
-
-			By("creating an Agent without allowBash")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"providerRef": {
-						"name": "e2e-bash-provider"
-					},
-					"model": {
-						"name": "%s"
-					}
-				}
-			}`, agentName, namespace, model)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("creating a Task with allowBash=true override")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "ai",
-					"agentRef": {"name": "%s"},
-					"prompt": "Say hello",
-					"agentRuntime": {
-						"allowBash": true
-					}
-				}
-			}`, taskName, namespace, agentName)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying the Job has ORKA_ALLOW_BASH=true env var")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "jobs",
-					"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-					"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-					"-n", namespace)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("ORKA_ALLOW_BASH"),
-					"Job should have ORKA_ALLOW_BASH env var")
-			}, 60*time.Second, 2*time.Second).Should(Succeed())
 		})
 	})
 

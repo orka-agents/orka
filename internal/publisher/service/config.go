@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +137,9 @@ func normalizeConfig(config Config) (Config, error) {
 		config.CapabilityTTL <= 0 || config.CapabilityTTL > MaxCapabilityTTL || config.VerifyAttempts < 1 || config.VerifyAttempts > 20 ||
 		config.VerifyBackoff < 0 {
 		return Config{}, fmt.Errorf("service limits are invalid")
+	}
+	if config.Logger == nil {
+		config.Logger = slog.New(slog.DiscardHandler)
 	}
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }

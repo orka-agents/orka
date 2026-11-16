@@ -90,6 +90,25 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: labels.AnnotationParentTaskUID,
 		},
 		{
+			name: "untrusted create with continuation lineage denied",
+			user: untrustedUsername,
+			task: func() *corev1alpha1.Task {
+				task := newAdmissionTestTask()
+				if task.Annotations == nil {
+					task.Annotations = map[string]string{}
+				}
+				task.Annotations[labels.AnnotationContinuationOfUID] = "victim-uid"
+				return task
+			}(),
+			contains: labels.AnnotationContinuationOfUID,
+		},
+		{
+			name:     "untrusted create with parent task namespace denied",
+			user:     untrustedUsername,
+			task:     withParentTaskNamespace(newAdmissionTestTask()),
+			contains: labels.AnnotationParentTaskNamespace,
+		},
+		{
 			name:     "untrusted create with workspace settlement marker denied",
 			user:     untrustedUsername,
 			task:     withWorkspaceSettledAnnotation(newAdmissionTestTask()),
@@ -202,6 +221,20 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			contains: fieldSpecRequestedBy,
 		},
 		{
+			name:     "trusted worker changing an API-stamped requester denied",
+			user:     trustedWorkerUser,
+			oldTask:  withRequestedBySource(withRequestedBy(oldTask.DeepCopy())),
+			newTask:  withRequestedBySubject(withRequestedBySource(withRequestedBy(oldTask.DeepCopy())), "victim"),
+			contains: fieldSpecRequestedBy,
+		},
+		{
+			name:    "trusted worker changing an unstamped requester allowed",
+			user:    trustedWorkerUser,
+			oldTask: withRequestedBy(oldTask.DeepCopy()),
+			newTask: withRequestedBySubject(withRequestedBy(oldTask.DeepCopy()), "other"),
+			allowed: true,
+		},
+		{
 			name:     "untrusted update changing transaction denied",
 			user:     untrustedUsername,
 			oldTask:  oldWithProvenance,
@@ -244,10 +277,59 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			contains: labels.AnnotationParentTaskUID,
 		},
 		{
+			name:     "untrusted update adding cancel request denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withCancelRequested(oldTask.DeepCopy()),
+			contains: labels.AnnotationCancelRequested,
+		},
+		{
+			name:     "trusted worker update adding cancel request denied",
+			user:     trustedWorkerUser,
+			oldTask:  oldTask,
+			newTask:  withCancelRequested(oldTask.DeepCopy()),
+			contains: labels.AnnotationCancelRequested,
+		},
+		{
+			name:    "trusted controller can record a cancel request",
+			user:    trustedControllerUser,
+			oldTask: oldTask,
+			newTask: withCancelRequested(oldTask.DeepCopy()),
+			allowed: true,
+		},
+		{
 			name:    "trusted controller can update provenance",
 			user:    trustedControllerUser,
 			oldTask: oldTask,
 			newTask: withParentTaskUID(withTransaction(withRequestedBy(oldTask.DeepCopy()))),
+			allowed: true,
+		},
+		{
+			name:     "untrusted removal of the continuation link finalizer denied",
+			user:     untrustedUsername,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:     "trusted worker removal of the continuation link finalizer denied",
+			user:     trustedWorkerUser,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:    "controller removal of the continuation link finalizer allowed",
+			user:    trustedControllerUser,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: oldTask.DeepCopy(),
+			allowed: true,
+		},
+		{
+			name:    "untrusted update keeping the continuation link finalizer allowed",
+			user:    untrustedUsername,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: withImage(withContinuationLinkFinalizer(oldTask.DeepCopy()), "alpine"),
 			allowed: true,
 		},
 		{
@@ -412,6 +494,22 @@ func withParentTaskUID(task *corev1alpha1.Task) *corev1alpha1.Task {
 	return task
 }
 
+func withParentTaskNamespace(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationParentTaskNamespace] = "parent-namespace"
+	return task
+}
+
+func withCancelRequested(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationCancelRequested] = "cancelled by parent task"
+	return task
+}
+
 func withImage(task *corev1alpha1.Task, image string) *corev1alpha1.Task {
 	task.Spec.Image = image
 	return task
@@ -479,4 +577,25 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 	if !response.Allowed {
 		t.Fatalf("a flag-trusted provenance writer must keep the provenance allowance: %v", response.Result)
 	}
+}
+
+func withRequestedBySource(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	return task
+}
+
+func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alpha1.Task {
+	if task.Spec.RequestedBy == nil {
+		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{}
+	}
+	task.Spec.RequestedBy.Subject = subject
+	return task
+}
+
+func withContinuationLinkFinalizer(task *corev1alpha1.Task) *corev1alpha1.Task {
+	task.Finalizers = append(task.Finalizers, labels.ContinuationLinkFinalizer)
+	return task
 }

@@ -1,0 +1,19 @@
+{
+  "fixtures": [
+    {"match": {"userMessage": "[e2e:soul-eval-ai-second]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-ai-first]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-ai-revised]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-codex-second]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-codex-first]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-codex-revised]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-claude-second]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-claude-first]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-claude-revised]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-copilot-second]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-copilot-first]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-copilot-revised]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-opencode-second]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-opencode-first]"}, "response": {"content": "SOUL_EVAL_OK"}},
+    {"match": {"userMessage": "[e2e:soul-eval-opencode-revised]"}, "response": {"content": "SOUL_EVAL_OK"}}
+  ]
+}

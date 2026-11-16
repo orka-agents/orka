@@ -370,6 +370,29 @@ func controllerEpochPredecessorDigest(lease *coordinationv1.Lease) (string, erro
 	return digest, nil
 }
 
+// ControllerEpochInstallationID returns the UID of the ControllerEpoch
+// object, which is created once, when the installation's first controller
+// acquires the epoch, and identifies the installation that owns every
+// storage dataset Orka advances.
+func (s *Store) ControllerEpochInstallationID(ctx context.Context, name string) (string, error) {
+	if err := s.requireClient(); err != nil {
+		return "", err
+	}
+	normalized, err := store.NormalizeControllerEpochName(name)
+	if err != nil {
+		return "", err
+	}
+	object, err := s.getControllerEpochObject(ctx, normalized)
+	if err != nil {
+		return "", err
+	}
+	uid := string(object.UID)
+	if err := store.ValidateControlIdentifier("controller epoch installation ID", uid); err != nil {
+		return "", fmt.Errorf("controller epoch object %s/%s has no usable UID: %w", object.Namespace, object.Name, err)
+	}
+	return uid, nil
+}
+
 func (s *Store) getControllerEpochObject(ctx context.Context, name string) (*corev1alpha1.ControllerEpoch, error) {
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochObjectName(name)}
 	object := &corev1alpha1.ControllerEpoch{}

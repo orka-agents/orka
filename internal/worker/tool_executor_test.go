@@ -8,8 +8,6 @@ package worker
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -38,8 +39,6 @@ import (
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
-	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -223,11 +222,11 @@ func TestToolExecutor_Execute_CustomTransportAllowsBodylessOversizedRepresentati
 	}
 }
 
-func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t *testing.T) {
+func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusActorTarget(t *testing.T) {
 	var gotHosts []string
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHosts = append(gotHosts, r.Host)
+		gotHosts = append(gotHosts, r.Header.Get("ate-target-actor"))
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request %d: %v", calls, err)
@@ -270,13 +269,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t 
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -288,64 +289,23 @@ func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t 
 		t.Fatalf("calls = %d, want 3", calls)
 	}
 	for i, gotHost := range gotHosts {
-		if gotHost != "actor-1.actors.test" {
+		if gotHost != "tools/actor-1" {
 			t.Fatalf("Host[%d] = %q, want actor route host", i, gotHost)
 		}
 	}
 }
 
-func TestToolExecutor_Execute_DirectMCPSubstrateActorAllowsTrustedStatusEndpoint(t *testing.T) {
-	const routeHost = "actor-1.actors.test"
+func TestToolExecutor_Execute_MCPSubstrateActorRejectsOutboundAccessPolicy(t *testing.T) {
 	var calls int
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != routeHost {
-			t.Fatalf("Host = %q, want %q", r.Host, routeHost)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer resource-credential" {
-			t.Fatalf("Authorization = %q", got)
-		}
-		if got := r.Header.Get(transactiontoken.HeaderName); got != "" {
-			t.Fatalf("%s = %q, want empty", transactiontoken.HeaderName, got)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request %d: %v", calls, err)
-		}
-		switch calls {
-		case 0:
-			if got := body["method"]; got != mcpInitializeMethod {
-				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
-			}
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`))
-		case 1:
-			if got := body["method"]; got != mcpInitializedNotificationMethod {
-				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
-			}
-			w.WriteHeader(http.StatusAccepted)
-		case 2:
-			if got := body["method"]; got != mcpToolsCallMethod {
-				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
-			}
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"mcp"}]}}`))
-		default:
-			t.Fatalf("unexpected MCP request %d", calls)
-		}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-
-	roots := x509.NewCertPool()
-	roots.AddCert(server.Certificate())
-	transport := server.Client().Transport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
-	client := &http.Client{Transport: transport}
 	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
-		Adapter:          outboundaccess.AdapterDirect,
-		CredentialHeader: "Authorization",
-		CredentialValue:  "Bearer resource-credential",
-		SensitiveValues:  []string{"resource-credential"},
+		Adapter: outboundaccess.AdapterDirect, CredentialHeader: "Authorization", CredentialValue: "Bearer resource-credential",
 	}}
-	executor := &ToolExecutor{client: client, namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "lookup", Namespace: "tenant"},
 		Spec: corev1alpha1.ToolSpec{
@@ -355,17 +315,18 @@ func TestToolExecutor_Execute_DirectMCPSubstrateActorAllowsTrustedStatusEndpoint
 			}},
 		},
 		Status: corev1alpha1.ToolStatus{
-			Endpoint: server.URL + "/mcp",
-			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: routeHost},
+			Available: true, Conditions: readySubstrateMCPConditions(),
+			Endpoint: SubstrateMCPProxyPath("tenant", "lookup"),
+			Actor:    &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools"},
 		},
 	}
-
-	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	useSubstrateMCPTestRouter(t, executor, server.URL)
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err == nil || !strings.Contains(err.Error(), "do not support outboundAccessPolicyRef") {
+		t.Fatalf("Execute() error = %v, want outbound access policy rejection", err)
 	}
-	if result != "mcp" || calls != 3 {
-		t.Fatalf("Execute() = %q calls=%d, want mcp and 3 calls", result, calls)
+	if calls != 0 {
+		t.Fatalf("actor calls = %d, want none", calls)
 	}
 }
 
@@ -374,7 +335,7 @@ func TestToolExecutor_Execute_MCPSubstrateActorInitializesSession(t *testing.T) 
 	const negotiatedProtocolVersion = "2025-03-26"
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "actor-1.actors.test" {
+		if r.Header.Get("ate-target-actor") != "tools/actor-1" {
 			t.Fatalf("Host = %q, want actor route host", r.Host)
 		}
 		if r.Method == http.MethodDelete {
@@ -466,13 +427,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorInitializesSession(t *testing.T) 
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -552,14 +515,16 @@ func TestToolExecutor_Execute_MCPSubstrateActorSendsApprovalIdempotencyOnlyOnToo
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 	ctx := WithToolIdempotencyKey(context.Background(), "approval-marker-1")
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -624,13 +589,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorAllowsUnsupportedSessionTerminati
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -683,13 +650,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorSendsInitializedWithoutSession(t 
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -759,13 +728,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorRedactsSessionIDOnErrors(t *testi
 					},
 				},
 				Status: corev1alpha1.ToolStatus{
+					Available: true, Conditions: readySubstrateMCPConditions(),
 					Endpoint: server.URL + "/mcp",
 					Actor: &corev1alpha1.ToolActorStatus{
-						RouteHost: "actor-1.actors.test",
+						Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 					},
 				},
 			}
 
+			useSubstrateMCPTestRouter(t, executor, server.URL)
 			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 			if err == nil {
 				t.Fatal("Execute() error = nil, want MCP HTTP error")
@@ -830,13 +801,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorRejectsInvalidInitializeResponse(
 					},
 				},
 				Status: corev1alpha1.ToolStatus{
+					Available: true, Conditions: readySubstrateMCPConditions(),
 					Endpoint: server.URL + "/mcp",
 					Actor: &corev1alpha1.ToolActorStatus{
-						RouteHost: "actor-1.actors.test",
+						Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 					},
 				},
 			}
 
+			useSubstrateMCPTestRouter(t, executor, server.URL)
 			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 			if err == nil {
 				t.Fatal("Execute() error = nil, want invalid initialize response error")
@@ -909,13 +882,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorTerminatesSessionAfterInvalidInit
 					},
 				},
 				Status: corev1alpha1.ToolStatus{
+					Available: true, Conditions: readySubstrateMCPConditions(),
 					Endpoint: server.URL + "/mcp",
 					Actor: &corev1alpha1.ToolActorStatus{
-						RouteHost: "actor-1.actors.test",
+						Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 					},
 				},
 			}
 
+			useSubstrateMCPTestRouter(t, executor, server.URL)
 			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 			if err == nil {
 				t.Fatal("Execute() error = nil, want invalid initialize response error")
@@ -986,13 +961,15 @@ func TestToolExecutor_Execute_MCPSubstrateActorIgnoresSessionTerminationFailureA
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
 			Actor: &corev1alpha1.ToolActorStatus{
-				RouteHost: "actor-1.actors.test",
+				Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools",
 			},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -1756,11 +1733,13 @@ func TestToolExecutor_Execute_MCPRejectsBodyAuth(t *testing.T) {
 			},
 		},
 		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(),
 			Endpoint: server.URL + "/mcp",
-			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: "actor-1.actors.test"},
+			Actor:    &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools"},
 		},
 	}
 
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"query":"test"}`))
 	if err == nil || !strings.Contains(err.Error(), "MCP tools do not support authInject=body") {
 		t.Fatalf("Execute() error = %v, want MCP body auth rejection", err)
@@ -1794,6 +1773,59 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	_, err := executor.Execute(context.Background(), tool, nil)
 	if err == nil {
 		t.Error("Execute() expected error for HTTP 500")
+	}
+}
+
+func TestToolExecutor_Execute_HTTPErrorCarriesStatus(t *testing.T) {
+	for status, delivered := range map[int]bool{http.StatusForbidden: false, http.StatusNotFound: true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+		tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+
+		_, err := executor.Execute(context.Background(), tool, nil)
+		server.Close()
+		statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+		_, isDelivered := errors.AsType[ToolExecutionError](err)
+		if !ok || statusErr.StatusCode != status || statusErr.Redirected || !ToolRequestWasAttempted(err) || isDelivered != delivered {
+			t.Fatalf("Execute() for HTTP %d error = %#v, want an attempted status error (delivered=%t)", status, err, delivered)
+		}
+	}
+}
+
+func TestToolExecutor_Execute_HTTPErrorAfterRedirectIsMarked(t *testing.T) {
+	// The POST may have taken effect before redirecting to a result the
+	// caller may not read.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /action", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/result", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /result", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL + "/action"}}}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+	if !ok || statusErr.StatusCode != http.StatusForbidden || !statusErr.Redirected {
+		t.Fatalf("Execute() error = %#v, want a redirected HTTP 403", err)
+	}
+}
+
+func TestToolErrorDiagnosticKeepsGatewayMCPCause(t *testing.T) {
+	err := ToolRequestAttemptedError{Err: gatewayMCPError{Err: errors.New("tool returned HTTP 403: denied")}}
+	if err.Error() != "gateway MCP request failed" {
+		t.Fatalf("Error() = %q, want the cause kept out of the message", err.Error())
+	}
+	if got := ToolErrorDiagnostic(err); got != "gateway MCP request failed: tool returned HTTP 403: denied" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the gateway cause", got)
+	}
+	if got := ToolErrorDiagnostic(errors.New("plain")); got != "plain" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the plain message", got)
 	}
 }
 
@@ -2315,6 +2347,7 @@ func TestToolExecutor_Execute_InjectsTraceparentAndEmitsHTTPToolSpan(t *testing.
 	}
 	ctx = baggage.ContextWithBaggage(ctx, bag)
 	ctx = WithToolCallID(ctx, "call-http")
+	ctx = WithAgentUID(ctx, "agent-uid")
 	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
 	parent.End()
 	if err != nil {
@@ -2342,6 +2375,9 @@ func TestToolExecutor_Execute_InjectsTraceparentAndEmitsHTTPToolSpan(t *testing.
 	}
 	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-http" {
 		t.Fatalf("tool call id = %q", got)
+	}
+	if got := attrs[genai.AttrAgentID].AsString(); got != "agent-uid" {
+		t.Fatalf("%s = %q, want the bound Agent's UID", genai.AttrAgentID, got)
 	}
 	if countMetricDataPoints(metrics.Collect(t), genai.MetricExecuteToolDuration) != 1 {
 		t.Fatalf("missing %s datapoint", genai.MetricExecuteToolDuration)
@@ -2397,7 +2433,8 @@ func TestToolExecutor_Execute_MCPSubstrateActorInjectsTraceparent(t *testing.T) 
 		Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
 			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
 		}}},
-		Status: corev1alpha1.ToolStatus{Endpoint: server.URL + "/mcp", Actor: &corev1alpha1.ToolActorStatus{RouteHost: "actor-1.actors.test"}},
+		Status: corev1alpha1.ToolStatus{
+			Available: true, Conditions: readySubstrateMCPConditions(), Endpoint: server.URL + "/mcp", Actor: &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools"}},
 	}
 	ctx, parent := tracing.Tracer("test").Start(context.Background(), "agent.step")
 	member, err := baggage.NewMember("tenant", "acme")
@@ -2410,6 +2447,7 @@ func TestToolExecutor_Execute_MCPSubstrateActorInjectsTraceparent(t *testing.T) 
 	}
 	ctx = baggage.ContextWithBaggage(ctx, bag)
 	ctx = WithToolCallID(ctx, "call-http")
+	useSubstrateMCPTestRouter(t, executor, server.URL)
 	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
 	parent.End()
 	if err != nil {
@@ -2668,24 +2706,9 @@ func TestValidateGatewayOriginalTargetUsesForwardedAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = validateGatewayOriginalTarget(context.Background(), requestURL, "127.0.0.1", false)
+	err = validateGatewayOriginalTarget(context.Background(), requestURL, "127.0.0.1")
 	if err == nil || !strings.Contains(err.Error(), "public original Tool URL") {
 		t.Fatalf("validateGatewayOriginalTarget() error = %v, want forwarded authority rejection", err)
-	}
-}
-
-func TestValidateGatewayOriginalTargetAllowsControllerResolvedActorRoute(t *testing.T) {
-	requestURL, err := neturl.Parse("http://127.0.0.1:8080/mcp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateGatewayOriginalTarget(
-		context.Background(),
-		requestURL,
-		"actor-1.actors.resources.substrate.ate.dev",
-		true,
-	); err != nil {
-		t.Fatalf("validateGatewayOriginalTarget() error = %v", err)
 	}
 }
 
@@ -2780,7 +2803,7 @@ func TestToolHTTPClientStripsSensitiveHeadersOnRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2825,7 +2848,7 @@ func TestToolHTTPClientGatewayBypassesConfiguredProxy(t *testing.T) {
 	transport := base.Transport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
 	base.Transport = transport
-	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2854,7 +2877,7 @@ func TestToolHTTPClientDoesNotFollowGatewayRedirect(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer gateway.Close()
-	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true)
+	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2961,7 +2984,7 @@ func TestToolHTTPClientRejectsCrossOriginRedirectWithoutCredentials(t *testing.T
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer source.Close()
-	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3233,4 +3256,40 @@ func TestGatewayMCPErrorHidesMessageAndPreservesClassification(t *testing.T) {
 	if !ToolRequestWasAttempted(err) {
 		t.Fatal("gateway error lost attempted-request classification")
 	}
+}
+
+// A request carrying a person's linked-account credential never follows a
+// redirect: Go forwards custom headers across redirects, and the credential
+// is bound to the origin the provider declared.
+func TestToolHTTPClientDoesNotFollowRedirectsForConnectionCredentials(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(source.Close)
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, source.URL+"/search", nil)
+	req.Header.Set("X-Linked-Token", "secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || hits.Load() != 0 {
+		t.Fatalf("status = %d target hits = %d, want the redirect returned unfollowed", resp.StatusCode, hits.Load())
+	}
+}
+
+// readySubstrateMCPConditions marks a test Tool's Actor verified for its
+// current (zero) generation.
+func readySubstrateMCPConditions() []metav1.Condition {
+	return []metav1.Condition{{Type: "Available", Status: metav1.ConditionTrue, Reason: "EndpointReachable"}}
 }

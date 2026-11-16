@@ -1,14 +1,17 @@
-import { useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { useIsMobile } from '@/hooks/use-media-query'
+import { useChatConfig } from '@/hooks/use-chat'
+import { api, isNotImplementedError } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { OrcaMark } from '@/components/ui/orca-mark'
 
-const navItems = [
+const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/usage', label: 'Usage', icon: ChartNoAxesCombined },
   { to: '/chat', label: 'Chat', icon: Sparkles },
@@ -16,16 +19,35 @@ const navItems = [
   { to: '/security', label: 'Security', icon: Shield },
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
   { to: '/kanban', label: 'Board', icon: Columns3 },
-  { to: '/live', label: 'Live', icon: Activity },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/tools', label: 'Tools', icon: Wrench },
+  { to: '/settings/connectors', label: 'Connectors', icon: Link2 },
 ] as const
+
+// The demo build's tour entry; other builds drop it (static mode check).
+const DemoTourLauncher = import.meta.env.MODE === 'demo'
+  ? lazy(() => import('@/demo/tour/tour').then((m) => ({ default: m.TourLauncher })))
+  : null
 
 export function Sidebar() {
   const location = useLocation()
+  // Connectors exist only on a controller started with --connectors-enabled;
+  // the entry is hidden once the server says they are off (shown until known).
+  // Without chat the config route is absent, so the connectors API itself is
+  // asked: it answers 501 when connectors are off.
+  const { data: chatConfig, isError: chatConfigUnavailable } = useChatConfig()
+  const connectorsProbe = useQuery({
+    queryKey: ['connectorsAvailability'],
+    queryFn: () => api.get<unknown>('/connectors'),
+    enabled: chatConfigUnavailable,
+    retry: false,
+    staleTime: 60 * 1000,
+  })
+  const connectorsOff = chatConfig?.connectorsEnabled === false || (chatConfigUnavailable && isNotImplementedError(connectorsProbe.error))
+  const navItems = NAV_ITEMS.filter((item) => item.to !== '/settings/connectors' || !connectorsOff)
   const { sidebarCollapsed: desktopCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUIStore()
   const isMobile = useIsMobile()
 
@@ -107,7 +129,7 @@ export function Sidebar() {
       <div className="flex h-14 items-center border-b border-border px-4">
         {!sidebarCollapsed && (
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground">
-            <OrcaMark className="h-6 w-6" />
+            <OrcaMark small className="h-6 w-6" />
             <span>Orka</span>
           </Link>
         )}
@@ -125,7 +147,8 @@ export function Sidebar() {
           )}
         </Button>
       </div>
-      <nav className="flex-1 space-y-1 p-2">
+      {/* Scrolls on short screens, so whatever sits below it stays in view. */}
+      <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
           return (
@@ -140,20 +163,26 @@ export function Sidebar() {
               onClick={() => { if (overlayOpen) closeOverlay() }}
               className={cn(
                 'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                // Refined active state: left accent bar + subtle tint + colored
-                // icon/text, replacing the old heavy solid fill.
+                // Active: a quiet grey fill and full-strength ink. In a
+                // black-and-white UI an accent bar or tint would be the
+                // loudest thing in the sidebar.
                 isActive
-                  ? 'bg-primary/10 text-primary before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary'
+                  ? 'bg-accent text-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
                 sidebarCollapsed && 'justify-center px-2'
               )}
             >
-              <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-primary')} />
+              <Icon className="h-4 w-4 shrink-0" />
               {!sidebarCollapsed && <span>{label}</span>}
             </Link>
           )
         })}
       </nav>
+      {DemoTourLauncher && (
+        <Suspense fallback={null}>
+          <DemoTourLauncher collapsed={sidebarCollapsed} onSelect={() => { if (overlayOpen) closeOverlay() }} />
+        </Suspense>
+      )}
     </aside>
     </>
   )

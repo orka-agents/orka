@@ -78,16 +78,82 @@ describe('AgentList', () => {
     // Agent A: name, namespace, provider badge, model badge, tools count
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet-4-20250514')).toBeInTheDocument()
-    expect(screen.getByText('1 tools')).toBeInTheDocument()
+    expect(screen.getByText('1 tool')).toBeInTheDocument()
     expect(screen.getByText('Active: 3')).toBeInTheDocument()
 
     // Agent B: name, runtime badge
     expect(screen.getByText('agent-b')).toBeInTheDocument()
-    expect(screen.getByText('codex ACP')).toBeInTheDocument()
+    expect(screen.getByText('Codex ACP')).toBeInTheDocument()
 
     // Agent C: OpenCode keeps its branded runtime label.
     expect(screen.getByText('agent-c')).toBeInTheDocument()
     expect(screen.getByText('OpenCode ACP')).toBeInTheDocument()
+  })
+
+  it('shows the providerRef name and a readiness badge from the Ready condition', async () => {
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'ref-agent', namespace: 'default', uid: 'uid-r' },
+              spec: { providerRef: { name: 'anthropic-prod' }, model: { provider: 'anthropic' } },
+              status: { activeTasks: 0, conditions: [{ type: 'Ready', status: 'True' }] },
+            },
+            {
+              metadata: { name: 'broken-agent', namespace: 'default', uid: 'uid-b' },
+              spec: { providerRef: { name: 'missing' } },
+              status: { activeTasks: 0, conditions: [{ type: 'Ready', status: 'False', message: 'referenced provider "missing" not found' }] },
+            },
+            {
+              metadata: { name: 'new-agent', namespace: 'default', uid: 'uid-n' },
+              spec: { providerRef: { name: 'anthropic-prod' } },
+            },
+          ],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<AgentList />)
+    await waitFor(() => expect(screen.getByText('ref-agent')).toBeInTheDocument())
+    expect(screen.getAllByText('anthropic-prod')).toHaveLength(2)
+    expect(screen.queryByText('anthropic')).not.toBeInTheDocument()
+    expect(screen.getByText('missing')).toBeInTheDocument()
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+    expect(screen.getByText('Not ready')).toHaveAttribute('title', 'referenced provider "missing" not found')
+  })
+
+  it('keeps long agent names readable at tablet widths', async () => {
+    const longName = 'repository-security-reviewer-agent'
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: longName, namespace: 'orka-system', uid: 'uid-long' },
+              spec: {},
+              status: { activeTasks: 0, conditions: [{ type: 'Ready', status: 'True' }] },
+            },
+          ],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<AgentList />)
+    const title = await screen.findByText(longName)
+    // A truncated name keeps its full text available as a tooltip.
+    expect(title).toHaveAttribute('title', longName)
+    expect(screen.getByText('orka-system')).toHaveAttribute('title', 'orka-system')
+    // Two columns only from lg and three from xl, so md cards span the full width.
+    const grid = title.closest('.grid')
+    expect(grid).toHaveClass('lg:grid-cols-2', 'xl:grid-cols-3')
+    expect(grid).not.toHaveClass('md:grid-cols-2')
+    expect(grid).not.toHaveClass('lg:grid-cols-3')
+    // The readiness badge sits under the name instead of beside it in the header row.
+    const nameColumn = title.parentElement as HTMLElement
+    expect(nameColumn).toContainElement(screen.getByText('Ready'))
   })
 
   it('agent card shows namespace', async () => {

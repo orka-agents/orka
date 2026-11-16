@@ -98,8 +98,7 @@ func PublicAddressDialTransport() *http.Transport {
 
 // ApplyPublicAddressDialControl installs the per-dial public-address control on
 // an existing transport, preserving its TLS configuration and any other
-// settings. Use it when a conformance dial must keep configured TLS roots (the
-// harness v1 client) yet still reject a hostname that resolves or rebinds to a
+// settings while rejecting a hostname that resolves or rebinds to a
 // non-public, cross-namespace, or link-local address.
 func ApplyPublicAddressDialControl(transport *http.Transport) {
 	if transport == nil {
@@ -129,9 +128,7 @@ func PinnedBackendDialTransport(addresses []string) *http.Transport {
 
 // ApplyPinnedBackendDial forces every dial on an existing transport to one of
 // the given verified backend ip:port targets, preserving the transport's TLS
-// configuration. Use it when a conformance dial must keep configured TLS roots
-// (the harness v1 client) yet still pin to verified Service backends rather than
-// the mutable Service ClusterIP.
+// configuration while pinning to verified Service backends.
 func ApplyPinnedBackendDial(transport *http.Transport, addresses []string) {
 	if transport == nil {
 		return
@@ -355,7 +352,14 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 	if !maps.Equal(base.AdapterDigests, target.Profile.AdapterDigests) {
 		return fmt.Errorf("adapter digest set does not exactly match the registered runtime profile")
 	}
-	if base.Limits != target.Limits {
+	registeredLimits := base.Limits
+	// The AgentRuntime registration predates the optional native-session cap.
+	// When absent from registration, it is separately negotiated and bounded
+	// by the v2 client; every registered ordinary limit remains exact.
+	if target.Limits.MaxNativeSessionBytes == 0 {
+		registeredLimits.MaxNativeSessionBytes = 0
+	}
+	if registeredLimits != target.Limits {
 		return fmt.Errorf("protocol limits do not exactly match the AgentRuntime registration")
 	}
 	if base.SupportsDrain != target.SupportsDrain {
@@ -459,6 +463,7 @@ func getCapabilities(ctx context.Context, client *http.Client, baseURL string) (
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set(harnessv2.NativeSessionLimitsHeader, "1")
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {

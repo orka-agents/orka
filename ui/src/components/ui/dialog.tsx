@@ -39,10 +39,18 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  // Radix returns focus to a DialogTrigger on close. A dialog opened from
+  // state has no trigger, so focus fell to <body>; remember what had focus
+  // when the dialog opened and return it there while it is still on the page.
+  // When nothing had focus (Safari does not focus a clicked button), Radix's
+  // own handling stays in charge.
+  const openerRef = React.useRef<HTMLElement | null>(null)
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
@@ -52,6 +60,18 @@ function DialogContent({
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-lg",
           className
         )}
+        onOpenAutoFocus={(event) => {
+          openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+          onOpenAutoFocus?.(event)
+        }}
+        onCloseAutoFocus={(event) => {
+          onCloseAutoFocus?.(event)
+          const opener = openerRef.current
+          openerRef.current = null
+          if (event.defaultPrevented || !opener?.isConnected || opener === document.body) return
+          event.preventDefault()
+          opener.focus()
+        }}
         {...props}
       >
         {children}

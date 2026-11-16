@@ -2,26 +2,46 @@ name: Free disk space
 description: >-
   Remove large preinstalled toolchains and prune Docker caches to free disk
   space for Docker-heavy E2E jobs on GitHub-hosted runners.
+inputs:
+  background:
+    description: >-
+      Remove the toolchains in the background instead of waiting for them
+      (3-8 minutes, mostly Android). Docker is still pruned first. Use it
+      when the job does not need the space right away.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
     - name: Free disk space
       shell: bash
+      env:
+        BACKGROUND: ${{ inputs.background }}
       run: |
         set -Eeuxo pipefail
         echo "Disk usage before cleanup"
         df -h
         docker system df || true
 
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /opt/ghc
-        sudo rm -rf /usr/local/share/boost
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/hostedtoolcache/CodeQL
-        sudo rm -rf /usr/share/swift
-
+        # Prune before any build starts; a later prune would delete its images.
         docker system prune -af || true
         docker builder prune -af || true
+
+        toolchains=(
+          /usr/share/dotnet
+          /opt/ghc
+          /usr/local/share/boost
+          /usr/local/lib/android
+          /opt/hostedtoolcache/CodeQL
+          /usr/share/swift
+        )
+        if [[ "${BACKGROUND}" == "true" ]]; then
+          # The runner keeps background processes until the job ends.
+          sudo nohup nice -n 19 rm -rf "${toolchains[@]}" >/dev/null 2>&1 &
+          echo "Removing preinstalled toolchains in the background"
+        else
+          sudo rm -rf "${toolchains[@]}"
+        fi
 
         echo "Disk usage after cleanup"
         df -h

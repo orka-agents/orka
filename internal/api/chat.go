@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -30,7 +29,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -69,7 +67,13 @@ const (
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled                bool
+	Enabled bool
+	// ConnectorsEnabled mirrors --connectors-enabled: without it the
+	// linked-account surfaces (list_connections) are not offered at all.
+	ConnectorsEnabled bool
+	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
+	// guidance names the dashboard page only when this controller serves it.
+	DashboardEnabled       bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -81,7 +85,15 @@ type ChatConfig struct {
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
+	// LinkedAccounts builds the linked-account resolver for one signed-in
+	// person's chat turn; nil leaves built-in GitHub tools on their own
+	// credentials. The controller wires it when connectors are enabled.
+	LinkedAccounts LinkedAccountsFactory
 }
+
+// LinkedAccountsFactory returns a resolver for a person's linked accounts
+// in a namespace, or nil when there is nothing to resolve.
+type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
 // digest-pinned RuntimePool images.
@@ -144,6 +156,14 @@ type activeChatRequest struct {
 	done            chan struct{}
 	deleteRequested bool
 	deleteWaiters   int
+	// gate marks a reservation a Session cancel holds on an idle chat to keep
+	// the next message out. It is not a chat request, so another cancel that
+	// finds it reports no running turn.
+	gate bool
+	// keepCreatedSession records that a Session cancel stopped the request:
+	// a Session the request created is kept, empty, rather than deleted as
+	// for a disconnected client, so the cancel's caller can still read it.
+	keepCreatedSession bool
 }
 
 type activeChatHandle struct {
@@ -203,6 +223,7 @@ type chatStreamRequest struct {
 	turnDeadline   time.Time
 	finalizeTurn   func()
 	provider       llm.Provider
+	providerName   string // the Provider resource's name; provider.Name() is only its type
 	messages       []llm.Message
 	systemPrompt   string
 	tools          []llm.Tool
@@ -391,6 +412,21 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
+	promptBuilder.SetChatProvider(providerInfo.Name)
+	// The tool list itself is built later; filter the names the same way now
+	// so the prompt only describes tools this caller is offered.
+	chatToolNames := chattools.ChatToolNames()
+	chatToolStubs := make([]llm.Tool, 0, len(chatToolNames))
+	for _, name := range chatToolNames {
+		chatToolStubs = append(chatToolStubs, llm.Tool{Name: name})
+	}
+	if !ch.config.ConnectorsEnabled {
+		chatToolStubs = filterCompletionToolsExcluding(chatToolStubs, chattools.ListConnectionsToolName)
+	}
+	offeredChatTools := completionToolNames(filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, chatToolStubs))
+	if len(offeredChatTools) < len(chatToolStubs) {
+		promptBuilder.SetAvailableChatTools(offeredChatTools)
+	}
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
@@ -409,40 +445,28 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	persistedCount := len(messages)
 
-	// Append user message — if an agentRef is set and the agent has a runtime,
-	// prepend context so the LLM knows to use create_agent_task.
+	// Append user message — if an agentRef is set, prepend context so the LLM
+	// knows which agent the user selected and which task tool runs it.
 	userContent := req.Message
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
 		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agentObj); err == nil {
-			if agentObj.Spec.Runtime != nil {
+			switch {
+			case agentObj.Spec.Runtime != nil && slices.Contains(offeredChatTools, "create_agent_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
-					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+					req.AgentRef, agentRuntimeLabel(agentObj.Spec.Runtime), req.AgentRef, req.Message)
+			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
+				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
+					req.AgentRef, req.AgentRef, req.Message)
+			default:
+				// The tool that runs this agent is not offered; keep the selection
+				// visible without telling the model to call it.
+				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
+					req.AgentRef, req.Message)
 			}
 		}
 	}
 
-	// Auto-route to dev-coordinator for issue/PR workflows.
-	// Chat just creates the coordinator — the coordinator creates its own specialist agents.
-	if req.AgentRef == "" && looksLikeIssueWorkflow(req.Message) {
-		userContent = fmt.Sprintf("[System: This is an issue workflow. "+
-			"You MUST create a dev-coordinator agent using create_agent with initialPrompt (one-shot pattern). "+
-			"Set coordination.enabled=true, providerRef=\"copilot\", model.name=\"gpt-5.4\", maxDepth=3, maxConcurrentChildren=5. "+
-			"CRITICAL: The dev-coordinator must NOT have a runtime — it must be a plain AI agent with providerRef. "+
-			"The coordinator system prompt must instruct it to: "+
-			"1) Use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro). "+
-			"Set allowedAgents to include the agents it creates. "+
-			"2) Follow this adaptive workflow: "+
-			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
-			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
-			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. "+
-			"Phase 4 — VALIDATE: Before review, determine the validation image and command from repository evidence such as CI workflows, toolchain files, Dockerfiles/devcontainers, Makefiles, and docs. Run validation with create_container_task on an immutable ref when available. If the environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED. Allow up to 6 validation repair tasks before reporting VALIDATION_BLOCKED. "+
-			"Phase 5 — REVIEW LOOP: Delegate parallel reviews to reviewer agents, then delegate coder repairs on the same branch until validation passes and all reviewers approve. Bound this to at most 8 review repair tasks. "+
-			"Phase 6 — PR + CI LOOP: After validation passes and reviewers approve, create or update the PR, then call check_pull_request_ci once with wait_timeout=\"30m\" and poll_interval=\"30s\". If checks fail, delegate a focused CI repair task to the coder on the PR branch, then re-run validation and reviewers before re-checking CI. Bound this to at most 3 CI repair tasks; if the CI check times out while still pending, report CI_PENDING. "+
-			"Phase 7 — APPROVE: Post final approval only after validation passes, reviewers approve, and CI is green. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Report VALIDATION_BLOCKED, REVIEW_BLOCKED, CI_BLOCKED, or CI_PENDING when a bounded loop is exhausted. Do not merge unless the user explicitly asks. "+
-			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
-			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
-	}
 	messages = append(messages, llm.Message{
 		Role:    chatRoleUser,
 		Content: userContent,
@@ -452,11 +476,21 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.userInfo = userInfo
 	executor.gatewayEventStore = ch.gatewayEventStore
+	executor.requester = requesterFromUserInfo(userInfo)
+	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
+	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
+	executor.dashboardEnabled = ch.config.DashboardEnabled
+	executor.chatSessionEpoch = chatSessionEpoch(ctx, ch.sessionStore, namespace, sessionID)
+	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
+	executor.providerNamespace = providerInfo.Namespace
 	executor.providerType = providerInfo.Type
 	authorizationReader := ch.contextTokenAuthorizationReader()
 	executor.SetPolicyReader(authorizationReader)
+	executor.authorizeAgentReference = func(_ context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenAgentTaskReference(contextToken, ch.contextTokenAuthorization, agent.Namespace, agent.Name)
+	}
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, authorizationReader, ch.kubeClient, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
@@ -478,6 +512,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
+	if !ch.config.ConnectorsEnabled {
+		tools = filterCompletionToolsExcluding(tools, chattools.ListConnectionsToolName)
+	}
 	tools = filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, tools)
 	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", completionToolNames(tools)); err != nil {
 		return err
@@ -504,8 +541,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
 		return c.JSON(ChatResponse{
@@ -522,6 +558,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		turnDeadline:   activeChat.turnDeadline,
 		finalizeTurn:   activeChat.finish,
 		provider:       provider,
+		providerName:   providerInfo.Name,
 		messages:       messages,
 		systemPrompt:   systemPrompt,
 		tools:          tools,
@@ -587,9 +624,13 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
+		providerName := req.providerName
+		if providerName == "" {
+			providerName = req.provider.Name()
+		}
 		statusData, _ := json.Marshal(map[string]string{
 			"sessionId":     req.sessionID,
-			chatProviderKey: req.provider.Name(),
+			chatProviderKey: providerName,
 			chatModelKey:    req.model,
 		})
 		emitSSE("status", string(statusData))
@@ -670,13 +711,18 @@ func (ch *ChatHandler) reserveChatTurn(
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(turnDeadline) {
 		turnDeadline = deadline.UTC()
 	}
-	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, &store.SessionRecord{
-		Namespace:   namespace,
-		Name:        sessionID,
-		SessionType: store.SessionTypeChat,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}, turnID, turnDeadline.Add(chatDurabilityTimeout))
+	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{
+		Session: &store.SessionRecord{
+			Namespace:   namespace,
+			Name:        sessionID,
+			SessionType: store.SessionTypeChat,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		TurnID:    turnID,
+		Now:       now,
+		ExpiresAt: turnDeadline.Add(chatDurabilityTimeout),
+	})
 	if errors.Is(err, store.ErrGatewayOwnedSession) {
 		return "", time.Time{}, false, fiber.NewError(fiber.StatusNotFound, "chat session not found")
 	}
@@ -807,8 +853,14 @@ func chatSessionLockError(err error) error {
 }
 
 func (ch *ChatHandler) reserveActiveChat(namespace, sessionID string) (*activeChatReservation, error) {
+	return ch.reserveActiveChatAs(namespace, sessionID, false)
+}
+
+// reserveActiveChatAs reserves the chat for a request, or, with gate, only to
+// keep a request from starting.
+func (ch *ChatHandler) reserveActiveChatAs(namespace, sessionID string, gate bool) (*activeChatReservation, error) {
 	cancelContext, cancel := context.WithCancel(context.Background())
-	request := &activeChatRequest{cancel: cancel, done: make(chan struct{})}
+	request := &activeChatRequest{cancel: cancel, done: make(chan struct{}), gate: gate}
 	reservation := &activeChatReservation{
 		cancelContext: cancelContext,
 		cancel:        cancel,
@@ -865,7 +917,10 @@ func (ch *ChatHandler) activateReservedChat(
 	stopTurnCancellation := context.AfterFunc(turnCancelCtx, reservation.cancel)
 	release := func() {
 		stopTurnCancellation()
-		ch.releaseChatTurn(namespace, sessionID, turnID, created)
+		ch.activeChatsMu.Lock()
+		keep := reservation.request.keepCreatedSession
+		ch.activeChatsMu.Unlock()
+		ch.releaseChatTurn(namespace, sessionID, turnID, created && !keep)
 		ch.finishActiveChatTurn(namespace, sessionID, turnID)
 	}
 	return &activeChatHandle{
@@ -899,7 +954,7 @@ func (ch *ChatHandler) deleteChatSession(ctx context.Context, namespace, session
 	if ch.sessionManager != nil {
 		return ch.sessionManager.DeleteSession(ctx, namespace, sessionID)
 	}
-	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID)
+	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID, time.Now().UTC())
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -947,8 +1002,7 @@ func (ch *ChatHandler) runToolLoop(
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, err
 		default:
@@ -960,8 +1014,7 @@ func (ch *ChatHandler) runToolLoop(
 		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -974,22 +1027,23 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
-		if ch.config.MaxSessionSize > 0 {
-			messages = llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
+		// Truncate a view of the whole conversation each step, never the
+		// history itself, so the cut stays where it was and the prompt
+		// prefix stays cacheable.
+		sent := ch.sessionView(messages)
+		resp, shortened, retried, err := ch.callLLMWithRetry(iterCtx, provider, sent, systemPrompt, model, tools, maxTokens, temperature)
+		if retried {
+			messages = shortened // the provider refused the context as too long
 		}
-
-		resp, updatedMsgs, err := ch.callLLMWithRetry(iterCtx, provider, messages, systemPrompt, model, tools, maxTokens, temperature)
-		messages = updatedMsgs
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
 		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
-		usage.InputTokens += resp.InputTokens
+		usage.InputTokens += resp.PromptTokens()
 		usage.OutputTokens += resp.OutputTokens
 
 		if len(resp.ToolCalls) == 0 {
@@ -1014,8 +1068,7 @@ func (ch *ChatHandler) runToolLoop(
 			)
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1058,18 +1111,19 @@ func (ch *ChatHandler) handleIterationLimit(
 	turnMessages = append(turnMessages, terminationPrompt)
 
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           ch.sessionView(messages),
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil {
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
 		return "", true, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
 	}
 	usage.LLMCalls++
-	usage.InputTokens += resp.InputTokens
+	usage.InputTokens += resp.PromptTokens()
 	usage.OutputTokens += resp.OutputTokens
 
 	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
@@ -1089,8 +1143,18 @@ func (ch *ChatHandler) handleIterationLimit(
 	return resp.Content, true, nil
 }
 
+// sessionView is the conversation as the provider gets it: truncated to the
+// session size budget, if one is set.
+func (ch *ChatHandler) sessionView(messages []llm.Message) []llm.Message {
+	if ch.config.MaxSessionSize > 0 {
+		return llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
+	}
+	return messages
+}
+
 // callLLMWithRetry calls the LLM provider and retries once with truncated messages
-// if the context is too long.
+// if the context is too long. It returns the messages it sent last and whether
+// that retry shortened them.
 func (ch *ChatHandler) callLLMWithRetry(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1099,14 +1163,15 @@ func (ch *ChatHandler) callLLMWithRetry(
 	tools []llm.Tool,
 	maxTokens int,
 	temperature float64,
-) (*llm.CompletionResponse, []llm.Message, error) {
+) (*llm.CompletionResponse, []llm.Message, bool, error) {
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		Tools:        tools,
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           messages,
+		Tools:              tools,
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil && llm.IsContextTooLongErr(err) {
 		tokenEstimate := 0
@@ -1115,15 +1180,17 @@ func (ch *ChatHandler) callLLMWithRetry(
 		}
 		messages = llm.TruncateMessages(messages, tokenEstimate/2)
 		resp, err = provider.Complete(ctx, &llm.CompletionRequest{
-			Model:        model,
-			SystemPrompt: systemPrompt,
-			Messages:     messages,
-			Tools:        tools,
-			MaxTokens:    maxTokens,
-			Temperature:  temperature,
+			Model:              model,
+			SystemPrompt:       systemPrompt,
+			SystemPromptStable: chatPromptStable(systemPrompt),
+			Messages:           messages,
+			Tools:              tools,
+			MaxTokens:          maxTokens,
+			Temperature:        temperature,
 		})
+		return resp, messages, true, err
 	}
-	return resp, messages, err
+	return resp, messages, false, err
 }
 
 // executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
@@ -1328,26 +1395,32 @@ func (ch *ChatHandler) saveChatSession(
 	// window added to the chat-turn lease.
 	durabilityCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
 	defer cancel()
-	return ch.sessionTurnCommitter.CommitSessionTurn(
-		durabilityCtx,
-		&store.SessionRecord{
+	return ch.sessionTurnCommitter.CommitSessionTurn(durabilityCtx, store.CommitSessionTurnRequest{
+		Session: &store.SessionRecord{
 			Namespace:   namespace,
 			Name:        sessionID,
 			SessionType: "chat",
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		},
-		turnID,
-		persistedCount,
-		storeMessages,
-		usage.InputTokens,
-		usage.OutputTokens,
-	)
+		TurnID:               turnID,
+		ExpectedMessageCount: persistedCount,
+		Messages:             storeMessages,
+		InputTokens:          usage.InputTokens,
+		OutputTokens:         usage.OutputTokens,
+		Now:                  time.Now().UTC(),
+	})
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
+	// The advertised set matches what a turn will actually offer: no
+	// list_connections without connectors, or for a delegated token that
+	// may not read linked accounts.
+	if !ch.config.ConnectorsEnabled || !contextTokenAllowsConnectorRead(GetUserInfo(c), ch.contextTokenAuthorization) {
+		toolNames = slices.DeleteFunc(slices.Clone(toolNames), func(name string) bool { return name == chattools.ListConnectionsToolName })
+	}
 
 	// Context-token callers must name a Provider explicitly: the resolver
 	// refuses the implicit server default for them, so the UI must not offer
@@ -1367,6 +1440,7 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
 		"maxConcurrent":           ch.config.MaxConcurrent,
 		"availableTools":          toolNames,
+		"connectorsEnabled":       ch.config.ConnectorsEnabled,
 	})
 }
 
@@ -1458,6 +1532,66 @@ func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace
 	}
 }
 
+// stopActiveChat stops a chat Session's in-flight request, as a client
+// disconnect would, and waits until it has stopped. Until release is called,
+// the Session stays fenced: no next message can start, so the caller can
+// cancel the stopped turn's Tasks without catching a new turn's. The Session
+// is kept and accepts the next message after release. It reports whether a
+// request was running.
+func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, func(), error) {
+	key := activeChatKey(namespace, sessionID)
+	for range 3 {
+		ch.activeChatsMu.Lock()
+		request := ch.activeChats[key]
+		if request != nil {
+			// A gate holds the entry after the request finishes, as a
+			// deletion does, so reserveActiveChat refuses the next message.
+			request.deleteWaiters++
+			request.keepCreatedSession = true
+		}
+		ch.activeChatsMu.Unlock()
+		if request == nil {
+			// Idle: hold the reservation ourselves. A request that started
+			// meanwhile is stopped on the next pass.
+			reservation, err := ch.reserveActiveChatAs(namespace, sessionID, true)
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			if err != nil {
+				return false, nil, err
+			}
+			return false, func() { ch.finishActiveChatReservation(reservation, nil) }, nil
+		}
+		release := func() { ch.abandonChatDeletionWaiter(namespace, sessionID, request) }
+		if request.gate {
+			// Another cancel already holds the idle chat; this one joins its
+			// gate and reports no running turn.
+			return false, release, nil
+		}
+		running := true
+		select {
+		case <-request.done:
+			running = false
+		default:
+			request.cancel()
+		}
+		timer := time.NewTimer(chatDurabilityTimeout)
+		select {
+		case <-request.done:
+			timer.Stop()
+			return running, release, nil
+		case <-timer.C:
+			release()
+			return true, nil, fmt.Errorf("%w: active chat did not stop before the cancellation deadline", store.ErrNotReady)
+		case <-ctx.Done():
+			timer.Stop()
+			release()
+			return true, nil, ctx.Err()
+		}
+	}
+	return false, nil, fmt.Errorf("%w: chat session %s/%s kept starting requests", store.ErrNotReady, namespace, sessionID)
+}
+
 func (ch *ChatHandler) clearChatDeletionGate(namespace, sessionID string) {
 	key := activeChatKey(namespace, sessionID)
 	ch.activeChatsMu.Lock()
@@ -1538,6 +1672,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 		if fbProviderCRD.Spec.Azure != nil {
 			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
+			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)
@@ -1558,6 +1693,23 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 	}
 
 	return resultProvider, nil
+}
+
+// chatSessionEpoch returns the label value pinning the chat Session's current
+// incarnation, or "" when the store cannot tell, which leaves the chat's
+// Tasks unable to act for their requester through an Agent identity.
+func chatSessionEpoch(ctx context.Context, sessions store.SessionStore, namespace, sessionID string) string {
+	reader, ok := sessions.(store.SessionCreationReader)
+	if !ok {
+		return ""
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, sessionID)
+	if err != nil {
+		logf.FromContext(ctx).Info("chat Session incarnation unavailable; its Tasks cannot act for the requester through an Agent identity",
+			"namespace", namespace, "session", sessionID, "error", err.Error())
+		return ""
+	}
+	return labels.SessionEpoch(createdAt)
 }
 
 // generateChatID returns 8 random hex characters.
@@ -1594,40 +1746,24 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 		return false
 	}
 	for i := range taskList.Items {
-		switch taskList.Items[i].Status.Phase {
-		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-			continue
-		case corev1alpha1.TaskPhaseScheduled:
-			// A recurring parent stays Scheduled by design and never completes.
-			continue
-		default:
+		phase := taskList.Items[i].Status.Phase
+		// A recurring parent stays Scheduled by design and never completes.
+		if !phase.IsTerminal() && phase != corev1alpha1.TaskPhaseScheduled {
 			return true
 		}
 	}
 	return false
 }
 
-// looksLikeIssueWorkflow checks if the user message contains patterns suggesting
-// a GitHub issue implementation workflow (fix, implement, create PR).
-// Uses word-boundary matching to avoid false positives from substrings.
-func looksLikeIssueWorkflow(message string) bool {
-	lower := strings.ToLower(message)
-	// Must mention a GitHub issue
-	hasIssue := strings.Contains(lower, "/issues/") ||
-		strings.Contains(lower, "issue #") ||
-		strings.Contains(lower, "issue#")
-	if !hasIssue {
-		return false
+// agentRuntimeLabel names an Agent's runtime for the model: its built-in
+// type, or the external AgentRuntime it references.
+func agentRuntimeLabel(runtime *corev1alpha1.AgentCLIRuntime) string {
+	switch {
+	case runtime.Type != "":
+		return string(runtime.Type)
+	case runtime.RuntimeRef != nil:
+		return "external AgentRuntime " + runtime.RuntimeRef.Name
+	default:
+		return "unspecified"
 	}
-	// Must suggest implementation work — use multi-word phrases or word boundaries
-	// to avoid false positives (e.g., "pr" in "problem", "fix" in "prefix")
-	actionPhrases := []string{"pick up", "work on", "pull request", "create a pr", "open a pr", "make a pr"}
-	for _, phrase := range actionPhrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	// Single-word actions need word boundary checks
-	actionWordsPattern := regexp.MustCompile(`\b(fix|implement|resolve|address)\b`)
-	return actionWordsPattern.MatchString(lower)
 }

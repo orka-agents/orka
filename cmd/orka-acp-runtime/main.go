@@ -7,18 +7,49 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/acp/toolbox"
 	"github.com/orka-agents/orka/workers/acp/supervisor"
 )
 
 func main() {
+	// Toolbox subcommands run in init containers (and as an unprivileged
+	// supervisor child) with no supervisor configuration. They must run before
+	// process hardening and before any environment is read.
+	if len(os.Args) > 1 && toolbox.IsSubcommand(os.Args[1]) {
+		os.Exit(toolbox.Run(os.Args[1], os.Args[2:], os.Stdout, os.Stderr))
+	}
+	// The operator file helper runs as a RuntimeSession child identity
+	// (launched through the ACP exec helper) with no supervisor configuration.
+	if len(os.Args) > 1 && os.Args[1] == supervisor.OperatorFileHelperSubcommand {
+		os.Exit(supervisor.RunOperatorFileHelper(os.Args[2:], os.Stdin, os.Stdout))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	evictionWindow, err := supervisor.EvictionSuspendWindow()
+	if err != nil {
+		logger.Error("invalid ACP supervisor eviction configuration", "error", err)
+		os.Exit(1)
+	}
+	// A provider-hosted worker forwards its own SIGTERM to this process and
+	// then gives the Actor a bounded window to be suspended. A supervisor that
+	// serves a data-only suspendable workspace must not exit in that window.
+	var evictionTarget atomic.Pointer[supervisor.Server]
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	go supervisor.WatchShutdownSignals(ctx, signals, evictionWindow, func() supervisor.EvictionHolder {
+		if server := evictionTarget.Load(); server != nil {
+			return server
+		}
+		return nil
+	}, nil, nil, stop)
 	if _, err := acp.HardenSupervisorProcess(); err != nil {
 		logger.Error("failed to harden ACP supervisor", "error", err)
 		os.Exit(1)
@@ -50,11 +81,26 @@ func main() {
 		logger.Error("invalid ACP supervisor configuration", "error", err)
 		os.Exit(1)
 	}
-	tracer, shutdownTelemetry, telemetryErr := supervisor.NewTelemetryFromEnv()
+	if err := supervisor.VerifyToolboxes(cfg); err != nil {
+		// The stable FAIL line reaches the container termination message so
+		// the controller fails waiting Tasks with ToolboxUnavailable instead
+		// of letting them wait for a Pod that never becomes Ready.
+		supervisor.ReportToolboxFailure(err)
+		logger.Error("toolbox verification failed", "error", err)
+		os.Exit(1)
+	}
+	if err := supervisor.VerifySkills(cfg); err != nil {
+		// Skill failures use the same stable FAIL line, so the controller
+		// fails waiting Tasks with the skill reason instead of waiting.
+		supervisor.ReportToolboxFailure(err)
+		logger.Error("skill verification failed", "error", err)
+		os.Exit(1)
+	}
+	telemetry, shutdownTelemetry, telemetryErr := supervisor.NewSupervisorTelemetryFromEnv()
 	if telemetryErr != nil {
 		logger.Warn("supervisor telemetry unavailable")
 	}
-	cfg.Tracer = tracer
+	cfg.Tracer, cfg.GenAITracer, cfg.Meter = telemetry.Tracer, telemetry.GenAITracer, telemetry.Meter
 	runtimeServer, err := supervisor.New(cfg)
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	if err != nil {
@@ -75,6 +121,7 @@ func main() {
 		MaxHeaderBytes: 32 << 10,
 	}
 
+	evictionTarget.Store(runtimeServer)
 	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()

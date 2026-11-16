@@ -63,6 +63,31 @@ describe('useSession', () => {
       messageCount: '5',
     })
   })
+
+  it('polls so the overview follows new chat turns', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/sessions/:id', () => {
+      calls += 1
+      return HttpResponse.json({ name: 'sess-1', namespace: 'default', messageCount: String(calls) })
+    }))
+
+    const { result } = renderHook(() => useSession('sess-1', 20), { wrapper: createWrapper() })
+    // Each poll answers a higher count; the data must follow past the first load.
+    await waitFor(() => expect(Number(result.current.data?.messageCount)).toBeGreaterThanOrEqual(3))
+  })
+
+  it.each([403, 404])('stops polling once the session answers %i', async (status) => {
+    let calls = 0
+    server.use(http.get('/api/v1/sessions/:id', () => {
+      calls += 1
+      return HttpResponse.json({ error: { code: status, message: 'gone' } }, { status })
+    }))
+
+    const { result } = renderHook(() => useSession('sess-1', 20), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(calls).toBe(1)
+  })
 })
 
 describe('useDeleteSession', () => {

@@ -8,6 +8,7 @@ package metrics
 
 import (
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -33,10 +34,21 @@ const (
 	labelRuntimePool = "runtime_pool"
 	labelEventType   = "event_type"
 	labelScope       = "scope"
+	labelState       = "state"
 	labelAccepting   = "accepting"
 )
 
 var (
+	// Approval labels are restricted to lifecycle outcomes and execution paths.
+	ApprovalDecisionDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_approval_decision_duration_seconds",
+			Help:    "Time from approval request to committed decision in seconds",
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400},
+		},
+		[]string{"outcome", "path"},
+	)
+
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -173,7 +185,7 @@ var (
 			Name: "orka_acp_runtime_pool_admission_state",
 			Help: "Authoritative RuntimePool admission state as a one-hot gauge",
 		},
-		[]string{labelNamespace, labelRuntimePool, "state"},
+		[]string{labelNamespace, labelRuntimePool, labelState},
 	)
 
 	ACPRuntimePoolScaleToZeroTotal = prometheus.NewCounterVec(
@@ -215,6 +227,32 @@ var (
 			Help: "Repository monitor policy, stale snapshot, and rate-limit blocks by reason",
 		},
 		[]string{labelReason},
+	)
+
+	// Repository monitor review convergence metrics. Mode, verdict, priority,
+	// and outcome are fixed controller vocabularies.
+	RepositoryMonitorReviewsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_reviews_total",
+			Help: "Repository monitor pull request review records by review mode and recorded verdict",
+		},
+		[]string{"mode", "verdict"},
+	)
+
+	RepositoryMonitorReviewFindingsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_review_findings_total",
+			Help: "Repository monitor review findings by priority and outcome: reported when first recorded, fixed when a later review resolves one",
+		},
+		[]string{"priority", "outcome"},
+	)
+
+	RepositoryMonitorReviewRoundsToPass = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "orka_repository_monitor_review_rounds_to_pass",
+			Help:    "Distinct pull request heads reviewed up to and including a pull request's first passed review",
+			Buckets: []float64{1, 2, 3, 4, 5, 7, 10, 15},
+		},
 	)
 
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
@@ -299,10 +337,48 @@ var (
 		},
 		[]string{labelStreamType, labelEventType},
 	)
+
+	// Parked-turn metrics. Labels are the bounded wait kind and state; Task,
+	// Session, and approval identifiers never appear.
+	TaskWaitTransitionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_task_wait_transitions_total",
+			Help: "Parked agent turn transitions by wait kind and new state",
+		},
+		[]string{"kind", labelState},
+	)
+
+	TaskWaitDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_task_wait_duration_seconds",
+			Help:    "Time a parked agent turn held no runtime capacity, from arming to its final state",
+			Buckets: []float64{5, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 86400},
+		},
+		[]string{"kind", labelState},
+	)
+
+	TaskWaitRuntimeReleasesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_task_wait_runtime_releases_total",
+			Help: "Resident RuntimeSessions retired because their turn parked, by result",
+		},
+		[]string{labelResult},
+	)
+
+	// WaitingForCapacityTotal counts transitions into a capacity wait. The
+	// resource label is task, substrate_actor_pool, or tool.
+	WaitingForCapacityTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_waiting_for_capacity_total",
+			Help: "Transitions into a retryable wait for runtime or provider capacity, by resource and reason",
+		},
+		[]string{"resource", labelReason},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(
+		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
 		APIRequestsTotal,
 		APIRequestDuration,
@@ -324,6 +400,9 @@ func init() {
 		RepositoryMonitorWorkActionsTotal,
 		RepositoryMonitorGitHubMutationsTotal,
 		RepositoryMonitorBlocksTotal,
+		RepositoryMonitorReviewsTotal,
+		RepositoryMonitorReviewFindingsTotal,
+		RepositoryMonitorReviewRoundsToPass,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -334,6 +413,10 @@ func init() {
 		ExecutionEventStreamErrorsTotal,
 		ExecutionEventRedactionsTotal,
 		ExecutionEventTruncationsTotal,
+		TaskWaitTransitionsTotal,
+		TaskWaitDuration,
+		TaskWaitRuntimeReleasesTotal,
+		WaitingForCapacityTotal,
 	)
 }
 
@@ -526,10 +609,49 @@ func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
 }
 
+// RecordRepositoryMonitorReview records one stored pull request review record.
+func RecordRepositoryMonitorReview(mode, verdict string) {
+	RepositoryMonitorReviewsTotal.WithLabelValues(normalizeMetricLabel(mode), normalizeMetricLabel(verdict)).Inc()
+}
+
+// RecordRepositoryMonitorReviewFindings adds count findings of one priority
+// and outcome.
+func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) {
+	if count <= 0 {
+		return
+	}
+	RepositoryMonitorReviewFindingsTotal.WithLabelValues(normalizeMetricLabel(priority), normalizeMetricLabel(outcome)).Add(float64(count))
+}
+
+// RecordRepositoryMonitorReviewRoundsToPass records how many heads a pull
+// request needed before its first passed review.
+func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
+	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
+}
+
 // RecordACPWorkspaceRetentionAction records one retention enforcement action
 // (suspend or delete) with its bounded reason.
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordTaskWaitTransition records a parked-turn state transition. A
+// positive waited duration is observed when the wait reaches a final state.
+func RecordTaskWaitTransition(kind, state string, waited time.Duration) {
+	TaskWaitTransitionsTotal.WithLabelValues(normalizeMetricLabel(kind), normalizeMetricLabel(state)).Inc()
+	if waited > 0 {
+		TaskWaitDuration.WithLabelValues(normalizeMetricLabel(kind), normalizeMetricLabel(state)).Observe(waited.Seconds())
+	}
+}
+
+// RecordTaskWaitRuntimeRelease records one parked-turn RuntimeSession retirement.
+func RecordTaskWaitRuntimeRelease(result string) {
+	TaskWaitRuntimeReleasesTotal.WithLabelValues(normalizeMetricLabel(result)).Inc()
+}
+
+// RecordWaitingForCapacity records one transition into a capacity wait.
+func RecordWaitingForCapacity(resource, reason string) {
+	WaitingForCapacityTotal.WithLabelValues(normalizeMetricLabel(resource), normalizeMetricLabel(reason)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {

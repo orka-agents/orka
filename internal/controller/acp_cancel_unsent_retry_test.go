@@ -53,7 +53,7 @@ func TestPromptCancellationRetriesUnsentPreflight(t *testing.T) {
 			}
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
-				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, runtimeContextErr, streamErr,
+				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, runtimeContextErr, streamErr, nil,
 			); err != nil {
 				t.Fatal(err)
 			}

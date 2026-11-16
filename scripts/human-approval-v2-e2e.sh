@@ -16,6 +16,8 @@ registry_created=0
 builder_created=0
 # shellcheck source=lib/kind-local-registry.sh
 source "$root/scripts/lib/kind-local-registry.sh"
+# shellcheck source=lib/deployment-rollout.sh
+source "$root/scripts/lib/deployment-rollout.sh"
 
 cleanup() {
   local status=$?
@@ -135,7 +137,8 @@ unused="example.invalid/unused@sha256:$(printf '0%.0s' {1..64})"
 make deploy IMG="$controller" WORKSPACE_PUBLISHER_IMG="$publisher" \
   ACP_CODEX_RUNTIME_IMG="$unused" ACP_CLAUDE_RUNTIME_IMG="$unused" \
   ACP_COPILOT_RUNTIME_IMG="$unused" ACP_OPENCODE_RUNTIME_IMG="$unused"
-kubectl --context "$context" -n orka-system rollout status deployment/orka-controller-manager --timeout=300s
+rollout_timeout="$(deployment_rollout_timeout kubectl --context "$context" -n orka-system orka-controller-manager)"
+kubectl --context "$context" -n orka-system rollout status deployment/orka-controller-manager --timeout="$rollout_timeout"
 jq -n --arg head "$(git rev-parse HEAD)" --arg agentkit "$agentkit_revision" \
   --arg foundry "$foundry_revision" --arg controller "$controller" --arg publisher "$publisher" \
   --slurpfile images "$work/images.json" --slurpfile composed "$work/composed-images.json" \

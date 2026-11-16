@@ -12,12 +12,10 @@ import (
 )
 
 // AgentExecutionBackend identifies the isolated execution dispatcher backend.
-// +kubebuilder:validation:Enum=harness-wrapper;runtime-pool;external-endpoint
+// +kubebuilder:validation:Enum=runtime-pool;external-endpoint
 type AgentExecutionBackend string
 
 const (
-	// AgentExecutionBackendHarnessWrapper is the built-in harness v1 wrapper.
-	AgentExecutionBackendHarnessWrapper AgentExecutionBackend = "harness-wrapper"
 	// AgentExecutionBackendRuntimePool is the managed Orka harness v2 RuntimePool path.
 	AgentExecutionBackendRuntimePool AgentExecutionBackend = "runtime-pool"
 	// AgentExecutionBackendExternalEndpoint is an external AgentRuntime endpoint.
@@ -54,6 +52,36 @@ type AgentExecutionAgentRef struct {
 
 	// +kubebuilder:validation:Minimum=1
 	Generation int64 `json:"generation"`
+
+	// Identity is the Agent's external identity frozen at binding. Editing the
+	// Agent or the controller's issuer configuration does not change it.
+	// +optional
+	Identity *AgentExecutionIdentityRef `json:"identity,omitempty"`
+}
+
+// AgentExecutionIdentityRef pins the external identity a bound Task acts as.
+type AgentExecutionIdentityRef struct {
+	// Issuer is the identity's issuer type, such as entra.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Issuer string `json:"issuer"`
+
+	// ID is the identity's ID at the issuer.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+
+	// Instance identifies the issuer instance, for Entra the tenant and
+	// blueprint, as configured on the controller at binding.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Instance string `json:"instance"`
+
+	// ActsForRequester records that the binding froze an agentIdentity
+	// policy in Delegated mode, so the Task can act for its requester. Every
+	// approval on such a Task needs the requester.
+	// +optional
+	ActsForRequester bool `json:"actsForRequester,omitempty"`
 }
 
 // AgentExecutionSnapshotRef links the immutable non-secret execution snapshot.
@@ -92,8 +120,6 @@ type AgentExecutionRuntimeRef struct {
 // routing, recovery, cancellation, terminal settlement, and finalization, and
 // is preserved across retries. Dispatchers build requests only from the
 // referenced immutable snapshot.
-// +kubebuilder:validation:XValidation:rule="self.backend != 'harness-wrapper' || self.contractVersion == 'orka.harness.v1'",message="the harness-wrapper backend requires an orka.harness.v1 binding"
-// +kubebuilder:validation:XValidation:rule="self.backend != 'runtime-pool' || self.contractVersion == 'orka.harness.v2'",message="the runtime-pool backend requires an orka.harness.v2 binding"
 type AgentExecutionBinding struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=1

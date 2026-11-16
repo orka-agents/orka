@@ -1345,13 +1345,13 @@ func TestGatewaySessionDeletionIsPermanentlyProtected(t *testing.T) {
 	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: event, AppendUserMessage: true, PendingLimit: 100}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteSession(ctx, event.Namespace, event.SessionName); !errors.Is(err, store.ErrConflict) || !errors.Is(err, store.ErrGatewayOwnedSession) {
+	if err := s.DeleteSession(ctx, event.Namespace, event.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrConflict) || !errors.Is(err, store.ErrGatewayOwnedSession) {
 		t.Fatalf("DeleteSession() error = %v, want ErrConflict and ErrGatewayOwnedSession", err)
 	}
 	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteSession(ctx, event.Namespace, event.SessionName); !errors.Is(err, store.ErrGatewayOwnedSession) {
+	if err := s.DeleteSession(ctx, event.Namespace, event.SessionName, time.Now().UTC()); !errors.Is(err, store.ErrGatewayOwnedSession) {
 		t.Fatalf("DeleteSession() after terminal event error = %v, want ErrGatewayOwnedSession", err)
 	}
 	if _, err := s.GetSession(ctx, event.Namespace, event.SessionName); err != nil {
@@ -1499,14 +1499,14 @@ func TestGatewayOwnedSessionRejectsGenericMutation(t *testing.T) {
 	if err := s.AppendMessages(ctx, event.Namespace, event.SessionName, []store.SessionMessage{{Role: "user", Content: "foreign"}}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("AppendMessages() error = %v, want ErrConflict", err)
 	}
-	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, "foreign-task", "foreign-uid"); !errors.Is(err, store.ErrValidation) {
+	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, "foreign-task", "foreign-uid", time.Now().UTC()); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("AcquireLock(foreign) error = %v, want ErrValidation", err)
 	}
 	claimed, err := s.ClaimNextGatewayEvent(ctx, "", "dispatcher", now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, claimed.TaskName, "task-uid"); !errors.Is(err, store.ErrNotReady) {
+	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, claimed.TaskName, "task-uid", time.Now().UTC()); !errors.Is(err, store.ErrNotReady) {
 		t.Fatalf("AcquireLock(pre-link gateway task) error = %v, want ErrNotReady", err)
 	}
 	if err := s.MarkGatewayEventTaskCreated(
@@ -1514,7 +1514,7 @@ func TestGatewayOwnedSessionRejectsGenericMutation(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, claimed.TaskName, "task-uid"); err != nil {
+	if err := s.AcquireLock(ctx, event.Namespace, event.SessionName, claimed.TaskName, "task-uid", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock(linked gateway task) error = %v", err)
 	}
 }
@@ -1981,7 +1981,9 @@ func TestGatewayDedupUsesNormalizedMetadata(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := setupTestStore(t)
+			// Orka normalizes metadata above the store, so admissions go
+			// through the storage client.
+			s := orkaClient(t, setupTestStore(t))
 			ctx := context.Background()
 			now := time.Now().UTC().Truncate(time.Second)
 			event := testGatewayEvent(now, fmt.Sprintf("dedupe-metadata-%d", i))

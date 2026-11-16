@@ -81,10 +81,13 @@ func validateProviderRESTUpdate(spec, existing corev1alpha1.ProviderSpec) error 
 }
 
 func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
+	if toolSpecHasEgressCredential(spec) {
+		return true
+	}
 	if spec.HTTP == nil {
 		return false
 	}
-	if spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
+	if spec.HTTP.GatewayTaskPass || spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
 		return true
 	}
 	for name := range spec.HTTP.Headers {
@@ -95,9 +98,35 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	return false
 }
 
+// toolSpecHasEgressCredential reports whether a Substrate MCP actor asks
+// the egress gateway to inject a Secret.
+func toolSpecHasEgressCredential(spec corev1alpha1.ToolSpec) bool {
+	if spec.MCP == nil || spec.MCP.SubstrateActor == nil {
+		return false
+	}
+	for _, rule := range spec.MCP.SubstrateActor.Egress {
+		if rule.Credential != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func validateToolRESTMutation(spec corev1alpha1.ToolSpec) error {
+	if toolSpecHasEgressCredential(spec) {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.mcp.substrateActor.egress[].credential is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
+	}
 	if spec.HTTP == nil {
 		return nil
+	}
+	if spec.HTTP.GatewayTaskPass {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.http.gatewayTaskPass is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
 	}
 	if spec.HTTP.AuthSecretRef != nil {
 		return fiber.NewError(
@@ -330,6 +359,9 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider already exists")
 		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create provider: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(provider)
@@ -404,6 +436,9 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
 		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
 	}
 	return c.JSON(provider)
@@ -468,6 +503,9 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	if err := h.client.Create(c.Context(), tool); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
+		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create tool: %v", err))
 	}
@@ -550,6 +588,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 		}
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}
@@ -653,6 +694,9 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "substrate actor pool already exists")
 		}
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create substrate actor pool: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(pool)
@@ -682,6 +726,9 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 		updated = pool
 		return nil
 	}); err != nil {
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update substrate actor pool: %v", err))
 	}
 	if fetchErr != nil {

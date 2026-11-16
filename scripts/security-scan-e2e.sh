@@ -25,6 +25,8 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${script_dir}/lib/e2e-admission-tls.sh"
+# shellcheck source=scripts/lib/deployment-rollout.sh
+. "${script_dir}/lib/deployment-rollout.sh"
 
 e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 default_kind_suffix="${e2e_run_id:0:32}"
@@ -593,7 +595,7 @@ build_fake_runtime() {
   local dockerfile="${work_dir}/security-scan-fake-runtime.Dockerfile"
   cat >"${dockerfile}" <<'DOCKERFILE'
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -733,7 +735,9 @@ patch_controller_images() {
       )
     ' | kubectl apply -f -
 
-  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  local rollout_timeout
+  rollout_timeout="$(deployment_rollout_timeout kubectl -n "${orka_namespace}" "${orka_controller_deployment}")"
+  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout="${rollout_timeout}"
 }
 
 reset_e2e_resources() {
@@ -1267,6 +1271,7 @@ main() {
   local manager_ref publisher_ref fake_runtime_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  general_worker_image="$(orka_kind_registry_push "${general_worker_image}" "orka/general-worker")"
   fake_runtime_ref="$(orka_kind_registry_push "${fake_runtime_image}" "orka/acp-security-fixture")"
 
   log "Bootstrapping test-only admission TLS"
@@ -1283,7 +1288,9 @@ main() {
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/repositoryscans.core.orka.ai --timeout=60s
-  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  local rollout_timeout
+  rollout_timeout="$(deployment_rollout_timeout kubectl -n "${orka_namespace}" "${orka_controller_deployment}")"
+  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout="${rollout_timeout}"
   apply_authority_observer "${fake_runtime_ref}"
   patch_controller_images incoming
   reset_e2e_resources

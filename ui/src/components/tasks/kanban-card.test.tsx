@@ -37,6 +37,16 @@ describe('KanbanCard', () => {
     expect(screen.getByText('container')).toBeInTheDocument()
   })
 
+  it('exposes the full name as a tooltip when it is truncated', () => {
+    render(<KanbanCard task={makeTask()} />)
+    expect(screen.getByText('test-task')).toHaveAttribute('title', 'test-task')
+  })
+
+  it('flags a task waiting for approval', () => {
+    render(<KanbanCard task={makeTask({ status: { phase: 'Running', message: 'waiting for approval ap-1 for bash at iteration 0' } })} />)
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
   it('renders namespace', () => {
     render(<KanbanCard task={makeTask({ metadata: { name: 'ns-task', namespace: 'staging', uid: 'u2' } })} />)
     expect(screen.getByText('staging')).toBeInTheDocument()

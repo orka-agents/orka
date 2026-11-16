@@ -27,7 +27,7 @@ func (t *WaitForTaskTool) Description() string {
 }
 
 func (t *WaitForTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Seconds to wait (max 60, default 30)"}}, jsonSchemaRequiredField: []string{nameField}})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaMaximumField: 60, jsonSchemaDescriptionField: "Seconds to wait (min 1, max 60, default 30)"}}, jsonSchemaRequiredField: []string{nameField}})
 }
 
 func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
@@ -47,13 +47,16 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	timeout := min(chatGetIntArg(a, timeoutField, 30), 60)
+	if timeout < 1 {
+		return ChatToolErrorResult(invalidArgumentsErrorType, "timeout must be at least 1 second", "Use a positive timeout in seconds, or omit it for the default of 30")
+	}
 
 	task := &corev1alpha1.Task{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
 
-	if isWaitTaskTerminal(task.Status.Phase) {
+	if task.Status.Phase.IsTerminal() {
 		return chatTaskStatusResult(task)
 	}
 
@@ -75,19 +78,10 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 				return classifyChatK8sErr(err)
 			}
 
-			if isWaitTaskTerminal(task.Status.Phase) {
+			if task.Status.Phase.IsTerminal() {
 				return chatTaskStatusResult(task)
 			}
 		}
-	}
-}
-
-func isWaitTaskTerminal(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
 	}
 }
 

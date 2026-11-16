@@ -19,7 +19,8 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
   const glyph = isResult ? (success ? '✓' : '✗') : '→'
 
   return (
-    <div className="mx-12 my-1">
+    // The indent lines up with message text from sm up; phones keep the width.
+    <div className="my-1 sm:mx-12">
       <button
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
@@ -28,7 +29,7 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
         )}
       >
         <span className={cn('inline-block size-1.5 shrink-0 rounded-full', dotClass)} aria-hidden="true" />
-        <span className="font-mono font-medium text-foreground">
+        <span className="min-w-0 truncate font-mono font-medium text-foreground" title={message.toolName}>
           {glyph} {message.toolName}
         </span>
         <ChevronRight
@@ -41,7 +42,7 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
           {!isResult && message.toolArgs != null && (
             <div>
               <span className="text-[10px] font-medium uppercase text-muted-foreground">Args</span>
-              <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-xs font-mono text-foreground">
+              <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap wrap-anywhere text-xs font-mono text-foreground">
                 {JSON.stringify(message.toolArgs, null, 2)}
               </pre>
             </div>
@@ -49,7 +50,12 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
           {isResult && message.toolResult != null && (
             <div>
               <span className="text-[10px] font-medium uppercase text-muted-foreground">Result</span>
-              <pre className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap text-xs font-mono text-foreground">
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-label={`${message.toolName ?? 'Tool'} result`}
+                className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap wrap-anywhere text-xs font-mono text-foreground"
+              >
                 {JSON.stringify(message.toolResult, null, 2)}
               </pre>
             </div>

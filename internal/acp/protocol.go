@@ -13,11 +13,24 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionLoad       = "session/load"
+	MethodSessionResume     = "session/resume"
+	MethodSessionClose      = "session/close"
 	MethodSessionPrompt     = "session/prompt"
 	MethodSessionCancel     = "session/cancel"
 	MethodSessionUpdate     = "session/update"
 	MethodRequestPermission = "session/request_permission"
 	MethodCancelRequest     = "$/cancel_request"
+)
+
+const (
+	// SessionCapabilityResume is the ACP sessionCapabilities key for
+	// session/resume: reconnecting to an existing provider session without a
+	// history replay (stable in ACP v1 since 2026-04).
+	SessionCapabilityResume = "resume"
+	// SessionCapabilityClose is the ACP sessionCapabilities key for
+	// session/close: an explicit graceful end of a provider session.
+	SessionCapabilityClose = "close"
 )
 
 type Meta map[string]any
@@ -88,6 +101,18 @@ type AgentCapabilities struct {
 	Meta                Meta               `json:"_meta,omitempty"`
 }
 
+// SessionCapability accepts the ACP capability object or a boolean true.
+func (c AgentCapabilities) SessionCapability(name string) bool {
+	switch value := c.SessionCapabilities[name].(type) {
+	case bool:
+		return value
+	case map[string]any:
+		return value != nil
+	default:
+		return false
+	}
+}
+
 type AuthMethod struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -156,6 +181,46 @@ type NewSessionResponse struct {
 	Meta          Meta              `json:"_meta,omitempty"`
 }
 
+// ResumeSessionRequest reconnects without replaying conversation history.
+type ResumeSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type ResumeSessionResponse struct {
+	SessionID     string            `json:"sessionId,omitempty"`
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	Models        json.RawMessage   `json:"models,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+type CloseSessionRequest struct {
+	SessionID string `json:"sessionId"`
+	Meta      Meta   `json:"_meta,omitempty"`
+}
+
+type CloseSessionResponse struct {
+	Meta Meta `json:"_meta,omitempty"`
+}
+
+type LoadSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type LoadSessionResponse struct {
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
 type ContentBlock struct {
 	Type     string          `json:"type"`
 	Text     string          `json:"text,omitempty"`
@@ -200,7 +265,59 @@ func (r StopReason) Successful() bool { return r == StopReasonEndTurn }
 
 type PromptResponse struct {
 	StopReason StopReason `json:"stopReason"`
-	Meta       Meta       `json:"_meta,omitempty"`
+	// Usage is the optional ACP turn token usage. It stays raw so a malformed
+	// report can never fail the prompt; see ParsePromptUsage.
+	Usage json.RawMessage `json:"usage,omitempty"`
+	Meta  Meta            `json:"_meta,omitempty"`
+}
+
+// PromptUsage is the token usage an ACP agent reported for one prompt turn.
+// Each count is present only when the agent reported it.
+type PromptUsage struct {
+	InputTokens       *int64
+	OutputTokens      *int64
+	CachedReadTokens  *int64
+	CachedWriteTokens *int64
+}
+
+// maxPromptUsageTokens bounds reported counts to an exactly representable,
+// plausible range; anything larger is treated as unreported.
+const maxPromptUsageTokens = 1 << 40
+
+// ParsePromptUsage decodes an ACP PromptResponse usage object. It is
+// telemetry-only: absent, malformed, negative or implausible values yield no
+// count rather than an error.
+func ParsePromptUsage(raw json.RawMessage) *PromptUsage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var fields struct {
+		InputTokens       json.RawMessage `json:"inputTokens"`
+		OutputTokens      json.RawMessage `json:"outputTokens"`
+		CachedReadTokens  json.RawMessage `json:"cachedReadTokens"`
+		CachedWriteTokens json.RawMessage `json:"cachedWriteTokens"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil
+	}
+	count := func(value json.RawMessage) *int64 {
+		// Decode through a pointer: JSON null leaves it nil, so a null count
+		// stays unreported instead of becoming an explicit zero.
+		var number *uint64
+		if len(value) == 0 || json.Unmarshal(value, &number) != nil || number == nil || *number > maxPromptUsageTokens {
+			return nil
+		}
+		result := int64(*number)
+		return &result
+	}
+	usage := &PromptUsage{
+		InputTokens: count(fields.InputTokens), OutputTokens: count(fields.OutputTokens),
+		CachedReadTokens: count(fields.CachedReadTokens), CachedWriteTokens: count(fields.CachedWriteTokens),
+	}
+	if usage.InputTokens == nil && usage.OutputTokens == nil && usage.CachedReadTokens == nil && usage.CachedWriteTokens == nil {
+		return nil
+	}
+	return usage
 }
 
 type CancelNotification struct {

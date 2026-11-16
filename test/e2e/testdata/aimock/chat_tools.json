@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:chat-tools-list-tools]", "hasToolResult": false },
+      "response": { "toolCalls": [{ "name": "list_tools", "arguments": {} }] }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-tools-list-tools]", "hasToolResult": true },
+      "response": { "content": "list_tools returned the tools in this namespace." }
+    },
+    {
+      "match": { "userMessage": "[e2e:chat-tools-direct-answer]" },
+      "response": { "content": "Paris" }
+    }
+  ]
+}

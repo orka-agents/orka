@@ -35,8 +35,18 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	original := server.Config.Handler
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasSuffix(req.URL.Path, "/check-runs") {
+			// The base commit passes, so the failure is the pull request's own.
+			conclusion := "success"
+			if strings.Contains(req.URL.Path, "/commits/head31/") {
+				conclusion = "failure"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":"failure"}]}`))
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
+			return
+		}
+		if strings.HasSuffix(req.URL.Path, "/status") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
 			return
 		}
 		original.ServeHTTP(w, req)
@@ -87,6 +97,9 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	}
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.Workspace == nil || task.Spec.Workspace.PushBranch != "feature-fix" || task.Spec.Workspace.ExpectedRemoteSHA != "head31" {
 		t.Fatalf("repair task spec = %#v, want exact-head repair publication", task.Spec)
+	}
+	if want := "fix: repair failing CI on #31\n\nOrka-Task: " + task.Name + "\n"; task.Spec.Workspace.CommitMessage != want {
+		t.Fatalf("repair commit message = %q, want %q", task.Spec.Workspace.CommitMessage, want)
 	}
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Create || task.Spec.SessionRef.Append || task.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, "feature-fix") {
 		t.Fatalf("repair task session = %#v, want stable non-appending branch owner", task.Spec.SessionRef)
@@ -303,6 +316,14 @@ func TestRepositoryMonitorRepairDoesNotStarveLaterPullRequests(t *testing.T) {
 			if err := db.CreateRepairJob(ctx, &store.RepairJob{ID: "first-pr-repair", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: 1, HeadSHA: "head1", TaskName: "active-repair", Phase: phase, CreatedAt: time.Now()}); err != nil {
 				t.Fatal(err)
 			}
+			// The first PR's head is already reviewed, so only its repair can
+			// compete for the run's single slot.
+			if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "first-pr-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "head1", Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "head1", BaseBranch: "main", LastReviewID: "first-pr-review", LastReviewedHeadSHA: "head1", LastVerdict: repositoryMonitorReviewVerdictPassed}); err != nil {
+				t.Fatal(err)
+			}
 			body := `[
 				{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"first","sha":"head1","repo":{"full_name":"orka-agents/orka"}}},
 				{"number":2,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"second","sha":"head2","repo":{"full_name":"orka-agents/orka"}}}
@@ -428,8 +449,15 @@ func TestRepositoryMonitorInventoryHonorsReadinessRefresh(t *testing.T) {
 func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
-	monitor, _ := repositoryMonitorInventoryTestObjects("repair-evidence")
-	r := &RepositoryMonitorReconciler{Store: db}
+	monitor, secret := repositoryMonitorInventoryTestObjects("repair-evidence")
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// CI lookups for the fix_ci prompt fail here, so it carries no check list.
+	unavailable := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(unavailable.Close)
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db, GitHubAPIBaseURL: unavailable.URL}
 	item := &store.MonitorItem{LastReviewID: "review-evidence", LastVerdict: repositoryMonitorReviewVerdictNeedsChanges}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head"}
 	review := &store.ReviewRecord{ID: item.LastReviewID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 31, HeadSHA: "head", Summary: "Initialize the retry result", FindingsJSON: `[{"file":"scripts/smoke.sh","line":42,"body":"The result variable is unset after success"}]`, ValidationEvidence: "shell test failed"}

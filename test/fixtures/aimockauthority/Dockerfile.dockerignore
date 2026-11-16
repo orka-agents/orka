@@ -1,0 +1,12 @@
+# Copyright (c) 2026. MIT License - see LICENSE file for details.
+# This fixture needs test sources excluded by the production build context.
+**
+!go.mod
+!go.sum
+!internal/
+!internal/transactiontoken/
+!internal/transactiontoken/profile.go
+!test/
+!test/fixtures/
+!test/fixtures/aimockauthority/
+!test/fixtures/aimockauthority/**

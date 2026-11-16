@@ -103,3 +103,57 @@ func TestBuildTaskTraceExplicitModelCompletionDequeuesOpenRequest(t *testing.T) 
 		t.Fatalf("warnings = %#v, want none", trace.Warnings)
 	}
 }
+
+func TestBuildTaskTraceRecordsModelAndProvider(t *testing.T) {
+	content := func(v map[string]string) json.RawMessage {
+		data, _ := json.Marshal(v)
+		return data
+	}
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{"modelRequestID": "m1", "model": "gpt-4.1", "provider": "openai"})},
+		{Seq: 2, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content(map[string]string{"modelRequestID": "m1", "model": "gpt-4.1-2025-04-14"})},
+		{Seq: 3, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{"modelRequestID": "m2", "model": "claude-haiku-4-5", "provider": "anthropic"})},
+		{Seq: 4, Type: events.ExecutionEventTypeModelRequestFailed, Content: content(map[string]string{"modelRequestID": "m2"})},
+		{Seq: 5, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content(map[string]string{"model": "gemini-2.5-flash", "provider": "gemini"})},
+	}, time.Now())
+	if len(trace.ModelRequests) != 3 {
+		t.Fatalf("model requests = %#v, want 3", trace.ModelRequests)
+	}
+	want := []struct{ model, provider string }{
+		{"gpt-4.1-2025-04-14", "openai"},
+		{"claude-haiku-4-5", "anthropic"},
+		{"gemini-2.5-flash", "gemini"},
+	}
+	for i, w := range want {
+		if got := trace.ModelRequests[i]; got.Model != w.model || got.Provider != w.provider {
+			t.Fatalf("model request %d = %#v, want model %q provider %q", i, got, w.model, w.provider)
+		}
+	}
+}
+
+func TestBuildTaskTraceReadsGenAIModelAliases(t *testing.T) {
+	content := func(v map[string]string) json.RawMessage {
+		data, _ := json.Marshal(v)
+		return data
+	}
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{
+			"modelRequestID": "m1", "gen_ai.request.model": "gpt-4.1", "gen_ai.response.model": "ignored-on-start", "gen_ai.provider.name": "openai",
+		})},
+		{Seq: 2, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content(map[string]string{
+			"modelRequestID": "m1", "gen_ai.request.model": "gpt-4.1", "gen_ai.response.model": "gpt-4.1-2025-04-14",
+		})},
+		{Seq: 3, Type: events.ExecutionEventTypeModelRequestStarted, Content: content(map[string]string{
+			"modelRequestID": "m2", "gen_ai.request.model": "claude-haiku-4-5", "gen_ai.response.model": "ignored-on-start",
+		})},
+	}, time.Now())
+	if len(trace.ModelRequests) != 2 {
+		t.Fatalf("model requests = %#v, want 2", trace.ModelRequests)
+	}
+	if got := trace.ModelRequests[0]; got.Model != "gpt-4.1-2025-04-14" || got.Provider != "openai" {
+		t.Fatalf("completed model request = %#v, want response model and semconv provider", got)
+	}
+	if got := trace.ModelRequests[1]; got.Model != "claude-haiku-4-5" {
+		t.Fatalf("running model request = %#v, want request model", got)
+	}
+}

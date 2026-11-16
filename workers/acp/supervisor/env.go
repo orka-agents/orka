@@ -47,6 +47,7 @@ const (
 	architectureARM64            = "arm64"
 	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
+	EnvNativeSessionMaxBytes     = "ORKA_NATIVE_SESSION_MAX_BYTES"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
 	EnvPodUID                    = "ORKA_ACP_POD_UID"
@@ -82,10 +83,21 @@ const (
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvDurableWorkspaceDir       = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
 	EnvDurableWorkspaceKey       = "ORKA_ACP_DURABLE_WORKSPACE_KEY"
+	EnvMaxResidentSessions       = "ORKA_ACP_MAX_RESIDENT_SESSIONS"
+	EnvMaxConcurrentPrompts      = "ORKA_ACP_MAX_CONCURRENT_PROMPTS"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
 	EnvE2EPromptWriteAmbiguity   = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	// EnvToolboxes carries the frozen toolbox list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvToolboxes = "ORKA_ACP_TOOLBOXES"
+	// EnvToolboxMountMethod names how the controller bound the toolboxes
+	// (copy or imageVolume). It is not part of the profile.
+	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
+	// EnvSkills carries the frozen skill list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvSkills = "ORKA_ACP_SKILLS"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -133,10 +145,22 @@ const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGES
 
 //nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
+	nativeSessionMaxBytes, err := nativeSessionMaxBytesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
 	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
 	modelLimits, err := modelTokenLimitsFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	toolboxes, err := toolboxesFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	skills, err := skillsFromEnv()
 	if err != nil {
 		return Config{}, err
 	}
@@ -153,6 +177,8 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
+		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -198,6 +224,10 @@ func LoadConfigFromEnv() (Config, error) {
 		foundryRecovery = true
 	}
 	limits := defaultProtocolLimits()
+	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
+	if err := applyCapacityFromEnv(&limits); err != nil {
+		return Config{}, err
+	}
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -308,9 +338,14 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
+		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
-		Provider:                          providerCaps,
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		// Built-in supervisors serve operator access; whether a session may
+		// use it is decided by the controller-side API's class opt-in,
+		// SubjectAccessReview, and session-state gates.
+		SupportsOperatorAccess: operatorAccessSupported(providerKind, os.Geteuid()),
+		Provider:               providerCaps,
+		WorkspaceGovernance:    harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envutil.String(EnvListenAddress, ":8080"),
@@ -335,6 +370,9 @@ func LoadConfigFromEnv() (Config, error) {
 		ArtifactUploader:              artifactUploader,
 		E2EPromptWriteFaultRecorder:   e2ePromptWriteFaultRecorder,
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
+		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
+		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		Skills:                        harnessv2.CloneRuntimeSkills(skills),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -355,6 +393,9 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
+
+// claudeSkillToolName is Claude Code's tool that loads a skill's instructions.
+const claudeSkillToolName = "Skill"
 
 // codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
@@ -451,6 +492,14 @@ func codexSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if request.NativeRestore != nil {
+		// Do not inherit imported approval or sandbox settings during resume.
+		// This is a fail-closed fallback for both workspace intents. Every prompt
+		// explicitly applies the orka-external agent mode's externalSandbox;
+		// the RuntimeSession boundary, not this fallback, governs workspace writes.
+		config["approval_policy"] = "on-request"
+		config["sandbox_mode"] = "read-only"
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -469,9 +518,9 @@ func codexSessionProjection(
 	// own sandbox needs unprivileged user namespaces that the runtime Pod
 	// forbids, so the RuntimeSession boundary enforces the surface instead —
 	// safe read commands execute, every elevation request is rejected
-	// unconditionally by the controller, file writes are mediated by the
-	// supervisor, and the read-intent workspace delta classification fails
-	// any turn that modifies the workspace.
+	// unconditionally by the controller, the supervisor owns the read-intent
+	// workspace so shell writes fail with EACCES, and the read-intent
+	// workspace delta classification fails any turn that modifies it anyway.
 	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
 }
 
@@ -539,16 +588,34 @@ func claudeSessionProjection(
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
 	} else {
-		// Claude Code 2.1.217 infers high effort for unknown gateway model IDs,
-		// including claude-haiku-4.5, even when the model rejects effort.
+		// Claude Code (verified through 2.1.293) infers high effort for unknown
+		// gateway model IDs, including claude-haiku-4.5, even when the model
+		// rejects effort.
 		// "unset" omits that inferred API field; explicit effort stays in options
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	skills := harnessv2.RuntimeSkillNames(request.Profile.Skills)
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
+		if len(skills) > 0 {
+			// The Skill tool only loads the instructions of the skills listed
+			// below; it can't run anything the policy doesn't already allow.
+			// Listing it here only makes it available: the SDK (0.3.293)
+			// turns the skills option into Skill(<name>) allowedTools rules,
+			// so those skills load without a permission callback, which the
+			// frozen policy would reject.
+			allowed = append(allowed, claudeSkillToolName)
+		}
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
+	}
+	if len(skills) > 0 {
+		// Expose exactly the Orka skills: the SDK hides every other skill and
+		// its Skill tool rejects them. Inline shell execution in skills and
+		// slash commands from any source is turned off as well.
+		options["skills"] = skills
+		options["settings"] = map[string]any{"disableSkillShellExecution": true}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -572,11 +639,13 @@ var copilotToolIDs = map[string][]string{
 // session removes from the model's catalog regardless of policy: sub-agent
 // orchestration, skills, SQL, and background task tools have no Orka
 // equivalent and would bypass the RuntimeSession boundary. The list is exactly
-// the set GitHub Copilot CLI 1.0.77 registers under the supervisor's flags
+// the set GitHub Copilot CLI 1.0.96 registers under the supervisor's flags
 // (verified in --acp mode): the CLI prints an "Unknown tool name" diagnostic
 // into the agent message stream for every --excluded-tools name outside its
 // catalog, and names such as ask_user, report_intent, exit_plan_mode, lsp, or
-// code_review are not registered tool names in that build at all. GitHub MCP
+// code_review are not registered tool names in that build at all. That build
+// registers skill only when the workspace contains skills, so it stays listed
+// for repositories that ship them. GitHub MCP
 // tools register as github-mcp-server-<tool> and are removed by
 // --disable-builtin-mcps; the ask_user tool is removed by --no-ask-user.
 var copilotAlwaysExcludedToolIDs = []string{"list_agents", "read_agent", "skill", "sql", "task", "write_agent"}
@@ -591,8 +660,8 @@ func copilotSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if request.AgentConfiguration.SystemPrompt != "" {
-		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce Agent systemPrompt")
+	if err := acp.ValidateCopilotInstructions(request.AgentConfiguration.SystemPrompt); err != nil {
+		return ProviderSessionProjection{}, err
 	}
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot enforce reasoning effort")
@@ -610,7 +679,7 @@ func copilotSessionProjection(
 		}
 	}
 	args := []string{"--excluded-tools=" + strings.Join(excluded, ",")}
-	// Copilot 1.0.77 supplies display titles, not structured tool names, in
+	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
 	// still remove every native tool outside the effective policy.
@@ -631,10 +700,14 @@ func copilotSessionProjection(
 	}
 	// The CLI reports the exclusion list back as "Info:" agent message chunks
 	// at prompt start; the filter withholds exactly those chunks.
-	return ProviderSessionProjection{
+	projection := ProviderSessionProjection{
 		AdditionalArgs:        args,
 		AgentDiagnosticFilter: &AgentDiagnosticFilter{Startup: copilotStartupDiagnostic(excluded)},
-	}, nil
+	}
+	if prompt := request.AgentConfiguration.SystemPrompt; prompt != "" {
+		projection.Instructions = nativeInstructionProjection(providerKindCopilot, prompt)
+	}
+	return projection, nil
 }
 
 func openCodeSessionProjection(
@@ -660,9 +733,7 @@ func openCodeSessionProjection(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return ProviderSessionProjection{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
-	if request.AgentConfiguration.SystemPrompt != "" {
-		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot exactly enforce Agent systemPrompt")
-	}
+
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot enforce reasoning effort")
 	}
@@ -679,7 +750,11 @@ func openCodeSessionProjection(
 			)
 		}
 	}
-	return ProviderSessionProjection{}, nil
+	projection := ProviderSessionProjection{}
+	if prompt := request.AgentConfiguration.SystemPrompt; prompt != "" {
+		projection.Instructions = nativeInstructionProjection(providerKindOpencode, prompt)
+	}
+	return projection, nil
 }
 
 func providerProfile(
@@ -710,7 +785,8 @@ func providerProfile(
 				}
 				return map[string]string{
 					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
-					"CODEX_CONFIG": string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
+					"CODEX_CONFIG": string(config), "MODEL_PROVIDER": codexProviderID,
+					"INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
@@ -901,12 +977,65 @@ func openCodeSessionConfig(
 			"*.env.example": openCodePermissionAllow,
 		}
 	}
+	if skills := harnessv2.RuntimeSkillNames(request.Profile.Skills); len(skills) > 0 {
+		// OpenCode checks the skill permission with the skill name, so only
+		// the Orka skills are allowed; its built-in skills fall through to the
+		// top-level "*" deny. No nested "*" deny: OpenCode evaluates rules in
+		// JavaScript object order, which lists integer-like keys (a valid
+		// skill name such as "123") before "*", so a nested wildcard would
+		// win the last match and deny that skill.
+		skillPermissions := map[string]string{}
+		for _, name := range skills {
+			skillPermissions[name] = openCodePermissionAllow
+		}
+		permissions["skill"] = skillPermissions
+		// The projected skills live outside the workspace, and a blanket
+		// external_directory deny in the config overrides OpenCode's own
+		// skill-folder allowance, so its read tool could load SKILL.md but
+		// not the skill's supporting files. Allow only each projected Orka
+		// skill folder and keep the wildcard deny. JSON object keys are
+		// sorted, so "*" precedes these absolute paths and OpenCode's
+		// last-match rule picks the narrower allow.
+		dir, err := nativeSkillsDir(providerKindOpencode, paths)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("OpenCode skills folder %q must be absolute", dir)
+		}
+		// OpenCode's apply_patch asks the edit permission only for a move's
+		// source, so the edit rules below cannot stop it from moving a
+		// workspace file onto a projected skill. When that tool can mutate,
+		// keep the skill folders behind the deny: the skill tool still
+		// returns SKILL.md, but the supporting files stay unreadable.
+		if mutationAction != openCodePermissionAllow || intent == harnessv2.WorkspaceIntentRead || !openCodeUsesApplyPatch(model) {
+			externalDirectory := map[string]string{"*": openCodePermissionDeny}
+			for _, name := range skills {
+				externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+			}
+			permissions["external_directory"] = externalDirectory
+		}
+		// external_directory does not tell a read from a write, so that
+		// allowance would also let the edit, write, and apply_patch tools
+		// rewrite a projected skill. Keep them inside the workspace.
+		if mutationAction == openCodePermissionAllow {
+			editRules, err := openCodeSkillEditRules(paths.Workspace, dir, skills)
+			if err != nil {
+				return nil, err
+			}
+			permissions[openCodeToolEdit] = editRules
+		}
+	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
 		permissions[openCodeToolBash] = openCodePermissionDeny
 		permissions[openCodeToolEdit] = openCodePermissionDeny
 		permissions[openCodeToolGrep] = openCodePermissionDeny
 		permissions[openCodeToolWrite] = openCodePermissionDeny
+	}
+	instructions := []string{openCodeRootInstructionPath, filepath.Join(paths.Workspace, "AGENTS.md")}
+	if request.AgentConfiguration != nil && request.AgentConfiguration.SystemPrompt != "" {
+		instructions = append(instructions, filepath.Join(paths.Home, ".orka", "agent-instructions.md"))
 	}
 	return json.Marshal(map[string]any{
 		// Native ACP returns before background title inference settles. Titles
@@ -916,7 +1045,7 @@ func openCodeSessionConfig(
 		"autoupdate":        false,
 		"enabled_providers": []string{openCodeProviderID},
 		"formatter":         false,
-		"instructions":      []string{openCodeRootInstructionPath, filepath.Join(paths.Workspace, "AGENTS.md")},
+		"instructions":      instructions,
 		"lsp":               false,
 		"mcp":               map[string]any{},
 		"model":             openCodeProviderID + "/" + model,
@@ -953,7 +1082,9 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 	permissions := make(map[string]bool)
 	owners := make(map[string]string)
 	for _, descriptor := range policy.Tools {
-		if !descriptor.Source.Brokered() {
+		// A forwarding Tool serves a command-line client and is hidden from
+		// the model's tool list, so it takes no model-facing permission.
+		if !descriptor.Source.Brokered() || descriptor.Forward != nil {
 			continue
 		}
 		// OpenCode prefixes tools from the controller MCP server with `orka_`,
@@ -972,6 +1103,44 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 		permissions[name] = openCodeToolPolicyAllows(policy, descriptor.Name)
 	}
 	return permissions, nil
+}
+
+// openCodeSkillEditRules allows edits everywhere except the projected skill
+// folders. OpenCode (1.19.0) asks one "edit" permission for its edit, write,
+// and apply_patch tools, with the file path relative to the project worktree:
+// the workspace when it is a Git repository, "/" otherwise. Both spellings of
+// each skill folder are denied, so a workspace file is caught only if its
+// path repeats the session's own absolute path. The rules stop those
+// path-taking tools only; a session that may run shell commands still owns its
+// private copy.
+// openCodeUsesApplyPatch mirrors the OpenCode 1.19.0 tool registry, which
+// replaces the edit and write tools with apply_patch for these model IDs.
+// OpenCode matches the model's API ID; this config sets no ID override, so
+// that is the provider/model key it writes.
+func openCodeUsesApplyPatch(model string) bool {
+	return strings.Contains(model, "gpt-") && !strings.Contains(model, "oss") && !strings.Contains(model, "gpt-4")
+}
+
+func openCodeSkillEditRules(workspace, skillsDir string, skills []string) (map[string]string, error) {
+	rules := map[string]string{"*": openCodePermissionAllow}
+	for _, name := range skills {
+		folder := filepath.Join(skillsDir, name)
+		fromWorkspace, err := filepath.Rel(workspace, folder)
+		if err != nil {
+			return nil, fmt.Errorf("locate OpenCode skill %q from the workspace: %w", name, err)
+		}
+		for _, relative := range []string{fromWorkspace, strings.TrimPrefix(folder, string(filepath.Separator))} {
+			pattern := filepath.ToSlash(filepath.Join(relative, "*"))
+			// OpenCode takes the last matching rule in key order and expands a
+			// leading "~" or "$HOME". JSON keys are sorted, so a deny must sort
+			// after "*" and must not be rewritten, or the allow would win.
+			if pattern <= "*" || strings.HasPrefix(pattern, "~") {
+				return nil, fmt.Errorf("OpenCode skill %q cannot be protected from edits at %q", name, folder)
+			}
+			rules[pattern] = openCodePermissionDeny
+		}
+	}
+	return rules, nil
 }
 
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation
@@ -1076,7 +1245,57 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxEventLineBytes: 1 << 20, MaxTerminalResultBytes: 1 << 20, MaxBufferedEvents: supervisorMaxBufferedPromptEvents,
 		MaxUpdateEventsPerSecond: maxUpdates, MinPromptLeaseMillis: 5_000, MaxPromptLeaseMillis: 120_000,
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
+		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+// maxRuntimeCapacity matches the RuntimePool capacity API bound.
+const maxRuntimeCapacity = 1000
+
+// applyCapacityFromEnv adopts the RuntimePool's capacity. Unset values keep
+// the built-in limits so an older controller's Pods behave as before.
+func applyCapacityFromEnv(limits *harnessv2.ProtocolLimits) error {
+	sessions, err := optionalCapacityFromEnv(EnvMaxResidentSessions, limits.MaxResidentSessions)
+	if err != nil {
+		return err
+	}
+	prompts, err := optionalCapacityFromEnv(EnvMaxConcurrentPrompts, limits.MaxConcurrentPrompts)
+	if err != nil {
+		return err
+	}
+	if prompts > sessions {
+		return fmt.Errorf("%s cannot exceed %s", EnvMaxConcurrentPrompts, EnvMaxResidentSessions)
+	}
+	limits.MaxResidentSessions, limits.MaxConcurrentPrompts = sessions, prompts
+	return nil
+}
+
+func optionalCapacityFromEnv(name string, fallback uint32) (uint32, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > maxRuntimeCapacity {
+		return 0, fmt.Errorf("%s must be an integer from 1 to %d", name, maxRuntimeCapacity)
+	}
+	return uint32(value), nil
+}
+
+func nativeSessionMaxBytesFromEnv() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvNativeSessionMaxBytes))
+	if raw == "" {
+		return harnessv2.DefaultMaxNativeSessionBytes, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", EnvNativeSessionMaxBytes)
+	}
+	limit, err = harnessv2.NormalizeNativeSessionMaxBytes(limit)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvNativeSessionMaxBytes, err)
+	}
+	return limit, nil
 }
 
 func workspaceArtifactDownloadLimitFromEnv() (int64, error) {
@@ -1092,6 +1311,26 @@ func workspaceArtifactDownloadLimitFromEnv() (int64, error) {
 }
 
 func requiredEnv(name string) string { return strings.TrimSpace(os.Getenv(name)) }
+
+// toolboxesFromEnv parses the frozen toolbox list. An absent or empty value
+// means no toolboxes and leaves the profile digest unchanged.
+func toolboxesFromEnv() ([]harnessv2.RuntimeToolbox, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvToolboxes))
+	if raw == "" {
+		return nil, nil
+	}
+	var toolboxes []harnessv2.RuntimeToolbox
+	if err := json.Unmarshal([]byte(raw), &toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	if len(toolboxes) == 0 {
+		return nil, nil
+	}
+	if err := harnessv2.ValidateRuntimeToolboxes(toolboxes); err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvToolboxes, err)
+	}
+	return toolboxes, nil
+}
 
 func modelTokenLimitsFromEnv() (*harnessv2.ModelTokenLimits, error) {
 	contextValue := strings.TrimSpace(os.Getenv(EnvModelContextLimit))
@@ -1165,4 +1404,31 @@ func readRequiredSecretFile(envName string) (string, error) {
 		return "", fmt.Errorf("%s file is empty", envName)
 	}
 	return value, nil
+}
+
+func nativeInstructionProjection(provider, prompt string) *acp.InstructionProjection {
+	if prompt == "" {
+		return nil
+	}
+	switch provider {
+	case providerKindCopilot:
+		return &acp.InstructionProjection{RelativePath: ".copilot/copilot-instructions.md", Content: prompt}
+	case providerKindOpencode:
+		return &acp.InstructionProjection{RelativePath: ".orka/agent-instructions.md", Content: prompt}
+	default:
+		return nil
+	}
+}
+
+// operatorAccessPlatform reports whether tagged-process containment and the
+// file helper exist on this platform. Replaceable in tests.
+var operatorAccessPlatform = runtime.GOOS == "linux"
+
+// operatorAccessSupported reports whether this supervisor can serve operator
+// access. Operator commands run with exactly one supplementary tag group,
+// which only a root supervisor can assign; a non-root supervisor's children
+// inherit its own groups, so the exec helper would refuse every launch.
+// Outside Linux no tag can be proven free and no operation can be contained.
+func operatorAccessSupported(providerKind string, euid int) bool {
+	return operatorAccessPlatform && euid == 0 && !isExternalACPProvider(providerKind)
 }

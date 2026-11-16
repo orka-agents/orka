@@ -356,34 +356,42 @@ func TestEffectiveStatusCodeMapsHandlerErrors(t *testing.T) {
 }
 
 func TestEffectiveStatusCodeReportsSPAFallbackAsSuccess(t *testing.T) {
-	// A 404 on a non-API path is served as index.html with 200 by the app
-	// error handler after middleware unwinds; telemetry must not record a
-	// successful SPA navigation as a failure. API and probe paths keep 404.
+	// When the app serves the dashboard, a 404 on a non-API path is served as
+	// index.html with 200 by the app error handler after middleware unwinds;
+	// telemetry must not record a successful SPA navigation as a failure. API
+	// and probe paths keep 404, and so does every path without the dashboard.
 	tests := []struct {
-		name string
-		path string
-		want int
+		name      string
+		path      string
+		dashboard bool
+		want      int
 	}{
-		{"client-side route", "/settings/profile", fiber.StatusOK},
-		{"api path", "/api/v1/missing", fiber.StatusNotFound},
-		{"healthz", "/healthz", fiber.StatusNotFound},
-		{"readyz", "/readyz", fiber.StatusNotFound},
-		{"openai compat path", "/openai/v1/nonexistent", fiber.StatusNotFound},
-		{"openai unimplemented endpoint", "/openai/v1/conversations", fiber.StatusNotImplemented},
-		{"anthropic compat path", "/anthropic/v1/messages/count_tokens", fiber.StatusNotFound},
-		{"webhook path", "/webhooks/gitlab", fiber.StatusNotFound},
-		{"upper-case compat path", "/OPENAI/v1/nonexistent", fiber.StatusNotFound},
-		{"upper-case unimplemented endpoint", "/OpenAI/v1/Conversations", fiber.StatusNotImplemented},
-		{"trailing-slash unimplemented endpoint", "/openai/v1/conversations/", fiber.StatusNotImplemented},
-		{"openai root", "/openai", fiber.StatusNotFound},
-		{"anthropic root", "/anthropic", fiber.StatusNotFound},
-		{"internal root", "/internal", fiber.StatusNotFound},
-		{"webhooks root", "/webhooks", fiber.StatusNotFound},
+		{"client-side route", "/settings/profile", true, fiber.StatusOK},
+		{"client-side route without dashboard", "/settings/profile", false, fiber.StatusNotFound},
+		{"missing static asset", "/assets/index-stale.js", true, fiber.StatusNotFound},
+		{"upper-case missing static asset", "/ASSETS/index-stale.js", true, fiber.StatusNotFound},
+		{"api path", "/api/v1/missing", true, fiber.StatusNotFound},
+		{"healthz", "/healthz", true, fiber.StatusNotFound},
+		{"readyz", "/readyz", true, fiber.StatusNotFound},
+		{"openai compat path", "/openai/v1/nonexistent", true, fiber.StatusNotFound},
+		{"openai unimplemented endpoint", "/openai/v1/conversations", true, fiber.StatusNotImplemented},
+		{"anthropic compat path", "/anthropic/v1/messages/count_tokens", true, fiber.StatusNotFound},
+		{"webhook path", "/webhooks/gitlab", true, fiber.StatusNotFound},
+		{"upper-case compat path", "/OPENAI/v1/nonexistent", true, fiber.StatusNotFound},
+		{"upper-case unimplemented endpoint", "/OpenAI/v1/Conversations", true, fiber.StatusNotImplemented},
+		{"trailing-slash unimplemented endpoint", "/openai/v1/conversations/", true, fiber.StatusNotImplemented},
+		{"openai root", "/openai", true, fiber.StatusNotFound},
+		{"anthropic root", "/anthropic", true, fiber.StatusNotFound},
+		{"internal root", "/internal", true, fiber.StatusNotFound},
+		{"webhooks root", "/webhooks", true, fiber.StatusNotFound},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got int
 			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+			if tt.dashboard {
+				app.State().Set(dashboardStateKey, true)
+			}
 			app.Use(func(c fiber.Ctx) error {
 				err := c.Next()
 				got = effectiveStatusCode(c, err)

@@ -8,22 +8,27 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/metrics"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 )
 
 func TestContextTokenAllowedToolsFiltersInjectedProxyTools(t *testing.T) {
@@ -262,5 +267,180 @@ func assertCompatToolNames(t *testing.T, got, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tool names = %#v, want %#v", got, want)
+	}
+}
+
+func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	handler, app := setupTestOpenAIHandler()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	var gotNames []string
+	var gateDenied bool
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/filter", func(c fiber.Ctx) error {
+		compReq := &llm.CompletionRequest{}
+		injectOrkaTools(compReq)
+		gotNames = completionToolNames(filterCompletionToolsForContextToken(c, handler.contextTokenAuthorization, compReq.Tools))
+		gateDenied = connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization, true) != nil
+		if connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization, false) == nil {
+			t.Error("with connectors disabled the gate must refuse every caller")
+		}
+		return c.SendStatus(http.StatusNoContent)
+	})
+	probe := func(scope string) {
+		t.Helper()
+		token := issueTestContextToken(t, provider, nil, map[string]any{"scope": scope})
+		req := httptest.NewRequest(http.MethodGet, "/filter", nil)
+		req.Header.Set(TransactionTokenHeaderName, token)
+		resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+		if err != nil || resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("probe(%q): status = %v err = %v", scope, resp, err)
+		}
+	}
+
+	// tools:use alone offers the coordinator tools but not the person's
+	// linked accounts; execution is refused the same way.
+	probe(ContextTokenScopeToolsUse)
+	if slices.Contains(gotNames, "list_connections") || !slices.Contains(gotNames, "create_agent_task") || !gateDenied {
+		t.Fatalf("tools:use only: names = %v denied = %t", gotNames, gateDenied)
+	}
+	probe(ContextTokenScopeToolsUse + " " + ContextTokenScopeConnectorsRead)
+	if !slices.Contains(gotNames, "list_connections") || gateDenied {
+		t.Fatalf("with connectors:read: names = %v denied = %t", gotNames, gateDenied)
+	}
+}
+
+// TestConnectorReadToolAuthorizerRecordsAuditFailures allows list_connections
+// in audit mode for a token without the connector-read scope but records the
+// failure, as the connector routes do; enforce mode refuses and records it.
+func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
+	ui := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: "https://issuer.example.test",
+		ContextToken: &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test", Scopes: []string{ContextTokenScopeToolsUse}}}
+	counter := func(result string) float64 {
+		var m dto.Metric
+		if err := metrics.ContextTokenAuthorizationTotal.WithLabelValues("connectorsRead", result, "missing_scope").Write(&m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetCounter().GetValue()
+	}
+	for _, tc := range []struct {
+		mode   string
+		result string
+		denied bool
+	}{
+		{mode: ContextTokenAuthorizationModeAudit, result: "audit"},
+		{mode: ContextTokenAuthorizationModeEnforce, result: "denied", denied: true},
+	} {
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: tc.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate := connectorReadToolAuthorizer(ui, authz, true)
+		if gate == nil {
+			t.Fatalf("%s: a token without the connector-read scope must be checked at call time", tc.mode)
+		}
+		before := counter(tc.result)
+		if denied := gate(); (denied != nil) != tc.denied {
+			t.Fatalf("%s: denied = %+v, want denied = %t", tc.mode, denied, tc.denied)
+		}
+		if after := counter(tc.result); after != before+1 {
+			t.Fatalf("%s: %s failures recorded = %v, want %v", tc.mode, tc.result, after, before+1)
+		}
+		withScope := *ui
+		withScope.ContextToken = &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test", Scopes: []string{ContextTokenScopeConnectorsRead}}
+		if connectorReadToolAuthorizer(&withScope, authz, true) != nil {
+			t.Fatalf("%s: a token with the connector-read scope needs no check", tc.mode)
+		}
+	}
+}
+
+// fakeLinkedAccounts reports every catalog built-in as bound and counts
+// the resolutions that reached it.
+type fakeLinkedAccounts struct{ calls *int }
+
+func (f fakeLinkedAccounts) BuiltinToolCredential(context.Context, string) (toolspkg.LinkedAccountCredential, bool, error) {
+	*f.calls++
+	return toolspkg.LinkedAccountCredential{AccessToken: "linked"}, true, nil
+}
+
+// TestScopedLinkedAccountsFollowConnectorReadBoundary covers the linked
+// GitHub tools of chat and the compatibility proxies: under enforcement a
+// delegated token without the connector-read scope uses no linked account
+// and never reaches the resolver, audit mode resolves the link and records
+// the missing scope, and a token carrying the scope is not narrowed.
+func TestScopedLinkedAccountsFollowConnectorReadBoundary(t *testing.T) {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	narrowed := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: requester.Issuer,
+		ContextToken: &ContextToken{Subject: "alice", Issuer: requester.Issuer, Scopes: []string{ContextTokenScopeToolsUse}}}
+	scoped := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: requester.Issuer,
+		ContextToken: &ContextToken{Subject: "alice", Issuer: requester.Issuer, Scopes: []string{ContextTokenScopeConnectorsRead}}}
+	for _, tc := range []struct {
+		mode  string
+		ui    *UserInfo
+		bound bool
+	}{
+		{mode: ContextTokenAuthorizationModeEnforce, ui: narrowed, bound: false},
+		{mode: ContextTokenAuthorizationModeAudit, ui: narrowed, bound: true},
+		{mode: ContextTokenAuthorizationModeEnforce, ui: scoped, bound: true},
+	} {
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: tc.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		factory := func(string, *corev1alpha1.RequestedBy) toolspkg.LinkedAccountCredentials {
+			return fakeLinkedAccounts{calls: &calls}
+		}
+		linked := scopedLinkedAccounts(factory, "default", requester, tc.ui, authz)
+		if linked == nil {
+			t.Fatalf("%s: a resolver is attached for every verified person", tc.mode)
+		}
+		credential, bound, err := linked.BuiltinToolCredential(context.Background(), "list_pull_requests")
+		if err != nil || bound != tc.bound || (bound && credential.AccessToken != "linked") {
+			t.Fatalf("%s %v: credential = %+v bound = %t err = %v, want bound = %t", tc.mode, tc.ui.ContextToken.Scopes, credential, bound, err, tc.bound)
+		}
+		if wantCalls := map[bool]int{true: 1, false: 0}[tc.bound]; calls != wantCalls {
+			t.Fatalf("%s: resolver calls = %d, want %d", tc.mode, calls, wantCalls)
+		}
+	}
+	if scopedLinkedAccounts(nil, "default", requester, narrowed, ContextTokenAuthorizationConfig{}) != nil {
+		t.Fatal("without a factory there is no resolver")
+	}
+}
+
+// TestResponsesWiresConnectorSettings covers the OpenAI Responses endpoint:
+// it offers list_connections and resolves linked accounts exactly as Chat
+// Completions does when connectors are enabled.
+func TestResponsesWiresConnectorSettings(t *testing.T) {
+	handler, app := setupTestOpenAIHandler()
+	handler.config.ConnectorsEnabled = true
+	var factoryCalls int
+	handler.config.LinkedAccounts = func(string, *corev1alpha1.RequestedBy) toolspkg.LinkedAccountCredentials {
+		factoryCalls++
+		return nil
+	}
+	if setup := handler.responsesCoordinatorSetup("default"); !setup.ConnectorsEnabled {
+		t.Fatal("the Responses coordinator setup must carry ConnectorsEnabled")
+	}
+	app.Get("/ctx", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Subject: "alice", Issuer: "https://issuer.example.test"})
+		toolCtx := handler.responsesToolContext(c, "default", ProviderResolutionInfo{})
+		if toolCtx == nil || toolCtx.AuthorizeConnectorRead != nil {
+			t.Errorf("tool context = %+v, want connector reads allowed", toolCtx)
+		}
+		return c.SendStatus(http.StatusNoContent)
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/ctx", nil))
+	if err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("probe = %v %v", resp, err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("linked-account factory calls = %d, want 1", factoryCalls)
 	}
 }

@@ -16,11 +16,12 @@ rules:
 - apiGroups: [core.orka.ai]
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs: [update]
 - apiGroups: [core.orka.ai]
   resources:
   - sessions
-  verbs: [get, list, update, delete]
+  verbs: [get, list, create, update, delete]
 - apiGroups: [gateway.orka.ai]
   resources:
   - gatewayclasses

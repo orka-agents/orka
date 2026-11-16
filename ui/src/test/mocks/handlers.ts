@@ -172,6 +172,7 @@ export const handlers = [
       maxTasksPerTurn: 3,
       maxConcurrent: 5,
       availableTools: ['create_task', 'list_tasks'],
+      connectorsEnabled: true,
     })
   }),
   http.delete(`${API}/chat/:sessionId`, () => {

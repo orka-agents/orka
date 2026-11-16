@@ -660,6 +660,45 @@ func TestValidateChildTaskAgainstParentTransactionAuthorizesCustomToolHTTPSecret
 	}
 }
 
+// The Substrate egress gateway injects a Substrate MCP actor's egress
+// credential into its requests, so delegating the Tool delegates the Secret.
+func TestValidateChildTaskAgainstParentTransactionAuthorizesSubstrateMCPEgressCredentials(t *testing.T) {
+	const (
+		toolName   = "github-mcp"
+		secretName = "github-token"
+	)
+	parent, agent, child := delegatedOpenCodeCustomToolTransaction(toolName)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: toolName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+			Egress: []corev1alpha1.SubstrateActorEgressRule{{
+				Scheme: "https", Host: "api.github.com",
+				Credential: &corev1alpha1.SubstrateActorEgressCredential{SecretRef: corev1alpha1.SecretKeySelector{Name: secretName, Key: "token"}},
+			}},
+		}}},
+	}
+
+	parent.Spec.Transaction.Scope = ""
+	parent.Spec.Transaction.Scopes = nil
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `requires transaction scope "orka:secrets:credentials:read"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want egress credential scope denial", err)
+	}
+
+	parent.Spec.Transaction.Scopes = []string{"orka:secrets:credentials:read"}
+	parent.Spec.Transaction.Context["secret"] = "different-secret"
+	err = validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), secretName) || !strings.Contains(err.Error(), "does not match transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want egress credential secret binding denial", err)
+	}
+
+	parent.Spec.Transaction.Context["secret"] = secretName
+	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent, tool), parent, child, testResearcherAgentName); err != nil {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() rejected an authorized egress credential: %v", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionAuthorizesCustomToolOutboundCredentials(t *testing.T) {
 	const (
 		toolName   = "custom-search"

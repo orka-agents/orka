@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -481,18 +482,45 @@ func sessionNameForTask(task *corev1alpha1.Task) string {
 }
 
 func (h *Handlers) existingSessionNameForTask(ctx context.Context, namespace string, task *corev1alpha1.Task) (string, error) {
+	var sessionStore store.SessionStore
+	if h != nil {
+		sessionStore = h.sessionStore
+	}
+	return executionEventSessionName(ctx, sessionStore, namespace, task)
+}
+
+// executionEventSessionName names the existing Session a Task's execution
+// events are attributed to, which is what a Session timeline lists. A
+// spec.sessionRef names it directly. A Task the chat API created has no
+// sessionRef and names its chat Session in the orka.ai/chat-session label,
+// which clients cannot set through the API; that label counts only when it
+// names a chat Session.
+func executionEventSessionName(ctx context.Context, sessionStore store.SessionStore, namespace string, task *corev1alpha1.Task) (string, error) {
 	sessionName := sessionNameForTask(task)
+	chatLabeled := false
+	if sessionName == "" && task != nil {
+		sessionName = strings.TrimSpace(task.Labels[labels.LabelChatSession])
+		chatLabeled = sessionName != ""
+	}
 	if sessionName == "" {
 		return "", nil
 	}
-	if h == nil || h.sessionStore == nil {
+	if sessionStore == nil {
+		// Without a store the label's Session type cannot be checked.
+		if chatLabeled {
+			return "", nil
+		}
 		return sessionName, nil
 	}
-	if _, err := h.sessionStore.GetSession(ctx, namespace, sessionName); err != nil {
+	sessionType, err := transcriptSessionType(ctx, sessionStore, namespace, sessionName)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", nil
 		}
 		return "", err
+	}
+	if chatLabeled && sessionType != store.SessionTypeChat {
+		return "", nil
 	}
 	return sessionName, nil
 }

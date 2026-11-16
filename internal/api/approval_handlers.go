@@ -27,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 )
 
 // ListTaskApprovalsResponse is one read of a Task and the approvals filtered
@@ -85,6 +86,8 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 }
 
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
+//
+//nolint:gocyclo // Decision validation, authorization, and replay checks stay together so none can be skipped.
 func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	approvalID, err := url.PathUnescape(c.Params("approvalID"))
@@ -108,6 +111,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	}
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
 		return err
+	}
+	// A client that answered a Task it resolved earlier never decides a
+	// later Task that reuses the name and an approval ID.
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
 	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
@@ -156,7 +164,14 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if decision == approvalDecisionApprove {
+		if err := requireRequesterApprovesDelegatedWrite(task, GetUserInfo(c)); err != nil {
+			return err
+		}
+	}
+	// A parked turn has ended, but its sign-off approval stays decidable
+	// while the wait is active: the decision starts the continuation turn.
+	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
@@ -211,6 +226,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
 	}
+	approvals.RecordDecision(current, appended)
 	listed = append(listed, *appended)
 	updated, _ := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, updated); err != nil {

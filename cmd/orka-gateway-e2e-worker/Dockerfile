@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Test-only: never substitute this image for a production worker.
-FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
@@ -9,6 +9,7 @@ COPY cmd/orka-gateway-e2e-worker/ cmd/orka-gateway-e2e-worker/
 # The fixture invokes the real tool/client, including their worker dependencies.
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 COPY workers/common/ workers/common/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/orka-gateway-e2e-worker

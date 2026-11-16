@@ -12,12 +12,16 @@ import { Button } from '@/components/ui/button'
 import { GitFork, ArrowRight } from 'lucide-react'
 import { useForkTask } from '@/hooks/use-execution-events'
 import { ApiError } from '@/lib/api-client'
+import { taskNameError } from './task-name'
 import type { ExecutionEvent, ForkTaskResponse } from '@/schemas/execution-event'
 
 export interface ForkDialogProps {
   taskId: string
   // The event row the fork was launched from. Its seq seeds afterSeq.
   event: ExecutionEvent | null
+  // Checkpoint used when the fork is not launched from an event row (the
+  // runtime controls fork from the latest event).
+  afterSeq?: number
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -28,7 +32,7 @@ function newIdempotencyKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `fork-${Date.now()}-${Math.round(Math.random() * 1e9)}`
 }
 
-export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProps) {
+export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpenChange }: ForkDialogProps) {
   const fork = useForkTask(taskId)
   const [newTaskName, setNewTaskName] = useState('')
   const [agentName, setAgentName] = useState('')
@@ -49,7 +53,8 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   const idempotencyKeyRef = useRef<string>('')
   const idempotencyKeySignatureRef = useRef<string | null>(null)
 
-  const afterSeq = event?.seq ?? 0
+  const afterSeq = event?.seq ?? checkpointSeq ?? 0
+  const nameError = taskNameError(newTaskName.trim())
   // Signature of the request this key represents. Trimmed to match what submit()
   // actually sends.
   const requestSignature = JSON.stringify([
@@ -83,7 +88,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   }
 
   async function submit() {
-    if (fork.isPending) return
+    if (fork.isPending || nameError) return
     setError(null)
     const submission = submissionRef.current
     // Reuse the key across retries of the same request, but mint a fresh one
@@ -175,9 +180,14 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
                 value={newTaskName}
                 onChange={(e) => setNewTaskName(e.target.value)}
                 placeholder="auto-generated if blank"
-                className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm aria-invalid:border-destructive"
                 disabled={fork.isPending}
+                aria-invalid={nameError ? true : undefined}
+                aria-describedby={nameError ? 'fork-name-error' : undefined}
               />
+              {nameError && (
+                <p id="fork-name-error" className="text-xs text-destructive" role="alert">{nameError}</p>
+              )}
             </div>
             <div className="space-y-1">
               <label htmlFor="fork-agent" className="text-xs font-medium text-muted-foreground">
@@ -223,7 +233,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
               <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={fork.isPending}>
                 Cancel
               </Button>
-              <Button onClick={submit} disabled={fork.isPending}>
+              <Button onClick={submit} disabled={fork.isPending || Boolean(nameError)}>
                 <GitFork className="mr-1 h-4 w-4" />
                 {fork.isPending ? 'Forking…' : 'Create fork'}
               </Button>

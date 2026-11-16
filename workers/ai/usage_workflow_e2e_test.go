@@ -49,6 +49,8 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
@@ -182,14 +184,16 @@ func assertUsageWorkflowTotals(t *testing.T, summary usage.Summary, phase corev1
 	}
 }
 
+// usageWorkflowStore is the storage client over SQLite, as production wires
+// every consumer, with test hooks for readiness and the poll cutoff.
 type usageWorkflowStore struct {
-	*sqlite.Store
+	*storageclient.Client
 	refreshNow bool
 	apiReady   atomic.Bool
 }
 
 func (s *usageWorkflowStore) HealthCheck(ctx context.Context) error {
-	if err := s.Store.HealthCheck(ctx); err != nil {
+	if err := s.Client.HealthCheck(ctx); err != nil {
 		return err
 	}
 	s.apiReady.Store(true)
@@ -204,7 +208,7 @@ func (s *usageWorkflowStore) ListUsagePullRequestLinks(
 	if s.refreshNow {
 		before = time.Now().UTC().Add(time.Second)
 	}
-	return s.Store.ListUsagePullRequestLinks(ctx, namespace, monitorUID, before, limit)
+	return s.Client.ListUsagePullRequestLinks(ctx, namespace, monitorUID, before, limit)
 }
 
 type usageWorkflowFixture struct {
@@ -219,6 +223,7 @@ type usageWorkflowFixture struct {
 	tasks      *controller.TaskReconciler
 	github     *usageWorkflowGitHub
 	url        string
+	transport  *http.Transport
 	stopAPI    context.CancelFunc
 	apiDone    chan error
 	startedAt  time.Time
@@ -234,6 +239,10 @@ func newUsageWorkflowFixture(t *testing.T) *usageWorkflowFixture {
 		startedAt: time.Now().UTC().Add(-time.Minute),
 		viewer:    "fixture-viewer-" + t.Name(), outsider: "fixture-outsider-" + t.Name(),
 	}
+	// This fixture tests persisted workflow state, not connection reuse. Own
+	// its HTTP connections so idle keep-alives cannot delay API replacement.
+	f.transport = http.DefaultTransport.(*http.Transport).Clone()
+	f.transport.DisableKeepAlives = true
 	for _, add := range []func(*runtime.Scheme) error{
 		corev1alpha1.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, rbacv1.AddToScheme, authenticationv1.AddToScheme,
 	} {
@@ -334,7 +343,8 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 	var err error
 	f.db, err = sqlite.NewDB(f.dbPath)
 	require.NoError(t, err)
-	f.backend = &usageWorkflowStore{Store: sqlite.NewStore(f.db, f.dbPath)}
+	storage := storageclienttest.NewEmbedded(t, sqlite.NewStore(f.db, f.dbPath))
+	f.backend = &usageWorkflowStore{Client: storage}
 	sessions := controller.NewSessionManager(f.backend)
 	f.reconciler = &controller.RepositoryMonitorReconciler{
 		Client: f.kube, APIReader: f.kube, Scheme: f.scheme, Store: f.backend, ResultStore: f.backend,
@@ -371,7 +381,7 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 				return true
 			default:
 			}
-			response, err := (&http.Client{Timeout: time.Second}).Get(f.url + "/readyz")
+			response, err := (&http.Client{Transport: f.transport, Timeout: time.Second}).Get(f.url + "/readyz")
 			if err != nil {
 				return false
 			}
@@ -394,6 +404,7 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 func (f *usageWorkflowFixture) stop(t *testing.T) {
 	t.Helper()
 	if f.stopAPI != nil {
+		f.transport.CloseIdleConnections()
 		f.stopAPI()
 		select {
 		case err := <-f.apiDone:
@@ -421,7 +432,7 @@ func (f *usageWorkflowFixture) request(t *testing.T, method, path, bearer string
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	response, err := (&http.Client{Transport: f.transport, Timeout: 10 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 	data, err := io.ReadAll(response.Body)
@@ -445,7 +456,7 @@ func (f *usageWorkflowFixture) submitIssueWebhook(t *testing.T, want int) {
 	req.Header.Set("X-GitHub-Event", "issues")
 	req.Header.Set("X-GitHub-Delivery", "usage-issue-delivery")
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	response, err := (&http.Client{Transport: f.transport, Timeout: 5 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 	data, err := io.ReadAll(response.Body)
@@ -579,7 +590,7 @@ func (f *usageWorkflowFixture) runDelegatedWorker(
 	t.Setenv(workerenv.ServiceAccountToken, "")
 	bearerPath := filepath.Join(t.TempDir(), "bearer")
 	require.NoError(t, os.WriteFile(bearerPath, []byte("usage-worker-fixture"), 0o600))
-	transport := &usageWorkflowTransport{base: http.DefaultTransport}
+	transport := &usageWorkflowTransport{base: f.transport}
 	recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
 		ControllerURL: f.url, Namespace: child.Namespace, TaskName: child.Name, BearerPath: bearerPath,
 		Client: &http.Client{Transport: transport, Timeout: 5 * time.Second},

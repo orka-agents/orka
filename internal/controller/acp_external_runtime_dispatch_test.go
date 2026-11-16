@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	"github.com/orka-agents/orka/internal/labels"
@@ -35,13 +36,14 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 type externalACPDispatchFixture struct {
 	ctx            context.Context
 	client         client.Client
 	controlStore   store.DurableControlStore
-	persistence    *sqlite.Store
+	persistence    *sealedTestStore
 	epochs         *ControllerEpochManager
 	reconciler     *TaskReconciler
 	dispatcher     *ACPDispatcher
@@ -55,13 +57,23 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
-	contextTimeout                  time.Duration
-	statusTransform                 func(*harnessv2.StatusResponse)
-	profileTransform                func(*harnessv2.RuntimeProfile)
-	terminalEvents                  map[harnessv2.PromptID]harnessv2.EventType
-	promptObserver                  func(harnessv2.StartPromptRequest)
-	workspaceDeltaObserver          func(harnessv2.CreateWorkspaceDeltaRequest)
+	beforeTerminal         func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel               func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
+	contextTimeout         time.Duration
+	statusTransform        func(*harnessv2.StatusResponse)
+	profileTransform       func(*harnessv2.RuntimeProfile)
+	terminalEvents         map[harnessv2.PromptID]harnessv2.EventType
+	promptObserver         func(harnessv2.StartPromptRequest)
+	workspaceDeltaObserver func(harnessv2.CreateWorkspaceDeltaRequest)
+	// rejectPrompt answers a prompt with a retryable 429 rate_limited
+	// rejection, before the runtime sees it, while it returns true.
+	rejectPrompt func() bool
+	// failDelete fails RuntimeSession deletion as unproven while it returns true.
+	failDelete                      func() bool
 	supportsPublicationFinalization bool
+	// registry is the broker registry the runtime's descriptors and the
+	// reconciler classify against; nil means the default registry.
+	registry *tools.Registry
 }
 
 type failAgentRuntimeReadWhileTaskSubmitting struct {
@@ -240,6 +252,8 @@ func newExternalACPDispatchFixtureWithOptions(
 	deleteRequests := make(chan harnessv2.DeleteRuntimeSessionRequest, 8)
 	server := newDispatcherRuntimeServerForPoolWithOptions(
 		t, profile, profileDigest, acpDispatcherTestPoolUID, dispatcherRuntimeServerOptions{
+			beforeTerminal:                   options.beforeTerminal,
+			onCancel:                         options.onCancel,
 			disableAgentSessionConfiguration: true,
 			disablePermissions:               true,
 			terminalEvents:                   options.terminalEvents,
@@ -272,6 +286,10 @@ func newExternalACPDispatchFixtureWithOptions(
 	if options.workspaceDeltaObserver != nil {
 		deltaProxy := newExternalRuntimeWorkspaceDeltaProxy(t, runtimeEndpoint, options.workspaceDeltaObserver)
 		runtimeEndpoint = deltaProxy.URL
+	}
+	if options.rejectPrompt != nil || options.failDelete != nil {
+		faultProxy := newExternalRuntimeFaultProxy(t, runtimeEndpoint, options.rejectPrompt, options.failDelete)
+		runtimeEndpoint = faultProxy.URL
 	}
 
 	config := conformancetest.Config{
@@ -346,8 +364,12 @@ func newExternalACPDispatchFixtureWithOptions(
 			&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
 		).
 		WithObjects(objects...).Build()
+	registry := options.registry
+	if registry == nil {
+		registry = tools.DefaultRegistry
+	}
 	mcpConfiguration, err := buildAgentRuntimeMCPConfigurationWithRegistry(
-		ctx, kubeClient, externalRuntime, profile, tools.DefaultRegistry,
+		ctx, kubeClient, externalRuntime, profile, registry,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -368,19 +390,12 @@ func newExternalACPDispatchFixtureWithOptions(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "external-dispatch-test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x58}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	persistence := sealedStore(t, sqlite.NewStore(db, "external-dispatch-test"))
 	controlStore, err := storekube.NewComposite(kubeClient, defaultNS, persistence, storekube.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(ctx)
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -413,7 +428,7 @@ func newExternalACPDispatchFixtureWithOptions(
 		Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(32),
 		DurableControlStore: controlStore, ControllerEpochManager: epochs, AgentExecutionSnapshots: persistence,
 		ResultStore: persistence, MessageStore: persistence, PlanStore: persistence, ExecutionEventStore: persistence,
-		SessionManager: sessionManager, ACPRuntimeEnabled: true,
+		SessionManager: sessionManager, MCPRegistry: options.registry,
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
@@ -547,6 +562,36 @@ func newExternalRuntimePromptProxy(
 	return server
 }
 
+// newExternalRuntimeFaultProxy rejects prompts with a retryable 429 and
+// fails RuntimeSession deletion as unproven while the given hooks return true.
+func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, failDelete func() bool) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	writeFault := func(w http.ResponseWriter, status int, code harnessv2.ErrorCode, message string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: message, Retryable: true})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") && rejectPrompt != nil && rejectPrompt():
+			_, _ = io.Copy(io.Discard, request.Body)
+			writeFault(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining")
+		case request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/runtime-sessions/") && failDelete != nil && failDelete():
+			_, _ = io.Copy(io.Discard, request.Body)
+			writeFault(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, "runtime session cleanup is unproven")
+		default:
+			proxy.ServeHTTP(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func newExternalRuntimeWorkspaceDeltaProxy(
 	t *testing.T,
 	upstream string,
@@ -622,6 +667,7 @@ func (f *externalACPDispatchFixture) queueTask(
 	uid types.UID,
 	prompt string,
 	sessionRef *corev1alpha1.SessionReference,
+	mutate ...func(*corev1alpha1.Task),
 ) *corev1alpha1.Task {
 	t.Helper()
 	task := &corev1alpha1.Task{
@@ -636,6 +682,9 @@ func (f *externalACPDispatchFixture) queueTask(
 	}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
 		AllowedTools: append([]string{}, f.mcpPolicy.AllowedTools...),
+	}
+	for _, apply := range mutate {
+		apply(task)
 	}
 	if err := f.client.Create(f.ctx, task); err != nil {
 		t.Fatal(err)
@@ -1107,6 +1156,127 @@ func TestACPDispatcherRetryableUnsentExternalWorkspaceDeltaRetriesSameOperation(
 	}
 	if attempt.ExecutionState != store.PromptExecutionSucceeded || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		t.Fatalf("retried workspace delta PromptAttempt = %#v", attempt)
+	}
+}
+
+func TestACPDispatcherCancellationPreservesCompletedStreamResult(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		terminal    harnessv2.EventType
+		cause       error
+		outcome     harnessv2.PromptOutcome
+		stopReason  harnessv2.ACPStopReason
+		wantPhase   corev1alpha1.TaskPhase
+		wantOutcome corev1alpha1.TaskExecutionOutcome
+		wantReason  corev1alpha1.TaskExecutionReason
+	}{
+		{name: "completed after task deletion", terminal: harnessv2.EventCompleted, cause: context.Canceled,
+			outcome: harnessv2.PromptOutcomeSucceeded, stopReason: harnessv2.ACPStopReasonEndTurn,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded, wantOutcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+		{name: "completed at task deadline", terminal: harnessv2.EventCompleted, cause: context.DeadlineExceeded,
+			outcome: harnessv2.PromptOutcomeSucceeded, stopReason: harnessv2.ACPStopReasonEndTurn,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded, wantOutcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+		{name: "cancelled at task deadline", terminal: harnessv2.EventCancelled, cause: context.DeadlineExceeded,
+			outcome: harnessv2.PromptOutcomeCancelled, stopReason: harnessv2.ACPStopReasonCancelled,
+			wantPhase: corev1alpha1.TaskPhaseCancelled, wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			wantReason: acpTaskTimeoutReason},
+		{name: "failed during task deletion", terminal: harnessv2.EventFailed, cause: context.Canceled,
+			outcome: harnessv2.PromptOutcomeFailed, stopReason: harnessv2.ACPStopReasonRefusal,
+			wantPhase: corev1alpha1.TaskPhaseFailed, wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantReason: acpPromptFailedReason},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var fixture *externalACPDispatchFixture
+			var cancelRuntime context.CancelFunc
+			cancelObserved := make(chan struct{})
+			terminalReady := make(chan harnessv2.Event, 1)
+			var cancelCalls atomic.Int32
+			fixture = newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
+				externalACPDispatchFixtureOptions{
+					terminalEvents: map[harnessv2.PromptID]harnessv2.EventType{"prompt-cancel-completed-stream-uid-1": test.terminal},
+					beforeTerminal: func(_ harnessv2.StartPromptRequest, terminal harnessv2.Event) {
+						terminalReady <- terminal
+						deadline := time.Now().Add(3 * time.Second)
+						for {
+							task := &corev1alpha1.Task{}
+							key := client.ObjectKey{Namespace: defaultNS, Name: "cancel-completed-stream"}
+							if err := fixture.client.Get(fixture.ctx, key, task); err != nil {
+								t.Error(err)
+								return
+							}
+							if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateRunning {
+								if err := fixture.client.Delete(fixture.ctx, task); err != nil {
+									t.Error(err)
+									return
+								}
+								break
+							}
+							if time.Now().After(deadline) {
+								t.Error("prompt acceptance was not persisted")
+								return
+							}
+							time.Sleep(time.Millisecond)
+						}
+						cancelRuntime()
+						select {
+						case <-cancelObserved:
+						case <-time.After(3 * time.Second):
+							t.Error("controller did not request cancellation")
+						}
+					},
+					onCancel: func(request harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse {
+						if cancelCalls.Add(1) != 1 {
+							t.Error("prompt cancellation was resubmitted")
+						}
+						terminal := <-terminalReady
+						wantReason := harnessv2.CancelReasonControllerShutdown
+						if errors.Is(test.cause, context.DeadlineExceeded) {
+							wantReason = harnessv2.CancelReasonTaskTimeout
+						}
+						if request.Reason != wantReason || request.Metadata.TaskUID != terminal.Identity.TaskUID ||
+							request.Metadata.TaskAttempt != terminal.Identity.TaskAttempt || request.Metadata.PromptID != terminal.Identity.PromptID ||
+							request.Metadata.Fence.RuntimeSessionUID != terminal.Identity.RuntimeSessionUID ||
+							request.Metadata.Fence.RuntimeSessionGeneration != terminal.Identity.RuntimeSessionGeneration {
+							t.Error("cancellation changed the accepted prompt identity or reason")
+						}
+						close(cancelObserved)
+						return harnessv2.CancelPromptResponse{
+							Protocol:       harnessv2.ProtocolVersion,
+							Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+							BarrierState:   harnessv2.CancellationBarrierSettled, SettlementProven: true,
+							Settlement: harnessv2.PromptSettlement{
+								TerminalEvent: terminal.Type, Outcome: test.outcome,
+								StopReason: test.stopReason, SettledAt: terminal.Identity.Timestamp,
+							},
+						}
+					},
+				})
+			queued := fixture.queueTask(t, "cancel-completed-stream", "cancel-completed-stream-uid", "finish during cancellation", nil)
+			runtimeCtx, cancelCause := context.WithCancelCause(fixture.ctx)
+			cancelRuntime = func() { cancelCause(test.cause) }
+			t.Cleanup(cancelRuntime)
+			fixture.dispatcher.runtimeContextFactory = func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc) {
+				return runtimeCtx, cancelRuntime
+			}
+			completed := fixture.dispatch(t, queued)
+			if completed.Status.Phase != test.wantPhase || completed.Status.Execution == nil ||
+				completed.Status.Execution.Outcome != test.wantOutcome || completed.Status.Execution.Reason != test.wantReason {
+				t.Fatalf("settlement lost during cancellation: phase=%s execution=%v", completed.Status.Phase, completed.Status.Execution)
+			}
+			if test.terminal == harnessv2.EventCompleted {
+				if completed.Status.Delivery == nil || completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeReadValidated {
+					t.Fatalf("completed result not read-validated: %v", completed.Status.Delivery)
+				}
+				result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+				if err != nil || string(result) != "from runtime" {
+					t.Fatalf("completed result = %q, err=%v", result, err)
+				}
+			}
+			if cancelCalls.Load() != 1 || fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 {
+				t.Fatalf("runtime operations: cancellations=%d creates=%d deletes=%d", cancelCalls.Load(),
+					fixture.createCalls.Load(), fixture.deleteCalls.Load())
+			}
+		})
 	}
 }
 
@@ -1666,6 +1836,58 @@ func TestACPDispatcherUsesRegisteredExternalMCPPolicy(t *testing.T) {
 	}
 }
 
+// agentRuntimeRewritingReader returns AgentRuntimes rewritten as an earlier
+// read would have seen them.
+type agentRuntimeRewritingReader struct {
+	client.Reader
+	rewrite func(*corev1alpha1.AgentRuntime)
+}
+
+func (r agentRuntimeRewritingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if runtime, ok := obj.(*corev1alpha1.AgentRuntime); ok {
+		r.rewrite(runtime)
+	}
+	return nil
+}
+
+func TestExternalRuntimeBindingRechecksCeilingAgainstFrozenRegistration(t *testing.T) {
+	const readTool, writeTool = "external_read", "external_write"
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{readTool, writeTool}
+	fixture := newExternalACPDispatchFixtureWithPolicy(
+		t, "external-v2", policy, testExternalACPCustomTool(readTool), testExternalACPCustomTool(writeTool),
+	)
+	agent := fixture.agent.DeepCopy()
+	agent.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{readTool}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: "external-ceiling-recheck", UID: types.UID("external-ceiling-recheck-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt: "look up a value", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{readTool, writeTool}},
+		},
+	}
+
+	// Planning reads an older registration that still denied the write tool.
+	olderRead := agentRuntimeRewritingReader{Reader: fixture.client, rewrite: func(runtime *corev1alpha1.AgentRuntime) {
+		runtime.Spec.Capabilities.MCPPolicy.DisallowedTools = []string{writeTool}
+	}}
+	planner := &TaskReconciler{Client: fixture.client, APIReader: olderRead}
+	if plan := planner.planAgentExecution(fixture.ctx, task, agent); plan.path != agentExecutionPathExternal {
+		t.Fatalf("planning against the older registration = %#v, want external path", plan)
+	}
+
+	// Binding freezes the current registration, which exposes the write tool.
+	_, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, agent)
+	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "external_write"`) || !isPermanentACPAgentConfigurationError(err) {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() error = %v, want permanent ceiling rejection", err)
+	}
+}
+
 func TestExternalRuntimeBindingRejectsUnconformedMCPToolDescriptorChange(t *testing.T) {
 	const toolName = "external_lookup"
 	policy := testAgentRuntimeMCPPolicy()
@@ -1828,7 +2050,7 @@ func TestBuildPromptRequestHonorsExternalLeaseBounds(t *testing.T) {
 			limits.MinPromptLeaseMillis = test.minimum
 			limits.MaxPromptLeaseMillis = test.maximum
 			request, err := fixture.dispatcher.buildPromptRequest(
-				bound.frozenTask, fence, bound.plan.Profile, bound.mcpConfiguration, "", "bounded", limits, 0,
+				bound.frozenTask, fence, bound.plan.Profile, bound.mcpConfiguration, "", "", "bounded", limits, 0,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -2824,5 +3046,268 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 				t.Fatal("drifted capability envelope was accepted")
 			}
 		})
+	}
+}
+
+// An external runtime's snapshot freezes no Connections, so a connector-
+// backed tool on it is refused with a definitive reason at candidate
+// resolution instead of failing every call for want of a frozen Connection.
+func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "github-conn"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "gh_search"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://api.github.com/search/issues", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	for _, object := range []client.Object{policy, tool} {
+		if err := fixture.client.Create(fixture.ctx, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "external-connector", UID: types.UID("external-connector-uid"), Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "search issues", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"gh_search"}},
+		},
+	}
+	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want a permanent connector refusal", candidate, err)
+	}
+	// A connector tool the policy denies is never exposed, so it is no
+	// reason to refuse the runtime.
+	denied := task.DeepCopy()
+	denied.Name, denied.UID = "external-connector-denied", types.UID("external-connector-denied-uid")
+	denied.Spec.AgentRuntime.DisallowedTools = []string{"gh_search"}
+	// (The fixture's registered policy then rejects the changed tool list on
+	// its own; what matters is that the refusal is no longer the connector.)
+	if _, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denied, fixture.agent); err != nil && strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with the connector tool denied = %v, want no connector refusal", err)
+	}
+}
+
+// GitHub built-ins under a linked account ride an external runtime only
+// when the requester's link leaves the registered policy exactly as
+// registered: a Ready link for every such tool, and write tools already in
+// the registered approval set. The candidate then freezes the link.
+func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
+	registry := brokeredGitHubRegistry(t)
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{"list_pull_requests"}
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	github.Namespace = defaultNS
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-linked", policy, externalACPDispatchFixtureOptions{registry: registry}, github)
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	SetRequesterStampKey(testRequesterStampKey)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: "external-linked", UID: types.UID("external-linked-uid"), Generation: 1,
+			Annotations: map[string]string{
+				labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+				labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "external-linked-uid", requester.Issuer, requester.Subject),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "list pull requests", RequestedBy: requester,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"list_pull_requests"}},
+		},
+	}
+	// No link: the registered policy would have to be narrowed, so the
+	// Task is refused for good rather than dispatched with a tool that
+	// could never run.
+	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per person") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() without a link = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: defaultNS, UID: "conn-uid", Generation: 2},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
+		},
+	}
+	// Connection has no status subresource in this fake client, so the
+	// Ready status is created with the object.
+	connection.Status.GrantSequence = 1
+	connection.Status.Conditions = []metav1.Condition{
+		{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
+		{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
+		{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
+	}
+	connection = consentedConnection(connection, github)
+	if err := fixture.client.Create(fixture.ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err != nil || candidate == nil {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a Ready link = (%#v, %v)", candidate, err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Connections) != 1 || body.Connections[0].Tool != "list_pull_requests" || body.Connections[0].Provider != "github" ||
+		body.Connections[0].UID != "conn-uid" || body.Connections[0].GrantSequence != 1 {
+		t.Fatalf("snapshot connections = %+v, want the link frozen for the built-in", body.Connections)
+	}
+	// The session's descriptors come from the registered policy, so a Task
+	// that denies a linked built-in that policy exposes is refused for good
+	// instead of being bound with the tool anyway or retried forever.
+	denying := task.DeepCopy()
+	denying.Spec.AgentRuntime.DisallowedTools = []string{"list_pull_requests"}
+	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denying, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per task") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a conflicting Task deny = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+	// A write tool the registration did not put behind approval is never
+	// carried, link or no link.
+	writePolicy := testAgentRuntimeMCPPolicy()
+	writePolicy.AllowedTools = []string{"create_pull_request", "list_pull_requests"}
+	writeFixture := newExternalACPDispatchFixtureWithOptions(t, "external-linked-write", writePolicy, externalACPDispatchFixtureOptions{registry: registry}, github.DeepCopy())
+	writeTask := task.DeepCopy()
+	writeTask.Name, writeTask.UID, writeTask.ResourceVersion = "external-linked-write", types.UID("external-linked-write-uid"), ""
+	writeTask.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testRequesterStampKey, "external-linked-write-uid", requester.Issuer, requester.Subject)
+	writeTask.Spec.AgentRef.Name = writeFixture.agent.Name
+	writeTask.Spec.AgentRuntime.AllowedTools = []string{"create_pull_request", "list_pull_requests"}
+	writeConnection := connection.DeepCopy()
+	writeConnection.ResourceVersion = ""
+	if err := writeFixture.client.Create(writeFixture.ctx, writeConnection); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err = writeFixture.reconciler.resolveExternalAgentExecutionCandidate(writeFixture.ctx, writeTask, writeFixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "registered approvalRequiredTools") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with an unregistered write approval = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+}
+
+// A task-scoped prompt rejected with a retryable 429 is requeued only after
+// its RuntimeSession is retired and the cleanup receipt is recorded against
+// the binding that names it; the Task then retries on a fresh session.
+func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *testing.T) {
+	var rejections atomic.Int32
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
+		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
+	})
+	queued := fixture.queueTask(t, "external-rate-limited-task-scoped", types.UID("external-rate-limited-task-scoped-uid"), "retry after admission", nil)
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	created := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+	go func() { created <- <-fixture.createRequests }()
+	if err := fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target); err != nil {
+		t.Fatalf("rate-limited task-scoped prompt was not requeued cleanly: %v", err)
+	}
+	first := <-created
+	requeued := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), requeued); err != nil {
+		t.Fatal(err)
+	}
+	execution := requeued.Status.Execution
+	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved || execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity {
+		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved waiting for capacity", execution)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("task-scoped RuntimeSession DELETE calls before requeue = %d, want 1", fixture.deleteCalls.Load())
+	}
+	receipt, err := taskScopedRuntimeSessionCleanupDigest(acpTaskControlUID(requeued), execution.Attempt,
+		string(first.Metadata.Fence.RuntimeInstanceID), string(first.Metadata.Fence.RuntimeSessionUID), int64(first.Metadata.Fence.RuntimeSessionGeneration))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.RuntimeSessionCleanupDigest != receipt {
+		t.Fatalf("requeue did not record the retired session's cleanup receipt: %#v", execution)
+	}
+	if execution.RuntimeSessionUID != "" || execution.RuntimeInstanceID != "" {
+		t.Fatalf("requeue kept a retired task-scoped binding: %#v", execution)
+	}
+	completed := fixture.dispatch(t, requeued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("requeued task-scoped Task status = %#v", completed.Status)
+	}
+}
+
+// When the rejected task-scoped RuntimeSession cannot be proven retired, the
+// requeued Task keeps naming it so its cleanup obligation is not lost. Every
+// later dispatch first retries deleting that exact retained generation: while
+// deletion keeps failing the binding stays untouched and no new generation is
+// created, and only a recorded receipt lets a new generation proceed.
+func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testing.T) {
+	var rejections atomic.Int32
+	var deleteFails atomic.Bool
+	var deleteAttempts atomic.Int32
+	deleteFails.Store(true)
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
+		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
+		failDelete: func() bool {
+			deleteAttempts.Add(1)
+			return deleteFails.Load()
+		},
+	})
+	queued := fixture.queueTask(t, "external-rate-limited-unretired", types.UID("external-rate-limited-unretired-uid"), "retry after admission", nil)
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	created := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+	go func() { created <- <-fixture.createRequests }()
+	_ = fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target)
+	first := <-created
+	current := func() *corev1alpha1.Task {
+		t.Helper()
+		task := &corev1alpha1.Task{}
+		if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), task); err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	retainsFirst := func(task *corev1alpha1.Task) bool {
+		execution := task.Status.Execution
+		return execution != nil && execution.RuntimeInstanceID == string(first.Metadata.Fence.RuntimeInstanceID) &&
+			execution.RuntimeSessionUID == string(first.Metadata.Fence.RuntimeSessionUID) &&
+			execution.RuntimeSessionGeneration == int64(first.Metadata.Fence.RuntimeSessionGeneration)
+	}
+	requeued := current()
+	if requeued.Status.Execution == nil || requeued.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || !retainsFirst(requeued) {
+		t.Fatalf("requeue dropped the unretired task-scoped binding: %#v", requeued.Status.Execution)
+	}
+	if runtimeSessionCleanupCompleteForUID(requeued, acpTaskControlUID(requeued)) || !taskScopedRuntimeSessionCleanupUnconfirmed(requeued) {
+		t.Fatal("unretired task-scoped RuntimeSession reported its cleanup as complete")
+	}
+
+	// The next dispatch reaches the same instance and deletion fails again.
+	attemptsBefore := deleteAttempts.Load()
+	held := fixture.dispatch(t, requeued)
+	if !retainsFirst(held) || held.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		runtimeSessionCleanupCompleteForUID(held, acpTaskControlUID(held)) {
+		t.Fatalf("failed retained cleanup overwrote or released the binding: %#v", held.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("CreateRuntimeSession calls while retained cleanup is unconfirmed = %d, want 1", fixture.createCalls.Load())
+	}
+	if deleteAttempts.Load() == attemptsBefore {
+		t.Fatal("the next dispatch did not retry deleting the retained generation")
+	}
+
+	// Once the exact retained generation is deleted, its receipt is recorded
+	// and a new generation proceeds to completion.
+	deleteFails.Store(false)
+	go func() { created <- <-fixture.createRequests }()
+	completed := fixture.dispatch(t, held)
+	second := <-created
+	if second.Metadata.Fence.RuntimeSessionGeneration <= first.Metadata.Fence.RuntimeSessionGeneration {
+		t.Fatalf("new task-scoped generation = %d, want later than retained %d", second.Metadata.Fence.RuntimeSessionGeneration, first.Metadata.Fence.RuntimeSessionGeneration)
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("Task after retained cleanup = %#v", completed.Status)
+	}
+	if fixture.createCalls.Load() != 2 {
+		t.Fatalf("CreateRuntimeSession calls = %d, want the retained and one new generation", fixture.createCalls.Load())
 	}
 }

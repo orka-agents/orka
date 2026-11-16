@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -23,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +35,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/redact"
@@ -47,6 +50,9 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// defaultToolHTTPTimeout bounds a Tool call whose Tool sets no timeout.
+const defaultToolHTTPTimeout = 30 * time.Second
 
 const (
 	mcpJSONRPCVersion                = "2.0"
@@ -86,6 +92,23 @@ func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
 	return context.WithValue(ctx, toolCallIDContextKey{}, toolCallID)
 }
 
+type agentUIDContextKey struct{}
+
+// WithAgentUID records the Agent UID a Task's execution binding froze, so a
+// Tool CRD span joins identity records the way built-in tool spans do
+// (ADR 0039).
+func WithAgentUID(ctx context.Context, agentUID string) context.Context {
+	if strings.TrimSpace(agentUID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentUIDContextKey{}, agentUID)
+}
+
+func agentUIDFromContext(ctx context.Context) string {
+	agentUID, _ := ctx.Value(agentUIDContextKey{}).(string)
+	return strings.TrimSpace(agentUID)
+}
+
 func toolCallIDFromContext(ctx context.Context) string {
 	toolCallID, _ := ctx.Value(toolCallIDContextKey{}).(string)
 	return strings.TrimSpace(toolCallID)
@@ -93,6 +116,8 @@ func toolCallIDFromContext(ctx context.Context) string {
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
+	// forwarding admits forwarding Tools; see AllowForwarding.
+	forwarding                 bool
 	client                     *http.Client
 	secretPath                 string
 	namespace                  string
@@ -108,6 +133,25 @@ type ToolExecutor struct {
 	credentialSecret            string
 	transactionExchange         *TransactionExchangeConfig
 	authSecretValues            map[string]string
+	requester                   *corev1alpha1.RequestedBy
+	frozenConnections           map[string]outboundaccess.FrozenConnection
+	agentIdentity               *outboundaccess.AgentIdentityBinding
+	taskUID                     string
+	checkedPolicies             map[string]outboundaccess.PolicyIdentity
+	// sendGate, when set, is judged after every lookup and credential
+	// resolution and immediately before the request leaves the process.
+	sendGate        func(context.Context) error
+	gatewayTaskPass func(context.Context, *corev1alpha1.Tool) (string, error)
+
+	// substrateMCPRouter is set only inside the Orka manager, whose pod
+	// certificate is the router's allowlisted identity. Workers use
+	// substrateMCPProxy instead.
+	substrateMCPRouter *SubstrateMCPRouter
+	substrateMCPProxy  *substrateMCPProxyConfig
+
+	remoteMu               sync.Mutex
+	remoteBindings         map[string][32]byte
+	remotePreparationFence func(context.Context, *corev1alpha1.Tool) error
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -121,6 +165,105 @@ type TransactionExchangeConfig struct {
 	Exchanger        contexttoken.Exchanger
 	SubjectTokenType string
 	OutboundScope    string
+}
+
+// SetRequester records the Task's verified human identity for connection-mode
+// outbound access. A nil requester makes every connector-backed call fail
+// closed.
+func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
+	if e == nil {
+		return
+	}
+	e.requester = requester.DeepCopy()
+}
+
+// SetTaskUID records the authenticated executing Task, which outbound access
+// resolution names in its identity use records.
+func (e *ToolExecutor) SetTaskUID(uid string) {
+	if e == nil {
+		return
+	}
+	e.taskUID = uid
+}
+
+// SetFrozenConnections records the Connection identities frozen into the
+// Task's execution snapshot, keyed by OutboundAccessPolicy name.
+// SetAgentIdentity binds the identity frozen into the executing Task's
+// binding for agentIdentity-mode outbound access. Nil makes those calls fail
+// closed.
+func (e *ToolExecutor) SetAgentIdentity(binding *outboundaccess.AgentIdentityBinding) {
+	if binding == nil {
+		e.agentIdentity = nil
+		return
+	}
+	copied := *binding
+	e.agentIdentity = &copied
+}
+
+func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.FrozenConnection) {
+	if e == nil {
+		return
+	}
+	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
+	maps.Copy(e.frozenConnections, frozen)
+}
+
+// SetSendGate installs a check run immediately before the tool request is
+// sent, after policy reads and credential resolution (which can refresh a
+// token and take a while). A failing gate sends nothing; its error is
+// returned unmarked, so the caller can tell nothing was attempted.
+func (e *ToolExecutor) SetSendGate(gate func(context.Context) error) {
+	if e == nil {
+		return
+	}
+	e.sendGate = gate
+}
+
+// SetCheckedPolicy records the OutboundAccessPolicy object the caller
+// validated before execution. Resolution of that policy name then refuses
+// any other policy object or generation.
+func (e *ToolExecutor) SetCheckedPolicy(name string, identity outboundaccess.PolicyIdentity) {
+	if e == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if e.checkedPolicies == nil {
+		e.checkedPolicies = map[string]outboundaccess.PolicyIdentity{}
+	}
+	e.checkedPolicies[name] = identity
+}
+
+func (e *ToolExecutor) checkedPolicy(name string) *outboundaccess.PolicyIdentity {
+	identity, ok := e.checkedPolicies[name]
+	if !ok {
+		return nil
+	}
+	return &identity
+}
+
+// Requester returns a copy of the bound requester identity, or nil.
+func (e *ToolExecutor) Requester() *corev1alpha1.RequestedBy {
+	if e == nil || e.requester == nil {
+		return nil
+	}
+	return e.requester.DeepCopy()
+}
+
+// TaskUID returns the bound executing Task's UID, or "".
+func (e *ToolExecutor) TaskUID() string {
+	if e == nil {
+		return ""
+	}
+	return e.taskUID
+}
+
+// FrozenConnections returns a copy of the frozen Connection bindings.
+func (e *ToolExecutor) FrozenConnections() map[string]outboundaccess.FrozenConnection {
+	if e == nil || len(e.frozenConnections) == 0 {
+		return nil
+	}
+	frozen := make(map[string]outboundaccess.FrozenConnection, len(e.frozenConnections))
+	maps.Copy(frozen, e.frozenConnections)
+	return frozen
 }
 
 // SetTransactionAuthority sets task-scoped transaction authority. Calling it
@@ -193,6 +336,7 @@ func NewToolExecutor() *ToolExecutor {
 						Trust: outboundaccess.TrustConfig{
 							Gateways:       trustedGateways,
 							TokenEndpoints: trustedEndpoints,
+							TokenRequester: toolExecutorTokenRequester(namespace),
 						},
 					}
 				}
@@ -211,7 +355,7 @@ func NewToolExecutor() *ToolExecutor {
 	authorityConstraint := strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret))
 	return &ToolExecutor{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultToolHTTPTimeout,
 		},
 		secretPath:                  "/secrets/tools",
 		namespace:                   namespace,
@@ -220,6 +364,10 @@ func NewToolExecutor() *ToolExecutor {
 		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
+		substrateMCPProxy:           substrateMCPProxyFromEnvironment(),
+		// The controller sets the Task's UID on the worker Pod and overrides
+		// any Task-supplied value, as it does for the namespace above.
+		taskUID: strings.TrimSpace(os.Getenv(workerenv.TaskUID)),
 	}
 }
 
@@ -232,7 +380,7 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 		namespace = "default"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: defaultToolHTTPTimeout}
 	}
 	var resolver outboundaccess.Resolver
 	if len(resolvers) > 0 {
@@ -249,6 +397,11 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, RemoteMCPTimeout(tool))
+		defer cancel()
+	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
@@ -325,7 +478,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 }
 
 func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string) []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs := make([]attribute.KeyValue, 0, 10)
 	attrs = append(attrs,
 		executeToolOperationAttr,
 		attribute.String(genai.AttrToolName, toolName),
@@ -345,6 +498,9 @@ func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string)
 	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
 		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
 	}
+	if agentUID := agentUIDFromContext(ctx); agentUID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrAgentID, agentUID))
+	}
 	return attrs
 }
 
@@ -360,15 +516,32 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway)
+	baseClient := e.client
+	if prepared.baseClient != nil {
+		baseClient = prepared.baseClient
+	}
+	// An Agent identity credential, like a linked-account one, is bound to
+	// the declared destination, so neither follows any redirect.
+	httpClient, err := toolHTTPClient(baseClient, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway,
+		prepared.connection || prepared.agentIdentity)
 	if err != nil {
 		return "", err
+	}
+	if prepared.substrateMCP {
+		// The proxy and router never redirect; a redirect would carry the
+		// workload or router credential elsewhere.
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 
 	if prepared.direct && !e.skipDirectPublicValidation {
 		dialContext := tokenexchange.PublicEndpointDialContext
-		if prepared.trustedActorRoute {
-			dialContext = exactEndpointDialContext(prepared.request.URL)
+		switch {
+		case (prepared.connection || prepared.agentIdentity) && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account or
+			// Agent identity request may go; the transport keeps its
+			// hardening (no proxy, verified TLS 1.2 or newer, no custom TLS
+			// dial).
+			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
@@ -376,6 +549,15 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		}
 	}
 
+	if e.sendGate != nil {
+		if err := e.sendGate(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	if prepared.remote != nil {
+		return e.executeRemoteMCPSession(ctx, httpClient, prepared, false)
+	}
 	if prepared.mcp {
 		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
 		if err != nil && prepared.gateway {
@@ -384,6 +566,9 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		return result, err
 	}
 
+	if prepared.forward {
+		return executeForwardRequest(httpClient, prepared)
+	}
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.gateway, prepared.redactionSecrets...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
@@ -391,6 +576,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 
 	return string(respBody), nil
 }
+
+// privateConnectionEndpointDialContext dials private addresses for the
+// fixture-only allowance on linked-account requests, still refusing the
+// infrastructure addresses.
+var privateConnectionEndpointDialContext = connectors.PrivateEndpointDialContext
 
 func directCredentialHTTPClient(
 	base *http.Client,
@@ -444,7 +634,17 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 	}
 }
 
-func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account) and
+// Agent identity requests reach private and cluster-local destinations. It exists for
+// local and CI fixtures only and is set once by the controller from its
+// dev-only flag; worker Pods never set it.
+var allowPrivateConnectionEndpoints atomic.Bool
+
+// SetAllowPrivateConnectionEndpoints turns the fixture allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateConnectionEndpoints(allowed bool) { allowPrivateConnectionEndpoints.Store(allowed) }
+
+func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway, connection bool) (*http.Client, error) {
 	if base == nil {
 		base = http.DefaultClient
 	}
@@ -495,6 +695,12 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 		if gateway {
 			return http.ErrUseLastResponse
 		}
+		if connection {
+			// A linked-account or Agent identity credential travels only
+			// to the declared origin: Go forwards custom headers on
+			// redirects, so the redirect is returned unfollowed instead.
+			return http.ErrUseLastResponse
+		}
 		if len(via) == 0 {
 			return nil
 		}
@@ -541,6 +747,16 @@ type gatewayMCPError struct{ Err error }
 func (e gatewayMCPError) Error() string { return "gateway MCP request failed" }
 func (e gatewayMCPError) Unwrap() error { return e.Err }
 
+// ToolErrorDiagnostic returns err's text for operator logs. Unlike Error, it
+// keeps the cause a gateway MCP failure leaves out of its message. Callers
+// still redact and bound it before logging.
+func ToolErrorDiagnostic(err error) string {
+	if gatewayErr, ok := errors.AsType[gatewayMCPError](err); ok && gatewayErr.Err != nil {
+		return err.Error() + ": " + gatewayErr.Err.Error()
+	}
+	return err.Error()
+}
+
 // ToolRequestAttemptedError wraps errors that occur after a custom tool request
 // may already have reached the remote endpoint.
 type ToolRequestAttemptedError struct {
@@ -560,6 +776,19 @@ type ToolExecutionError struct {
 
 func (e ToolExecutionError) Error() string { return e.Err.Error() }
 func (e ToolExecutionError) Unwrap() error { return e.Err }
+
+// ToolHTTPStatusError reports the non-2xx status a custom tool endpoint, or
+// the gateway in front of it, answered the tool request with. Redirected
+// reports that the status answered a followed redirect, not the original
+// request, which may already have taken effect.
+type ToolHTTPStatusError struct {
+	StatusCode int
+	Redirected bool
+	Err        error
+}
+
+func (e ToolHTTPStatusError) Error() string { return e.Err.Error() }
+func (e ToolHTTPStatusError) Unwrap() error { return e.Err }
 
 // ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
 func ToolRequestWasAttempted(err error) bool {
@@ -652,10 +881,13 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, suppress
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A request created by a followed redirect carries the response that
+		// caused it.
+		redirected := resp.Request != nil && resp.Request.Response != nil
 		if suppressErrorBody {
-			return nil, fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)
+			return nil, ToolHTTPStatusError{StatusCode: resp.StatusCode, Redirected: redirected, Err: fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)}
 		}
-		err := fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
+		err := ToolHTTPStatusError{StatusCode: resp.StatusCode, Redirected: redirected, Err: fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))}
 		// A completed API failure can be delivered to the model as a tool
 		// result. Redirect and authentication failures remain protocol errors.
 		if resp.StatusCode >= 400 && resp.StatusCode < 600 && resp.StatusCode != http.StatusUnauthorized &&
@@ -702,16 +934,29 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
-	httpConfig        corev1alpha1.HTTPExecution
-	request           *http.Request
-	authToken         string
-	transactionToken  string
-	redactionSecrets  []string
-	gatewayTLS        tokenexchange.TLSConfig
-	gateway           bool
-	direct            bool
-	mcp               bool
-	trustedActorRoute bool
+	remote           *corev1alpha1.Tool
+	httpConfig       corev1alpha1.HTTPExecution
+	request          *http.Request
+	authToken        string
+	transactionToken string
+	redactionSecrets []string
+	gatewayTLS       tokenexchange.TLSConfig
+	gateway          bool
+	direct           bool
+	// connection marks a request carrying a person's linked-account
+	// credential: it is never followed across a redirect.
+	connection bool
+	// agentIdentity marks a request carrying an Agent identity credential.
+	agentIdentity bool
+	mcp           bool
+	// substrateMCP marks a request to a Substrate MCP actor through the Orka
+	// API proxy or, inside the manager, the router. baseClient overrides the
+	// executor client for the router's mTLS identity.
+	substrateMCP bool
+	baseClient   *http.Client
+	// forward marks a forwarding Tool's request, whose upstream answer is
+	// returned whatever its status.
+	forward bool
 }
 
 func (p preparedToolRequest) secrets(extra ...string) []string {
@@ -739,18 +984,40 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+		if e.gatewayTaskPass == nil {
+			return preparedToolRequest{}, errors.New("gateway task pass requires controller authority")
+		}
+		if err := ValidateGatewayTaskPassTool(tool); err != nil {
+			return preparedToolRequest{}, err
+		}
+	}
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		return e.prepareRemoteMCPRequest(ctx, tool, args, false)
+	}
+	if isForwardingTool(tool) {
+		return e.prepareForwardRequest(ctx, tool, args)
+	}
 	params, err := decodeToolArguments(args)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 
-	httpConfig, routeHost, err := toolHTTPConfig(tool)
+	if isMCPSubstrateActorTool(tool) {
+		return e.prepareSubstrateMCPRequest(ctx, tool, params)
+	}
+	httpConfig, err := toolHTTPConfig(tool)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
-	isMCP := isMCPSubstrateActorTool(tool)
 
 	var authToken string
+	if httpConfig.GatewayTaskPass {
+		authToken, err = e.gatewayTaskPass(ctx, tool)
+		if err != nil || authToken == "" {
+			return preparedToolRequest{}, errors.New("gateway task pass is unavailable")
+		}
+	}
 	if httpConfig.AuthSecretRef != nil {
 		token, err := e.getSecretKey(ctx, httpConfig.AuthSecretRef.Name, httpConfig.AuthSecretRef.Key)
 		if err != nil {
@@ -759,11 +1026,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		authToken = token
 	}
 
-	authInject := toolAuthInject(httpConfig)
-	if isMCP && authInject == "body" && authToken != "" {
-		return preparedToolRequest{}, fmt.Errorf("MCP tools do not support authInject=body")
-	}
-	authInject, err = applyToolBodyAuth(params, httpConfig, authToken)
+	authInject, err := applyToolBodyAuth(params, httpConfig, authToken)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
@@ -773,34 +1036,17 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	if method == "" {
 		method = http.MethodPost
 	}
-	var body []byte
-	if isMCP {
-		method = http.MethodPost
-		body, err = marshalMCPToolCallRequest(tool, params)
-		if err != nil {
-			return preparedToolRequest{}, err
-		}
-	} else {
-		url = interpolateToolURL(url, params)
-		body, err = json.Marshal(params)
-		if err != nil {
-			return preparedToolRequest{}, fmt.Errorf("failed to marshal request body: %w", err)
-		}
+	url = interpolateToolURL(url, params)
+	body, err := json.Marshal(params)
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to create request: %w", err)
 	}
-	if routeHost != "" {
-		req.Host = routeHost
-	}
-
 	req.Header.Set("Content-Type", "application/json")
-	if isMCP {
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
-	}
 	configuredSecrets := []string{}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
@@ -813,11 +1059,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		if existing := strings.TrimSpace(req.Header.Get(toolIdempotencyKeyHeader)); existing != "" && existing != approvalIdempotencyKey {
 			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", toolIdempotencyKeyHeader)
 		}
-		if isMCP {
-			req.Header.Del(toolIdempotencyKeyHeader)
-		} else {
-			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
-		}
+		req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
 	}
 	if authInject == toolAuthInjectHeader && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -828,7 +1070,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 
 	transactionToken := ""
 	policyBacked := tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil
-	if !policyBacked {
+	if !policyBacked && !httpConfig.GatewayTaskPass {
 		transactionToken, err = e.outboundTransactionToken(ctx, tool)
 		if err != nil {
 			return preparedToolRequest{}, err
@@ -839,23 +1081,35 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 
 	prepared := preparedToolRequest{
-		httpConfig:        httpConfig,
-		request:           req,
-		authToken:         authToken,
-		transactionToken:  transactionToken,
-		redactionSecrets:  compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
-		mcp:               isMCP,
-		trustedActorRoute: isMCP && routeHost != "",
+		httpConfig:       httpConfig,
+		request:          req,
+		authToken:        authToken,
+		transactionToken: transactionToken,
+		redactionSecrets: compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
+		gateway:          httpConfig.GatewayTaskPass,
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
-		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
+		if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 			return preparedToolRequest{}, err
 		}
 	}
 	return prepared, nil
 }
 
-func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, prepared *preparedToolRequest) error {
+// agentIdentityOriginError keeps an Agent identity credential on the Tool's
+// declared destination, never an origin a call's arguments chose.
+func agentIdentityOriginError(adapter string, tool *corev1alpha1.Tool, target *neturl.URL) error {
+	if adapter != outboundaccess.AdapterAgentIdentity {
+		return nil
+	}
+	declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+	if err != nil || !sameHTTPOrigin(declared, target) {
+		return errors.New("agent identity credential request must target the declared tool origin")
+	}
+	return nil
+}
+
+func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, prepared *preparedToolRequest) error {
 	if e.outboundResolver == nil {
 		return errors.New("outbound access policy is configured but the resolver is unavailable")
 	}
@@ -894,19 +1148,57 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialAuthorityEnforced: e.credentialAuthorityEnforced,
 		CredentialScopeAllowed:      e.credentialScopeAllowed,
 		CredentialSecret:            e.credentialSecret,
+		Requester:                   e.requester,
+		FrozenConnections:           e.frozenConnections,
+		CheckedPolicy:               e.checkedPolicy(ref.Name),
+		Tool: outboundaccess.ToolBinding{
+			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
+			Forward: toolForwardProtocol(tool),
+			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
+			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
+		},
+		Arguments:     args,
+		MCPBacked:     isMCPSubstrateActorTool(tool) || prepared.mcp,
+		TaskUID:       e.taskUID,
+		AgentIdentity: e.agentIdentity,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
 	}
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
-	case outboundaccess.AdapterDirect:
+	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection, outboundaccess.AdapterAgentIdentity:
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
-			return errors.New("direct outbound access requires an HTTPS Tool URL")
+			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
+		}
+		if err := agentIdentityOriginError(resolution.Adapter, tool, prepared.request.URL); err != nil {
+			return err
+		}
+		prepared.agentIdentity = resolution.Adapter == outboundaccess.AdapterAgentIdentity
+		if resolution.Adapter == outboundaccess.AdapterConnection {
+			prepared.connection = true
+			// The linked-account credential is bound to the destination the
+			// provider declared. An MCP-backed Tool sends its requests to the
+			// actor endpoint rather than spec.http.url, and a prepared request
+			// whose origin differs from the declared URL would carry the token
+			// elsewhere; both fail closed.
+			if isMCPSubstrateActorTool(tool) || prepared.mcp {
+				return errors.New("connection outbound access policies are not supported on MCP-backed tools")
+			}
+			declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+			if err != nil || !sameHTTPOrigin(declared, prepared.request.URL) {
+				return errors.New("connection credential request must target the declared tool origin")
+			}
+			// The caller (a worker or an ACP runtime) is not trusted to have
+			// honored the provider's curated schema; the person's credential
+			// is attached only to arguments that schema admits.
+			if err := connectors.ValidateToolArguments(resolution.Parameters, args); err != nil {
+				return fmt.Errorf("connection credential request arguments rejected: %w", err)
+			}
 		}
 		if prepared.httpConfig.AuthSecretRef != nil {
-			return errors.New("direct outbound access cannot coexist with authSecretRef")
+			return errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
 		header := http.CanonicalHeaderKey(strings.TrimSpace(resolution.CredentialHeader))
 		if header == "" || strings.EqualFold(header, transactiontoken.HeaderName) {
@@ -921,6 +1213,9 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		prepared.request.Header.Del(transactiontoken.HeaderName)
 		prepared.request.Header.Set(header, resolution.CredentialValue)
 	case outboundaccess.AdapterGateway:
+		if prepared.forward {
+			return errors.New("a forwarding tool needs a credential-injecting outbound access policy, not a gateway")
+		}
 		return e.applyGatewayOutboundAccess(ctx, prepared, resolution, parentScopes, transactionTokenSource)
 	default:
 		return fmt.Errorf("unsupported outbound access adapter %q", resolution.Adapter)
@@ -946,12 +1241,10 @@ func (e *ToolExecutor) applyGatewayOutboundAccess(
 		return errors.New("gateway outbound access could not resolve request authorities")
 	}
 	if !e.skipDirectPublicValidation {
-		trustedActorRoute := prepared.mcp && strings.TrimSpace(prepared.request.Host) != ""
 		if err := validateGatewayOriginalTarget(
 			ctx,
 			prepared.request.URL,
 			originalAuthority,
-			trustedActorRoute,
 		); err != nil {
 			return err
 		}
@@ -976,7 +1269,6 @@ func validateGatewayOriginalTarget(
 	ctx context.Context,
 	requestURL *neturl.URL,
 	authority string,
-	trustedActorRoute bool,
 ) error {
 	if requestURL == nil {
 		return errors.New("gateway outbound access requires a prepared Tool request")
@@ -993,11 +1285,6 @@ func validateGatewayOriginalTarget(
 	}
 	if authorityURL.User != nil {
 		return errors.New("gateway outbound access original Tool authority must not contain embedded credentials")
-	}
-	if trustedActorRoute {
-		// Actor route hosts and router endpoints are controller-resolved Tool status,
-		// not caller-selected public Tool URLs. The trusted gateway owns that route.
-		return nil
 	}
 	if err := tokenexchange.ValidatePublicEndpointHost(ctx, authorityURL.Hostname()); err != nil {
 		return fmt.Errorf("gateway outbound access requires a public original Tool URL: %w", err)
@@ -1039,30 +1326,11 @@ func compactToolSecrets(values ...string) []string {
 	return out
 }
 
-func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, string, error) {
-	var httpConfig corev1alpha1.HTTPExecution
-	if tool != nil && tool.Spec.HTTP != nil {
-		httpConfig = *tool.Spec.HTTP
+func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, error) {
+	if tool == nil || tool.Spec.HTTP == nil {
+		return corev1alpha1.HTTPExecution{}, fmt.Errorf("http tool endpoint is not configured")
 	}
-	if !isMCPSubstrateActorTool(tool) {
-		if tool == nil || tool.Spec.HTTP == nil {
-			return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("http tool endpoint is not configured")
-		}
-		return httpConfig, "", nil
-	}
-
-	httpConfig.URL = strings.TrimSpace(tool.Status.Endpoint)
-	if httpConfig.Method == "" {
-		httpConfig.Method = http.MethodPost
-	}
-	routeHost := ""
-	if tool.Status.Actor != nil {
-		routeHost = strings.TrimSpace(tool.Status.Actor.RouteHost)
-	}
-	if httpConfig.URL == "" || routeHost == "" {
-		return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("MCP tool actor endpoint is not ready")
-	}
-	return httpConfig, routeHost, nil
+	return *tool.Spec.HTTP, nil
 }
 
 func isMCPSubstrateActorTool(tool *corev1alpha1.Tool) bool {
@@ -1937,4 +2205,23 @@ func outboundTTSClientKey(cfg contexttoken.TTSConfig) string {
 		cfg.ChildTokenTTL.String(),
 		cfg.ToolTokenTTL.String(),
 	}, "\x00")
+}
+
+// toolHTTPTimeout is the Tool's declared request timeout, zero when none.
+func toolHTTPTimeout(tool *corev1alpha1.Tool) time.Duration {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.Timeout == nil {
+		return 0
+	}
+	return tool.Spec.HTTP.Timeout.Duration
+}
+
+// toolExecutorTokenRequester names this worker's own ServiceAccount as
+// namespace/name, so an OutboundAccessPolicy that exchanges the worker's own
+// identity resolves here as it does in the controller. Empty when unknown.
+func toolExecutorTokenRequester(namespace string) string {
+	name := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountName))
+	if name == "" || strings.TrimSpace(namespace) == "" {
+		return ""
+	}
+	return strings.TrimSpace(namespace) + "/" + name
 }

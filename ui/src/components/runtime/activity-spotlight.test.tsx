@@ -30,10 +30,58 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Following live')).toBeInTheDocument()
   })
 
+  it('keeps a long agent name on one line and wraps the row instead', () => {
+    const agent = 'repository-security-analysis-assistant'
+    render(
+      <ActivitySpotlight
+        task={task('a1', {
+          spec: { type: 'agent', agentRef: { name: agent } },
+          status: { phase: 'Running', startTime: new Date(0).toISOString(), conditions: [{ type: 'WaitingForApproval', status: 'True' }] },
+        })}
+        following
+      />,
+    )
+    const name = screen.getByText(agent)
+    expect(name).toHaveAttribute('title', agent)
+    expect(name).toHaveClass('truncate', 'min-w-0', 'max-w-full')
+    expect(name.parentElement).toHaveClass('flex', 'flex-wrap')
+    expect(name.parentElement).toContainElement(screen.getByText('Waiting for approval'))
+  })
+
   it('falls back to unassigned when no agentRef and shows paused', () => {
     render(<ActivitySpotlight task={task('r2')} following={false} />)
     expect(screen.getByText('unassigned')).toBeInTheDocument()
     expect(screen.getByText('Paused')).toBeInTheDocument()
+  })
+
+  it('shows the waiting status message instead of the last event while parked on an approval', () => {
+    const ev = { summary: 'AI worker completed' } as ExecutionEvent
+    render(
+      <ActivitySpotlight
+        task={task('w1', { status: { phase: 'Running', startTime: new Date(0).toISOString(), message: 'waiting for approval ap-7 for bash at iteration 1' } })}
+        latestEvent={ev}
+        following
+      />,
+    )
+    expect(screen.getByText('waiting for approval ap-7 for bash at iteration 1')).toBeInTheDocument()
+    expect(screen.queryByText('AI worker completed')).not.toBeInTheDocument()
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
+  it('surfaces a stuck Pod as a warning instead of the last event', () => {
+    const ev = { summary: 'Task started with Job pull-1-abc' } as ExecutionEvent
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    render(
+      <ActivitySpotlight
+        task={task('pull-1', { status: { phase: 'Running', startTime: new Date(0).toISOString(), message } })}
+        latestEvent={ev}
+        following
+      />,
+    )
+    const warning = screen.getByRole('status')
+    expect(warning).toHaveTextContent(message)
+    expect(warning).toHaveClass('text-status-pending')
+    expect(screen.queryByText('Task started with Job pull-1-abc')).not.toBeInTheDocument()
   })
 
   it('prefers latest event summary over a running status message', () => {

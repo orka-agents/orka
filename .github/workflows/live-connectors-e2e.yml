@@ -1,0 +1,72 @@
+name: Live Connectors E2E
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/live-connectors-e2e.yml"
+      - ".github/actions/setup-kind/**"
+      - "Dockerfile"
+      - "Makefile"
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+      - "scripts/live-connectors-e2e.sh"
+      - "scripts/render-worker-images.sh"
+      - "scripts/render-acp-runtime-images.sh"
+      - "scripts/apply-acp-production.sh"
+      - "scripts/lib/**"
+      - "test/e2e/kind-config.yaml"
+      - "test/fixtures/connectors/**"
+      - "workers/**"
+  pull_request:
+    paths:
+      - ".github/workflows/live-connectors-e2e.yml"
+      - ".github/actions/setup-kind/**"
+      - "Dockerfile"
+      - "Makefile"
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+      - "scripts/live-connectors-e2e.sh"
+      - "scripts/render-worker-images.sh"
+      - "scripts/render-acp-runtime-images.sh"
+      - "scripts/apply-acp-production.sh"
+      - "scripts/lib/**"
+      - "test/e2e/kind-config.yaml"
+      - "test/fixtures/connectors/**"
+      - "workers/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-connectors-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-connectors-e2e:
+    name: Link, use, approve, refresh, disconnect
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIND_CLUSTER: orka-live-connectors-e2e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
+      - name: Verify kind installation
+        run: kind version
+      - run: bash scripts/live-connectors-e2e.sh

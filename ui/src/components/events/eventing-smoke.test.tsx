@@ -29,7 +29,7 @@ vi.mock('@tanstack/react-router', async () => {
     },
     useNavigate: () => mockNavigate,
     useLocation: () => ({ pathname: '/tasks/smoke-task' }),
-    useSearch: () => ({ tab: 'overview' }),
+    useSearch: () => ({ tab: 'spec' }),
   }
 })
 
@@ -123,14 +123,15 @@ describe('evented execution UI smoke', () => {
     render(<TaskDetail taskId="smoke-task" />)
     await waitFor(() => expect(screen.getByText('smoke-task')).toBeInTheDocument())
 
-    // 1. Timeline tab shows the task's events.
-    await user.click(screen.getByRole('tab', { name: 'Timeline' }))
+    // 1. Activity's raw events show the task's events.
+    await user.click(screen.getByRole('tab', { name: 'Activity' }))
+    await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getByText('task started')).toBeInTheDocument())
     expect(screen.getByText('task done')).toBeInTheDocument()
     expect(screen.getAllByTestId('event-row')).toHaveLength(3)
 
-    // 2. Trace tab explains model + tool sections.
-    await user.click(screen.getByRole('tab', { name: 'Trace' }))
+    // 2. Activity's trace explains model + tool sections.
+    await user.click(screen.getByRole('button', { name: 'Trace' }))
     await waitFor(() => expect(screen.getByText('Execution trace')).toBeInTheDocument())
     expect(screen.getByText('Model requests')).toBeInTheDocument()
     expect(screen.getByText('one model call')).toBeInTheDocument()
@@ -142,8 +143,9 @@ describe('evented execution UI smoke', () => {
     await user.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
 
-    // 4. Fork from an event row on the Timeline tab.
-    await user.click(screen.getByRole('tab', { name: 'Timeline' }))
+    // 4. Fork from a raw event row.
+    await user.click(screen.getByRole('tab', { name: 'Activity' }))
+    await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getAllByRole('button', { name: /fork from here/i }).length).toBeGreaterThan(0))
     await user.click(screen.getAllByRole('button', { name: /fork from here/i })[1])
     const dialog = await screen.findByRole('dialog')
@@ -169,14 +171,16 @@ describe('evented execution UI smoke', () => {
     const user = userEvent.setup()
     const view = render(<TaskDetail taskId="smoke-task" />)
     await waitFor(() => expect(screen.getByText('smoke-task')).toBeInTheDocument())
-    await user.click(screen.getByRole('tab', { name: 'Timeline' }))
+    await user.click(screen.getByRole('tab', { name: 'Activity' }))
+    await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getByText('task started')).toBeInTheDocument())
 
     // Simulate a browser refresh: unmount and remount; history reloads from the API.
     view.unmount()
     render(<TaskDetail taskId="smoke-task" />)
     await waitFor(() => expect(screen.getByText('smoke-task')).toBeInTheDocument())
-    await user.click(screen.getByRole('tab', { name: 'Timeline' }))
+    await user.click(screen.getByRole('tab', { name: 'Activity' }))
+    await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getByText('task started')).toBeInTheDocument())
     expect(screen.getByText('worker up')).toBeInTheDocument()
   })

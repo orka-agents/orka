@@ -1,0 +1,151 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-shared-template]",
+        "toolResultContains": "{{EXPECTED_RESULT}}"
+      },
+      "response": {
+        "content": "AUTHORIZATION_RESULT_OBSERVED"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-shared-template]",
+        "toolResultContains": "{{NOTE_NONCE}}"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "delegate_task",
+            "arguments": {
+              "agent": "{{SCOPED_CHILD}}",
+              "prompt": "[e2e:authorization-scoped-child]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-shared-template]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "e2eauthorizationnote",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-scoped-child]",
+        "toolResultContains": "AUTHORITY_EFFECT_probe"
+      },
+      "response": {
+        "content": "AUTHORIZATION_CHILD_RAN"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-scoped-child]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "e2eauthorizationevidence",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-broker-allowed-control]",
+        "toolResultContains": "AUTHORITY_EFFECT_probe"
+      },
+      "response": {
+        "content": "AUTHORIZATION_BROKER_DECISION:e2eauthorizationevidence"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-template]",
+        "toolResultContains": "{{EXPECTED_RESULT}}"
+      },
+      "response": {
+        "content": "AUTHORIZATION_RESULT_OBSERVED"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-template]",
+        "toolResultContains": "{{INJECTION_NONCE}}"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__delegate_task",
+            "arguments": {
+              "agent": "{{AGENT}}",
+              "prompt": "[e2e:authorization-child]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-template]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": {
+              "command": "cat {{INJECTION_PATH}}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-child]"
+      },
+      "response": {
+        "content": "AUTHORIZATION_CHILD_RAN"
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-publication-child]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": {
+              "command": "printf 'authorized eval publication\\n' > AUTHORIZATION_CONTROL.md && cat AUTHORIZATION_CONTROL.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:authorization-publication-child]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "AUTHORIZATION_PUBLICATION_CHILD_RAN"
+      }
+    }
+  ]
+}

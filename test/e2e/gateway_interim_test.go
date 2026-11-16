@@ -55,7 +55,7 @@ func gatewayE2EFixtureArgs(original []string) []string {
 			args = append(args, original[i])
 		}
 	}
-	return append(args, "--ai-worker-image="+gatewayNativeWorkerImage,
+	return append(args, "--ai-worker-image="+gatewayNativeWorkerRef,
 		"--gateway-terminal-retention="+gatewayE2ETerminalRetention.String())
 }
 
@@ -136,7 +136,8 @@ func gatewayE2EVerifyNativeMessage(baseURL, token, eventID, taskName string, cap
 		pod = pods.Items[0]
 		g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
 		g.Expect(pod.OwnerReferences).To(ContainElement(HaveField("UID", job.UID)))
-		g.Expect(pod.Spec.Containers[0].Image).To(Equal(gatewayNativeWorkerImage))
+		g.Expect(pod.Spec.Containers[0].Image).To(Equal(gatewayNativeWorkerRef))
+		g.Expect(pod.Spec.Containers[0].ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
 	}, time.Minute, time.Second).Should(Succeed())
 	// The test drives only fixture-local fences using Kubernetes exec. /worker
 	// authenticates origin and executes the production tool/client with the real

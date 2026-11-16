@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:api-cov-session]" },
+      "response": { "content": "E2E_API_COV_SESSION_ANSWER: 6" }
+    },
+    {
+      "match": { "userMessage": "[e2e:api-cov-chat]" },
+      "response": { "content": "E2E_API_COV_CHAT_ANSWER: hello." }
+    }
+  ]
+}

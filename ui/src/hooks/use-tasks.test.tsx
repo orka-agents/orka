@@ -11,7 +11,6 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import {
-  useTaskList,
   useTaskListAll,
   useTask,
   useTaskResult,
@@ -33,14 +32,6 @@ function createWrapper() {
 beforeEach(() => {
   useAuthStore.setState({ token: 'test-token' })
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
-})
-
-describe('useTaskList', () => {
-  it('returns task list from API', async () => {
-    const { result } = renderHook(() => useTaskList(), { wrapper: createWrapper() })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(result.current.data).toEqual({ items: [], metadata: {} })
-  })
 })
 
 describe('useTaskListAll', () => {
@@ -169,6 +160,12 @@ describe('useTaskResult', () => {
     await act(async () => {
       await result.current.refetch()
     })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual({ result: 'task output' })
+  })
+
+  it('fetches on its own once enabled', async () => {
+    const { result } = renderHook(() => useTaskResult('my-task', true), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toEqual({ result: 'task output' })
   })

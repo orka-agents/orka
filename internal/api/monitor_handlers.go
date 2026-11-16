@@ -128,6 +128,16 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorSupportedTargets(spec); err != nil {
 		return err
 	}
+	switch strings.TrimSpace(spec.Review.Trigger) {
+	case "", "open", "push":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.trigger must be open or push")
+	}
+	switch strings.TrimSpace(spec.Review.BlockingPriority) {
+	case "", "P0", "P1", "P2", "P3":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.blockingPriority must be one of P0, P1, P2, or P3")
+	}
 	if err := validateRepositoryMonitorReviewPublishSpec(spec.Review.Publish); err != nil {
 		return err
 	}
@@ -148,6 +158,13 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	}
 	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
+	}
+	if _, err := controller.ParseRepositoryMonitorSchedule(&corev1alpha1.RepositoryMonitor{Spec: spec}); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
+	}
+	// The CRD schema bounds the integer limits; this duration has no minimum.
+	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")
 	}
 	return nil
 }
@@ -188,8 +205,10 @@ func validateRepositoryMonitorReviewPublishSpec(publish corev1alpha1.RepositoryM
 	if event := strings.TrimSpace(publish.Event); event != "" && event != "COMMENT" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.event only supports COMMENT in v1")
 	}
-	if policy := strings.TrimSpace(publish.SameHeadPolicy); policy != "" && policy != "skip" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.sameHeadPolicy only supports skip in v1")
+	switch strings.TrimSpace(publish.SameHeadPolicy) {
+	case "", "skip", "update":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.sameHeadPolicy must be skip or update")
 	}
 	if priority := strings.TrimSpace(publish.Inline.MinPriority); priority != "" {
 		switch priority {
@@ -438,6 +457,24 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fiber.NewError(fiber.StatusBadRequest, "at least one repository monitor target must be enabled")
 	}
+	// Mirrors the controller's repositoryMonitorIssueImplementationEnabled and
+	// repositoryMonitorPullRequestLabelScopeField.
+	implementation := spec.IssueWorkflow.Implementation.Enabled
+	if !spec.Targets.Issues.Enabled || spec.Agents.Implementer == nil || (implementation != nil && !*implementation) {
+		return nil
+	}
+	for _, scope := range []struct {
+		field  string
+		labels []string
+	}{
+		{"spec.targets.pullRequests.includeLabels", spec.Targets.PullRequests.IncludeLabels},
+		{"spec.repair.includeLabels", spec.Repair.IncludeLabels},
+		{"spec.repair.ciOnlyLabels", spec.Repair.CIOnlyLabels},
+	} {
+		if len(scope.labels) > 0 {
+			return fiber.NewError(fiber.StatusBadRequest, scope.field+" cannot be combined with issue implementation, whose pull requests would not carry the label")
+		}
+	}
 	return nil
 }
 
@@ -651,6 +688,10 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "createRepositoryMonitor", namespace, req.Spec); err != nil {
 		return err
 	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositorymonitor", name,
+		repositoryMonitorSpecAgentRefs(req.Spec), nil); err != nil {
+		return err
+	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
@@ -663,6 +704,9 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.client.Create(c.Context(), monitor); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository monitor already exists")
+		}
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor: %v", err))
 	}
@@ -775,6 +819,10 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "updateRepositoryMonitor", namespace, req.Spec); err != nil {
 		return err
 	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositorymonitor", monitor.Name,
+		repositoryMonitorSpecAgentRefs(req.Spec), repositoryMonitorAgentRefs(monitor)); err != nil {
+		return err
+	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
@@ -785,6 +833,9 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository monitor: %v", err))
 	}
 	return c.JSON(updated)
@@ -839,6 +890,11 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 	}
 	if err := validateRepositoryMonitorRunRequest(req); err != nil {
 		return err
+	}
+	// The controller skips queued runs while the monitor reports a
+	// configuration Error, so a new run would stay queued and block the next.
+	if ready := controller.RepositoryMonitorRunsBlockedCondition(monitor); ready != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("repository monitor is not ready (%s): %s; fix the monitor before starting a run", ready.Reason, ready.Message))
 	}
 	if err := h.ensureNoActiveRepositoryMonitorRun(c, namespace, monitor.Name); err != nil {
 		return err
@@ -1668,7 +1724,7 @@ func (h *Handlers) GetRepositoryMonitorImplementationPatchPreview(c fiber.Ctx) e
 	if strings.TrimSpace(job.TaskName) == "" || strings.TrimSpace(job.PatchArtifactID) == "" {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation job has no patch artifact")
 	}
-	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), namespace, job.TaskName, job.PatchArtifactID)
+	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: job.TaskName}, Filename: job.PatchArtifactID})
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation patch artifact not found")
 	}

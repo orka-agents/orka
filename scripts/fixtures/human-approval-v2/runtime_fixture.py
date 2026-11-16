@@ -17,6 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 
+CANCELLATION_CONTINUATION_TIMEOUT_SECONDS = 30
+
+
 def encode(value):
     return json.dumps(value, separators=(",", ":")).encode()
 
@@ -56,6 +59,33 @@ def model_message(request):
         arguments["summary"] = "Inspect the pressure transmitter."
     call = {"id": "fixture-" + secrets.token_hex(8), "type": "function", "function": {"name": matches[0], "arguments": encode(arguments).decode()}}
     return {"role": "assistant", "content": None, "tool_calls": [call]}, run_id
+
+
+def holds_cancellation_continuation(request, run_id):
+    if not run_id or not run_id.endswith("-cancel"):
+        return False
+    messages = request.get("messages", [])
+    start = next((index for index in range(len(messages) - 1, -1, -1)
+                  if messages[index].get("role") == "user"), len(messages))
+    tool = next((message for message in reversed(messages[start + 1:])
+                 if message.get("role") == "tool"), None)
+    if tool is None:
+        return False
+    try:
+        outcome = json.loads(user_text(tool))
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(outcome, dict) and outcome.get("approved") is False and
+            isinstance(outcome.get("error"), dict) and
+            outcome["error"].get("code") == "approval_cancelled")
+
+
+def wait_for_model_disconnect(connection, timeout):
+    try:
+        ready, _, _ = select.select([connection], [], [], timeout)
+        return bool(ready) and connection.recv(1) == b""
+    except OSError:
+        return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,6 +141,14 @@ class Handler(BaseHTTPRequestHandler):
         message, run_id = model_message(request)
         with self.server.lock:
             self.server.counts[run_id or "independent"] = self.server.counts.get(run_id or "independent", 0) + 1
+        if holds_cancellation_continuation(request, run_id):
+            # A tool's cancellation denial is a legitimate model continuation.
+            # Keep this conformance case active so actual ACP session/cancel,
+            # rather than an immediate fixture answer, must stop the prompt.
+            self.close_connection = True
+            if not wait_for_model_disconnect(self.connection, CANCELLATION_CONTINUATION_TIMEOUT_SECONDS):
+                self.send(504, {"error": "cancellation continuation did not disconnect"})
+            return
         result = {"id": "chatcmpl-" + secrets.token_hex(8), "object": "chat.completion", "created": int(time.time()), "model": "approval-fixture", "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if message.get("tool_calls") else "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
         if request.get("stream"):
             delta = dict(message)

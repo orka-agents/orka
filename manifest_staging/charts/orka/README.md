@@ -7,7 +7,16 @@ complete Helm installation. Published charts are available from
 [GitHub Releases](https://github.com/orka-agents/orka/releases) and the Helm
 repository at `https://orka-agents.github.io/orka/charts`.
 
-For development, use `manifest_staging/charts/orka` from a source checkout.
+For development, use `manifest_staging/charts/orka`. It selects `0.0.0-dev`, the
+latest validated `main` image set published by the Development Images workflow.
+Tagged controller, publisher, and native worker images pull on each Pod start;
+republishing a tag does not restart existing Pods. Coding-runtime tags resolve
+to digests at controller startup.
+
+For a feature branch or older checkout, override every image with a matching
+commit-specific tag or digest. The workflow publishes `sha-<full-commit>` tags
+and a `development-images-<full-commit>` artifact containing `images.json` and
+`values.json`. Pass the latter with `--values` to pin all nine images together.
 See [Build from source](https://orka-agents.github.io/orka/docs/build-from-source).
 
 ## Values
@@ -15,13 +24,13 @@ See [Build from source](https://orka-agents.github.io/orka/docs/build-from-sourc
 [values.yaml](values.yaml) contains the chart defaults. Pass your settings to
 Helm with `--values <file>` or `--set-string`.
 
-A new installation needs no values. The chart generates its own encryption key
+A published release chart needs no image overrides. The chart generates its own encryption key
 and webhook certificate. The settings you are most likely to change later:
 
 | Setting | Notes |
 | --- | --- |
-| `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
-| `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
+| `controller.image`, `publisher.image`, `workers.*.image` | Published charts default to the release tag; development charts use `0.0.0-dev`. Set `tag` or `digest`; a digest takes precedence. |
+| `controller.acpRuntime.*Image` | Published charts default to release tags; development charts use `0.0.0-dev`. Set a full tagged or digest reference, or an empty string to disable a provider. |
 | `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `webhooks.tls.existingSecret`, `.caBundle`, `.caInjectionAnnotations` | Empty by default; the controller issues and renews a self-signed webhook certificate. Set to bring your own certificate or use cert-manager. |
 | `providerProxy.enabled`, `.upstreamBaseURL` | Off by default. Enable and name your model gateway's in-cluster Service to connect built-in coding agents; the chart derives the egress rule from that Service. Set `.egress` yourself for anything else. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
@@ -44,12 +53,47 @@ Runtime tags are resolved to digests at controller startup. This requires HTTPS
 access to a registry that allows anonymous pulls. Use digest references for
 private registries or installations without registry access from the controller.
 
+## Restricted AI worker permissions
+
+Set `workers.ai.rbacProfile: restricted` to replace the AI worker's Kubernetes
+role with read-only ConfigMap, Tool, OutboundAccessPolicy, Agent, AgentRuntime
+and Task lookups. The default profile and vendor/container workers are unchanged.
+The profile requires `rbac.create: true`. Unknown profile names fail rendering.
+
+Restricted workers receive no Secret access, Task or Agent writes, Job or
+ServiceAccount mutation, Pod access, port-forwarding or RBAC grants. Direct
+coordination writes, credential lookup and the Kubernetes `code_exec` backend
+therefore fail rather than using a more privileged fallback.
+
+This also sets **controller-wide** context-token authorization to `enforce`,
+including for callers other than workers. Explicit `off` or `audit` conflicts
+fail chart rendering. Existing context-token callers must supply the scopes
+and transaction context their operations require; an upgrade can now return HTTP 403
+for requests that previously relied on disabled or audit-only authorization.
+
+**This is not a workload sandbox or a complete credential-isolation claim.**
+Kubernetes grants are additive: review every effective binding for the worker.
+Context tokens are separate issuer grants, not ServiceAccount identities;
+their scope/context checks do not intersect with the worker's Kubernetes role.
+A forwarded token with an explicit Task-create grant can still authorize a
+matching Task through the controller. Narrow those grants at the issuer.
+Allowed OIDC identities are also separate authority, unchanged by this profile.
+
+The profile does not prevent controller-supplied Secret environment variables
+or mounts, constrain every Task payload or external tool, or establish process,
+network or gateway-response isolation. Review those paths independently before
+putting credentials beside untrusted workers. It does not change Kustomize
+worker roles or remove permissions granted outside this chart.
+
 ## CRDs and Helm lifecycle
 
-- The chart packages production CRDs under `crds/`. Development-only fake
-  workspace CRDs are excluded.
+- The chart packages core and shared workspace CRDs under `crds/`. Provider
+  configuration CRDs and compute controllers are installed separately.
 - Helm creates these CRDs during installation, but does not update them during
   `helm upgrade` or delete them during `helm uninstall`.
+- Drain every legacy ACP allocation under the old release before applying the
+  RuntimePool schema or upgrading the controller. Retained legacy objects block
+  startup even after their native settings are pruned.
 - Use `--skip-crds` only when another workflow manages compatible Orka CRDs.
 - Uninstall removes chart-managed PVCs. Depending on the volume reclaim policy,
   this can delete stored data. Back up before uninstalling.

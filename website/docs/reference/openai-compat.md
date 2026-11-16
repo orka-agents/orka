@@ -6,7 +6,7 @@ description: "Use Orka with OpenAI Chat Completions and stateless Responses clie
 # OpenAI-compatible API
 
 Orka serves `/openai/v1/chat/completions`, stateless `/openai/v1/responses`, and `/openai/v1/models`,
-so clients like [Continue](https://continue.dev/) and [Cursor](https://cursor.sh/) can point
+so clients like Codex, OpenCode and more can point
 at Orka instead of at a model vendor. Your cluster holds the API keys; the client holds a
 ServiceAccount token.
 
@@ -178,8 +178,8 @@ follow-up history; it does not establish behavior of a particular hosted model.
 
 The `model` field supports two formats:
 
-- **`provider/model`** — e.g., `anthropic/claude-sonnet-4-20250514`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
-- **`model`** — e.g., `claude-sonnet-4-20250514`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
+- **`provider/model`** — e.g., `anthropic/claude-opus-5`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
+- **`model`** — e.g., `claude-opus-5`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
 
 ## Prerequisites
 
@@ -196,7 +196,7 @@ spec:
   secretRef:
     name: anthropic-secret
     key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  defaultModel: claude-opus-5
 ```
 
 2. **Secret** with the API key:
@@ -256,9 +256,9 @@ Configure Continue to use Orka as an OpenAI-compatible provider. Add to your Con
 {
   "models": [
     {
-      "title": "Claude Sonnet 4 (via Orka)",
+      "title": "Claude Opus 5 (via Orka)",
       "provider": "openai",
-      "model": "anthropic/claude-sonnet-4-20250514",
+      "model": "anthropic/claude-opus-5",
       "apiBase": "https://orka.example.com/openai/v1",
       "apiKey": "YOUR_ORKA_TOKEN"
     }
@@ -283,7 +283,7 @@ curl -X POST https://orka.example.com/openai/v1/chat/completions \
   -H "Authorization: Bearer $ORKA_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 1024
   }'
@@ -326,20 +326,20 @@ Concretely, Orka does five things to every request before it reaches the model:
 | # | What happens | Consequence for you |
 | --- | --- | --- |
 | 1 | **Your `tools` array is discarded.** Not merged — replaced. | Your client's own tools never run. |
-| 2 | 18 built-in Orka tools are injected. | The model can act on your cluster with the tools listed below. |
+| 2 | 19 built-in Orka tools are injected. | The model can act on your cluster with the tools listed below. |
 | 3 | The tool list is filtered against your context token's allowed tools, if you use [transaction tokens](../concepts/transaction-tokens.md). | Denied tools disappear rather than failing at call time. |
 | 4 | A large Orka system prompt is **prepended** to yours. | Your system prompt still applies, but it is no longer first. |
 | 5 | Tool history is stripped from your messages. `role: tool` messages are dropped; assistant messages keep their text but lose their tool calls; consecutive same-role messages are merged. | Sending back a conversation that contains client-side tool use loses that structure. |
 
 Orka then runs the tool loop itself and returns the final answer.
 
-The 18 injected tools:
+The 19 injected tools:
 
 | Group | Tools |
 | --- | --- |
 | Built-in | `web_search`, `web_fetch`, `code_exec`, `file_read`, `file_write` |
 | Create work | `create_agent`, `create_agent_task`, `create_ai_task`, `create_container_task`, `create_pr_monitor` |
-| Track work | `check_task_progress`, `fetch_task_output`, `wait_for_task`, `cancel_task`, `list_agents`, `list_tasks` |
+| Track work | `check_task_progress`, `fetch_task_output`, `wait_for_task`, `cancel_task`, `list_agents`, `list_tasks`, `list_connections` |
 | Pull requests | `create_pull_request`, `check_pull_request_ci` |
 
 Orka advertises only the tools listed above that are registered for server-side execution.

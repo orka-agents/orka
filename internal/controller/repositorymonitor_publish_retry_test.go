@@ -207,6 +207,8 @@ func newRepositoryMonitorPublishRetryFixture(t *testing.T, failureStage string, 
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews":
 			stage = "post"
 			fixture.posts++
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected request", http.StatusBadRequest)

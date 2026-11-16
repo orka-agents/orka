@@ -101,7 +101,9 @@ export function EventTimeline({
   return (
     <div className="space-y-3" data-testid="event-timeline">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">{title}</h3>
+        {/* Rendered directly under a detail page tab (task and session
+            Timeline), so it is the section heading below the page h1. */}
+        <h2 className="text-sm font-semibold">{title}</h2>
         <span className="text-xs text-muted-foreground">
           {filtered.length} of {events.length} event{events.length !== 1 ? 's' : ''}
         </span>

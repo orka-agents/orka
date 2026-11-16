@@ -143,6 +143,11 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
             {modelRequests.map((m) => (
               <li key={m.id} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 <TraceStatusPill status={m.status} />
+                {(m.model || m.provider) && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {[m.model, m.provider].filter(Boolean).join(' · ')}
+                  </Badge>
+                )}
                 {m.summary && <span className="min-w-0 break-words">{m.summary}</span>}
                 {m.error && <span className="text-status-failed">{m.error}</span>}
                 <span className="ml-auto font-mono text-xs text-muted-foreground">

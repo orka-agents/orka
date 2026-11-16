@@ -205,11 +205,12 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	}
 	workspace.ReadCredentialRef = secretRef
 
-	if err := tc.Client.Create(ctx, task); err != nil {
+	if err := createChatTask(ctx, tc.Client, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
-
+	sealTaskCreate(ctx, tc, task)
 	tc.IncrementTasks()
+	tc.RecordCreatedTask(task)
 	return ChatToolSuccess(map[string]any{
 		nameField:      task.Name,
 		"monitor_name": monitorName,

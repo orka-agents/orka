@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,14 @@ var version = "dev"
 func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.Execute(); err != nil {
+		if exitErr, ok := errors.AsType[*operatorExitError](err); ok {
+			// A remote command's own status is passed through; only Orka-side
+			// outcomes (timeouts, limits, refusals) print a message.
+			if exitErr.code != 0 && !strings.HasPrefix(exitErr.message, "command exited with status") {
+				fmt.Fprintln(os.Stderr, "Error:", exitErr.message)
+			}
+			os.Exit(exitErr.code)
+		}
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
@@ -57,7 +66,10 @@ func newRootCmd() *cobra.Command {
 
 	// Register subcommands
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newDashboardCmd())
+	cmd.AddCommand(newConnectCmd())
+	cmd.AddCommand(newConnectionCmd())
+	cmd.AddCommand(newHostCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newAgentCmd())
@@ -84,9 +96,9 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
-// serviceAccountLoginFunc is used by login to request ServiceAccount login credentials.
+// serviceAccountTokenFunc creates the ServiceAccount token orka dashboard signs the browser in with.
 // Tests can replace this to avoid calling kubectl.
-var serviceAccountLoginFunc = createServiceAccountToken
+var serviceAccountTokenFunc = createServiceAccountToken
 
 // createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
 func createServiceAccountToken(serviceAccount, namespace string) (string, error) {

@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -30,9 +35,27 @@ func init() {
 }
 
 // NewDB opens a SQLite database with recommended pragmas for WAL mode,
-// busy timeout, synchronous mode, and foreign keys.
+// busy timeout, synchronous mode, and foreign keys. It creates or validates the
+// current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	return newDB(path, false)
+}
+
+// sqliteDSN makes the driver write and read every time.Time in UTC. SQL
+// compares stored times as text, so one zone keeps those comparisons correct
+// and satisfies the storage contract's UTC rule whatever zone a caller used.
+// Rows written earlier in another zone are read back in UTC, but their stored
+// text keeps its offset, so SQL comparisons with them can still be wrong.
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_timezone=UTC"
+}
+
+func newDB(path string, allowMigration bool) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +73,10 @@ func NewDB(path string) (*sql.DB, error) {
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA foreign_keys=ON",
+		// Deleted content is overwritten with zeros rather than left in free
+		// pages: connector custody rows are crypto-shredded on disconnect,
+		// and a later file snapshot must not be able to recover them.
+		"PRAGMA secure_delete=ON",
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
@@ -58,9 +85,17 @@ func NewDB(path string) (*sql.DB, error) {
 		}
 	}
 
-	if err := initializeSchema(db); err != nil {
+	schemaErr := initializeSchema(db)
+	if schemaErr != nil && allowMigration {
+		schemaErr = upgradeSchema(db, path, schemaErr)
+	}
+	if schemaErr != nil {
 		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", err)
+		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", schemaErr)
+	}
+	if err := synchronizeDatasetMetadata(db); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
 	}
 
 	return db, nil
@@ -69,6 +104,7 @@ func NewDB(path string) (*sql.DB, error) {
 // currentSchemaStatements defines the complete supported SQLite layout.
 func currentSchemaStatements() []string {
 	statements := []string{
+		datasetSchema,
 		`CREATE TABLE IF NOT EXISTS task_data_cleanup_generations (
 			namespace TEXT PRIMARY KEY,
 			generation INTEGER NOT NULL
@@ -86,11 +122,13 @@ func currentSchemaStatements() []string {
 			PRIMARY KEY (namespace, task_uid, job_uid)
 		)`,
 		`CREATE TABLE IF NOT EXISTS results (
-			namespace  TEXT NOT NULL,
-			task_name  TEXT NOT NULL,
-			data       BLOB NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			namespace   TEXT NOT NULL,
+			task_name   TEXT NOT NULL,
+			data        BLOB NOT NULL,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch INTEGER NOT NULL DEFAULT 0,
+			write_seq   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
@@ -177,30 +215,6 @@ func currentSchemaStatements() []string {
 			ON session_messages(namespace, message_id) WHERE message_id <> ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
 			ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`,
-		`CREATE TABLE IF NOT EXISTS runtime_sessions (
-			id              TEXT NOT NULL,
-			namespace       TEXT NOT NULL,
-			session_name    TEXT NOT NULL,
-			active_task     TEXT NOT NULL DEFAULT '',
-			agent_name      TEXT NOT NULL DEFAULT '',
-			provider        TEXT NOT NULL,
-			state           TEXT NOT NULL,
-			cleanup_policy  TEXT NOT NULL,
-			idle_timeout_ns INTEGER NOT NULL DEFAULT 0,
-			max_lifetime_ns INTEGER NOT NULL DEFAULT 0,
-			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (namespace, id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_namespace_updated
-			ON runtime_sessions(namespace, updated_at DESC, id ASC)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_owner
-			ON runtime_sessions(namespace, session_name, provider, state, updated_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_active_task
-			ON runtime_sessions(namespace, active_task, updated_at DESC)
-			WHERE active_task <> ''`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_cleanup
-			ON runtime_sessions(namespace, state, cleanup_policy, updated_at ASC)`,
 		`CREATE TABLE IF NOT EXISTS plan_states (
 			namespace     TEXT NOT NULL,
 			task_name     TEXT NOT NULL,
@@ -327,6 +341,8 @@ func currentSchemaStatements() []string {
 			size         INTEGER NOT NULL,
 			data         BLOB NOT NULL,
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch  INTEGER NOT NULL DEFAULT 0,
+			write_seq    INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name, filename)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,
@@ -620,7 +636,7 @@ func currentSchemaStatements() []string {
 			ON work_actions(monitor_namespace, monitor_name, target_kind, target_number, desired_action, status, updated_at DESC)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_actions_dedupe
 			ON work_actions(monitor_namespace, monitor_name, dedupe_key)
-			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running')`,
+			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending')`,
 		`CREATE TABLE IF NOT EXISTS action_records (
 			id                 TEXT PRIMARY KEY,
 			monitor_namespace  TEXT NOT NULL,
@@ -959,20 +975,43 @@ func currentSchemaStatements() []string {
 	statements = append(statements, controlSchemaStatements()...)
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	statements = append(statements, usageSchema()...)
-	return append(statements, agentExecutionSchemaStatements()...)
+	statements = append(statements, agentExecutionSchemaStatements()...)
+	statements = append(statements, nativeSessionSchemaStatements()...)
+	statements = append(statements, connectorSchemaStatements()...)
+	return append(statements, operationReceiptSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db               *sql.DB
-	securityTx       *sql.Tx
-	dbPath           string
-	processLock      io.Closer
+	db         *sql.DB
+	securityTx *sql.Tx
+	// securityClock, set on a scan ingestion's transaction-scoped store,
+	// supplies the times the security writes of one step assign.
+	securityClock func() time.Time
+	dbPath        string
+	processLock   io.Closer
+	// ownsProcessLock is set for a store OpenLockedStore opened under the
+	// process lock, which an embedded dataset binding requires.
+	ownsProcessLock  bool
 	executionEventMu sync.Mutex
+	// pendingWALTruncate remembers a connector custody deletion whose log
+	// truncation found the log busy; the next custody operation finishes it.
+	// It starts set, so a truncation a previous process could not finish is
+	// completed by this process's first custody operation.
+	pendingWALTruncate atomic.Bool
 
-	// snapshotCipher encrypts immutable agent execution snapshot bodies at
-	// rest. Snapshot persistence fails closed while it is nil.
-	snapshotCipher *AgentExecutionSnapshotCipher
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a reopen, the only way SQLite's serving database can restart, is
+	// visible as a new incarnation.
+	incarnation string
+
+	// requireWriteEnvelopes refuses a contract write without a write
+	// envelope. Production sets it; package tests may write without one.
+	requireWriteEnvelopes atomic.Bool
+
+	// nativeSessionSealer seals native state for the duplicate SQL control
+	// implementation's turn finalization. Production never installs it.
+	nativeSessionSealer store.NativeSessionFinalizationSealer
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
@@ -981,12 +1020,27 @@ type Store struct {
 	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
 	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
+
+	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
+	// fence check's cleanup generation read and its Job revocation reads.
+	checkTaskDataFenceAfterGenerationRead func(context.Context)
+
+	// clock, when set by a test, replaces the provider clock that measures
+	// operation age and receipt retention.
+	clock func() time.Time
+
+	// writeState, when set by a test, replaces the dataset write state, which
+	// is always ready for an open SQLite store.
+	writeState func() storagev1.DatasetState
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	return &Store{db: db, dbPath: dbPath}
+	s := &Store{db: db, dbPath: dbPath}
+	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
+	return s
 }
 
 // OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
@@ -998,12 +1052,15 @@ func OpenLockedStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := NewDB(path)
+	db, err := newDB(path, true)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
-	return &Store{db: db, dbPath: path, processLock: lock}, nil
+	s := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true}
+	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
+	return s, nil
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,
@@ -1027,6 +1084,9 @@ func (s *Store) Start(ctx context.Context) error {
 			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
+			if err := s.pruneExpiredOperationReceipts(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "Failed to prune expired operation receipts")
+			}
 		}
 	}
 }
@@ -1049,6 +1109,9 @@ func (s *Store) close() error {
 	}
 	return lockErr
 }
+
+// Close releases the database and process lock, including a failed bootstrap.
+func (s *Store) Close() error { return s.close() }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.
 func (s *Store) updateDBSizeMetric() {

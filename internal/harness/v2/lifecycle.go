@@ -34,12 +34,16 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 	RuntimeSessionStatePromptRunning: {
 		RuntimeSessionStateValidating: {},
 		RuntimeSessionStateCancelling: {},
+		// A prompt that settles without completing leaves an unproven workspace.
+		RuntimeSessionStatePoisoned: {},
 	},
 	RuntimeSessionStateValidating: {
 		RuntimeSessionStateIdle:                 {},
 		RuntimeSessionStatePreparingPublication: {},
-		RuntimeSessionStateCancelling:           {},
-		RuntimeSessionStatePoisoned:             {},
+		// A runtime may freeze and persist the delta within validation.
+		RuntimeSessionStatePublicationPrepared: {},
+		RuntimeSessionStateCancelling:          {},
+		RuntimeSessionStatePoisoned:            {},
 	},
 	RuntimeSessionStatePreparingPublication: {
 		RuntimeSessionStatePublicationPrepared: {},
@@ -64,13 +68,18 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 		RuntimeSessionStateDeleting: {},
 	},
 	RuntimeSessionStateCancelling: {
-		RuntimeSessionStatePoisoned: {},
+		// The prompt can complete before the cancellation reaches the adapter;
+		// its workspace is then validated like any completed prompt.
+		RuntimeSessionStateValidating: {},
+		RuntimeSessionStatePoisoned:   {},
 	},
 	RuntimeSessionStatePoisoned: {
 		RuntimeSessionStateDeleting: {},
 	},
 	RuntimeSessionStateDeleting: {
 		RuntimeSessionStateDeleted: {},
+		// Cleanup that cannot be proven keeps the session, poisoned, for retry.
+		RuntimeSessionStatePoisoned: {},
 	},
 	RuntimeSessionStateDeleted: {},
 }

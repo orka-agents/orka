@@ -9,6 +9,19 @@ The `orka` CLI talks to the Orka controller REST API and is intended for day-to-
 
 ## Installation
 
+On macOS or Linux, if your installation runs the latest stable release, install the CLI
+with [Homebrew](https://brew.sh). Use the fully qualified name; `brew install orka`
+resolves to an unrelated cask:
+
+```bash
+brew install orka-agents/tap/orka
+orka version
+```
+
+The formula follows the latest stable release, possibly a few hours after it is published,
+and installs shell completions. Check `orka version` after installing; for any other
+version, use the release archives below.
+
 Download the CLI from [GitHub Releases](https://github.com/orka-agents/orka/releases).
 Choose a published release that matches your installed Helm chart and controller version.
 The `v0.3.0` value below is an example. Replace it with your installation's release tag,
@@ -183,6 +196,12 @@ orka task logs my-task
 orka task delete my-task
 ```
 
+Stop a Task that is still pending or running:
+
+```bash
+orka task cancel my-task --reason "wrong repository"
+```
+
 Create a simple container task from flags:
 
 ```bash
@@ -248,7 +267,8 @@ Common task commands:
 | `orka task plan NAME` | Read autonomous plan state. |
 | `orka task artifacts NAME` | List task artifacts. |
 | `orka task download NAME [FILENAME] --output PATH` | Download task artifact content. |
-| `orka task delete NAME` | Delete/cancel a task. |
+| `orka task cancel NAME [--reason TEXT]` | Stop a Pending or Running task and keep its result, artifacts and events. The Tasks it delegated are cancelled with it, at every depth, including one whose creation lands just after the cancel (it cancels itself before it starts), except children in another namespace when the controller cannot list Tasks cluster-wide, as with namespace-scoped RBAC, and children a native worker created in another namespace, which record no authenticated parent; cancel those directly. A scheduled task is refused; suspend it instead. Requires `update` on `tasks/cancel`. |
+| `orka task delete NAME` | Delete a task and everything it produced; a running task is stopped first. |
 
 ### Following tasks
 
@@ -327,6 +347,24 @@ ID            STATUS   TOOL               ARGUMENTS                             
 8a8d1a7d418d  pending  create-work-order  asset=pump-1 summary="Inspect the pressure transmitter."  in 9m
 ```
 
+### Debugging a running Task's workspace
+
+Administrators can run a command in, or copy a single file out of or into, the
+execution workspace of a running class-backed ACP Task. These commands are off
+by default. They need the controller flag, a class opt-in, and dedicated
+`tasks/exec` / `tasks/files` permissions. Every call is audited:
+
+```bash
+orka task exec my-task -- git status
+orka task exec my-task -it -- bash
+orka task cp my-task:src/main.go ./main.go     # read-only, does not taint
+orka task cp ./fix.patch my-task:fix.patch     # taints the session
+```
+
+Exec and copies in taint the session: it is never published, reused,
+checkpointed, or continued. See
+[Operator workspace access](../guides/operator-workspace-access.md).
+
 ## Chat and dashboard helpers
 
 `orka run` is a chat interface backed by Orka chat and provider configuration:
@@ -339,25 +377,45 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
-`orka login` creates a ServiceAccount token and opens the dashboard with that token in the URL fragment:
+`orka dashboard` creates a ServiceAccount token, or uses `--token`, and opens the dashboard signed in with it, passing the token in the URL fragment. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash
-orka login --service-account orka-client --namespace orka-system
+orka dashboard --service-account orka-client --namespace orka-system
 ```
 
-For automation, tests, or terminals where token-bearing URLs could be captured, use the safe print-only mode:
+The printed URL shows `<redacted>` in place of the token, while the browser still gets the full URL. `--no-open` skips the browser launch. When no browser can open, such as over SSH, `--show-token` prints the full URL so you can copy it:
 
 ```bash
-orka login \
+orka dashboard \
   --service-account orka-client \
   --namespace orka-system \
   --no-open \
-  --redact-token
+  --show-token
 ```
 
-`--no-open` skips browser launch. `--redact-token` prints `<redacted>` instead of the raw token while still using the full token internally if browser opening is enabled. A redacted URL is not usable for manual login; rerun without `--redact-token` only in a trusted terminal if you need to copy the full URL.
+Use `--show-token` only in a trusted terminal: logs, CI output, and shared sessions would capture the token.
 
-Do not use default `login` output in logs or shared terminals where the generated browser URL might be captured.
+## Linked accounts
+
+`orka connect <provider>` links one of your own accounts (see the
+[Connectors guide](../guides/connectors.md)) as the signed-in person: it starts
+the consent flow, opens the provider's consent page, and waits until the link is
+ready. `orka connection` lists, shows, and disconnects your links and shows the
+providers an operator made available:
+
+```bash
+orka connect github --mode readWrite --token "$OIDC_TOKEN"
+orka connection list
+orka connection get github-<digest>
+orka connection delete github-<digest>
+orka connection providers
+orka connection complete github-<digest> --completion <value>   # when no dashboard signed in as you finishes the link
+```
+
+These commands need a personal identity (OIDC or context token). A
+ServiceAccount token, such as the one `orka dashboard` creates, has no accounts to
+link; the CLI explains the resulting `403`. `--no-open` prints the consent URL
+without opening a browser and `--no-wait` returns once consent has started.
 
 ## Resource management commands
 
@@ -387,9 +445,16 @@ orka secret list -o json
 
 Sessions and durable memory are store-backed workflows rather than Kubernetes CRDs.
 
+`orka session migrate import` stages a stopped Codex thread for a fresh Orka
+Session. `orka session migrate export` installs a saved checkpoint in a fresh
+local home. Both require a private journal for retries and support Codex 0.160.0
+paginated sessions on Linux and macOS. See
+[Codex session migration](../guides/codex-session-migration.md).
+
 ```bash
 orka session list -o json
 orka session get SESSION_ID -o json
+orka session cancel SESSION_ID --reason "enough"   # stop the current turn; the session stays usable
 orka session delete SESSION_ID
 
 orka memory create --content "stable project fact" --source cli --tags docs,cli
@@ -401,12 +466,14 @@ orka memory update MEMORY_ID --content "updated fact"
 orka memory delete MEMORY_ID
 orka memory proposal list -o json
 orka memory proposal get PROPOSAL_ID -o json
-orka memory proposal review PROPOSAL_ID --status accepted --reviewer OPERATOR
-orka memory proposal apply PROPOSAL_ID --applied-by OPERATOR
+orka memory proposal review PROPOSAL_ID --status accepted --note "Matches the operations note."
+orka memory proposal apply PROPOSAL_ID
 orka memory proposal archive PROPOSAL_ID
 ```
 
 Memory governance is explicit: reviewing a memory proposal does not automatically create durable memory. Use `orka memory proposal apply PROPOSAL_ID` only for an accepted proposal that should become durable memory.
+
+The server records your signed-in identity as the reviewer and the applier; neither can be set from the CLI. `review` prints the recorded status and reviewer, and `apply` prints the new memory ID and who applied the proposal.
 
 ## Security scans and repository monitors
 
@@ -455,7 +522,7 @@ orka monitor events my-monitor -o json
 orka monitor delete my-monitor
 ```
 
-Manual run/action commands such as `orka security scan run`, `orka monitor run`, and finding patch/PR actions can create downstream Tasks and may require live GitHub, provider, and agent configuration.
+Manual run and action commands such as `orka security scan run`, `orka monitor run`, and finding patch and pull request actions create downstream Tasks, and need working GitHub, provider, and agent configuration.
 
 ## Usage and PR outcomes
 
@@ -490,47 +557,6 @@ Tables distinguish missing measurements from reported zero and include coverage
 and cache availability. JSON and YAML preserve the full response, including
 nulls. See [Usage and PR outcomes](../guides/usage-and-pr-outcomes.md) for examples,
 retention, and access requirements.
-
-## Live-gated workflows
-
-Some commands intentionally create downstream work or require external services. Keep these behind explicit operator intent in automation and e2e tests.
-
-### `orka run`
-
-`orka run` streams chat responses over the Orka chat API. A positive smoke needs server-side chat enabled plus a configured provider/model or agent:
-
-```bash
-ORKA_API=http://127.0.0.1:8080
-ORKA_TOKEN="$(kubectl create token orka-client -n orka-system)"
-
-orka --server "$ORKA_API" --token "$ORKA_TOKEN" \
-  run --session cli-live-smoke "Reply with one short sentence."
-```
-
-For normal non-live validation, prefer a negative smoke against an unreachable or deliberately unconfigured server and assert a clean error without printing tokens.
-
-### `orka security scan run`
-
-Manual security scan runs can create scan Tasks and may require GitHub credentials, analysis agents, provider credentials, and repository network access:
-
-```bash
-orka security scan run my-repository-scan
-orka security scan list my-repository-scan -o json
-```
-
-Gate this path with explicit environment variables in CI, for example `ORKA_CLI_E2E_LIVE_ACTIONS=1`, and skip by default when credentials or fixtures are missing.
-
-### `orka monitor run`
-
-Manual repository monitor runs can enqueue repository review/repair work and may require GitHub credentials plus reviewer/repair agents:
-
-```bash
-orka monitor run my-monitor --target-kind pull_request --target-number 123
-orka monitor runs my-monitor -o json
-orka monitor items my-monitor -o json
-```
-
-Use live-gated tests or manual verification for this path until stable GitHub/provider fixtures are available.
 
 ## ACP runtime management
 
@@ -619,39 +645,4 @@ orka task list --status <TAB>   # Pending, Running, Finalizing, ...
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
 | `orka workspace status TASK` | Inspect canonical workspace policy and delivery status without credential references, one field per line. |
 | `orka task status TASK [--verbose]` | Show whether a Task finished and where the change went; `--verbose` adds RuntimePool identity and publication verification. |
-| `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
-
-## Binary e2e coverage matrix
-
-Normal binary e2e tests build and invoke `bin/orka` directly with isolated config/home directories. They intentionally avoid real secrets in command arguments and assert stdout/stderr do not leak configured tokens or sentinel secret values.
-
-| CLI area | Binary e2e status | Notes |
-| --- | --- | --- |
-| `auth` | Covered | `validate`, `whoami`; invalid-token negative path. |
-| `models` | Covered | OpenAI and Anthropic compatibility list output. |
-| `config` | Covered | Isolated `HOME`, `set-server`, fake `set-token`, masked `view`. |
-| `status` | Covered | Health/readiness/task/agent summary. |
-| `task` | Covered | Manifest create, flag create (including read/write workspace policy), structured status, list/filter, get, wait, result, logs, children, plan, artifacts, download, delete. |
-| `workspace` | Covered | Canonical workspace intent, credential-role presence, and delivery status. |
-| `runtime-pool` | Focused unit coverage | CRUD routing plus lifecycle/admission/capacity table output. |
-| `agent-runtime` | Focused unit coverage | CRUD routing plus v2-only identity/profile table output. |
-| `provider` | Covered | CRUD and secret redaction expectations. |
-| `agent` | Covered | CRUD. |
-| `tool` | Covered | CRUD. |
-| `skill` | Covered | init, validate, import, list, get, content, update, delete. |
-| `secret` | Covered | Metadata-only list. |
-| `audit` | Covered | Trace no-match path. |
-| `session` | Covered | List/get/delete against a controlled fixture. |
-| `memory` | Covered | Create/list/get/disable/enable/update/delete and proposal-list smoke. |
-| `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
-| `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
-| `usage` | Compiled-binary fixture coverage | Summary table, work JSON, other-usage YAML, configured authentication, and nonzero exit for a missing work request. |
-| `substrate` | Covered | Pool create/get/list/update/delete. |
-| `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
-| `login` | Safe mode covered | `--no-open --redact-token` is covered; full browser-open token URL remains unsuitable for normal e2e logs. |
-| `completion` | Covered | Binary smoke generates bash, zsh, fish, and PowerShell completion output. |
-| `security scan run` | Deferred/live-gated | Creates downstream scan Tasks and requires live agent/GitHub/provider setup. |
-| `monitor run` | Deferred/live-gated | Creates downstream monitor work and can require GitHub/provider setup. |
-| security finding actions | Deferred/live-gated | Need stable finding fixtures or live scan data. |
-
-Use this matrix as a coverage guide when adding CLI commands: non-live command groups should have at least one compiled-binary e2e smoke path, and CRUD-style groups should cover create/get/list/update/delete where the API supports it.
+| `orka audit trace TRANSACTION_ID` | Show Tasks correlated by [transaction](../concepts/transaction-tokens.md) ID. |

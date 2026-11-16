@@ -107,6 +107,35 @@ describe('gateway tables', () => {
     }
   })
 
+  it.each([
+    ['Gateway bindings', () => <GatewayBindingsTable bindings={[binding]} loading={false} />],
+    ['Gateway events', () => <GatewayEventsTable events={[event]} loading={false} />],
+    ['Gateway deliveries', () => <GatewayDeliveriesTable deliveries={[]} loading={false} />],
+  ])('lets the keyboard scroll the %s table on narrow screens', (name, table) => {
+    render(table())
+
+    const region = screen.getByRole('region', { name })
+    expect(region).toHaveAttribute('tabindex', '0')
+    expect(region).toContainElement(screen.getByRole('table'))
+  })
+
+  it('wraps long event and delivery messages inside their column', () => {
+    const message = 'adapter rejected the reply: channel_not_found (the bot was removed from #platform-help)'
+    const delivery: GatewayDelivery = {
+      id: 'delivery-failed', namespace: 'default', gatewayName: 'chat', eventId: 'event-1',
+      kind: 'error', state: 'Failed', replyTarget: 'room', text: 'failed', attemptCount: 3,
+      maxAttempts: 10, manualRetryCount: 0, lastError: message, nextAttemptAt: '2026-07-18T10:00:00Z',
+      expiresAt: '2026-07-19T10:00:00Z', createdAt: '2026-07-18T09:00:00Z', updatedAt: '2026-07-18T10:00:00Z',
+    }
+    // Table cells are whitespace-nowrap, so the message must opt back in to wrapping.
+    const { unmount } = render(<GatewayEventsTable events={[{ ...event, stateMessage: message }]} loading={false} />)
+    expect(screen.getByText(message)).toHaveClass('whitespace-normal', 'break-words')
+    unmount()
+
+    render(<GatewayDeliveriesTable deliveries={[delivery]} loading={false} />)
+    expect(screen.getByText(message)).toHaveClass('whitespace-normal', 'break-words')
+  })
+
   it('surfaces manual delivery retry failures', async () => {
     const delivery: GatewayDelivery = {
       id: 'delivery-failed', namespace: 'default', gatewayName: 'chat', eventId: 'event-1',

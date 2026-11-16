@@ -33,6 +33,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -81,8 +82,6 @@ const (
 		"Memory proposals are review-only and are not automatically applied."
 )
 
-var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
-
 const modelLoopEventTimeout = 250 * time.Millisecond
 const maxSessionContextBytes = 96 << 10
 const roleUser = "user"
@@ -105,6 +104,7 @@ func main() {
 	}
 }
 
+//nolint:gocyclo // Worker startup wires each optional subsystem in order.
 func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -184,10 +184,11 @@ func run(transcriptPath string) (err error) {
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:          apiKey,
-		BaseURL:         baseURL,
-		ProviderType:    provider,
-		AzureAPIVersion: azureAPIVersion,
+		APIKey:              apiKey,
+		BaseURL:             baseURL,
+		ProviderType:        provider,
+		AzureAPIVersion:     azureAPIVersion,
+		AzureDeploymentName: workerEnv.AzureDeploymentName,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
@@ -206,10 +207,11 @@ func run(transcriptPath string) (err error) {
 			}
 
 			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
-				APIKey:          fallbackEnv.APIKey,
-				BaseURL:         fallbackEnv.BaseURL,
-				ProviderType:    fallbackEnv.Provider,
-				AzureAPIVersion: fallbackEnv.AzureAPIVersion,
+				APIKey:              fallbackEnv.APIKey,
+				BaseURL:             fallbackEnv.BaseURL,
+				ProviderType:        fallbackEnv.Provider,
+				AzureAPIVersion:     fallbackEnv.AzureAPIVersion,
+				AzureDeploymentName: fallbackEnv.AzureDeploymentName,
 			})
 			if err != nil {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
@@ -249,14 +251,27 @@ func run(transcriptPath string) (err error) {
 		return err
 	}
 
-	// Memory tools use the controller's internal API and are safe to register
-	// independently of coordination mode. Auto-enable them when the controller
-	// context needed to execute them is present.
+	// Registration does not enable tools omitted by the controller.
 	registerMemoryTools()
-	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
-	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	if err != nil {
+		return fmt.Errorf("load custom tools: %w", err)
+	}
+	// Tools behind a connection-mode policy never run in this Pod.
+	connectorBackedToolNames, err = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	if err != nil {
+		return fmt.Errorf("classify connector-backed tools: %w", err)
+	}
+	markConnectorBackedTools(customTools, connectorBackedToolNames)
+	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
+	ctx, err = prepareNativeRemoteTools(
+		ctx, k8sClient, taskNamespace, taskName, enabledTools, customTools, worker.NewToolExecutor(),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare remote MCP tools: %w", err)
+	}
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
@@ -331,6 +346,10 @@ func run(transcriptPath string) (err error) {
 			workerEnv.TransactionCredentialReadScopes,
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
+		// Children this worker creates inherit the requester's connector
+		// authority only when the controller seals them on this worker's
+		// authenticated request.
+		SealTaskCreate: sealChildTaskViaController,
 	}
 
 	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
@@ -429,28 +448,52 @@ func createK8sClient() (client.Client, error) {
 }
 
 // loadCustomTools loads Tool CRDs from the cluster
+//
+// A Tool the controller dispatched as connector-backed (it is in the frozen
+// digest set) is never silently dropped: a read that keeps failing fails
+// startup so the Pod restarts with the tool set it was dispatched with,
+// instead of running with a permanently reduced one.
 func loadCustomTools(
 	ctx context.Context,
 	k8sClient client.Client,
 	namespace string,
 	toolNames []string,
-) map[string]*corev1alpha1.Tool {
+) (map[string]*corev1alpha1.Tool, error) {
 	customTools := make(map[string]*corev1alpha1.Tool)
+	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
 
 	for _, name := range toolNames {
 		// Skip built-in tools
 		if _, ok := tools.DefaultRegistry.Get(name); ok {
 			continue
 		}
+		_, frozen := frozenConnector[name]
 
 		// Try to load as custom Tool CRD
 		tool := &corev1alpha1.Tool{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+		key := client.ObjectKey{Namespace: namespace, Name: name}
+		if err := readCustomTool(ctx, k8sClient, key, tool, frozen); err != nil {
+			// A dispatched connector-backed Tool that is gone fails startup
+			// too: the Job ends (it is never retried at the Job level) and
+			// the controller's retry re-dispatches with a fresh freeze,
+			// rather than this worker running a tool set nobody dispatched.
+			if frozen {
+				return nil, fmt.Errorf("load connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
+			continue
+		}
+		if aitools.IsRemoteMCP(tool) {
+			// Remote binding/discovery is mandatory and Task-authorized, not a
+			// best-effort load that may silently omit a selected capability.
+			customTools[name] = tool
 			continue
 		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
+			if frozen {
+				return nil, fmt.Errorf("bind outbound access policy for connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
 			continue
 		}
@@ -458,7 +501,31 @@ func loadCustomTools(
 		customTools[name] = tool
 	}
 
-	return customTools
+	return customTools, nil
+}
+
+// readCustomTool reads a Tool; a frozen connector-backed one is retried on
+// transient failures with the same bounds as its policy.
+func readCustomTool(
+	ctx context.Context, k8sClient client.Client, key client.ObjectKey, tool *corev1alpha1.Tool, frozen bool,
+) error {
+	if !frozen {
+		return k8sClient.Get(ctx, key, tool)
+	}
+	backoff := connectorPolicyReadBackoff
+	var err error
+	for range connectorPolicyReadAttempts {
+		if err = k8sClient.Get(ctx, key, tool); err == nil || apierrors.IsNotFound(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return err
 }
 
 func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
@@ -532,6 +599,19 @@ func bindApprovalOutboundAccessPolicyVersion(
 	if err := k8sClient.Get(ctx, key, policy); err != nil {
 		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
 	}
+	return bindApprovalResolvedOutboundPolicyVersion(ctx, k8sClient, namespace, tool, policy)
+}
+
+// bindApprovalResolvedOutboundPolicyVersion binds the exact policy snapshot the
+// caller validated, without a second policy read introducing different selectors.
+func bindApprovalResolvedOutboundPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+	policy *corev1alpha1.OutboundAccessPolicy,
+) error {
+	clearApprovalOutboundAccessPolicyVersion(tool)
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
 	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
 	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
@@ -671,8 +751,12 @@ func buildLLMTools(
 ) []llm.Tool {
 	var llmTools []llm.Tool
 	toolCtx := optionalToolContext(toolContexts)
+	memoryConfigured := memoryControllerConfigPresent()
 
 	for _, name := range enabledTools {
+		if !memoryConfigured && slices.Contains(aitools.MemoryToolNames(), name) {
+			continue
+		}
 		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
 			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
 			continue
@@ -683,8 +767,12 @@ func buildLLMTools(
 			continue
 		}
 
-		// Check if it's a custom tool
+		// Check if it's a custom tool. A forwarding Tool serves a
+		// command-line client in an ACP runtime and is never a function.
 		if tool, ok := customTools[name]; ok {
+			if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
+				continue
+			}
 			var params json.RawMessage
 			if tool.Spec.Parameters != nil {
 				params = tool.Spec.Parameters.Raw
@@ -724,20 +812,6 @@ func memoryControllerConfigPresent() bool {
 	return strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskName)) != ""
-}
-
-func autoEnableMemoryTools(enabled []string) []string {
-	normalized := normalizeEnabledTools(enabled)
-	if !memoryControllerConfigPresent() {
-		return normalized
-	}
-
-	for _, name := range memoryToolNames {
-		if !containsTool(normalized, name) {
-			normalized = append(normalized, name)
-		}
-	}
-	return normalized
 }
 
 func containsTool(enabled []string, name string) bool {
@@ -1227,6 +1301,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
+//nolint:gocyclo // The agent loop keeps tool, approval, and overflow handling in one ordered pass.
 func executeAgentLoopWithEvents(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1247,6 +1322,7 @@ func executeAgentLoopWithEvents(
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
+	deprecatedMemoryTools := workerenv.SplitCSV(os.Getenv(workerenv.AIDeprecatedMemoryTools))
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
 	}
@@ -1308,8 +1384,7 @@ func executeAgentLoopWithEvents(
 		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
-			stepSpan.SetStatus(codes.Error, errType)
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			tracing.RecordSpanErrorType(stepSpan, errType)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
@@ -1348,9 +1423,7 @@ func executeAgentLoopWithEvents(
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
 		if completionErr != nil {
-			stepSpan.RecordError(completionErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(completionErr))
 			stepSpan.End()
 			return "", completionErr
 		}
@@ -1392,9 +1465,7 @@ func executeAgentLoopWithEvents(
 			baseToolCtx,
 		)
 		if approvalErr != nil {
-			stepSpan.RecordError(approvalErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(approvalErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(approvalErr))
 			stepSpan.End()
 			return "", approvalErr
 		}
@@ -1431,7 +1502,7 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
+				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled")
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
 					stepCtx,
@@ -1450,7 +1521,13 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				if connectorBackedToolNames[toolName] {
+					// The person's linked-account token lives only in the
+					// controller; the worker asks it to run the call.
+					result, execErr = executeConnectorToolViaController(execCtx, nil, customTool, execArgs, tc.ID, approvalKey)
+				} else {
+					result, execErr = executeNativeCustomTool(execCtx, baseToolCtx, toolExecutor, customTool, execArgs)
+				}
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}
@@ -1474,8 +1551,20 @@ func executeAgentLoopWithEvents(
 					}
 					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
 				}
+				if execErr == nil && approvalKey != "" {
+					// Schema preflight cannot execute the tool, so it must not
+					// consume approval. Once execution starts, retain the fired
+					// key even if the tool returns an argument-shaped error.
+					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
+						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
+						if execErr != nil {
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments")
+						}
+					}
+				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
+					warnDeprecatedMemoryTool(toolName, deprecatedMemoryTools)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 				}
 			}
@@ -1548,7 +1637,7 @@ func aiWorkerErrorType(err error) string {
 	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
 		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }
 
 func startAgentStepSpan(
@@ -1824,4 +1913,82 @@ func loadSkillsFromVolume() string {
 		fmt.Printf("Loaded %d skill file(s) from %s\n", loaded, skillsDir)
 	}
 	return sb.String()
+}
+
+// sealChildTaskViaController asks the controller to seal the requester stamp
+// onto a child Task this worker just created. The controller authenticates
+// this Pod as the parent Task's worker and checks the child's ownership and
+// requester before sealing; a failure leaves the child unverified for
+// connector use and is not an error for the creating tool.
+func sealChildTaskViaController(ctx context.Context, _ client.Client, task *corev1alpha1.Task) error {
+	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/")
+	namespace := strings.TrimSpace(os.Getenv(workerenv.TaskNamespace))
+	parent := strings.TrimSpace(os.Getenv(workerenv.TaskName))
+	if task == nil || controllerURL == "" || namespace == "" || parent == "" || task.Spec.RequestedBy == nil {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/internal/v1/tasks/%s/%s/children/%s/requester-stamp",
+		controllerURL, url.PathEscape(namespace), url.PathEscape(parent), url.PathEscape(task.Name))
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	token := workerServiceAccountToken()
+	// Nothing repairs a seal later, so a failure that may clear is retried
+	// briefly: a 409 (the child changed between the controller's read and
+	// its fenced seal), a 429 or 5xx, or a transport error. Any other
+	// response is final.
+	backoff := sealConflictBackoff
+	var last string
+	for attempt := range 4 {
+		if attempt > 0 {
+			select {
+			case <-callCtx.Done():
+				fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
+		if err != nil {
+			return nil
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := sealHTTPClient().Do(req)
+		if err != nil {
+			last = err.Error()
+			continue
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status >= 200 && status < 300 {
+			return nil
+		}
+		last = fmt.Sprintf("controller returned %d", status)
+		if status != http.StatusConflict && status != http.StatusTooManyRequests && status < http.StatusInternalServerError {
+			break
+		}
+	}
+	fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+	return nil
+}
+
+// sealConflictBackoff is the first wait before a seal is retried; each
+// retry doubles it.
+var sealConflictBackoff = 250 * time.Millisecond
+
+// sealHTTPClient is the client used to reach the controller for sealing;
+// tests replace it with a fixture client.
+// It carries the worker's ServiceAccount token, so it neither honors proxy
+// environment variables nor follows redirects: the token reaches the
+// controller and nothing else.
+var sealHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }

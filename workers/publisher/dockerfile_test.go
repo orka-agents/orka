@@ -15,7 +15,7 @@ func TestDockerfilePinsCleanRoomProfile(t *testing.T) {
 	contents := string(data)
 	required := []string{
 		"docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
-		"docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466",
+		"docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61",
 		"GIT_VERSION=2.55.0",
 		"FROM --platform=$TARGETPLATFORM docker.io/library/debian:bookworm-slim@sha256:" +
 			"7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS git-builder",
