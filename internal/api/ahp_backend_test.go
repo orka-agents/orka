@@ -696,6 +696,52 @@ func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
 	require.NotContains(t, string(raw), "intruder", "an event of another Task under the name is not the recovered turn's")
 }
 
+// A legacy turn whose Task is already gone when it is recovered takes no
+// Task created afterwards under the name for its own: it ends as deleted.
+func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+	env.backend.forgetTurn(turn)
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.ActiveTaskUID = "" }))
+	require.NoError(t, env.kube.Delete(ctx, task))
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+	env.backend.recoverTurns(ctx, alice)
+
+	// Another Task is created under the name, says something and succeeds.
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
+		Spec: task.Spec}
+	require.NoError(t, env.kube.Create(ctx, replacement))
+	env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, TaskUID: "uid-of-another-task", Runtime: &harnessv2.Event{
+		Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "intruder"}}}})
+	replacement.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	require.NoError(t, env.kube.Status().Update(ctx, replacement))
+	failed := waitForActionType(t, chatSub, "chat/error")
+	require.Contains(t, string(failed), "TaskDeleted")
+	state, err := ahphost.ChannelState(ctx, env.backend.store, alice.UserKey, chat)
+	require.NoError(t, err)
+	require.NotContains(t, ahpTurnText(state.Chat.Turns[len(state.Chat.Turns)-1].ResponseParts), "intruder")
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.NotEqual(t, "uid-of-another-task", record.ActiveTaskUID)
+}
+
 // A client's turn cancel that fails is tried again, so the Task does not run
 // on while the client shows the turn cancelled.
 func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {

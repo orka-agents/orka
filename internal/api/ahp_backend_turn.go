@@ -516,17 +516,24 @@ func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 	return true
 }
 
+// ahpTaskGoneUID stands for the UID of a turn's Task that was already gone
+// when the turn was recovered. No Task has it, so none created later under the
+// Task's name is taken for the turn's.
+const ahpTaskGoneUID = "\x00gone"
+
 // recordTaskUID keeps the UID of the turn's Task in its session's record, if
 // the session still runs the turn, so a later recovery follows the same Task.
+// A write the store refuses is tried again: without the UID a later recovery
+// would take whatever Task then holds the name.
 func (t *ahpTurn) recordTaskUID(ctx context.Context, uid string) {
-	if uid == "" {
+	if uid == "" || uid == ahpTaskGoneUID {
 		return
 	}
-	logSessionUpdate(t.b.updateSession(ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+	t.b.updateSessionUntilDone(ctx, t.principal.UserKey, t.session.Session, "record the turn's Task UID", func(s *ahpSession) {
 		if s.ActiveTurn == t.id && s.ActiveTask == t.task && s.ActiveTaskUID == "" {
 			s.ActiveTaskUID = uid
 		}
-	}), t.session.Session, "record the turn's Task UID")
+	})
 }
 
 func (t *ahpTurn) drain(events <-chan liveevents.Event) {
@@ -1385,9 +1392,15 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 		// record, so a Task created later under the name is never the turn's.
 		if turn.taskUID == "" {
 			task := &corev1alpha1.Task{}
-			if err := b.h.client.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task); err == nil && task.UID != "" {
+			err := b.h.client.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task)
+			switch {
+			case err == nil && task.UID != "":
 				turn.taskUID = string(task.UID)
 				turn.recordTaskUID(ctx, turn.taskUID)
+			case apierrors.IsNotFound(err):
+				// The turn's Task is gone: one created under its name from now
+				// on is not the turn's, which ends as deleted.
+				turn.taskUID = ahpTaskGoneUID
 			}
 		}
 		// The previous leader may have streamed some or all of the answer.
