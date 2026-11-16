@@ -115,8 +115,11 @@ creates; a run that proposes one cites the Sessions it drew on.
 - In this mode the worker has one tool, `submit_memory_consolidation`, a fixed
   Orka-owned system prompt, and no injected memory context. `spec.ai.prompt`, when set, is
   passed as the operator's focus.
-- Orka keeps one run record per Task UID. Beginning a run fixes its window, which ends now.
-  It starts at its mode's cursor: the window end of the latest completed run in that mode,
+- Orka keeps one run record per Task UID. Beginning a run fixes its window, which ends on
+  the whole second before now: the store stamps some Session changes with whole-second
+  times, so a change stored at or before the end happened before the run read the store,
+  and any later one falls in the next window, never between the two.
+  A window starts at its mode's cursor: the window end of the latest completed run in that mode,
   or, before any completed, the window start of the mode's first run, so skipped and failed
   runs read their Sessions again however long they wait. A cursor is followed back at most
   720 hours. With no run at all, the window starts the lookback (default 7 days) before
