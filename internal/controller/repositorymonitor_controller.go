@@ -78,6 +78,9 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
+	// ciLogBlobClient replaces the client for signed GitHub Actions log
+	// blobs in tests.
+	ciLogBlobClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete

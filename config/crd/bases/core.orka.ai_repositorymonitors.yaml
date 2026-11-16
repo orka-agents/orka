@@ -361,6 +361,20 @@ spec:
                       GitHub reports that permission only when one pull request is read, so a
                       pull request seen only in an inventory list is never repaired as a fork.
                     type: boolean
+                  ciEvidence:
+                    description: CIEvidence configures the CI evidence fix_ci repair
+                      prompts carry.
+                    properties:
+                      logs:
+                        default: false
+                        description: |-
+                          Logs adds bounded, redacted excerpts of failed GitHub Actions job logs
+                          to fix_ci repair prompts. Excerpts are stored in the repair Task's
+                          spec.prompt, which anyone who can read Tasks in the monitor namespace
+                          can see, so they are off by default. Reading logs needs Actions read
+                          access for forgeCredentialRef; without it, evidence names the reason.
+                        type: boolean
+                    type: object
                   ciOnlyLabels:
                     description: |-
                       CIOnlyLabels marks pull requests whose CI is repaired without a review:

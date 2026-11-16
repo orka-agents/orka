@@ -128,6 +128,13 @@ type repositoryMonitorRepairLabelsGitHub struct {
 	annotationReads []string
 	// checkRunFailure answers every check-run read with this status code.
 	checkRunFailure int
+	// jobs serves GitHub Actions jobs by ID; a job in jobFailures answers
+	// with that status code. jobLogLocations is each job's log redirect.
+	jobs            map[int64]map[string]any
+	jobFailures     map[int64]int
+	jobLogLocations map[int64]string
+	// jobReads records each job read as "id" or "id/logs".
+	jobReads []string
 }
 
 // repositoryMonitorRepairLabelsGitHubFailure writes a GitHub error.
@@ -179,6 +186,35 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 		all := g.annotations[id]
 		start, end := min((page-1)*perPage, len(all)), min(page*perPage, len(all))
 		_ = json.NewEncoder(w).Encode(all[start:end])
+	case strings.HasPrefix(path, "/repos/orka-agents/orka/actions/jobs/"):
+		rest := strings.TrimPrefix(path, "/repos/orka-agents/orka/actions/jobs/")
+		g.jobReads = append(g.jobReads, rest)
+		idText, logs := strings.CutSuffix(rest, "/logs")
+		id, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil {
+			http.Error(w, "bad job", http.StatusBadRequest)
+			return
+		}
+		if status := g.jobFailures[id]; status != 0 {
+			repositoryMonitorRepairLabelsGitHubFailure(w, status)
+			return
+		}
+		job, ok := g.jobs[id]
+		if !ok {
+			http.NotFound(w, req)
+			return
+		}
+		if !logs {
+			_ = json.NewEncoder(w).Encode(job)
+			return
+		}
+		location, ok := g.jobLogLocations[id]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusGone)
+			return
+		}
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusFound)
 	case strings.HasSuffix(path, "/check-runs"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/commits/"), "/check-runs")
 		if g.checkReads == nil {

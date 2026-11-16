@@ -516,6 +516,22 @@ type RepositoryMonitorRepairSpec struct {
 	// +listType=set
 	// +optional
 	CIOnlyLabels []string `json:"ciOnlyLabels,omitempty"`
+	// CIEvidence configures the CI evidence fix_ci repair prompts carry.
+	// +optional
+	CIEvidence RepositoryMonitorRepairCIEvidenceSpec `json:"ciEvidence,omitempty"`
+}
+
+// RepositoryMonitorRepairCIEvidenceSpec configures the CI evidence fix_ci
+// repair prompts carry beyond check output, annotations, and commit statuses.
+type RepositoryMonitorRepairCIEvidenceSpec struct {
+	// Logs adds bounded, redacted excerpts of failed GitHub Actions job logs
+	// to fix_ci repair prompts. Excerpts are stored in the repair Task's
+	// spec.prompt, which anyone who can read Tasks in the monitor namespace
+	// can see, so they are off by default. Reading logs needs Actions read
+	// access for forgeCredentialRef; without it, evidence names the reason.
+	// +kubebuilder:default=false
+	// +optional
+	Logs bool `json:"logs,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.
