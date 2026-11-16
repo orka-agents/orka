@@ -102,8 +102,9 @@ creates; a run that proposes one cites the Sessions it drew on.
   Task can: the internal transcript routes limit a Task to its own Session and its
   coordination tree. So a `ValidatingAdmissionPolicy` checks the live caller that creates
   such a Task, or changes any of its spec: it needs `list` and `get` on `sessions` in the
-  namespace (reading a transcript needs `get`), and in `Propose` mode also `create` on
-  `memoryproposals`. Checking every spec change matters because the prompt steers the run
+  namespace (reading a transcript needs `get`), `list` on `memories` (the run sends the
+  namespace's memories to the model, and its report quotes them), and in `Propose` mode also
+  `create` on `memoryproposals`. Checking every spec change matters because the prompt steers the run
   and the Agent or provider decides where the transcripts are sent. The field is immutable.
   The Orka API creates Tasks with its own identity, so its Task-creation authorization runs
   the same checks against the person calling it, on every API path that creates a Task.
