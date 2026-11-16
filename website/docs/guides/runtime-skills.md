@@ -13,7 +13,8 @@ skill's instructions only when the task calls for it.
 Codex, Claude, and OpenCode Agents list skills in `spec.runtime.skills`. Each skill comes from a
 digest-pinned container image. Orka binds the skill folder read-only into the runtime
 Pod with the same delivery as [toolboxes](./toolboxes.md), checks it, and copies it into
-every session's native skills folder, owned by that session's own identity.
+every session's native skills folder, owned by that session's own identity. Claude is the
+exception: its sessions share one read-only copy that no session identity owns.
 
 Native Agents (`type: ai` Tasks) keep using the [Skill](../reference/resources.md#skill)
 resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-tools.md#add-skills).
