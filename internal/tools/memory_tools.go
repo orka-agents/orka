@@ -129,7 +129,7 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		if memories == nil {
 			memories = []store.Memory{}
 		}
-		recordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
+		RecordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
 		return marshalMemoryToolResult(memories)
 	}
 
@@ -166,20 +166,25 @@ const (
 	MemoryListPurposeRecall = "recall"
 )
 
-// MemoryRecallRecordTimeout bounds how long counting a recall may delay the
-// recall's result. A storage write can retry far longer, and a recall's
-// caller may give up first.
-var MemoryRecallRecordTimeout = 2 * time.Second
+// MemoryRecallRecordTimeout bounds one recall count. It is longer than the
+// storage client's own retry horizon, so a count normally finishes, or fails,
+// on its own: cancelling a write midway would leave its outcome unknown, and
+// the storage client holds later writes until it resolves one.
+var MemoryRecallRecordTimeout = time.Minute
 
-// recordMemoryRecall counts the memories a recall returned. Counting is
-// best effort: it waits at most MemoryRecallRecordTimeout, and a failure is
-// logged and never fails the recall.
-func recordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
+// memoryRecallSlots bounds how many recall counts run at once. A recall that
+// finds every slot taken is not counted.
+var memoryRecallSlots = make(chan struct{}, 16)
+
+// RecordMemoryRecall counts the memories a recall returned, without delaying
+// the recall: the count runs in the background, on a fresh context that
+// keeps only the caller's logger, since a request's context can be cancelled
+// or reused once it returns. Counting is best effort, so a count that fails,
+// or finds no free slot, is logged and dropped.
+func RecordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
 	if recorder == nil || len(memories) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, MemoryRecallRecordTimeout)
-	defer cancel()
 	ids := make([]string, 0, len(memories))
 	for _, memory := range memories {
 		ids = append(ids, memory.ID)
@@ -187,10 +192,24 @@ func recordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, name
 	if len(ids) > store.MaxMemoryRecallIDs {
 		ids = ids[:store.MaxMemoryRecallIDs]
 	}
-	err := recorder.RecordMemoryRecall(ctx, store.MemoryRecall{Namespace: namespace, IDs: ids, RecalledAt: time.Now().UTC()})
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
+	recall := store.MemoryRecall{Namespace: namespace, IDs: ids, RecalledAt: time.Now().UTC()}
+	logger := log.FromContext(ctx)
+	select {
+	case memoryRecallSlots <- struct{}{}:
+	default:
+		logger.Info("dropped a memory recall count: too many counts are running", "namespace", namespace, "memories", len(ids))
+		return
 	}
+	countCtx := log.IntoContext(context.Background(), logger)
+	timeout := MemoryRecallRecordTimeout
+	go func() {
+		defer func() { <-memoryRecallSlots }()
+		ctx, cancel := context.WithTimeout(countCtx, timeout)
+		defer cancel()
+		if err := recorder.RecordMemoryRecall(ctx, recall); err != nil {
+			logger.Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
+		}
+	}()
 }
 
 // ProposeMemoryTool submits memory-adjacent governance proposals for coordinator review.

@@ -159,6 +159,8 @@ const (
 //     names no source, writing both back to the caller's record. Memory IDs
 //     are unique across namespaces: an ID already in use returns ErrConflict,
 //     as does a SourceProposalID already used by a memory in the namespace.
+//     It stores RecalledCount 0 and no LastRecalledAt, whatever the record
+//     names, and writes them back.
 //   - A memory is read, updated, disabled and deleted only in its namespace.
 //     A missing memory returns ErrNotFound.
 //   - ListMemories requires a namespace and returns memories most recently

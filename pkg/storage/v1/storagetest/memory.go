@@ -162,6 +162,14 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 			require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: id, Namespace: memoryTenant, Content: id,
 				CreatedAt: at, UpdatedAt: at}))
 		}
+		forged := &storagev1.Memory{ID: "mem-forged", Namespace: memoryTenant, Content: "forged", CreatedAt: at, UpdatedAt: at,
+			RecalledCount: 99, LastRecalledAt: &at}
+		require.NoError(t, p.CreateMemory(ctx, forged))
+		require.Zero(t, forged.RecalledCount, "creation writes the reset counts back")
+		stored, err := p.GetMemory(ctx, memoryTenant, "mem-forged")
+		require.NoError(t, err)
+		require.Zero(t, stored.RecalledCount, "a new memory has no recalls, whatever it names")
+		require.Nil(t, stored.LastRecalledAt)
 		require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-foreign", Namespace: memoryOtherTenant,
 			Content: "foreign", CreatedAt: at, UpdatedAt: at}))
 		require.NoError(t, p.DeleteMemory(ctx, memoryTenant, "mem-gone"))

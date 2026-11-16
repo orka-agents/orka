@@ -72,6 +72,8 @@ func (s *Store) createMemoryWrite(ctx context.Context, memory *store.Memory) err
 	if memory.UpdatedAt.IsZero() {
 		memory.UpdatedAt = now
 	}
+	// Only recalls count recalls: a new memory has none, whatever it names.
+	memory.RecalledCount, memory.LastRecalledAt = 0, nil
 
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {

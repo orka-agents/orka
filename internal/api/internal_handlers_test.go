@@ -1451,11 +1451,11 @@ func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
 	}
 
 	list("?limit=5")
-	require.Equal(t, map[string]int{"mem-a": 0, "mem-b": 0}, counts(), "a prompt's memory context is not a recall")
 	list("?purpose=recall&query=mem-a")
-	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts(), "a recall counts the memories it returned")
+	require.Eventually(t, func() bool { return counts()["mem-a"] == 1 }, 5*time.Second, 5*time.Millisecond,
+		"a recall counts the memories it returned, in the background")
 	list("?purpose=recall&query=nothing-matches")
-	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts())
+	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts(), "a prompt's memory context and an empty recall are not counted")
 
 	recalled, err := ss.GetMemory(ctx, "default", "mem-a")
 	require.NoError(t, err)
@@ -1475,7 +1475,7 @@ func (s slowRecallStore) RecordMemoryRecall(ctx context.Context, _ store.MemoryR
 
 func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	previous := tools.MemoryRecallRecordTimeout
-	tools.MemoryRecallRecordTimeout = 20 * time.Millisecond
+	tools.MemoryRecallRecordTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { tools.MemoryRecallRecordTimeout = previous })
 	_, app, ss := setupTestInternalHandlers()
 	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
@@ -1486,5 +1486,5 @@ func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "a stuck count never fails the recall")
-	require.Less(t, time.Since(started), 2*time.Second, "a stuck count gives up within its budget")
+	require.Less(t, time.Since(started), time.Second, "a stuck count never delays the recall")
 }

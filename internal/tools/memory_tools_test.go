@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,8 +149,9 @@ func TestRememberMemoryToolExecute_DerivesTitleWhenOmitted(t *testing.T) {
 
 type recordingMemoryRecalls struct {
 	memories []store.Memory
-	recalls  []store.MemoryRecall
 	err      error
+	mu       sync.Mutex
+	recalls  []store.MemoryRecall
 }
 
 func (r *recordingMemoryRecalls) ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error) {
@@ -156,8 +159,16 @@ func (r *recordingMemoryRecalls) ListMemories(context.Context, store.MemoryFilte
 }
 
 func (r *recordingMemoryRecalls) RecordMemoryRecall(_ context.Context, recall store.MemoryRecall) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.recalls = append(r.recalls, recall)
 	return r.err
+}
+
+func (r *recordingMemoryRecalls) recorded() []store.MemoryRecall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]store.MemoryRecall(nil), r.recalls...)
 }
 
 func TestRecallMemoryToolRecordsBrokeredRecall(t *testing.T) {
@@ -177,10 +188,9 @@ func TestRecallMemoryToolRecordsBrokeredRecall(t *testing.T) {
 			if !strings.Contains(got, `"id":"mem-a"`) || !strings.Contains(got, `"id":"mem-b"`) {
 				t.Fatalf("Execute() = %s", got)
 			}
-			if len(memories.recalls) != 1 {
-				t.Fatalf("recorded %d recalls, want 1", len(memories.recalls))
-			}
-			recall := memories.recalls[0]
+			require.Eventually(t, func() bool { return len(memories.recorded()) == 1 }, 5*time.Second, 5*time.Millisecond,
+				"the count runs in the background")
+			recall := memories.recorded()[0]
 			if recall.Namespace != "test-ns" || !slices.Equal(recall.IDs, []string{"mem-a", "mem-b"}) || recall.RecalledAt.IsZero() {
 				t.Fatalf("recall = %#v", recall)
 			}
@@ -195,8 +205,8 @@ func TestRecallMemoryToolRecordsNothingForAnEmptyRecall(t *testing.T) {
 	if _, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if len(memories.recalls) != 0 {
-		t.Fatalf("recorded %#v for a recall that returned nothing", memories.recalls)
+	if recorded := memories.recorded(); len(recorded) != 0 {
+		t.Fatalf("recorded %#v for a recall that returned nothing", recorded)
 	}
 }
 
@@ -223,7 +233,7 @@ func TestRecallMemoryToolMarksNativeRecall(t *testing.T) {
 // blockingMemoryRecalls never finishes recording a recall until its context
 // ends, like a storage write that keeps retrying.
 type blockingMemoryRecalls struct {
-	recordingMemoryRecalls
+	*recordingMemoryRecalls
 }
 
 func (r *blockingMemoryRecalls) RecordMemoryRecall(ctx context.Context, _ store.MemoryRecall) error {
@@ -235,7 +245,7 @@ func TestRecallMemoryToolDoesNotWaitOnASlowCount(t *testing.T) {
 	previous := MemoryRecallRecordTimeout
 	MemoryRecallRecordTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { MemoryRecallRecordTimeout = previous })
-	memories := &blockingMemoryRecalls{recordingMemoryRecalls{memories: []store.Memory{{ID: "mem-a", Namespace: "test-ns"}}}}
+	memories := &blockingMemoryRecalls{&recordingMemoryRecalls{memories: []store.Memory{{ID: "mem-a", Namespace: "test-ns"}}}}
 	ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
 		MemoryReader: memories, MemoryRecallRecorder: memories})
 
@@ -243,5 +253,34 @@ func TestRecallMemoryToolDoesNotWaitOnASlowCount(t *testing.T) {
 	got, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`))
 	require.NoError(t, err)
 	require.Contains(t, got, `"id":"mem-a"`)
-	require.Less(t, time.Since(started), 2*time.Second, "a stuck count gives up within its budget")
+	require.Less(t, time.Since(started), time.Second, "a stuck count never delays the recall")
+}
+
+func TestRecordMemoryRecallDropsCountsBeyondItsSlots(t *testing.T) {
+	previous := MemoryRecallRecordTimeout
+	MemoryRecallRecordTimeout = time.Minute
+	t.Cleanup(func() { MemoryRecallRecordTimeout = previous })
+	require.Eventually(t, func() bool { return len(memoryRecallSlots) == 0 }, 5*time.Second, 5*time.Millisecond,
+		"counts from earlier tests have finished")
+	release := make(chan struct{})
+	stuck := &gatedMemoryRecalls{release: release}
+	for range cap(memoryRecallSlots) + 5 {
+		RecordMemoryRecall(context.Background(), stuck, "test-ns", []store.Memory{{ID: "mem-a"}})
+	}
+	require.Eventually(t, func() bool { return stuck.started.Load() == int32(cap(memoryRecallSlots)) }, 5*time.Second, 5*time.Millisecond)
+	close(release)
+	require.Eventually(t, func() bool { return len(memoryRecallSlots) == 0 }, 5*time.Second, 5*time.Millisecond,
+		"finished counts free their slots")
+	require.Equal(t, int32(cap(memoryRecallSlots)), stuck.started.Load(), "counts beyond the slots are dropped, not queued")
+}
+
+type gatedMemoryRecalls struct {
+	release chan struct{}
+	started atomic.Int32
+}
+
+func (g *gatedMemoryRecalls) RecordMemoryRecall(context.Context, store.MemoryRecall) error {
+	g.started.Add(1)
+	<-g.release
+	return nil
 }

@@ -7,11 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
-	"context"
-	"time"
-
 	"github.com/gofiber/fiber/v3"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -60,33 +56,12 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// An agent's recall_memory call counts the memories it returned; a
+	// prompt's memory context and operator listings do not.
 	if c.Query(tools.MemoryListPurposeParam, "") == tools.MemoryListPurposeRecall {
-		h.recordMemoryRecall(c.Context(), namespace, memories)
+		tools.RecordMemoryRecall(c.Context(), h.memoryStore, namespace, memories)
 	}
 	return c.JSON(memories)
-}
-
-// recordMemoryRecall counts the memories an agent's recall_memory call
-// returned. A prompt's memory context and operator listings are not recalls.
-// Counting is best effort: it waits at most tools.MemoryRecallRecordTimeout,
-// well inside the worker's request timeout, and a failure is logged and
-// never fails the recall.
-func (h *InternalHandlers) recordMemoryRecall(ctx context.Context, namespace string, memories []store.Memory) {
-	if len(memories) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, tools.MemoryRecallRecordTimeout)
-	defer cancel()
-	ids := make([]string, 0, len(memories))
-	for _, memory := range memories {
-		ids = append(ids, memory.ID)
-	}
-	if len(ids) > store.MaxMemoryRecallIDs {
-		ids = ids[:store.MaxMemoryRecallIDs]
-	}
-	if err := h.memoryStore.RecordMemoryRecall(ctx, store.MemoryRecall{Namespace: namespace, IDs: ids, RecalledAt: time.Now().UTC()}); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
-	}
 }
 
 // CreateMemory creates a memory in the namespace in the internal route.
