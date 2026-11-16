@@ -311,7 +311,8 @@ func NewReport(settings Settings, status string, input Input, kept []Operation, 
 	summary string, proposals []store.MemoryProposal) Report {
 	report := Report{
 		Mode: settings.Mode, Status: status, Memories: len(input.Memories), EligibleSessions: input.EligibleSessions,
-		ReadSessions: len(input.Sessions), InputTruncated: input.Truncated, Operations: kept, Rejected: rejected, Conflicts: conflicts,
+		ReadSessions: len(input.Sessions), InputTruncated: input.Truncated, WindowCutFrom: input.CutFrom,
+		Operations: kept, Rejected: rejected, Conflicts: conflicts,
 		Summary: truncateRunes(strings.TrimSpace(summary), MaxSummaryChars),
 	}
 	if report.Operations == nil {

@@ -29,6 +29,7 @@ Find a few changes that make memory more useful:
 Rules:
 - Name every memory you change by its exact id and generation from the data.
 - Cite the sessions, and where you can the message ids, that support each change. An add must cite at least one session.
+- A transcript message that repeats a memory you were given, such as an agent quoting a memory it recalled, is not evidence for that memory. Only count what people and agents found or decided in the conversation.
 - Keep each memory short: one fact, at most 1200 characters.
 - When two memories contradict each other and the transcripts do not show which is current, report a conflict instead of choosing.
 - Never put secrets, credentials, tokens, raw transcript excerpts, personal data, or one-off task status into a memory.
@@ -71,6 +72,7 @@ var SubmitToolParameters = json.RawMessage(`{
 					"sources": {
 						"type": "array",
 						"maxItems": 20,
+						"description": "The sessions, and where known the message ids, the change draws on; an add must cite at least one",
 						"items": {
 							"type": "object",
 							"properties": {

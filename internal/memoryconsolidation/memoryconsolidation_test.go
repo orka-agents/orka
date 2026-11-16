@@ -33,8 +33,9 @@ func TestSettingsForAppliesDefaultsAndBounds(t *testing.T) {
 func TestWindowStartsAtTheCursorButNeverBeforeMaxLookback(t *testing.T) {
 	now := time.Date(2026, 11, 16, 3, 0, 1, 500_000_000, time.UTC)
 	start, end := Window(nil, now, 24*time.Hour)
-	require.Equal(t, time.Date(2026, 11, 16, 2, 59, 1, 0, time.UTC), end,
-		"the window ends on a whole second, a commit grace before now, as whole-second Session stamps need")
+	require.Equal(t, time.Date(2026, 11, 16, 3, 0, 1, 0, time.UTC).Add(-WindowCommitGrace), end,
+		"the window ends on a whole second, a commit grace before now, past any write that could still commit")
+	require.Equal(t, 15*time.Minute+30*time.Second, WindowCommitGrace, "MaxOperationAge plus MaxClockSkew")
 	require.Equal(t, end.Add(-24*time.Hour), start, "the first run reads the lookback")
 	ahead := now.Add(time.Hour)
 	start, _ = Window(&ahead, now, 24*time.Hour)
@@ -57,10 +58,12 @@ type fakeSource struct {
 	transcripts map[string][]store.SessionMessage
 	memories    []store.Memory
 	loaded      []int
+	// eligible, when set, is how many Sessions changed in all.
+	eligible int
 }
 
 func (f *fakeSource) ListMemoryConsolidationSessions(_ context.Context, _ string, _, _ time.Time, limit int) ([]store.SessionMetadata, int, error) {
-	return f.sessions[:min(limit, len(f.sessions))], len(f.sessions), nil
+	return f.sessions[:min(limit, len(f.sessions))], max(f.eligible, len(f.sessions)), nil
 }
 
 func (f *fakeSource) LoadTranscript(_ context.Context, _, name string, maxMessages int) ([]store.SessionMessage, error) {
@@ -354,4 +357,45 @@ func TestReportStructureKeepsNoTextAModelWroteOrARunRead(t *testing.T) {
 	require.Equal(t, "a target memory is not one the run read", structure.Rejected[1].Reason)
 	require.Equal(t, []string{"mem-a"}, structure.Conflicts[0].MemoryIDs)
 	require.Equal(t, secret, report.Summary, "the full report is unchanged")
+}
+
+func TestCollectInputsMarksEveryLimitItReaches(t *testing.T) {
+	start := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	collect := func(src *fakeSource) Input {
+		t.Helper()
+		input, err := CollectInputs(t.Context(), src, "ns", start, start.Add(24*time.Hour))
+		require.NoError(t, err)
+		return input
+	}
+	session := func(name string, messages int) (store.SessionMetadata, []store.SessionMessage) {
+		transcript := make([]store.SessionMessage, 0, messages)
+		for i := range messages {
+			transcript = append(transcript, store.SessionMessage{ID: fmt.Sprintf("%s-%d", name, i), Role: "user", Content: "hi"})
+		}
+		return store.SessionMetadata{Name: name, SessionType: "chat", UpdatedAt: start.Add(time.Hour)}, transcript
+	}
+	small := func() *fakeSource {
+		src := &fakeSource{transcripts: map[string][]store.SessionMessage{}}
+		meta, transcript := session("s", 2)
+		src.sessions = []store.SessionMetadata{meta}
+		src.transcripts["s"] = transcript
+		return src
+	}
+	require.False(t, collect(small()).Truncated, "nothing reached a limit")
+
+	manyMemories := small()
+	for i := range MaxInputMemories {
+		manyMemories.memories = append(manyMemories.memories, store.Memory{ID: fmt.Sprintf("m-%03d", i), Generation: 1, Content: "x"})
+	}
+	require.True(t, collect(manyMemories).Truncated, "a full memory list may have left older memories out")
+
+	longSession := small()
+	meta, transcript := session("long", MaxMessagesPerSession+1)
+	longSession.sessions = append(longSession.sessions, meta)
+	longSession.transcripts["long"] = transcript
+	require.True(t, collect(longSession).Truncated, "a Session with more messages than a run reads")
+
+	moreSessions := small()
+	moreSessions.eligible = 2
+	require.True(t, collect(moreSessions).Truncated, "more changed Sessions than the run read")
 }

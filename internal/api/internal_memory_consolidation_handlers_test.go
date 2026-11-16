@@ -352,3 +352,26 @@ func TestMemoryConsolidationRedactsTheProposalsItCreates(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "consolidation-secret-value", "and so is the report")
 }
+
+func TestMemoryConsolidationReportsAWindowCutPastMaxLookback(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	old := time.Now().UTC().Add(-memoryconsolidation.MaxLookback - 48*time.Hour).Truncate(time.Second)
+	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+		TaskUID: "long-ago", TaskName: "long-ago", Mode: "Propose", Status: store.MemoryConsolidationRunning,
+		WindowStart: old.Add(-time.Hour), WindowEnd: old, CreatedAt: old}))
+	_, err := f.store.CompleteMemoryConsolidationRun(t.Context(), store.MemoryConsolidationCompletion{Namespace: "default",
+		TaskUID: "long-ago", Status: store.MemoryConsolidationCompleted, Report: []byte(`{}`), CompletedAt: old})
+	require.NoError(t, err)
+
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.NotNil(t, begin.Input)
+	require.NotNil(t, begin.Input.CutFrom, "a window cut short says where it was cut from")
+	require.True(t, old.Equal(*begin.Input.CutFrom))
+
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{}}, &report))
+	require.NotNil(t, report.WindowCutFrom, "and so does its report")
+	require.True(t, old.Equal(*report.WindowCutFrom))
+}

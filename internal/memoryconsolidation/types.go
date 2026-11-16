@@ -15,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // Bounds on a run. They keep a run's input, its proposals and its report
@@ -108,9 +109,12 @@ func SettingsFor(spec *corev1alpha1.MemoryConsolidationSpec) Settings {
 	return settings
 }
 
-// WindowCommitGrace is how long before a run begins its window ends: far
-// longer than any Session write takes to commit after it is stamped.
-const WindowCommitGrace = time.Minute
+// WindowCommitGrace is how long before a run begins its window ends. A
+// Session change is stamped with its write's issue time, and a retried write
+// can commit long after; a provider refuses a write more than MaxOperationAge
+// after it was issued, allowing MaxClockSkew, so no change stamped before the
+// end commits after the run reads.
+const WindowCommitGrace = storagev1.MaxOperationAge + storagev1.MaxClockSkew
 
 // Window returns the Sessions a run reads: those changed after start and no
 // later than end. A namespace's first run in a mode starts the lookback
@@ -146,9 +150,14 @@ type Input struct {
 	// EligibleSessions counts every Session that changed in the window,
 	// including those beyond MaxInputSessions.
 	EligibleSessions int `json:"eligibleSessions"`
-	// Truncated reports that the memories or the transcripts reached their
-	// budget, so some were left out.
+	// Truncated reports that a limit was reached, so some memories, Sessions
+	// or messages may have been left out: the character budgets, the 200
+	// memories, the 50 Sessions, or a Session's message limits.
 	Truncated bool `json:"truncated,omitempty"`
+	// CutFrom is the cursor a window was cut from when it lay further back
+	// than MaxLookback: Sessions changed between it and the window's start
+	// were not read.
+	CutFrom *time.Time `json:"cutFrom,omitempty"`
 }
 
 // InputMemory is one active memory as a run sees it.
@@ -219,12 +228,14 @@ type Report struct {
 	EligibleSessions int                                  `json:"eligibleSessions"`
 	ReadSessions     int                                  `json:"readSessions"`
 	InputTruncated   bool                                 `json:"inputTruncated,omitempty"`
-	SkippedReason    string                               `json:"skippedReason,omitempty"`
-	Operations       []Operation                          `json:"operations"`
-	ProposalIDs      []string                             `json:"proposalIds,omitempty"`
-	Rejected         []Rejection                          `json:"rejected,omitempty"`
-	Conflicts        []Conflict                           `json:"conflicts,omitempty"`
-	Summary          string                               `json:"summary,omitempty"`
+	// WindowCutFrom is the cursor the window was cut from; see Input.CutFrom.
+	WindowCutFrom *time.Time  `json:"windowCutFrom,omitempty"`
+	SkippedReason string      `json:"skippedReason,omitempty"`
+	Operations    []Operation `json:"operations"`
+	ProposalIDs   []string    `json:"proposalIds,omitempty"`
+	Rejected      []Rejection `json:"rejected,omitempty"`
+	Conflicts     []Conflict  `json:"conflicts,omitempty"`
+	Summary       string      `json:"summary,omitempty"`
 	// Abridged reports that detail was dropped to fit the report's size
 	// limit; see Report.Encode.
 	Abridged bool `json:"abridged,omitempty"`

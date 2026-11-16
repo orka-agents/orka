@@ -51,6 +51,15 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 	if err != nil {
 		return Input{}, fmt.Errorf("list memories: %w", err)
 	}
+	// A list at the limit may have left older memories out; the store does
+	// not say how many more there are.
+	if len(memories) >= MaxInputMemories {
+		input.Truncated = true
+		memories = memories[:MaxInputMemories]
+	}
+	if eligible > len(sessions) {
+		input.Truncated = true
+	}
 	budget := MaxMemoryInputChars
 	for _, memory := range memories {
 		read := InputMemory{ID: memory.ID, Generation: memory.Generation, Content: truncateRunes(memory.Content, MaxMemoryChars),
@@ -76,6 +85,9 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		if err != nil {
 			return Input{}, fmt.Errorf("load transcript of session %q: %w", session.Name, err)
 		}
+		if len(records) >= maxTranscriptRecords {
+			input.Truncated = true
+		}
 		var messages []InputMessage
 		for _, message := range records {
 			role := strings.ToLower(strings.TrimSpace(message.Role))
@@ -86,6 +98,7 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 			messages = append(messages, InputMessage{ID: message.ID, Role: role, Content: truncateRunes(content, MaxMessageChars)})
 		}
 		if len(messages) > MaxMessagesPerSession {
+			input.Truncated = true
 			messages = messages[len(messages)-MaxMessagesPerSession:]
 		}
 		read := InputSession{Name: session.Name, Type: sessionType(session.SessionType), UpdatedAt: session.UpdatedAt.UTC()}

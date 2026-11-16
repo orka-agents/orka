@@ -156,6 +156,11 @@ func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespa
 	if err != nil {
 		return nil, err
 	}
+	if cursor != nil && start.After(*cursor) {
+		// The cursor lay further back than MaxLookback.
+		cut := cursor.UTC()
+		input.CutFrom = &cut
+	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("encode memory consolidation input: %w", err)
