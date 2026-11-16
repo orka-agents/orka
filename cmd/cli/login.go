@@ -202,13 +202,11 @@ func newLogoutCmd() *cobra.Command {
 // loginServer is --server or the configured server. Sessions are bearer
 // credentials, so plain HTTP is refused except to this machine.
 func loginServer(cmd *cobra.Command) (string, error) {
-	server, _ := cmd.Flags().GetString("server")
+	// The same server every other command reaches: --server, ORKA_SERVER,
+	// then the config. A session signed in elsewhere would be withheld from it.
+	server := strings.TrimRight(strings.TrimSpace(configuredServer(cmd, loadConfig())), "/")
 	if server == "" {
-		server = loadConfig().Server
-	}
-	server = strings.TrimRight(strings.TrimSpace(server), "/")
-	if server == "" {
-		return "", errors.New("pass --server with your Orka address, such as https://orka.<tailnet>.ts.net")
+		return "", errors.New("pass --server, or set " + envServer + ", with your Orka address, such as https://orka.<tailnet>.ts.net")
 	}
 	if err := sessionServerAllowed(server); err != nil {
 		return "", err

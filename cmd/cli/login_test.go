@@ -833,3 +833,38 @@ func TestEnvironmentCredentialsAndASavedSession(t *testing.T) {
 		t.Fatal("a saved session must not go to the server ORKA_SERVER names")
 	}
 }
+
+// orka login signs in to the server every other command reaches: --server,
+// then ORKA_SERVER, then the config.
+func TestLoginServerFollowsTheCLIServerOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := saveConfig(orkaConfig{Server: "https://saved.example"}); err != nil {
+		t.Fatal(err)
+	}
+	server := func(args ...string) string {
+		t.Helper()
+		cmd := newRootCmd()
+		login, _, err := cmd.Find([]string{"login"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := login.ParseFlags(args); err != nil {
+			t.Fatal(err)
+		}
+		got, err := loginServer(login)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := server(); got != "https://saved.example" {
+		t.Fatalf("config: %q", got)
+	}
+	t.Setenv(envServer, "https://env.example/")
+	if got := server(); got != "https://env.example" {
+		t.Fatalf("ORKA_SERVER: %q", got)
+	}
+	if got := server("--server", "https://flag.example"); got != "https://flag.example" {
+		t.Fatalf("--server: %q", got)
+	}
+}
