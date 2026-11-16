@@ -316,14 +316,17 @@ matches your installed chart, and follow [CLI installation](reference/cli.md#ins
 verify and install it. No Go toolchain is needed. Contributors can
 [build it from source](reference/cli.md#building-from-source).
 
-Point the CLI at the forwarded API once, and every command after that uses it:
+Point the CLI at the forwarded API once, and every command after that uses it. It reads the
+client token from `ORKA_TOKEN`, so the token you created above works here too:
 
 ```bash
 orka config set-server http://localhost:8080
 orka config set-namespace orka-system
-kubectl -n orka-system create token orka-client | orka config set-token --file -
 orka version
 ```
+
+In another terminal, export `ORKA_TOKEN` again, or store a token with
+`kubectl -n orka-system create token orka-client | orka config set-token --file -`.
 
 Then check on the Tasks from this guide:
 
