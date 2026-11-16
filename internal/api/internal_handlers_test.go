@@ -1566,3 +1566,26 @@ func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestInternalApplyStaleConsolidationProposalConflicts(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+	ctx := context.Background()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "content of " + id}))
+	}
+	proposal := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "Merge", Content: "merged",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}}}
+	require.NoError(t, ss.CreateMemoryProposal(ctx, proposal))
+	require.NoError(t, ss.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer"}))
+	require.NoError(t, ss.SetMemoryDisabled(ctx, "default", "mem-b", true))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/"+proposal.ID+"/apply", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	memories, err := ss.ListMemories(ctx, store.MemoryFilter{Namespace: "default", IncludeDisabled: true})
+	require.NoError(t, err)
+	require.Len(t, memories, 2, "a stale merge creates no memory and retires none")
+}

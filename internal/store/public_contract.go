@@ -191,6 +191,8 @@ type (
 	MemoryProposalReview                      = storagev1.MemoryProposalReview
 	MemoryProposalApplyTarget                 = storagev1.MemoryProposalApplyTarget
 	MemoryProposalApplication                 = storagev1.MemoryProposalApplication
+	MemoryProposalTarget                      = storagev1.MemoryProposalTarget
+	MemoryProposalSource                      = storagev1.MemoryProposalSource
 	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
 )
@@ -261,6 +263,11 @@ const (
 	MemorySourceProposal              = storagev1.MemorySourceProposal
 	MemoryProposalTypeSkill           = storagev1.MemoryProposalTypeSkill
 	MemoryProposalTypeMemory          = storagev1.MemoryProposalTypeMemory
+	MemoryProposalTypeMerge           = storagev1.MemoryProposalTypeMerge
+	MemoryProposalTypeSupersede       = storagev1.MemoryProposalTypeSupersede
+	MemoryProposalTypeRetire          = storagev1.MemoryProposalTypeRetire
+	MaxMemoryProposalTargets          = storagev1.MaxMemoryProposalTargets
+	MaxMemoryProposalSources          = storagev1.MaxMemoryProposalSources
 	MemoryProposalStatusPending       = storagev1.MemoryProposalStatusPending
 	MemoryProposalStatusAccepted      = storagev1.MemoryProposalStatusAccepted
 	MemoryProposalStatusRejected      = storagev1.MemoryProposalStatusRejected
@@ -405,4 +412,10 @@ func ValidateUsageObservation(observation UsageObservation) error {
 
 func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) string {
 	return storagev1.UsageWorkID(namespace, monitorUID, repository, kind, number)
+}
+
+// IsMemoryConsolidationProposalType reports whether proposalType is one of
+// the consolidation proposal types, which change existing memories.
+func IsMemoryConsolidationProposalType(proposalType string) bool {
+	return storagev1.IsMemoryConsolidationProposalType(proposalType)
 }

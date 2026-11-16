@@ -262,6 +262,11 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "get", "core.orka.ai", "memories", id)
 		}
+		// A consolidation proposal changes the memories it targets.
+		apply.AuthorizeMemoryChange = func(ctx context.Context, namespace, id string) error {
+			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
+				namespace, "update", "core.orka.ai", "memories", id)
+		}
 	}
 	return applyNamespaceMemoryProposal(c, h.memoryProposalStore, apply)
 }

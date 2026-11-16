@@ -8,6 +8,13 @@ import (
 // Memory represents durable namespace-scoped memory captured from tasks,
 // sessions, or explicit worker calls. LastRecalledAt and RecalledCount record
 // agent recalls of the memory; only RecordMemoryRecall changes them.
+//
+// Generation is the version of the record: 1 when it is created, and one more
+// for every change to its content, tags, provenance, Disabled or Deleted; a
+// recall does not change it. A consolidation proposal names the generation it
+// read, so applying it fails once the memory changed. SupersededBy names the
+// memory that replaced this one when a merge or supersede proposal was
+// applied.
 type Memory struct {
 	ID               string     `json:"id"`
 	Namespace        string     `json:"namespace"`
@@ -25,6 +32,8 @@ type Memory struct {
 	UpdatedAt        time.Time  `json:"updatedAt"`
 	LastRecalledAt   *time.Time `json:"lastRecalledAt,omitempty"`
 	RecalledCount    int        `json:"recalledCount"`
+	Generation       uint64     `json:"generation"`
+	SupersededBy     string     `json:"supersededBy,omitempty"`
 }
 
 // MemoryFilter constrains memory list and recall queries.
@@ -80,6 +89,43 @@ type MemoryProposal struct {
 	UpdatedAt       time.Time  `json:"updatedAt"`
 	ReviewedAt      *time.Time `json:"reviewedAt,omitempty"`
 	AppliedAt       *time.Time `json:"appliedAt,omitempty"`
+	// Targets names the memories a consolidation proposal changes, each at the
+	// generation the proposal read. Only consolidation types carry targets.
+	Targets []MemoryProposalTarget `json:"targets,omitempty"`
+	// Sources cites the Session messages a proposal drew on.
+	Sources []MemoryProposalSource `json:"sources,omitempty"`
+}
+
+// MemoryProposalTarget names one memory a consolidation proposal changes and
+// the generation of that memory the proposal read.
+type MemoryProposalTarget struct {
+	MemoryID   string `json:"memoryId"`
+	Generation uint64 `json:"generation"`
+}
+
+// MemoryProposalSource cites a Session, and optionally one of its messages,
+// that a proposal drew on.
+type MemoryProposalSource struct {
+	SessionName string `json:"sessionName"`
+	MessageID   string `json:"messageId,omitempty"`
+}
+
+// MaxMemoryProposalTargets and MaxMemoryProposalSources bound the targets and
+// sources of one proposal.
+const (
+	MaxMemoryProposalTargets = 20
+	MaxMemoryProposalSources = 20
+)
+
+// IsMemoryConsolidationProposalType reports whether proposalType is one of
+// the consolidation types, which change existing memories.
+func IsMemoryConsolidationProposalType(proposalType string) bool {
+	switch proposalType {
+	case MemoryProposalTypeMerge, MemoryProposalTypeSupersede, MemoryProposalTypeRetire:
+		return true
+	default:
+		return false
+	}
 }
 
 // MemoryProposalFilter constrains proposal list queries.
@@ -143,6 +189,14 @@ const (
 	MemoryProposalTypeSkill = "skill"
 	// MemoryProposalTypeMemory proposes a durable memory.
 	MemoryProposalTypeMemory = "memory"
+	// MemoryProposalTypeMerge proposes one memory, from the proposal's
+	// content, that replaces two or more target memories.
+	MemoryProposalTypeMerge = "memory_merge"
+	// MemoryProposalTypeSupersede proposes one memory, from the proposal's
+	// content, that replaces one target memory.
+	MemoryProposalTypeSupersede = "memory_supersede"
+	// MemoryProposalTypeRetire proposes disabling one or more target memories.
+	MemoryProposalTypeRetire = "memory_retire"
 
 	MemoryProposalStatusPending  = "pending"
 	MemoryProposalStatusAccepted = "accepted"
@@ -159,8 +213,8 @@ const (
 //     names no source, writing both back to the caller's record. Memory IDs
 //     are unique across namespaces: an ID already in use returns ErrConflict,
 //     as does a SourceProposalID already used by a memory in the namespace.
-//     It stores RecalledCount 0 and no LastRecalledAt, whatever the record
-//     names, and writes them back.
+//     It stores RecalledCount 0, no LastRecalledAt, Generation 1 and no
+//     SupersededBy, whatever the record names, and writes them back.
 //   - A memory is read, updated, disabled and deleted only in its namespace.
 //     A missing memory returns ErrNotFound.
 //   - ListMemories requires a namespace and returns memories most recently
@@ -170,9 +224,13 @@ const (
 //   - UpdateMemory replaces the mutable fields, including Disabled, Deleted
 //     and SourceProposalID, and refreshes UpdatedAt with the provider's time.
 //     A SourceProposalID another memory in the namespace uses returns
-//     ErrConflict.
+//     ErrConflict. It ignores the record's Generation and SupersededBy, and
+//     adds one to the stored Generation when any field it replaces changes;
+//     an update that changes none keeps it.
 //   - DeleteMemory keeps the record, marking it deleted and disabled.
-//     SetMemoryDisabled on a deleted memory returns ErrNotFound.
+//     SetMemoryDisabled on a deleted memory returns ErrNotFound. Each adds one
+//     to Generation when it changes Deleted or Disabled, and leaves it
+//     unchanged otherwise.
 //   - RecordMemoryRecall requires a namespace and at most MaxMemoryRecallIDs
 //     IDs, and returns ErrValidation otherwise. For each distinct ID that
 //     names a memory in the namespace that is not deleted, it adds one to
@@ -206,7 +264,15 @@ type MemoryStore interface {
 //     note, review time, applied memory ID, applier or application time,
 //     returns ErrValidation. A blank reviewer, review note or applier counts
 //     as absent; any nonempty AppliedMemoryID, even whitespace, is an apply
-//     outcome, as it is for review and archive.
+//     outcome, as it is for review and archive. Targets and Sources are
+//     validated, returning ErrValidation: a consolidation type
+//     (IsMemoryConsolidationProposalType) needs its targets: at least two for
+//     MemoryProposalTypeMerge, exactly one for MemoryProposalTypeSupersede and
+//     at least one for MemoryProposalTypeRetire, each a distinct nonblank
+//     memory ID with a generation of at least 1, at most
+//     MaxMemoryProposalTargets. Merge and supersede also need nonblank
+//     content. Any other type carries no targets. Every type may cite at most
+//     MaxMemoryProposalSources sources, each naming a Session.
 //   - A proposal is read, reviewed and archived only in its namespace. A
 //     missing proposal returns ErrNotFound.
 //   - ListMemoryProposals requires a namespace and returns proposals newest
@@ -233,8 +299,9 @@ type MemoryStore interface {
 //     that names none returns an error. An accepted proposal of type
 //     MemoryProposalTypeMemory targets the memory already created from it
 //     (its SourceProposalID), or no memory when applying would create one.
-//     Any other type or status returns ErrValidation. A missing proposal
-//     returns ErrNotFound.
+//     So does an accepted merge or supersede proposal. An accepted retire
+//     proposal targets its first target memory. Any other type or status
+//     returns ErrValidation. A missing proposal returns ErrNotFound.
 //   - CommitMemoryProposalApplication resolves the target again and applies
 //     only if it equals Target, returning ErrPreconditionFailed with no
 //     memory and no change otherwise. For an applied proposal it returns the
@@ -244,6 +311,18 @@ type MemoryStore interface {
 //     proposal as applied to it, in the same transaction. Two applications
 //     that race create one memory: the loser returns ErrPreconditionFailed
 //     and its retry resolves the winner's memory.
+//   - Applying a consolidation proposal changes its targets in the same
+//     transaction, and only while every target is in the namespace, is not
+//     deleted and is still at the generation the proposal names. Otherwise
+//     it returns ErrConflict and changes nothing: the proposal is stale, and
+//     a new resolve would not change that. A merge or supersede creates
+//     Memory, then marks every target deleted and disabled, superseded by
+//     it. It never adopts a memory that already names it as its source:
+//     such a memory was not created by applying it, so it returns
+//     ErrConflict. A retire creates nothing and disables every target,
+//     returning the first, and leaves a target already disabled at its
+//     generation. Each target that changes gains one generation and the
+//     application time as UpdatedAt.
 type MemoryProposalStore interface {
 	CreateMemoryProposal(ctx context.Context, proposal *MemoryProposal) error
 	GetMemoryProposal(ctx context.Context, namespace, id string) (*MemoryProposal, error)

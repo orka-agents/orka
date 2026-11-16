@@ -507,3 +507,40 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 		})
 	}
 }
+
+func TestExternalAPIConsolidationApplyRequiresUpdateOnEveryTarget(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "second", Namespace: "default", Content: "second memory"}))
+	protected, err := f.store.GetMemory(t.Context(), "default", "protected")
+	require.NoError(t, err)
+	proposal := &store.MemoryProposal{ID: "merge", Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "merge",
+		Content: "merged", Targets: []store.MemoryProposalTarget{
+			{MemoryID: "protected", Generation: protected.Generation}, {MemoryID: "second", Generation: 1},
+		}}
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+	require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+		Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+	}))
+	permissions := make([]authorizationv1.ResourceAttributes, 0, 4)
+	permissions = append(permissions,
+		authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "merge"},
+		authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "create"},
+	)
+	for _, target := range []string{"protected", "second"} {
+		f.allowOnly(t, permissions...)
+		before := f.changes(t)
+		status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/merge/apply", `{}`)
+		require.Equal(t, http.StatusForbidden, status, body)
+		require.Equal(t, before, f.changes(t), "a refused consolidation changes nothing")
+		update := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "update", Name: target}
+		require.Equal(t, update, *f.reviews[len(f.reviews)-1].ResourceAttributes)
+		permissions = append(permissions, update)
+	}
+	f.allowOnly(t, permissions...)
+	status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/merge/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "merged")
+	retired, err := f.store.GetMemory(t.Context(), "default", "second")
+	require.NoError(t, err)
+	require.True(t, retired.Deleted)
+}

@@ -74,22 +74,27 @@ func (s *Store) createMemoryWrite(ctx context.Context, memory *store.Memory) err
 	}
 	// Only recalls count recalls: a new memory has none, whatever it names.
 	memory.RecalledCount, memory.LastRecalledAt = 0, nil
+	memory.Generation = 1
+	memory.SupersededBy = ""
 
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.taskDataExecutor(ctx).ExecContext(ctx,
-		`INSERT INTO memories
-		 (id, namespace, session_name, agent_name, task_name, parent_task, source, source_proposal_id, content, tags_json,
-		  disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		memory.ID, memory.Namespace, memory.SessionName, memory.AgentName, memory.TaskName, memory.ParentTask,
-		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
-		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
-	)
+	_, err = s.taskDataExecutor(ctx).ExecContext(ctx, insertMemorySQL, memoryInsertArgs(memory, tagsJSON)...)
 	return uniqueConflict(err)
+}
+
+const insertMemorySQL = `INSERT INTO memories
+	 (id, namespace, session_name, agent_name, task_name, parent_task, source, source_proposal_id, content, tags_json,
+	  disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count, generation, superseded_by)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+func memoryInsertArgs(memory *store.Memory, tagsJSON string) []any {
+	return []any{memory.ID, memory.Namespace, memory.SessionName, memory.AgentName, memory.TaskName, memory.ParentTask,
+		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
+		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount, memory.Generation, memory.SupersededBy}
 }
 
 // GetMemory fetches a memory by ID within a namespace.
@@ -157,13 +162,23 @@ func (s *Store) updateMemoryWrite(ctx context.Context, memory *store.Memory) err
 		return err
 	}
 
+	// SQLite evaluates every SET expression against the row as it was, so
+	// the generation compares the stored fields with the new ones: an update
+	// that changes none of them, such as saving a memory unchanged, keeps the
+	// generation, and proposals that read it stay current.
+	fields := []any{memory.SessionName, memory.AgentName, memory.TaskName, memory.ParentTask, memory.Source, memory.SourceProposalID,
+		memory.Content, tagsJSON, memory.Disabled, memory.Deleted}
+	args := append(append([]any{}, fields...), fields...)
+	args = append(args, memory.Namespace, memory.ID)
 	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memories
-		 SET session_name = ?, agent_name = ?, task_name = ?, parent_task = ?, source = ?, source_proposal_id = ?, content = ?, tags_json = ?,
+		 SET generation = generation + CASE WHEN session_name = ? AND agent_name = ? AND task_name = ? AND parent_task = ?
+		         AND source = ? AND source_proposal_id = ? AND content = ? AND tags_json = ? AND disabled = ? AND deleted = ?
+		         THEN 0 ELSE 1 END,
+		     session_name = ?, agent_name = ?, task_name = ?, parent_task = ?, source = ?, source_proposal_id = ?, content = ?, tags_json = ?,
 		     disabled = ?, deleted = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE namespace = ? AND id = ?`,
-		memory.SessionName, memory.AgentName, memory.TaskName, memory.ParentTask, memory.Source, memory.SourceProposalID,
-		memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.Namespace, memory.ID,
+		args...,
 	)
 	if err != nil {
 		return uniqueConflict(err)
@@ -180,7 +195,10 @@ func (s *Store) DeleteMemory(ctx context.Context, namespace, id string) error {
 
 func (s *Store) deleteMemoryWrite(ctx context.Context, namespace, id string) error {
 	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-		`UPDATE memories SET deleted = TRUE, disabled = TRUE, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`,
+		`UPDATE memories
+		 SET generation = generation + CASE WHEN deleted = TRUE AND disabled = TRUE THEN 0 ELSE 1 END,
+		     deleted = TRUE, disabled = TRUE, updated_at = CURRENT_TIMESTAMP
+		 WHERE namespace = ? AND id = ?`,
 		namespace, id,
 	)
 	if err != nil {
@@ -198,8 +216,11 @@ func (s *Store) SetMemoryDisabled(ctx context.Context, namespace, id string, dis
 
 func (s *Store) setMemoryDisabledWrite(ctx context.Context, namespace, id string, disabled bool) error {
 	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-		`UPDATE memories SET disabled = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ? AND deleted = FALSE`,
-		disabled, namespace, id,
+		`UPDATE memories
+		 SET generation = generation + CASE WHEN disabled = ? THEN 0 ELSE 1 END,
+		     disabled = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE namespace = ? AND id = ? AND deleted = FALSE`,
+		disabled, disabled, namespace, id,
 	)
 	if err != nil {
 		return err
@@ -425,6 +446,13 @@ func (s *Store) createMemoryProposalWrite(ctx context.Context, proposal *store.M
 	if field := proposalDecisionField(proposal); field != "" {
 		return store.ValidationErrorf("a new proposal cannot carry %s; review and apply record it", field)
 	}
+	if err := validateMemoryProposalChanges(proposal); err != nil {
+		return err
+	}
+	targetsJSON, sourcesJSON, err := marshalMemoryProposalChanges(proposal)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	if proposal.CreatedAt.IsZero() {
 		proposal.CreatedAt = now
@@ -433,15 +461,16 @@ func (s *Store) createMemoryProposalWrite(ctx context.Context, proposal *store.M
 		proposal.UpdatedAt = now
 	}
 
-	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
+	_, err = s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO memory_proposals
 		 (id, namespace, task_name, agent_name, type, skill_name, title, description, content, patch,
-		  status, reviewer, review_note, applied_memory_id, applied_by, created_at, updated_at, reviewed_at, applied_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  status, reviewer, review_note, applied_memory_id, applied_by, created_at, updated_at, reviewed_at, applied_at,
+		  targets_json, sources_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		proposal.ID, proposal.Namespace, proposal.TaskName, proposal.AgentName, proposal.Type, proposal.SkillName,
 		proposal.Title, proposal.Description, proposal.Content, proposal.Patch, proposal.Status, proposal.Reviewer,
 		proposal.ReviewNote, proposal.AppliedMemoryID, proposal.AppliedBy, proposal.CreatedAt, proposal.UpdatedAt,
-		proposal.ReviewedAt, proposal.AppliedAt,
+		proposal.ReviewedAt, proposal.AppliedAt, targetsJSON, sourcesJSON,
 	)
 	return uniqueConflict(err)
 }
@@ -718,11 +747,21 @@ func resolveMemoryProposalTarget(ctx context.Context, q memoryProposalQueryer, n
 		target.MemoryID = proposal.AppliedMemoryID
 		return target, proposal, nil
 	}
-	if strings.ToLower(strings.TrimSpace(proposal.Type)) != proposalTypeMemory {
+	proposalType := strings.ToLower(strings.TrimSpace(proposal.Type))
+	if proposalType != proposalTypeMemory && !store.IsMemoryConsolidationProposalType(proposalType) {
 		return store.MemoryProposalApplyTarget{}, nil, store.ValidationErrorf("proposal type %q cannot be applied as memory", proposal.Type)
 	}
 	if status != proposalStatusAccepted {
 		return store.MemoryProposalApplyTarget{}, nil, store.ValidationErrorf("proposal status %q cannot be applied", proposal.Status)
+	}
+	if proposalType == store.MemoryProposalTypeRetire {
+		// A retire creates no memory; its application returns the first
+		// memory it disables.
+		if len(proposal.Targets) == 0 {
+			return store.MemoryProposalApplyTarget{}, nil, fmt.Errorf("retire proposal %q names no target memories", proposal.ID)
+		}
+		target.MemoryID = proposal.Targets[0].MemoryID
+		return target, proposal, nil
 	}
 	var linked string
 	err = q.QueryRowContext(ctx, `SELECT id FROM memories WHERE namespace = ? AND source_proposal_id = ?`, namespace, id).Scan(&linked)
@@ -756,25 +795,15 @@ func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, applica
 		hook()
 	}
 
+	proposalType := strings.ToLower(strings.TrimSpace(proposal.Type))
+	if proposalType == store.MemoryProposalTypeRetire && expected.AppliedMemoryID == "" {
+		if application.Memory != nil {
+			return nil, store.ValidationErrorf("a retire proposal creates no memory")
+		}
+		return applyRetireProposal(ctx, tx, application, proposal)
+	}
 	if expected.MemoryID != "" {
-		memory, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, expected.Namespace, expected.MemoryID))
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("memory proposal references missing memory")
-		}
-		if err != nil {
-			return nil, err
-		}
-		if expected.AppliedMemoryID == "" {
-			// Record the application of a memory already created from this
-			// proposal, keeping any earlier application time.
-			if err := markMemoryProposalApplied(ctx, tx.Tx, application, memory.ID, true); err != nil {
-				return nil, err
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return memory, nil
+		return commitExistingMemoryApplication(ctx, tx, application, proposal, proposalType)
 	}
 
 	memory := *application.Memory
@@ -796,23 +825,28 @@ func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, applica
 	if memory.UpdatedAt.IsZero() {
 		memory.UpdatedAt = application.AppliedAt
 	}
+	memory.Generation = 1
+	memory.SupersededBy = ""
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memories
-		 (id, namespace, session_name, agent_name, task_name, parent_task, source, source_proposal_id, content, tags_json,
-		  disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		memory.ID, memory.Namespace, memory.SessionName, memory.AgentName, memory.TaskName, memory.ParentTask,
-		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
-		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
-	); err != nil {
+	consolidation := store.IsMemoryConsolidationProposalType(proposalType)
+	if consolidation {
+		if err := checkConsolidationTargets(ctx, tx.Tx, proposal); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, insertMemorySQL, memoryInsertArgs(&memory, tagsJSON)...); err != nil {
 		if isSQLiteConstraintError(err) {
 			return nil, store.PreconditionFailedErrorf("memory proposal %q was applied concurrently", expected.ProposalID)
 		}
 		return nil, err
+	}
+	if consolidation {
+		if err := retireConsolidationTargets(ctx, tx.Tx, proposal, memory.ID, application.AppliedAt); err != nil {
+			return nil, err
+		}
 	}
 	if err := markMemoryProposalApplied(ctx, tx.Tx, application, memory.ID, false); err != nil {
 		return nil, err
@@ -821,6 +855,35 @@ func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, applica
 		return nil, err
 	}
 	return &memory, nil
+}
+
+// commitExistingMemoryApplication returns the memory an applied proposal
+// names, or records the application of a memory already created from it, in
+// tx, and commits.
+func commitExistingMemoryApplication(ctx context.Context, tx *writeTx, application store.MemoryProposalApplication,
+	proposal *store.MemoryProposal, proposalType string) (*store.Memory, error) {
+	expected := application.Target
+	memory, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, expected.Namespace, expected.MemoryID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("memory proposal references missing memory")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if expected.AppliedMemoryID == "" {
+		if store.IsMemoryConsolidationProposalType(proposalType) {
+			return nil, refuseLinkedConsolidationMemory(proposal, memory)
+		}
+		// Record the application of a memory already created from this
+		// proposal, keeping any earlier application time.
+		if err := markMemoryProposalApplied(ctx, tx.Tx, application, memory.ID, true); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return memory, nil
 }
 
 func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, application store.MemoryProposalApplication, memoryID string, allowExistingAppliedID bool) error {
@@ -896,7 +959,7 @@ func primarySQLiteCode(code int) int {
 
 func selectMemorySQL() string {
 	return `SELECT id, namespace, session_name, agent_name, task_name, parent_task, source, source_proposal_id, content, tags_json,
-		disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count FROM memories`
+		disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count, generation, superseded_by FROM memories`
 }
 
 func appendMemoryFilters(query string, args *[]any, filter store.MemoryFilter) string {
@@ -954,7 +1017,7 @@ func scanMemory(scanner rowScanner) (*store.Memory, error) {
 	err := scanner.Scan(
 		&memory.ID, &memory.Namespace, &memory.SessionName, &memory.AgentName, &memory.TaskName, &memory.ParentTask,
 		&memory.Source, &memory.SourceProposalID, &memory.Content, &tagsJSON, &memory.Disabled, &memory.Deleted,
-		&memory.CreatedAt, &memory.UpdatedAt, &lastRecalled, &memory.RecalledCount,
+		&memory.CreatedAt, &memory.UpdatedAt, &lastRecalled, &memory.RecalledCount, &memory.Generation, &memory.SupersededBy,
 	)
 	if err != nil {
 		return nil, err
@@ -972,20 +1035,25 @@ func scanMemory(scanner rowScanner) (*store.Memory, error) {
 
 func selectMemoryProposalSQL() string {
 	return `SELECT id, namespace, task_name, agent_name, type, skill_name, title, description, content, patch,
-		status, reviewer, review_note, applied_memory_id, applied_by, created_at, updated_at, reviewed_at, applied_at
+		status, reviewer, review_note, applied_memory_id, applied_by, created_at, updated_at, reviewed_at, applied_at,
+		targets_json, sources_json
 		FROM memory_proposals`
 }
 
 func scanMemoryProposal(scanner rowScanner) (*store.MemoryProposal, error) {
 	var proposal store.MemoryProposal
 	var reviewedAt, appliedAt sql.NullTime
+	var targetsJSON, sourcesJSON string
 	err := scanner.Scan(
 		&proposal.ID, &proposal.Namespace, &proposal.TaskName, &proposal.AgentName, &proposal.Type, &proposal.SkillName,
 		&proposal.Title, &proposal.Description, &proposal.Content, &proposal.Patch, &proposal.Status, &proposal.Reviewer,
 		&proposal.ReviewNote, &proposal.AppliedMemoryID, &proposal.AppliedBy, &proposal.CreatedAt, &proposal.UpdatedAt,
-		&reviewedAt, &appliedAt,
+		&reviewedAt, &appliedAt, &targetsJSON, &sourcesJSON,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if err := unmarshalMemoryProposalChanges(&proposal, targetsJSON, sourcesJSON); err != nil {
 		return nil, err
 	}
 	if reviewedAt.Valid {

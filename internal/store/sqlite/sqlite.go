@@ -287,7 +287,9 @@ func currentSchemaStatements() []string {
 			created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_recalled_at TIMESTAMP,
-			recalled_count   INTEGER NOT NULL DEFAULT 0
+			recalled_count   INTEGER NOT NULL DEFAULT 0,
+			generation       INTEGER NOT NULL DEFAULT 1,
+			superseded_by    TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_recall
 			ON memories(namespace, deleted, disabled, updated_at DESC)`,
@@ -315,7 +317,9 @@ func currentSchemaStatements() []string {
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			reviewed_at       TIMESTAMP,
-			applied_at        TIMESTAMP
+			applied_at        TIMESTAMP,
+			targets_json      TEXT NOT NULL DEFAULT '[]',
+			sources_json      TEXT NOT NULL DEFAULT '[]'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
