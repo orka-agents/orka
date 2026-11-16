@@ -288,6 +288,10 @@ func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Princ
 		if !ok {
 			return nil
 		}
+		// A client watching the files uses the workspace: removed as idle
+		// under the watch, its files would show as they were until it is
+		// rebuilt.
+		b.workspaces.touch(principal, pod)
 		stamps, err := b.workspaces.stamps(ctx, pod, root, recursive)
 		if err != nil {
 			return nil
