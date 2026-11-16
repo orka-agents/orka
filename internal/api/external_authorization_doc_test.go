@@ -205,15 +205,26 @@ func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRouteP
 // apiAuthorizationDocNamesPermission reports whether one semicolon-separated
 // clause of an additional-checks cell grants the permission's verb on its
 // resource, written "`verb`[, `verb`...] on `[group/]resource`[ and ...]".
-// Matching within a clause keeps verbs paired with their own resources.
+// Matching within a clause keeps verbs paired with their own resources and
+// SAR names: a named permission's clause must state "`:param`", and an
+// unnamed permission's clause must state no URL parameter.
 func apiAuthorizationDocNamesPermission(additional string, permission apiResourcePermission) bool {
 	for clause := range strings.SplitSeq(additional, ";") {
 		verbs, targets, ok := strings.Cut(clause, " on ")
 		if !ok || !strings.Contains(verbs, "`"+permission.verb+"`") {
 			continue
 		}
-		if strings.Contains(targets, "`"+permission.resource+"`") ||
-			strings.Contains(targets, "`"+permission.group+"/"+permission.resource+"`") {
+		if !strings.Contains(targets, "`"+permission.resource+"`") &&
+			!strings.Contains(targets, "`"+permission.group+"/"+permission.resource+"`") {
+			continue
+		}
+		// A named permission states its URL parameter; an unnamed one states
+		// none (an explicit "empty name" or no name at all).
+		if permission.nameParam != "" {
+			if strings.Contains(targets, "`:"+permission.nameParam+"`") {
+				return true
+			}
+		} else if !strings.Contains(targets, "`:") {
 			return true
 		}
 	}
@@ -238,4 +249,8 @@ func TestAPIAuthorizationDocNamesPermissionPairsVerbsWithResources(t *testing.T)
 	require.True(t, apiAuthorizationDocNamesPermission("`list` on `repositorymonitors` and `tasks`", listTasks))
 	require.False(t, apiAuthorizationDocNamesPermission("`list` on `repositoryscans/tasks`", listTasks), "a subresource must not match its last segment")
 	require.False(t, apiAuthorizationDocNamesPermission("`list` mentioned; `tasks` mentioned", listTasks))
+
+	require.False(t, apiAuthorizationDocNamesPermission("`patch` on `core.orka.ai/repositorymonitors`, empty name", patch), "a named permission must state its parameter")
+	require.False(t, apiAuthorizationDocNamesPermission("`patch` on `core.orka.ai/repositorymonitors`, `:id`", patch), "a named permission must state the right parameter")
+	require.False(t, apiAuthorizationDocNamesPermission("`list` on `core.orka.ai/tasks`, `:name`", listTasks), "an unnamed permission must not state a parameter")
 }
