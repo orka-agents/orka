@@ -309,6 +309,14 @@ const repositoryMonitorCILogCutMarker = " …"
 // through credential characters into the next. Only an edge with unkept
 // lines beyond it is withheld.
 func repositoryMonitorCILogWithholdOpenEdges(original, lines []string, openStart, openEnd bool) {
+	// Analyze the text the sanitizer keeps: a zero-width or other format
+	// rune it strips must not hide a credential character or an escaped
+	// line break at a boundary.
+	normalized := make([]string, len(original))
+	for i, line := range original {
+		normalized[i] = repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(line, ""))
+	}
+	original = normalized
 	words, escaped := repositoryMonitorEvidenceLineWords(original)
 	// passes reports that a credential can run through all of line i.
 	passes := func(i int) bool { return len(words[i]) == 1 || len(words[i]) == 0 && escaped[i] }

@@ -489,3 +489,25 @@ func TestRepositoryMonitorCILogEvidenceReportsEmptyLogs(t *testing.T) {
 		}
 	}
 }
+
+// The window-edge pass analyzes the text the sanitizer keeps, so a format
+// rune such as U+200B cannot hide a credential character or an escaped line
+// break at a boundary.
+func TestRepositoryMonitorCILogOpenEdgesIgnoreFormatRunes(t *testing.T) {
+	const zwsp = "\u200b"
+	withheld := func(original []string, openStart, openEnd bool) []string {
+		lines := append([]string(nil), original...)
+		repositoryMonitorCILogWithholdOpenEdges(original, lines, openStart, openEnd)
+		return lines
+	}
+	cut := []string{"dump ab ab" + repositoryMonitorCILogCutMarker, zwsp + "Q3xR9mP7tK2vL8nW4", "##[error]failed"}
+	got := withheld(cut, false, false)
+	if got[1] != repositoryMonitorEvidenceRedactedLine || got[2] != cut[2] {
+		t.Fatalf("after a cut, a format-prefixed fragment must be withheld and the error kept: %q", got)
+	}
+	end := []string{"build output (step)", "Q3xR9mP7tK2vL8nW4\\" + zwsp}
+	got = withheld(end, false, true)
+	if got[1] != repositoryMonitorEvidenceRedactedLine {
+		t.Fatalf("an escaped break hidden by a format rune at the open end must be withheld: %q", got)
+	}
+}
