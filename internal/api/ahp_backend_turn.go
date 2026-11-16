@@ -73,9 +73,13 @@ type ahpTurn struct {
 	id        string
 	task      string
 	startedAt time.Time
-	emit      ahphost.Emitter
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// taskUID is the UID of the turn's Task once it is known; t.mu guards it.
+	// Events, approvals and a Task that carry another UID belong to a Task
+	// created later under the same name.
+	taskUID string
+	emit    ahphost.Emitter
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	mu              sync.Mutex
 	clientCancelled bool
@@ -264,7 +268,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		}
 		s.Agent, s.Model, s.Turns = choice.Agent, choice.Model, number
 		s.SessionTurns++
-		s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = action.TurnId, name, started.Format(time.RFC3339Nano)
+		s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = action.TurnId, name, "", started.Format(time.RFC3339Nano)
 		s.History = ahpKeepHistory(append(s.History, ahpExchange{User: ahpBounded(action.Message.Text, ahpExchangeMax)}))
 		turn.session = *s
 	})
@@ -304,7 +308,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 			if s.ActiveTurn != action.TurnId {
 				return
 			}
-			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
+			s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
 			s.Agent, s.Model, s.SessionTurns, s.History = record.Agent, record.Model, record.SessionTurns, record.History
 		})
 		b.mu.Lock()
@@ -324,6 +328,16 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		return
 	}
 	unlock()
+	if uid := string(task.UID); uid != "" {
+		turn.mu.Lock()
+		turn.taskUID = uid
+		turn.mu.Unlock()
+		logSessionUpdate(b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+			if s.ActiveTurn == action.TurnId && s.ActiveTask == name {
+				s.ActiveTaskUID = uid
+			}
+		}), record.Session, "record the turn's Task UID")
+	}
 	b.cancelIfClientCancelled(context.WithoutCancel(ctx), principal, turn, task)
 	sealRequesterStamp(ctx, b.h.client, task)
 
@@ -473,7 +487,7 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 		case <-ticker.C:
 			task := &corev1alpha1.Task{}
 			err := t.b.h.client.Get(t.ctx, types.NamespacedName{Namespace: t.session.Namespace, Name: t.task}, task)
-			if apierrors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) || (err == nil && !t.ownsTask(task)) {
 				t.settleWithError("TaskDeleted", "the turn's Task was deleted")
 				return
 			}
@@ -487,6 +501,19 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 			return
 		}
 	}
+}
+
+// ownsTask reports whether task is the turn's Task, not one created later
+// under its name. A turn recorded before Task UIDs were kept takes the UID of
+// the Task it first finds.
+func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.taskUID == "" {
+		t.taskUID = string(task.UID)
+		return true
+	}
+	return string(task.UID) == t.taskUID
 }
 
 func (t *ahpTurn) drain(events <-chan liveevents.Event) {
@@ -515,6 +542,11 @@ func ahpTaskTerminal(task *corev1alpha1.Task) bool {
 func (t *ahpTurn) handle(event liveevents.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Events follow the Task's name; one a later Task under that name sent is
+	// not the turn's, nor are its permission requests.
+	if event.TaskUID != "" && t.taskUID != "" && event.TaskUID != t.taskUID {
+		return
+	}
 	if event.Approval != nil {
 		t.onApproval(event.Approval)
 		return
@@ -919,6 +951,7 @@ func (t *ahpTurn) recoverApprovals() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	listed = approvals.FilterEventsForTaskUID(listed, t.taskUID)
 	for _, held := range approvals.Derive(listed, t.b.now()) {
 		if held.Kind != approvals.KindPermission || held.Status != approvals.StatusPending {
 			continue
@@ -1240,7 +1273,7 @@ func (t *ahpTurn) finishSession() {
 	// must see that the branch was pushed, or it would continue on it.
 	ended := t.b.updateSessionUntilDone(t.ctx, t.principal.UserKey, t.session.Session, "end the turn", func(s *ahpSession) {
 		if s.ActiveTurn == t.id {
-			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
+			s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
 			s.Published = s.Published || t.published
 		}
 	})
@@ -1331,7 +1364,7 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 		turnCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		turn := &ahpTurn{
 			b: b, principal: principal, session: record, id: record.ActiveTurn,
-			task: record.ActiveTask, startedAt: started, emit: b.emitterFor(principal), ctx: turnCtx, cancel: cancel,
+			task: record.ActiveTask, taskUID: record.ActiveTaskUID, startedAt: started, emit: b.emitterFor(principal), ctx: turnCtx, cancel: cancel,
 			tools: map[string]*ahpToolCall{},
 		}
 		// The previous leader may have streamed some or all of the answer.
