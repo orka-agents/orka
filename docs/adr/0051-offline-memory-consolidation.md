@@ -63,6 +63,9 @@ port is mechanical.
 | `memory_supersede` | one memory | creates one memory from the proposal and retires the target into it |
 | `memory_retire` | one or more memories | disables every target |
 
+A new memory that no existing one covers stays an ordinary `memory` proposal, as `remember`
+creates; a run that proposes one cites the Sessions it drew on.
+
 - A proposal names each target with the generation it read, and may cite the Sessions and
   messages it drew on. Targets and sources are bounded.
 - Applying one is a single provider transaction. Every target must be in the namespace, not
@@ -81,8 +84,13 @@ port is mechanical.
   would put both contradicting claims into every later prompt; a person should decide.
 - On `orka.memory.v1`, a merge or supersede is a create followed by deletes that each name
   the expected generation, and a retire is a replace. That contract changes one record at a
-  time, so a port must order those writes under idempotent operation IDs instead of one
-  transaction.
+  time, so a port cannot keep the all-or-nothing guarantee. It must check every target's
+  generation before its first write, then write under idempotent operation IDs and record
+  the application as in progress. When a later write conflicts, because a target changed
+  after the check, the writes that succeeded stay: the new memory exists and some targets
+  are retired. The port records the proposal as partly applied, naming what changed, and
+  leaves the rest for a person, who can retire the new memory or the remaining targets. It
+  never retries a conflicting write against the newer content.
 
 ### Scheduled consolidation runs
 
@@ -90,29 +98,41 @@ port is mechanical.
   with `spec.schedule`. Admission refuses the field on other Task types and with a
   `sessionRef`. The mode is `DryRun`, the default, which reports what it would propose, or
   `Propose`, which also creates the proposals.
-- A run reads Sessions of every user in its namespace, which no ordinary Task can: the
-  internal transcript routes limit a Task to its own Session and its coordination tree.
-  So a `ValidatingAdmissionPolicy` checks the live caller that creates the Task, or
-  changes its `memoryConsolidation`: it needs `list` on `sessions` in the namespace, and in
-  `Propose` mode also `create` on `memoryproposals`. A scheduled run is created by the
-  controller from a parent that passed this check. The internal run routes accept only the
-  authenticated worker of an active Task that carries the field.
+- A run reads the transcripts of every user's Sessions in its namespace, which no ordinary
+  Task can: the internal transcript routes limit a Task to its own Session and its
+  coordination tree. So a `ValidatingAdmissionPolicy` checks the live caller that creates
+  such a Task, or changes any of its spec: it needs `list` and `get` on `sessions` in the
+  namespace (reading a transcript needs `get`), and in `Propose` mode also `create` on
+  `memoryproposals`. Checking every spec change matters because the prompt steers the run
+  and the Agent or provider decides where the transcripts are sent. The field is immutable.
+  A scheduled run is created by the controller from a parent that passed this check. The
+  internal run routes accept only the authenticated worker of an active Task that carries
+  the field.
 - Memory and its proposals are namespace-wide. A namespace that enables consolidation
   accepts that what one person's Session taught can reach everyone's prompts, after review.
 - In this mode the worker has one tool, `submit_memory_consolidation`, a fixed
   Orka-owned system prompt, and no injected memory context. `spec.ai.prompt`, when set, is
   passed as the operator's focus.
-- Orka keeps one run record per Task UID. Beginning a run fixes its window: from the end of
-  the namespace's latest completed run, or the lookback (default 7 days) when there is
-  none, to now. A retried Pod of the same Task gets the same window. A run that fails or is
-  skipped does not move the cursor, so its Sessions are read again.
+- Orka keeps one run record per Task UID. Beginning a run fixes its window, which ends now.
+  It starts at its mode's cursor: the window end of the latest completed run in that mode,
+  or, before any completed, the window start of the mode's first run, so skipped and failed
+  runs read their Sessions again however long they wait. A cursor is followed back at most
+  720 hours. With no run at all, the window starts the lookback (default 7 days) before
+  now. `DryRun` and `Propose` keep separate cursors, so dry runs never use up the Sessions
+  a proposing run has yet to read. A retried Pod of the same Task gets the same window.
+- At most one run reads a namespace's memory at a time. Beginning a run while another in the
+  namespace, of either mode, is running returns a conflict, so two runs never propose over
+  the same memories at once. A run whose Task died stops blocking after two hours.
 - Inputs:
   - every active memory in the namespace (at most 200), with its generation and recall
-    counts;
-  - chat and task Sessions, never gateway ones, that are idle and changed inside the
-    window: the 50 most recently changed, and the newest 40 user and assistant messages of
-    each, each message bounded. Tool messages are dropped, so memory a run recalled cannot
-    be read back as new evidence.
+    counts, each cut to 2,000 characters;
+  - chat and task Sessions, never gateway ones, that changed inside the window: the 50 most
+    recently changed, and the newest 40 user and assistant messages of each, each cut to
+    2,000 characters. A Session with a turn still running is read too: its transcript holds
+    only finished turns, and releasing its lock does not change it again, so skipping it
+    could miss it for good. Tool messages are dropped, so memory a run recalled cannot be
+    read back as new evidence.
+  - 200,000 characters in all, memories first; the report says when the input was cut.
   - Fewer eligible Sessions than `minNewSessions` (default 5) skips the run without calling
     the model.
 - Orka cannot tell from a stored Session which Task wrote it, so this version does not
@@ -126,9 +146,9 @@ port is mechanical.
   - no memory is targeted twice;
   - content is non-empty and at most 1,200 characters;
   - at most `maxOperations` operations (default 10, at most 20);
-  - the operations remove at most a quarter of the active memories, and at least one. A
-    merge of k memories removes k−1, a supersede none and a retire k, so merging two
-    duplicates is always possible.
+  - the operations remove at most `max(1, ⌊active memories ÷ 4⌋)` memories. A merge of k
+    memories removes k−1, a supersede none and a retire k, so merging two duplicates is
+    always possible, and a run that only supersedes or proposes nothing is within it.
 - Orka drops an operation that fails these checks and records why. The rest still apply.
 - The report holds the window, the input counts, each accepted operation, each rejected one
   with its reason, the conflicts the model reported, and the proposal IDs. It becomes the
@@ -144,7 +164,8 @@ port is mechanical.
   recalls. Counting adds one small write per recall.
 - Excluding scheduled or continuation turns needs the turn's origin recorded on Session
   messages. That is a follow-up.
-- A run reads at most 50 Sessions. When more changed, the oldest of them are not read.
+- A run reads at most 50 Sessions and 200,000 characters. When more changed, the oldest of
+  them are not read.
 - The storage contract gains a revision and new methods that every provider must
   implement, checked by the shared suite.
 - Ranking recalls by relevance, an index of memory titles loaded into every prompt, and
