@@ -48,26 +48,30 @@ func newDashboardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Open the Orka dashboard in your browser, signed in",
-		Long: "Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in " +
-			"with it. The token goes only to the browser; other orka commands do not use it. The controller serves the " +
-			"dashboard only when it runs with --dashboard-enabled; every other orka command works without it.",
+		Long: "Create a ServiceAccount token (or use --token or --token-file) and open the Orka dashboard in your browser, " +
+			"signed in with it. The token goes only to the browser; other orka commands do not use it, and this command " +
+			"does not use " + envToken + " or the config file's token. The browser opens --server, " + envServer + " or " +
+			"the configured server, else " + defaultServer + "; unlike other commands, dashboard does not find the server " +
+			"through the kubeconfig. The ServiceAccount is in --namespace, " + envNamespace + " or the configured " +
+			"namespace, else \"" + defaultNamespace + "\". The controller serves the dashboard only when it runs with " +
+			"--dashboard-enabled; every other orka command works without it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			server, _ := cmd.Flags().GetString("server")
-			token, _ := cmd.Flags().GetString("token")
-			ns, _ := cmd.Flags().GetString("namespace")
+			// Only a token given for this command signs the browser in; the
+			// ORKA_TOKEN and config tokens are API credentials.
+			token, err := flagToken(cmd)
+			if err != nil {
+				return err
+			}
 
 			cfg := loadConfig()
-			if server == "" {
-				server = cfg.Server
-			}
+			server := configuredServer(cmd, cfg)
 			if server == "" {
 				server = defaultServer
 			}
+			// The namespace of the ServiceAccount the created token is for.
+			ns := configuredNamespace(cmd, cfg)
 			if ns == "" {
-				ns = cfg.Namespace
-			}
-			if ns == "" {
-				ns = "default"
+				ns = defaultNamespace
 			}
 
 			// Checked before a token is minted, so a server without the
@@ -78,11 +82,10 @@ func newDashboardCmd() *cobra.Command {
 			}
 
 			if token == "" {
-				var err error
 				token, err = serviceAccountTokenFunc(serviceAccount, ns)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
-					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
+					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token or --token-file\n")
 					return err
 				}
 			}
@@ -124,6 +127,11 @@ func newDashboardCmd() *cobra.Command {
 		},
 	}
 
+	// Shadows the global --token, whose help recommends ORKA_TOKEN, which this
+	// command does not read.
+	cmd.Flags().StringP("token", "t", "",
+		"Token to sign the dashboard in with (prefer --token-file, which keeps it out of process arguments; "+
+			envToken+" is not used)")
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "ServiceAccount name")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the dashboard URL without opening a browser")
 	cmd.Flags().BoolVar(
