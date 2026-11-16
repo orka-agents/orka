@@ -16,4 +16,16 @@ describe('activeParkedApprovalId', () => {
     const failed = { metadata: { name: 'tk' }, status: { phase: 'Failed' as const, wait: { kind: 'Approval', state: 'Requested', references: ['ap'] } } }
     expect(activeParkedApprovalId(failed)).toBeUndefined()
   })
+
+  it('stops showing a parked approval once its wait deadline passes', () => {
+    const now = Date.parse('2026-11-16T12:00:00Z')
+    const task = (deadline: string) => ({
+      metadata: { name: 'tk' },
+      status: { phase: 'Succeeded' as const, wait: { kind: 'Approval', state: 'Waiting', references: ['ap'], deadline } },
+    })
+    expect(activeParkedApprovalId(task('2026-11-16T12:05:00Z'), now)).toBe('ap')
+    expect(activeParkedApprovalId(task('2026-11-16T12:00:00Z'), now)).toBeUndefined()
+    expect(activeParkedApprovalId(task('2026-11-16T11:00:00Z'), now)).toBeUndefined()
+    expect(activeParkedApprovalId(task('not-a-time'), now)).toBe('ap')
+  })
 })
