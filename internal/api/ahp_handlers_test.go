@@ -107,6 +107,9 @@ func TestAHPTokenRoutesMintListAndRevoke(t *testing.T) {
 		"unknown field": `{"subject":"bob"}`,
 		"bad ttl":       `{"ttl":"forever"}`,
 		"ttl too long":  `{"ttl":"100000h"}`,
+		// A zero given is not an omitted lifetime.
+		"zero ttl":     `{"ttl":"0s"}`,
+		"negative ttl": `{"ttl":"-1h"}`,
 	} {
 		status, raw := h.do(http.MethodPost, "/api/v1/ahp-tokens", body)
 		require.Equal(t, http.StatusBadRequest, status, "%s: %s", name, raw)

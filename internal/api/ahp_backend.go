@@ -28,6 +28,7 @@ import (
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -444,6 +445,12 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 		}
 		key := string(runtime) + "\x00" + agent.Spec.Model.Name
 		if seen[key] {
+			continue
+		}
+		// An Agent the controller found unusable, such as an OpenCode Agent
+		// without its model limits, would only fail every turn: its model is
+		// not offered until the Agent is fixed. One not yet checked is.
+		if meta.IsStatusConditionFalse(agent.Status.Conditions, "Ready") {
 			continue
 		}
 		// A model is offered only through an Agent the person may use, so
