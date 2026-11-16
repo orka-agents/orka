@@ -370,7 +370,7 @@ func parseSkipDirective(line string) (reason string, isAttempt bool, valid bool)
 		return "", true, false
 	}
 	reason = strings.TrimSpace(m[1])
-	if reason == "" {
+	if reason == "" || strings.Contains(reason, "-->") || strings.Contains(reason, "<!--") {
 		return "", true, false
 	}
 	return reason, true, true
@@ -590,6 +590,8 @@ func TestExtractYAMLCodeBlocks_SkipMalformed(t *testing.T) {
 		"<!-- orka:skip-strict-decode reason",
 		"<!-- orka:skip-strict-decode reason --> trailing prose",
 		"<!-- orka:skip-strict-decode reason --",
+		"<!-- orka:skip-strict-decode --> <!-- unrelated -->",
+		"<!-- orka:skip-strict-decode reason --> <!-- unrelated -->",
 	} {
 		t.Run(directive, func(t *testing.T) {
 			content := strings.Join([]string{
