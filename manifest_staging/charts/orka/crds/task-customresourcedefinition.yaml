@@ -2410,6 +2410,16 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  tracking:
+                    description: |-
+                      Tracking records that projectedSeq has followed the approval events
+                      since the Task selected an approval event. The controller sets it when
+                      it initializes the status of a Task that selects one. Otherwise, the
+                      first projection raises projectedSeq to the stream's high-water mark
+                      before setting it, so history from before the selection, or from while
+                      the Task selected no approval event, is never notified. It is cleared
+                      when the Task selects no approval event.
+                    type: boolean
                 type: object
               attempts:
                 description: Attempts is the number of attempts made

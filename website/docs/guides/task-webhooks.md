@@ -274,8 +274,11 @@ How approvals reach a receiver:
 - An approval notice gets **5 attempts**, retried after 10s, 20s, 40s and 60s,
   so it settles within about three minutes. Review windows are short, and a
   late alert is of little use.
-- Selecting an event later does not replay older transitions. Removing one,
-  where the spec can still change, retires its pending notices unsent.
+- Selecting approval events on a Task whose spec can still change, or
+  selecting them again after removing them all, does not replay earlier
+  approval history. Notices start with the first transition recorded after
+  the controller sees the selection. Removing an event retires its pending
+  notices unsent.
 - A Task with the same name as an earlier one never receives the earlier Task's
   approvals.
 
@@ -293,6 +296,7 @@ Status records the queue and its cursor:
 status:
   approvalWebhooks:
     projectedSeq: 42
+    tracking: true
     notices:
       - deliveryID: 2b7c...
         eventType: task.approval_resolved

@@ -374,17 +374,23 @@ func pruneSettledApprovalNotices(state *corev1alpha1.TaskApprovalWebhooks, limit
 // approval API and the broker; when nothing recorded that, the controller
 // appends the ApprovalExpired event once. The store keeps one terminal event
 // per approval, so a decision that landed first wins and this append is
-// refused. It reports whether an event was appended and when the next
-// pending expiry falls due.
+// refused. It reports whether an append was attempted, so the caller reads
+// the approvals again, and when the next pending expiry falls due.
+//
+// Like the broker's recovery, the append copies the request's Session
+// association from history. It therefore runs under the namespace cleanup
+// fence against a fresh read of the retained request: timeline or Session
+// cleanup that commits after that read refuses the append and the read is
+// repeated, so the controller never recreates a cleaned request's history
+// or restores a cleaned Session association.
 func recordDueApprovalExpiries(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
 	task *corev1alpha1.Task,
-	listed []store.ExecutionEvent,
 	own []approvals.Approval,
 	now time.Time,
 ) (bool, time.Duration, error) {
-	appended := false
+	attempted := false
 	next := time.Duration(0)
 	for _, approval := range own {
 		if approval.Status != approvals.StatusPending || approval.Binding == nil || approval.ExpiresAt == nil {
@@ -397,22 +403,32 @@ func recordDueApprovalExpiries(
 			}
 			continue
 		}
-		event, err := approvalExpiryEvent(task, listed, approval)
+		attempted = true
+		_, err := withRetainedMCPApproval(ctx, eventStore, task.Namespace, task.Name, mcpApprovalNamespaceFence, approval,
+			func(txCtx context.Context, current approvals.Approval, listed []store.ExecutionEvent) (*store.ExecutionEvent, error) {
+				if current.Status != approvals.StatusPending {
+					return nil, nil // A terminal event recorded since the first read wins.
+				}
+				event, err := approvalExpiryEvent(task, listed, current)
+				if err != nil {
+					return nil, err
+				}
+				appended, err := eventStore.AppendExecutionEvent(txCtx, event)
+				if errors.Is(err, store.ErrConflict) {
+					return nil, nil // Another terminal event won; read it again.
+				}
+				return appended, err
+			})
 		if err != nil {
-			return appended, next, err
+			return attempted, next, fmt.Errorf("record approval expiry: %w", err)
 		}
-		if _, err := eventStore.AppendExecutionEvent(ctx, event); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				appended = true // Another terminal event won; read it again.
-				continue
-			}
-			return appended, next, fmt.Errorf("record approval expiry: %w", err)
-		}
-		appended = true
 	}
-	return appended, next, nil
+	return attempted, next, nil
 }
 
+// approvalExpiryEvent builds the controller's ApprovalExpired event from a
+// fenced read of the approval's history, copying the request's current
+// Session and agent association.
 func approvalExpiryEvent(task *corev1alpha1.Task, listed []store.ExecutionEvent, approval approvals.Approval) (*store.ExecutionEvent, error) {
 	var request store.ExecutionEvent
 	for _, event := range listed {
@@ -450,8 +466,19 @@ func (w *WebhookNotifier) reconcileApprovalNotices(
 	task *corev1alpha1.Task,
 ) (time.Duration, error) {
 	selected := selectedApprovalWebhookEvents(task)
-	if len(selected) == 0 && firstPendingApprovalNotice(task.Status.ApprovalWebhooks) < 0 {
-		return 0, nil
+	if len(selected) == 0 {
+		if state := task.Status.ApprovalWebhooks; state != nil && state.Tracking {
+			// Opting out ends tracking, so selecting again starts from the
+			// stream's high-water mark rather than replaying what happened
+			// while nothing was selected.
+			state.Tracking = false
+			if err := status.Update(ctx, task); err != nil {
+				return 0, err
+			}
+		}
+		if firstPendingApprovalNotice(task.Status.ApprovalWebhooks) < 0 {
+			return 0, nil
+		}
 	}
 	log := logf.FromContext(ctx)
 	requeue := time.Duration(0)
@@ -491,23 +518,60 @@ func (w *WebhookNotifier) projectTaskApprovalEvents(
 	if err != nil {
 		return approvalProjection{}, err
 	}
-	own := taskApprovals(listed, uid)
 	var result approvalProjection
+	result.changed = startApprovalWebhookTracking(ctx, task, listed)
+	own := taskApprovals(listed, uid)
 	if selected.allows(corev1alpha1.TaskApprovalWebhookResolved) {
-		appended, next, err := recordDueApprovalExpiries(ctx, eventStore, task, listed, own, w.now())
+		attempted, next, err := recordDueApprovalExpiries(ctx, eventStore, task, own, w.now())
 		result.nextExpiry = next
 		if err != nil {
 			return result, err
 		}
-		if appended {
+		if attempted {
 			if listed, err = approvals.ListEvents(ctx, eventStore, task.Namespace, task.Name); err != nil {
 				return result, err
 			}
 			own = taskApprovals(listed, uid)
 		}
 	}
-	result.changed, err = projectApprovalNotices(ctx, task, approvalWebhookTransitions(own), selected, w.now())
+	projected, err := projectApprovalNotices(ctx, task, approvalWebhookTransitions(own), selected, w.now())
+	result.changed = result.changed || projected
 	return result, err
+}
+
+// startTrackingInitialApprovalSelection marks, while the controller
+// initializes a new Task's status, that the Task selected approval events
+// from the start. Nothing has run yet, so every later transition of the Task
+// is projected.
+func startTrackingInitialApprovalSelection(task *corev1alpha1.Task) {
+	if len(selectedApprovalWebhookEvents(task)) > 0 && task.Status.ApprovalWebhooks == nil {
+		task.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true}
+	}
+}
+
+// startApprovalWebhookTracking sets the selection boundary when the
+// controller observes a Task selecting approval events that it did not
+// select when its status was initialized, or that it selects again after the
+// controller observed it selecting none. The cursor is first raised to the
+// stream's high-water mark in listed, so approval history from before the
+// selection is never notified and cannot fill the queue. A selection that
+// was removed and restored between two observations is not seen as removed.
+// It reports whether status changed.
+func startApprovalWebhookTracking(ctx context.Context, task *corev1alpha1.Task, listed []store.ExecutionEvent) bool {
+	state := task.Status.ApprovalWebhooks
+	if state != nil && state.Tracking {
+		return false
+	}
+	if state == nil {
+		state = &corev1alpha1.TaskApprovalWebhooks{}
+	}
+	for _, event := range listed {
+		state.ProjectedSeq = max(state.ProjectedSeq, event.Seq)
+	}
+	state.Tracking = true
+	task.Status.ApprovalWebhooks = state
+	logf.FromContext(ctx).Info("approval webhook events selected; earlier approval history is not notified", "projectedSeq", state.ProjectedSeq)
+	return true
 }
 
 // deliverApprovalNotices sends pending notices in stream order. A later

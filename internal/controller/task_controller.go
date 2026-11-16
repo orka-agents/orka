@@ -400,6 +400,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if task.Status.Phase == "" {
 		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 			t.Status.Phase = corev1alpha1.TaskPhasePending
+			startTrackingInitialApprovalSelection(t)
 		}); err != nil {
 			log.Error(err, "failed to update initial status")
 			tracing.RecordSpanError(span, err)

@@ -740,6 +740,16 @@ type TaskApprovalWebhooks struct {
 	// +kubebuilder:validation:Minimum=0
 	ProjectedSeq int64 `json:"projectedSeq,omitempty"`
 
+	// Tracking records that projectedSeq has followed the approval events
+	// since the Task selected an approval event. The controller sets it when
+	// it initializes the status of a Task that selects one. Otherwise, the
+	// first projection raises projectedSeq to the stream's high-water mark
+	// before setting it, so history from before the selection, or from while
+	// the Task selected no approval event, is never notified. It is cleared
+	// when the Task selects no approval event.
+	// +optional
+	Tracking bool `json:"tracking,omitempty"`
+
 	// Notices are the retained notices in stream order. Pending notices are
 	// never removed; settled ones are pruned, oldest first, to make room.
 	// +optional

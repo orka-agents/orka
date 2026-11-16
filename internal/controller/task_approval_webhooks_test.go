@@ -12,8 +12,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,9 +24,11 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/storetest"
+	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/taskwebhook"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,14 +44,19 @@ const (
 
 var approvalWebhookTestNow = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 
-// approvalWebhookHarness drives approval notices over a fake API, a fake
-// event store, and a recording receiver. Every reconcile uses a fresh
-// notifier, as a restarted controller would: all state comes from status.
+// approvalWebhookHarness drives approval notices over a fake API, the
+// fenced storage client over SQLite, and a recording receiver. Every
+// reconcile uses a fresh notifier, as a restarted controller would: all state
+// comes from status.
 type approvalWebhookHarness struct {
-	t        *testing.T
-	now      time.Time
-	client   ctrlclient.Client
-	events   *storetest.FakeExecutionEventStore
+	t      *testing.T
+	now    time.Time
+	client ctrlclient.Client
+	db     *storesqlite.Store
+	// storage is the fenced client; events is what the controller reads and
+	// writes through, storage unless a test intercepts it.
+	storage  *storageclient.Client
+	events   store.ExecutionEventStore
 	receiver *webhookReceiver
 	keys     taskwebhook.KeySet
 	// maxAttempts overrides the approval attempt bound when non-zero.
@@ -56,20 +66,34 @@ type approvalWebhookHarness struct {
 func newApprovalWebhookHarness(t *testing.T, task *corev1alpha1.Task, statuses ...int) *approvalWebhookHarness {
 	t.Helper()
 	h := &approvalWebhookHarness{t: t, now: approvalWebhookTestNow, receiver: newWebhookReceiver(t, statuses...), keys: newWebhookTestKeys(t)}
-	h.events = storetest.NewFakeExecutionEventStoreWithClock(func() time.Time { return h.now })
+	connection, err := storesqlite.NewDB(filepath.Join(t.TempDir(), "approval-webhooks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	h.db = storesqlite.NewStore(connection, "approval-webhooks-test")
+	h.storage = approvalStorageClient(t, h.db)
+	h.events = h.storage
 	if task != nil {
 		task.Spec.WebhookURL = h.receiver.server.URL + "/hook"
-		h.client = newWebhookTestClient(t, task)
+		// The Task reconciler records usage in the store, keyed by namespace UID.
+		h.client = newWebhookTestClient(t, task, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNS, UID: "namespace-uid"}})
 	}
 	return h
 }
 
+// newApprovalWebhookTask returns a Task that has run. A Task that selects
+// approval events has tracking set, as status initialization records it.
 func newApprovalWebhookTask(phase corev1alpha1.TaskPhase, selected ...corev1alpha1.TaskWebhookEvent) *corev1alpha1.Task {
-	return &corev1alpha1.Task{
+	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: approvalWebhookTestTask, Namespace: defaultNS, UID: approvalWebhookTestUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, WebhookEvents: selected},
 		Status:     corev1alpha1.TaskStatus{Phase: phase, Attempts: 1},
 	}
+	if len(selected) > 0 {
+		task.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true}
+	}
+	return task
 }
 
 var bothApprovalEvents = []corev1alpha1.TaskWebhookEvent{
@@ -110,7 +134,10 @@ func (h *approvalWebhookHarness) append(event *store.ExecutionEvent) *store.Exec
 	if event.Severity == "" {
 		event.Severity = events.ExecutionEventSeverityInfo
 	}
-	appended, err := h.events.AppendExecutionEvent(context.Background(), event)
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = h.now
+	}
+	appended, err := h.storage.AppendExecutionEvent(context.Background(), event)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -564,6 +591,7 @@ func TestApprovalWebhooksKeepTerminalDeliveryUnchanged(t *testing.T) {
 func TestApprovalWebhooksParkedSignOffNotifiesAfterTheTurnSucceeded(t *testing.T) {
 	task := parkedTestTask(corev1alpha1.TaskWaitKindApproval, corev1alpha1.TaskPhaseSucceeded)
 	task.Spec.WebhookEvents = bothApprovalEvents
+	task.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true}
 	h := newParkedWebhookHarness(t, task)
 	approvalNotices := func() {
 		t.Helper()
@@ -657,5 +685,217 @@ func TestTaskReconcilerDeliversApprovalNoticesForAFinishedTask(t *testing.T) {
 	// their own order.
 	if terminal != 1 || !slices.Equal(approvalEvents, []string{"task.approval_requested", "task.approval_resolved"}) {
 		t.Fatalf("terminal notices = %d, approval events = %v", terminal, approvalEvents)
+	}
+}
+
+// approvalExpiryCleanupStore runs cleanup once, just before the controller's
+// first ApprovalExpired append reaches the store: after the approval history
+// was listed and, under the fence, after the fenced read of the request.
+type approvalExpiryCleanupStore struct {
+	*storageclient.Client
+	cleanup func(context.Context) error
+	once    sync.Once
+	appends atomic.Int32
+}
+
+func (s *approvalExpiryCleanupStore) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	if event.Type == events.ExecutionEventTypeApprovalExpired {
+		s.appends.Add(1)
+		var err error
+		s.once.Do(func() { err = s.cleanup(context.Background()) })
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.Client.AppendExecutionEvent(ctx, event)
+}
+
+// Timeline or Session cleanup that commits after the controller read an
+// expired brokered review must refuse the controller's expiry append, so it
+// neither recreates the cleaned request's history nor restores the cleaned
+// Session association.
+func TestApprovalWebhooksExpiryCleanupAfterListRecreatesNothing(t *testing.T) {
+	const session = "approval-session"
+	for _, cleanup := range []string{"timeline", "session"} {
+		t.Run(cleanup, func(t *testing.T) {
+			h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...))
+			expiresAt := approvalWebhookTestNow.Add(10 * time.Minute)
+			content, _ := json.Marshal(map[string]any{
+				"approvalID": "approval-bound", "taskUID": string(approvalWebhookTestUID), "targetTool": "github.create_pr",
+				"expiresAt": expiresAt, "binding": approvals.CallBinding{TaskAttempt: 1, PromptID: "prompt-1", OperationIDDigest: "sha256:op", RequestDigest: "sha256:req"},
+			})
+			h.append(&store.ExecutionEvent{
+				Type: events.ExecutionEventTypeApprovalRequested, ToolName: "call_tool", ToolCallID: "approval-bound",
+				SessionName: session, Content: content,
+			})
+			h.reconcile()
+
+			wrapped := &approvalExpiryCleanupStore{Client: h.storage, cleanup: func(ctx context.Context) error {
+				if cleanup == "timeline" {
+					return h.db.DeleteExecutionEvents(ctx, defaultNS, events.ExecutionEventStreamTypeTask, approvalWebhookTestTask)
+				}
+				return h.db.DeleteSession(ctx, defaultNS, session, time.Now().UTC())
+			}}
+			h.events = wrapped
+			h.now = expiresAt.Add(approvalExpiryGrace)
+			for range 3 {
+				h.reconcile()
+			}
+			if wrapped.appends.Load() == 0 {
+				t.Fatal("the controller never reached its expiry append")
+			}
+
+			listed, err := h.storage.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+				Namespace: defaultNS, StreamType: events.ExecutionEventStreamTypeTask, StreamID: approvalWebhookTestTask,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cleanup == "timeline" {
+				if len(listed) != 0 {
+					t.Fatalf("cleaned history has %d events; the expiry recreated an orphan %s", len(listed), listed[0].Type)
+				}
+				if got := eventTypes(h.receipts()); !slices.Equal(got, []string{"task.approval_requested"}) {
+					t.Fatalf("events = %v, want no resolution for a cleaned request", got)
+				}
+				return
+			}
+			expiries := 0
+			for _, event := range listed {
+				if event.SessionName != "" {
+					t.Fatalf("%s restored the cleaned Session association %q", event.Type, event.SessionName)
+				}
+				if event.Type == events.ExecutionEventTypeApprovalExpired {
+					expiries++
+				}
+			}
+			if expiries != 1 {
+				t.Fatalf("expiry events = %d, want one recorded from a fresh read", expiries)
+			}
+			sessionEvents, _, err := h.storage.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{
+				Namespace: defaultNS, SessionName: session,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sessionEvents) != 0 {
+				t.Fatalf("the cleaned Session's stream has %d events", len(sessionEvents))
+			}
+			if got := eventTypes(h.receipts()); !slices.Equal(got, []string{"task.approval_requested", "task.approval_resolved"}) {
+				t.Fatalf("events = %v", got)
+			}
+		})
+	}
+}
+
+// setWebhookEvents changes the stored Task's selection.
+func (h *approvalWebhookHarness) setWebhookEvents(selected ...corev1alpha1.TaskWebhookEvent) {
+	h.t.Helper()
+	task := h.task()
+	task.Spec.WebhookEvents = selected
+	if err := h.client.Update(context.Background(), task); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// Selecting approval events on a Task whose spec is still mutable, or
+// selecting them again after opting out, never notifies earlier history and
+// cannot fill the queue with it; later transitions are notified exactly once.
+func TestApprovalWebhooksLateSelectionDoesNotReplayHistory(t *testing.T) {
+	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning)
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	h := newApprovalWebhookHarness(t, task)
+	// More history than the queue holds, so a replay would overflow it.
+	for i := range corev1alpha1.MaxTaskApprovalWebhookNotices + 4 {
+		id := fmt.Sprintf("approval-old-%02d", i)
+		h.request(approvalWebhookTestUID, id)
+		h.decide(approvalWebhookTestUID, id, events.ExecutionEventTypeApprovalApproved)
+	}
+	h.request(approvalWebhookTestUID, "approval-open")
+	h.reconcile()
+
+	h.setWebhookEvents(bothApprovalEvents...)
+	h.reconcile()
+	h.reconcile()
+	state := h.task().Status.ApprovalWebhooks
+	if got := len(h.receiver.all()); got != 0 || state == nil || !state.Tracking || state.Overflowed || len(state.Notices) != 0 {
+		t.Fatalf("late selection replayed history: %d receipts, state %+v", got, state)
+	}
+
+	// A transition after the selection is notified once, even for an
+	// approval requested before it.
+	h.decide(approvalWebhookTestUID, "approval-open", events.ExecutionEventTypeApprovalDeclined)
+	h.request(approvalWebhookTestUID, "approval-new")
+	h.reconcile()
+	h.reconcile()
+	h.reconcile()
+	receipts := h.receipts()
+	if got := eventTypes(receipts); !slices.Equal(got, []string{"task.approval_resolved", "task.approval_requested"}) ||
+		receipts[0].payload.ApprovalID != "approval-open" || receipts[1].payload.ApprovalID != "approval-new" {
+		t.Fatalf("events = %v, want only the transitions after the selection", got)
+	}
+
+	// While opted out, transitions are not tracked, and selecting again does
+	// not replay them.
+	h.setWebhookEvents()
+	h.reconcile()
+	if state := h.task().Status.ApprovalWebhooks; state.Tracking {
+		t.Fatal("opting out kept tracking")
+	}
+	h.decide(approvalWebhookTestUID, "approval-new", events.ExecutionEventTypeApprovalApproved)
+	h.request(approvalWebhookTestUID, "approval-unselected")
+	h.reconcile()
+	h.setWebhookEvents(bothApprovalEvents...)
+	h.reconcile()
+	h.reconcile()
+	if got := len(h.receiver.all()); got != 2 {
+		t.Fatalf("receipts = %d after selecting again, want no replay of the opted-out period", got)
+	}
+	h.request(approvalWebhookTestUID, "approval-after")
+	h.reconcile()
+	h.reconcile()
+	receipts = h.receipts()
+	if len(receipts) != 3 || receipts[2].payload.ApprovalID != "approval-after" || receipts[2].payload.EventType != "task.approval_requested" {
+		t.Fatalf("receipts = %v, want only the new request after selecting again", eventTypes(receipts))
+	}
+	if state := h.task().Status.ApprovalWebhooks; state.Overflowed || state.Omitted != 0 {
+		t.Fatalf("state = %+v, want no overflow from history", state)
+	}
+}
+
+// Status initialization records that a Task selected approval events from
+// the start, so an approval it requests before its first projection is still
+// notified. A Task that selects none gets no approval state.
+func TestTaskReconcilerInitializesApprovalTrackingWithStatus(t *testing.T) {
+	for _, selected := range [][]corev1alpha1.TaskWebhookEvent{nil, bothApprovalEvents} {
+		t.Run(fmt.Sprintf("selected=%d", len(selected)), func(t *testing.T) {
+			task := newApprovalWebhookTask("", selected...)
+			task.Status = corev1alpha1.TaskStatus{}
+			task.Finalizers = []string{labels.TaskFinalizer}
+			h := newApprovalWebhookHarness(t, task)
+			reconciler := &TaskReconciler{Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			stored := h.task()
+			if stored.Status.Phase != corev1alpha1.TaskPhasePending {
+				t.Fatalf("phase = %q, want status initialized", stored.Status.Phase)
+			}
+			if len(selected) == 0 {
+				if stored.Status.ApprovalWebhooks != nil {
+					t.Fatalf("legacy Task recorded approval state %+v", stored.Status.ApprovalWebhooks)
+				}
+				return
+			}
+			if state := stored.Status.ApprovalWebhooks; state == nil || !state.Tracking || state.ProjectedSeq != 0 {
+				t.Fatalf("state = %+v, want tracking from the start", state)
+			}
+			h.request(approvalWebhookTestUID, "approval-1")
+			h.reconcile()
+			if got := eventTypes(h.receipts()); !slices.Equal(got, []string{"task.approval_requested"}) {
+				t.Fatalf("events = %v, want the first request notified", got)
+			}
+		})
 	}
 }

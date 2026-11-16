@@ -60,8 +60,13 @@ is still pending five seconds after its `expiresAt`, the controller appends
 moment. That matches what the API and broker already report. The store's
 one-terminal-event rule makes this the linearization point: a decision that
 committed first wins and the append is refused. The five seconds let a live
-broker record its own expiry first. The controller records nothing for
-approvals without an enforced expiry.
+broker record its own expiry first. The append copies the request's Session
+association, so, like the broker's recovery, it runs under the namespace
+cleanup fence against a fresh read of the retained request. Timeline or
+Session cleanup that commits after the read refuses the append. The read is
+then repeated, so the controller never recreates a cleaned request or restores
+a cleaned Session association. The controller records nothing for approvals
+without an enforced expiry.
 
 **Projection.** During Task reconcile, in every phase, the controller lists
 the Task's approval events and keeps only approvals whose request names this
@@ -78,9 +83,27 @@ are written in one status update before any attempt. Each notice has:
 
 A transition at or below the cursor is never projected again, and a restarted
 controller recomputes the same IDs. This relies on per-stream sequences being
-visible in order, as the event store's other cursors do. A transition whose
-event is not selected still advances the cursor, so selecting an event later
-never replays older transitions.
+visible in order, as the event store's other cursors do. It also relies on a
+Task's stream never being emptied while the projection runs for it: only the
+Task's deletion finalizer deletes the stream, and a Task being deleted is no
+longer projected. A later Task with the same name has a new UID and an empty
+cursor. A transition whose event is not selected still advances the cursor.
+
+**Selection boundary.** The spec stays mutable for Tasks that record no
+execution authority, such as native AI Tasks without a soul binding, so
+approval events can be selected after approvals already happened.
+`status.approvalWebhooks.tracking` records that the cursor has followed the
+stream since the Task selected an approval event. The controller sets it when
+it initializes the status of a Task that already selects one: nothing has run
+yet, so every transition of the Task is projected. A Task that selects
+approval events without it, because it selected them later, has its cursor
+raised to the stream's high-water mark at its first projection, which then
+sets `tracking`. Earlier history is never notified and cannot latch the
+overflow. Observing a Task that selects no approval event clears `tracking`,
+so selecting again also starts at the high-water mark and does not replay the
+opted-out period. The boundary follows what the controller observes: an
+opt-out and re-enable that no reconcile saw in between are treated as
+continuous selection.
 
 **Overflow.** The queue holds at most 16 notices, one slot reserved for
 overflow. A pending notice is never removed. Settled notices (`Delivered` or
@@ -150,7 +173,9 @@ notices, as for the terminal notice.
   exactly-once: a crash between send and record repeats an attempt under the
   same ID.
 - Receivers must tolerate gaps and order by `streamSeq` within a Task. Gaps
-  come from a failed notice, the overflow latch, or a later selection.
+  come from a failed notice, the overflow latch, or a later selection. A
+  resolution can arrive without its request when the request predates the
+  selection.
 - An approval notice is an alert, not authority. Receivers act through the
   approvals API, which revalidates everything.
 - The controller now writes `ApprovalExpired` for an expired brokered review
