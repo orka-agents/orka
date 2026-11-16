@@ -114,19 +114,19 @@ Each run reads the Sessions that changed since the last completed run of its mod
 - chat and task Sessions only, never gateway conversations;
 - the 50 most recently changed of them, however long ago they were created, and the newest 40 user and assistant messages of each, found among its newest 200 records and each cut to 2,000 characters. Tool messages are dropped, so memory an agent recalled cannot come back as new evidence;
 - every active memory, up to 200, with its `generation` and [recall counts](#recall-counts), each cut to 2,000 characters and at most 10 tags of 40 characters;
-- at most 60,000 characters of memories and, separately, 60,000 characters of transcripts, so memories never crowd out what the run learns from. A report whose input reached either limit says `inputTruncated`. A model that still cannot take the input fails the run, which leaves its Sessions for the next one.
+- at most 60,000 characters of memories and, separately, 60,000 characters of transcripts, so memories never crowd out what the run learns from. Within a Session the limit keeps the newest turns, which the model still reads in order. A report whose input reached either limit says `inputTruncated`. A model that still cannot take the input fails the run, which leaves its Sessions for the next one.
 
 `DryRun` and `Propose` keep separate places, so dry runs never use up the Sessions a proposing run has yet to read. When fewer than `minNewSessions` Sessions changed, the run is skipped without calling the model. A skipped or failed run does not move its mode's place: the next run reads the same Sessions again, from where the first run started, up to 720 hours back.
 
-A run records its input when it begins: a retried Pod reads the same input, and its result is checked against exactly what the model saw. The recorded input is deleted when the run finishes, and no other copy of it is kept. Only the worker of the run's own active Task can begin or complete it, and once its Job is revoked it can do neither, even before Kubernetes shows the revocation.
+A run records its input when it begins: a retried Pod reads the same input, and its result is checked against exactly what the model saw. The recorded input is deleted when the run finishes, or when its Task fails, is cancelled or is deleted first, and no other copy of it is kept. A run whose Task ended without finishing it is marked abandoned, and the next run in its mode reads its Sessions again. Only the worker of the run's own active Task can begin or complete it, and once its Job is revoked it can do neither, even before Kubernetes shows the revocation.
 
-Only one run at a time reads a namespace's memory. A run that begins while another is running fails with a conflict. A run whose Task died stops blocking after two hours; the run that takes over marks it abandoned, so it can neither resume nor create proposals.
+Only one run at a time reads a namespace's memory. A run that begins while another is running fails with a conflict. A run that read its inputs while another run in its mode completed reads them again from where that run ended, so the two never read the same Sessions. A run whose Task died stops blocking after two hours; the run that takes over marks it abandoned, so it can neither resume nor create proposals.
 
 Orka cannot yet tell which Task wrote a Session, so turns of scheduled Tasks and parked continuations are read like any other.
 
 ### What a run keeps
 
-The model's result is untrusted, so Orka checks every operation against what the run read and drops one that fails, recording why:
+The model's result is untrusted. A result without an `operations` list, or from a response the model did not finish, is not accepted: the worker asks once more, and otherwise the run fails, so its Sessions are read again. A run that finds nothing to change submits an empty list. Orka then checks every operation against what the run read and drops one that fails, recording why:
 
 - every target is a memory the run read, at the generation it read, still active at that generation, and no two operations change the same memory;
 - every source is a Session the run read, and an `add` cites at least one;

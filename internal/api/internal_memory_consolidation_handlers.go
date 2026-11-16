@@ -50,6 +50,10 @@ func (h *InternalHandlers) memoryConsolidationCaller(c fiber.Ctx) (string, *core
 	return namespace, task, nil
 }
 
+// memoryConsolidationBeginAttempts bounds how often a run chooses its window
+// again after another run moved its mode's cursor.
+const memoryConsolidationBeginAttempts = 3
+
 // memoryConsolidationNow is the clock a run's window ends by; tests move it
 // past the Sessions they write.
 var memoryConsolidationNow = time.Now
@@ -100,8 +104,15 @@ func (h *InternalHandlers) beginOrResumeMemoryConsolidation(ctx context.Context,
 	task *corev1alpha1.Task) (memoryconsolidation.BeginResponse, error) {
 	settings := memoryconsolidation.SettingsFor(task.Spec.AI.MemoryConsolidation)
 	run, err := h.memoryConsolidationStore.GetMemoryConsolidationRun(ctx, namespace, string(task.UID))
+	// A run in the mode that completed while this one read its inputs moved
+	// the cursor past this window's start; read the inputs again from there.
 	if errors.Is(err, store.ErrNotFound) {
-		run, err = h.beginMemoryConsolidation(ctx, namespace, task, settings)
+		for attempt := 1; ; attempt++ {
+			run, err = h.beginMemoryConsolidation(ctx, namespace, task, settings)
+			if !errors.Is(err, store.ErrPreconditionFailed) || attempt == memoryConsolidationBeginAttempts {
+				break
+			}
+		}
 	}
 	if err != nil {
 		return memoryconsolidation.BeginResponse{}, consolidationStoreError("begin memory consolidation", err)
@@ -193,6 +204,12 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 		return nil, errAbandonedMemoryConsolidation
 	default:
 		return decodeMemoryConsolidationReport(run)
+	}
+	// An absent or null operations list is a malformed result, not a run
+	// that found nothing: completing it would move the cursor past
+	// Sessions nobody read. A run that found nothing submits an empty list.
+	if submission.Operations == nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "a memory consolidation result needs its operations list, empty when nothing changes")
 	}
 	input, err := decodeMemoryConsolidationInput(run)
 	if err != nil {

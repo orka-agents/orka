@@ -67,8 +67,8 @@ func TestRunMemoryConsolidationSubmitsTheModelResult(t *testing.T) {
 	args := `{"operations":[{"type":"retire","targets":[{"memoryId":"mem-a","generation":2}],"reason":"stale"}],` +
 		`"summary":"one stale memory"}`
 	provider := &recordingProvider{sequenceProvider: sequenceProvider{responses: []*llm.CompletionResponse{
-		{Content: "I think memory is fine."},
-		{ToolCalls: []llm.ToolCall{{ID: "call-1", Name: memoryconsolidation.SubmitToolName,
+		{Content: "I think memory is fine.", StopReason: "end_turn"},
+		{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: memoryconsolidation.SubmitToolName,
 			Arguments: json.RawMessage(args)}}},
 	}}}
 
@@ -95,7 +95,10 @@ func TestRunMemoryConsolidationFailsWithoutAResult(t *testing.T) {
 	consolidationController(t, memoryconsolidation.BeginResponse{Status: memoryconsolidation.StatusRunning,
 		Input: &input}, &submitted)
 	provider := &recordingProvider{sequenceProvider: sequenceProvider{
-		responses: []*llm.CompletionResponse{{Content: "no"}, {Content: "still no"}}}}
+		responses: []*llm.CompletionResponse{
+			{Content: "no", StopReason: "end_turn"},
+			{Content: "still no", StopReason: "end_turn"},
+		}}}
 	_, err := runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
 	require.ErrorContains(t, err, "did not submit", "a run without a result fails, so its Sessions are read again")
 }
@@ -156,4 +159,47 @@ func TestMemoryConsolidationClientRetriesWhileTheControllerIsUnavailable(t *test
 	calls = -100
 	err = client.post(t.Context(), "/begin", struct{}{}, &begin)
 	require.ErrorContains(t, err, "HTTP 503", "a controller that stays unavailable fails the run")
+}
+
+func TestRunMemoryConsolidationRefusesAnUnfinishedResult(t *testing.T) {
+	input := memoryconsolidation.Input{}
+	submitted := memoryconsolidation.Submission{Summary: "not submitted"}
+	consolidationController(t, memoryconsolidation.BeginResponse{Status: memoryconsolidation.StatusRunning,
+		Input: &input}, &submitted)
+	for _, stop := range []string{"max_tokens", "content_filter", ""} {
+		provider := &recordingProvider{sequenceProvider: sequenceProvider{responses: []*llm.CompletionResponse{
+			{StopReason: stop, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: memoryconsolidation.SubmitToolName,
+				Arguments: json.RawMessage(`{"operations":[],"summary":"cut off"}`)}}},
+		}}}
+		_, err := runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
+		require.Error(t, err, "stop reason %q", stop)
+		require.Equal(t, "not submitted", submitted.Summary, "an unfinished response is never submitted")
+	}
+}
+
+func TestRunMemoryConsolidationAsksAgainForAResultWithoutOperations(t *testing.T) {
+	input := memoryconsolidation.Input{}
+	var submitted memoryconsolidation.Submission
+	consolidationController(t, memoryconsolidation.BeginResponse{Status: memoryconsolidation.StatusRunning,
+		Input: &input}, &submitted)
+	call := func(args string) *llm.CompletionResponse {
+		return &llm.CompletionResponse{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "call-1",
+			Name: memoryconsolidation.SubmitToolName, Arguments: json.RawMessage(args)}}}
+	}
+	provider := &recordingProvider{sequenceProvider: sequenceProvider{responses: []*llm.CompletionResponse{
+		call(`{"summary":"no operations field"}`),
+		call(`{"operations":[],"summary":"nothing to change"}`),
+	}}}
+	_, err := runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
+	require.NoError(t, err)
+	require.Len(t, provider.requests, 2, "a result without operations is asked for again")
+	require.NotNil(t, submitted.Operations)
+	require.Empty(t, submitted.Operations)
+	require.Equal(t, "nothing to change", submitted.Summary)
+
+	provider = &recordingProvider{sequenceProvider: sequenceProvider{responses: []*llm.CompletionResponse{
+		call(`{}`), call(`{"operations":null}`),
+	}}}
+	_, err = runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
+	require.ErrorContains(t, err, "did not submit")
 }

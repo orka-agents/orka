@@ -89,13 +89,20 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 			messages = messages[len(messages)-MaxMessagesPerSession:]
 		}
 		read := InputSession{Name: session.Name, Type: sessionType(session.SessionType), UpdatedAt: session.UpdatedAt.UTC()}
-		for _, message := range messages {
-			if budget -= utf8.RuneCountInString(message.Content); budget < 0 {
+		// The budget keeps a Session's newest turns, which the run is meant
+		// to learn from; the model still reads them in order.
+		kept := len(messages)
+		for kept > 0 {
+			size := utf8.RuneCountInString(messages[kept-1].Content)
+			if budget-size < 0 {
 				input.Truncated = true
+				budget = 0
 				break
 			}
-			read.Messages = append(read.Messages, message)
+			budget -= size
+			kept--
 		}
+		read.Messages = messages[kept:]
 		if len(read.Messages) > 0 {
 			input.Sessions = append(input.Sessions, read)
 		}

@@ -88,6 +88,19 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
+	// The window was chosen from the mode's cursor before this transaction.
+	// A run in the mode that completed since then read past its start, so
+	// beginning would read those Sessions again.
+	err = executor.QueryRowContext(ctx,
+		`SELECT task_uid FROM memory_consolidation_runs
+		 WHERE namespace = ? AND mode = ? AND status = ? AND window_end > ? LIMIT 1`,
+		run.Namespace, run.Mode, store.MemoryConsolidationCompleted, run.WindowStart.UTC()).Scan(&other)
+	switch {
+	case err == nil:
+		return store.PreconditionFailedErrorf("memory consolidation run %q completed past this run's window start", other)
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
 	// A running run whose lease ended is taken over: marking it abandoned in
 	// this transaction means its worker can neither resume it nor complete
 	// it, so the two never propose at once.
@@ -194,6 +207,21 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 		return nil, err
 	}
 	return completed, nil
+}
+
+// AbandonMemoryConsolidationRun abandons a Task's running run and clears its
+// input, keeping its window.
+func (s *Store) AbandonMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error {
+	return writeOperationErr(ctx, s, "AbandonMemoryConsolidationRun", func(ctx context.Context) error {
+		if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
+			return store.ValidationErrorf("namespace and Task UID are required")
+		}
+		_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
+			`UPDATE memory_consolidation_runs SET status = ?, input = NULL
+			 WHERE namespace = ? AND task_uid = ? AND status = ?`,
+			store.MemoryConsolidationAbandoned, namespace, taskUID, store.MemoryConsolidationRunning)
+		return err
+	})
 }
 
 // GetMemoryConsolidationRun returns the run of a namespace's Task. It checks

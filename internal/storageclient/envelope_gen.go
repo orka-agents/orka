@@ -9,6 +9,12 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
+func (p envelopedState) AbandonMemoryConsolidationRun(ctx context.Context, a1 string, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "AbandonMemoryConsolidationRun", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.AbandonMemoryConsolidationRun(ctx, a1, a2)
+	})
+}
+
 func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 storagev1.AcquireChatTurnRequest) (bool, error) {
 	var r0 bool
 	err := p.ops.run(ctx, writeCall{method: "AcquireChatTurn", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {

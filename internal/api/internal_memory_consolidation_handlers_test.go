@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -33,6 +34,28 @@ type consolidationFixture struct {
 
 func newConsolidationFixture(t *testing.T, consolidation *corev1alpha1.MemoryConsolidationSpec) consolidationFixture {
 	t.Helper()
+	return newConsolidationFixtureWith(t, consolidation, nil)
+}
+
+// movedCursorStore refuses its first begins as if another run moved the
+// cursor while the run read its inputs.
+type movedCursorStore struct {
+	store.MemoryConsolidationStore
+	refusals int
+	begins   int
+}
+
+func (s *movedCursorStore) BeginMemoryConsolidationRun(ctx context.Context, run *store.MemoryConsolidationRun) error {
+	s.begins++
+	if s.begins <= s.refusals {
+		return store.PreconditionFailedErrorf("another run completed past this window's start")
+	}
+	return s.MemoryConsolidationStore.BeginMemoryConsolidationRun(ctx, run)
+}
+
+func newConsolidationFixtureWith(t *testing.T, consolidation *corev1alpha1.MemoryConsolidationSpec,
+	wrap func(store.MemoryConsolidationStore) store.MemoryConsolidationStore) consolidationFixture {
+	t.Helper()
 	// A run's window ends a second before now; begin as if a few seconds
 	// passed after the test wrote its Sessions.
 	previous := memoryConsolidationNow
@@ -49,8 +72,12 @@ func newConsolidationFixture(t *testing.T, consolidation *corev1alpha1.MemoryCon
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	backing := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	var runs store.MemoryConsolidationStore = backing
+	if wrap != nil {
+		runs = wrap(backing)
+	}
 	h := NewInternalHandlers(backing, backing, backing, backing, backing, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient,
-		MemoryStore: backing, MemoryProposalStore: backing, MemoryConsolidationStore: backing})
+		MemoryStore: backing, MemoryProposalStore: backing, MemoryConsolidationStore: runs})
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
@@ -261,4 +288,64 @@ func TestMemoryConsolidationRefusesARevokedWorker(t *testing.T) {
 	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
 	require.NoError(t, err)
 	require.Equal(t, store.MemoryConsolidationRunning, run.Status)
+}
+
+func TestMemoryConsolidationBeginsAgainAfterTheCursorMoved(t *testing.T) {
+	for name, tc := range map[string]struct {
+		refusals int
+		status   int
+	}{
+		"once":       {refusals: 1, status: http.StatusOK},
+		"every time": {refusals: memoryConsolidationBeginAttempts, status: http.StatusConflict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			moved := &movedCursorStore{refusals: tc.refusals}
+			f := newConsolidationFixtureWith(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose},
+				func(runs store.MemoryConsolidationStore) store.MemoryConsolidationStore {
+					moved.MemoryConsolidationStore = runs
+					return moved
+				})
+			f.seedSessions(t, 5)
+			require.Equal(t, tc.status, f.post(t, "begin", struct{}{}, nil))
+			require.Equal(t, min(tc.refusals+1, memoryConsolidationBeginAttempts), moved.begins,
+				"the run reads its inputs again from the moved cursor, a bounded number of times")
+		})
+	}
+}
+
+func TestMemoryConsolidationRefusesAResultWithoutOperations(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, nil))
+	require.Equal(t, http.StatusBadRequest, f.post(t, "complete", map[string]any{"summary": "no list"}, nil))
+	require.Equal(t, http.StatusBadRequest, f.post(t, "complete", map[string]any{"operations": nil}, nil))
+	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
+	require.NoError(t, err)
+	require.Equal(t, store.MemoryConsolidationRunning, run.Status, "a malformed result finishes nothing, so the cursor stays")
+
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", map[string]any{"operations": []any{}}, &report),
+		"an empty list is a run that found nothing")
+	require.Equal(t, store.MemoryConsolidationCompleted, report.Status)
+}
+
+func TestMemoryConsolidationRedactsTheProposalsItCreates(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, nil))
+	const secret = "Authorization: Bearer consolidation-secret-value"
+	submission := memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{{Type: memoryconsolidation.OperationAdd,
+		Title: "Release " + secret, Content: "Call the release API with " + secret, Reason: "Seen in " + secret,
+		Sources: []store.MemoryProposalSource{{SessionName: "session-0", MessageID: "session-0-assistant"}}}}}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", submission, &report))
+	require.Len(t, report.ProposalIDs, 1)
+	proposal, err := f.store.GetMemoryProposal(t.Context(), "default", report.ProposalIDs[0])
+	require.NoError(t, err)
+	for field, text := range map[string]string{"title": proposal.Title, "content": proposal.Content, "description": proposal.Description} {
+		require.NotContains(t, text, "consolidation-secret-value", "the stored proposal's %s is redacted", field)
+	}
+	encoded, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "consolidation-secret-value", "and so is the report")
 }

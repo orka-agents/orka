@@ -312,7 +312,11 @@ the observable parts.
   types `memory_merge`, `memory_supersede` and `memory_retire`, which apply
   only while every target memory is at the generation the proposal names.
   Revision 11 adds `MemoryConsolidationStore`, which records memory
-  consolidation runs and creates a run's proposals with its report.
+  consolidation runs and creates a run's proposals with its report. Its
+  begin, complete, get and session-list methods check a Task data fence;
+  begin refuses a window whose mode's cursor has since moved; and the
+  controller abandons the run of a Task that ended or was deleted without
+  finishing it, which clears the transcripts the run recorded.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

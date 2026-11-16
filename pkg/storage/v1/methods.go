@@ -149,6 +149,7 @@ var methodCatalog = map[string]MethodInfo{
 	"AppendMessages":                            stateWrite(""),
 	"AppendMessagesWithLock":                    stateWrite(""),
 	"ArchiveMemoryProposal":                     stateWrite(""),
+	"AbandonMemoryConsolidationRun":             stateWrite("$1, $2"),
 	"BeginMemoryConsolidationRun":               stateWrite("$1.Namespace, $1.TaskUID"),
 	"BindDataset":                               {Kind: MethodAdmin, Class: CallControl},
 	"BindPatchProposalPublicationEvidence":      stateWrite(""),

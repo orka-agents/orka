@@ -104,6 +104,64 @@ func runMemoryConsolidationRuns(t *testing.T, newProvider StateFactory) {
 		require.Nil(t, other, "the cursor is per namespace")
 	})
 
+	t.Run("a run cannot begin from a cursor another run moved", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		first := consolidationRun("uid-first", at, at.Add(time.Hour))
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, first))
+		_, err := p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-first", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{}`), CompletedAt: at.Add(time.Hour)})
+		require.NoError(t, err)
+
+		stale := consolidationRun("uid-stale", at.Add(30*time.Minute), at.Add(2*time.Hour))
+		err = p.BeginMemoryConsolidationRun(ctx, stale)
+		require.ErrorIs(t, err, storagev1.ErrPreconditionFailed, "a window chosen before the first run completed")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-stale")
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused begin records nothing")
+
+		dryRun := consolidationRun("uid-dry", at.Add(30*time.Minute), at.Add(2*time.Hour))
+		dryRun.Mode = "DryRun"
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, dryRun), "another mode's cursor is its own")
+		_, err = p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-dry", Status: storagev1.MemoryConsolidationSkipped, Report: []byte(`{}`), CompletedAt: at.Add(2 * time.Hour)})
+		require.NoError(t, err)
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-next", at.Add(time.Hour), at.Add(3*time.Hour))),
+			"a window that starts at the cursor begins")
+	})
+
+	t.Run("abandoning a run clears its input and keeps its window", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		require.ErrorIs(t, p.AbandonMemoryConsolidationRun(ctx, "", "uid"), storagev1.ErrValidation)
+		require.ErrorIs(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, " "), storagev1.ErrValidation)
+		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "missing"), "a missing run is left alone")
+
+		run := consolidationRun("uid-dead", at, at.Add(time.Hour))
+		run.Input = []byte(`{"transcript":"excerpt"}`)
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, run))
+		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead"))
+		stored, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MemoryConsolidationAbandoned, stored.Status)
+		require.Empty(t, stored.Input, "an abandoned run keeps no transcripts")
+		cursor, err := p.GetMemoryConsolidationCursor(ctx, conditionalNamespace, "Propose")
+		require.NoError(t, err)
+		require.NotNil(t, cursor)
+		requireSameInstant(t, at, *cursor, "the abandoned run's start still holds the cursor")
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-next", at, at.Add(2*time.Hour))),
+			"an abandoned run blocks no other run")
+
+		p = newProvider(t)
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-done", at, at.Add(time.Hour))))
+		_, err = p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-done", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{"done":true}`), CompletedAt: at.Add(time.Hour)})
+		require.NoError(t, err)
+		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "uid-done"))
+		finished, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-done")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MemoryConsolidationCompleted, finished.Status, "a finished run is left unchanged")
+		require.JSONEq(t, `{"done":true}`, string(finished.Report))
+	})
+
 	t.Run("a running run keeps another from beginning until its lease ends", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		first := consolidationRun("uid-first", at, at.Add(time.Hour))

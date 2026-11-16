@@ -852,6 +852,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+		if err := r.abandonMemoryConsolidationRun(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		if r.ResultStore != nil {
 			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
 			if !ok {
@@ -2956,12 +2959,33 @@ func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1al
 // Job cleanup included, then cancels what it delegated, and requeues it soon
 // while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	if err := r.abandonMemoryConsolidationRun(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 	result, err := r.handleCompleted(ctx, task)
 	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
 		result.RequeueAfter = 2 * time.Second
 	}
 	return result, err
+}
+
+// abandonMemoryConsolidationRun abandons the run of a memory consolidation
+// Task that ended or is being deleted without finishing it, which clears the
+// transcripts its run recorded. A finished run is left unchanged, so this is
+// a no-op for a run that completed.
+func (r *TaskReconciler) abandonMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task) error {
+	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
+		return nil
+	}
+	runs, ok := r.ResultStore.(store.MemoryConsolidationStore)
+	if !ok {
+		return nil
+	}
+	if err := runs.AbandonMemoryConsolidationRun(ctx, task.Namespace, string(task.UID)); err != nil {
+		return fmt.Errorf("abandon memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return nil
 }
 
 // cascadeTaskCancellation cancels what a Task delegated once the Task's

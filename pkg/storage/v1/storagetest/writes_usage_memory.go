@@ -183,6 +183,16 @@ func init() {
 			observe: observeMemoryConsolidationRun,
 		},
 		usageCase{
+			method: "AbandonMemoryConsolidationRun",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.BeginMemoryConsolidationRun(t.Context(), &storagev1.MemoryConsolidationRun{Namespace: memoryTenant,
+					TaskUID: "uid-catalog", TaskName: "run", Mode: "DryRun", Status: storagev1.MemoryConsolidationRunning,
+					WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour), Input: []byte(`{}`), CreatedAt: writeCaseCreated}))
+			},
+			args:    fixed(memoryTenant, "uid-catalog"),
+			observe: observeMemoryConsolidationRun,
+		},
+		usageCase{
 			method: "CompleteMemoryConsolidationRun",
 			setup: func(t *testing.T, p storagev1.StateProvider) {
 				require.NoError(t, p.BeginMemoryConsolidationRun(t.Context(), &storagev1.MemoryConsolidationRun{Namespace: memoryTenant,

@@ -311,3 +311,23 @@ func TestReportEncodeAbridgesToFit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "abridged")
 }
+
+func TestCollectInputsKeepsTheNewestTurnsUnderTheBudget(t *testing.T) {
+	start := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	src := &fakeSource{transcripts: map[string][]store.SessionMessage{}}
+	src.sessions = []store.SessionMetadata{{Name: "long", SessionType: "chat", UpdatedAt: start.Add(time.Hour)}}
+	transcript := make([]store.SessionMessage, 0, 40)
+	for i := range 40 {
+		transcript = append(transcript, store.SessionMessage{ID: fmt.Sprintf("m-%02d", i), Role: "user",
+			Content: strings.Repeat("x", MaxMessageChars)})
+	}
+	src.transcripts["long"] = transcript
+	input, err := CollectInputs(t.Context(), src, "ns", start, start.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.True(t, input.Truncated)
+	require.Len(t, input.Sessions, 1)
+	messages := input.Sessions[0].Messages
+	require.Len(t, messages, MaxTranscriptInputChars/MaxMessageChars)
+	require.Equal(t, "m-39", messages[len(messages)-1].ID, "the newest turn is kept")
+	require.Equal(t, fmt.Sprintf("m-%02d", 40-len(messages)), messages[0].ID, "older turns are dropped, and order is kept")
+}

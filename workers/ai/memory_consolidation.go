@@ -168,8 +168,17 @@ func requestConsolidation(
 			MaxTokens:          settings.maxTokens, Temperature: settings.temperature, TemperatureSet: settings.temperatureSet,
 			Tools: []llm.Tool{tool},
 		})
-		if err != nil {
+		if err := completionCallError(resp, err); err != nil {
 			return memoryconsolidation.Submission{}, fmt.Errorf("memory consolidation model call: %w", err)
+		}
+		// An unfinished, refused or failed response may still carry a tool
+		// call with valid arguments; submitting it would propose from a
+		// result the model never finished.
+		switch outcome := llm.NormalizeCompletionOutcome(resp); outcome {
+		case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
+		default:
+			return memoryconsolidation.Submission{}, fmt.Errorf("memory consolidation model call: %w",
+				completionOutcomeError(outcome, resp.StopReason))
 		}
 		for _, call := range resp.ToolCalls {
 			if call.Name != memoryconsolidation.SubmitToolName {
@@ -178,6 +187,11 @@ func requestConsolidation(
 			var submission memoryconsolidation.Submission
 			if err := json.Unmarshal(call.Arguments, &submission); err != nil {
 				return memoryconsolidation.Submission{}, fmt.Errorf("decode memory consolidation result: %w", err)
+			}
+			if submission.Operations == nil {
+				// Not a result: an empty list says nothing changes, a missing
+				// one says nothing. Ask again rather than finish the run.
+				break
 			}
 			return submission, nil
 		}

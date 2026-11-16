@@ -79,6 +79,10 @@ const (
 //     namespace, of any mode, is running and began less than
 //     MemoryConsolidationRunLease before CreatedAt: then it returns
 //     ErrConflict, so two runs never propose over the same memories at once.
+//     It returns ErrPreconditionFailed, which also matches ErrConflict, when
+//     a run in the same mode completed with a window end after WindowStart:
+//     the window was chosen from a cursor that has since moved, and the
+//     caller chooses it again.
 //     A running run whose lease ended is marked MemoryConsolidationAbandoned
 //     in the same transaction, so it can never complete. It writes the stored
 //     run back to the caller's record, so a retried worker keeps its first
@@ -93,6 +97,11 @@ const (
 //     invalid or duplicate proposal changes nothing. A skipped run creates no
 //     proposals. A finished or abandoned run is returned unchanged and
 //     creates nothing. It returns the stored run.
+//   - AbandonMemoryConsolidationRun marks the running run of a namespace and
+//     TaskUID abandoned and clears its Input, for a Task that ended or was
+//     deleted without finishing its run. Its window is kept, so its mode's
+//     cursor does not move. A finished, abandoned or missing run is left
+//     unchanged. It requires a namespace and a TaskUID.
 //   - GetMemoryConsolidationRun returns the run of a namespace and TaskUID,
 //     or ErrNotFound.
 //   - ListMemoryConsolidationSessions returns the namespace's chat and task
@@ -115,6 +124,7 @@ const (
 type MemoryConsolidationStore interface {
 	BeginMemoryConsolidationRun(ctx context.Context, run *MemoryConsolidationRun) error
 	CompleteMemoryConsolidationRun(ctx context.Context, completion MemoryConsolidationCompletion) (*MemoryConsolidationRun, error)
+	AbandonMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error
 	GetMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) (*MemoryConsolidationRun, error)
 	GetMemoryConsolidationCursor(ctx context.Context, namespace, mode string) (*time.Time, error)
 	ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]SessionMetadata, int, error)

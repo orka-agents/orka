@@ -9,6 +9,13 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
+func (p *stateProvider) AbandonMemoryConsolidationRun(ctx context.Context, a1 string, a2 string) error {
+	_, err := p.injector.call(ctx, p.contract, "AbandonMemoryConsolidationRun", func(ctx context.Context) error {
+		return p.inner.AbandonMemoryConsolidationRun(ctx, a1, a2)
+	})
+	return err
+}
+
 func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 storagev1.AcquireChatTurnRequest) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "AcquireChatTurn", func(ctx context.Context) (err error) {
