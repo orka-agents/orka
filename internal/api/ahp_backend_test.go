@@ -652,6 +652,50 @@ func TestAHPBackendFollowsTheTaskItCreatedNotItsName(t *testing.T) {
 	require.NotContains(t, ahpTurnText(state.Chat.Turns[len(state.Chat.Turns)-1].ResponseParts), "intruder")
 }
 
+// A turn recorded before Task UIDs were kept takes, on recovery, the UID of
+// the Task under its name before it follows any event, and keeps it in the
+// record for the next recovery.
+func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+
+	// The leader stops; its record, written before UIDs were kept, has none.
+	env.backend.forgetTurn(turn)
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.ActiveTaskUID = "" }))
+	env.backend.mu.Lock()
+	delete(env.backend.recovered, alice.UserKey)
+	env.backend.mu.Unlock()
+	env.backend.recoverTurns(ctx, alice)
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.Equal(t, string(task.UID), record.ActiveTaskUID, "recovery keeps the UID of the Task it follows")
+
+	say := func(uid, text string) {
+		env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, TaskUID: uid, Runtime: &harnessv2.Event{
+			Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+				AssistantMessage: &harnessv2.AssistantMessageChunk{Text: text}}}})
+	}
+	say("uid-of-another-task", "intruder")
+	say(string(task.UID), "mine")
+	raw := waitForActionType(t, chatSub, "chat/delta")
+	require.Contains(t, string(raw), "mine")
+	require.NotContains(t, string(raw), "intruder", "an event of another Task under the name is not the recovered turn's")
+}
+
 // A client's turn cancel that fails is tried again, so the Task does not run
 // on while the client shows the turn cancelled.
 func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {

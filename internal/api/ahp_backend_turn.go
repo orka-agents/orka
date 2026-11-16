@@ -332,11 +332,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		turn.mu.Lock()
 		turn.taskUID = uid
 		turn.mu.Unlock()
-		logSessionUpdate(b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
-			if s.ActiveTurn == action.TurnId && s.ActiveTask == name {
-				s.ActiveTaskUID = uid
-			}
-		}), record.Session, "record the turn's Task UID")
+		turn.recordTaskUID(ctx, uid)
 	}
 	b.cancelIfClientCancelled(context.WithoutCancel(ctx), principal, turn, task)
 	sealRequesterStamp(ctx, b.h.client, task)
@@ -504,16 +500,33 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 }
 
 // ownsTask reports whether task is the turn's Task, not one created later
-// under its name. A turn recorded before Task UIDs were kept takes the UID of
-// the Task it first finds.
+// under its name. A turn whose Task UID is still unknown, as a recovered one
+// whose Task could not be read, takes the UID of the Task it first finds and
+// keeps it in the record.
 func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.taskUID == "" {
-		t.taskUID = string(task.UID)
-		return true
+	if t.taskUID != "" {
+		owns := string(task.UID) == t.taskUID
+		t.mu.Unlock()
+		return owns
 	}
-	return string(task.UID) == t.taskUID
+	t.taskUID = string(task.UID)
+	t.mu.Unlock()
+	t.recordTaskUID(t.ctx, string(task.UID))
+	return true
+}
+
+// recordTaskUID keeps the UID of the turn's Task in its session's record, if
+// the session still runs the turn, so a later recovery follows the same Task.
+func (t *ahpTurn) recordTaskUID(ctx context.Context, uid string) {
+	if uid == "" {
+		return
+	}
+	logSessionUpdate(t.b.updateSession(ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+		if s.ActiveTurn == t.id && s.ActiveTask == t.task && s.ActiveTaskUID == "" {
+			s.ActiveTaskUID = uid
+		}
+	}), t.session.Session, "record the turn's Task UID")
 }
 
 func (t *ahpTurn) drain(events <-chan liveevents.Event) {
@@ -1366,6 +1379,16 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			b: b, principal: principal, session: record, id: record.ActiveTurn,
 			task: record.ActiveTask, taskUID: record.ActiveTaskUID, startedAt: started, emit: b.emitterFor(principal), ctx: turnCtx, cancel: cancel,
 			tools: map[string]*ahpToolCall{},
+		}
+		// A turn recorded before Task UIDs were kept takes the UID of the Task
+		// under its name now, before it follows any event, and keeps it in the
+		// record, so a Task created later under the name is never the turn's.
+		if turn.taskUID == "" {
+			task := &corev1alpha1.Task{}
+			if err := b.h.client.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task); err == nil && task.UID != "" {
+				turn.taskUID = string(task.UID)
+				turn.recordTaskUID(ctx, turn.taskUID)
+			}
 		}
 		// The previous leader may have streamed some or all of the answer.
 		if state, err := ahphost.ChannelState(ctx, b.store, principal.UserKey, record.Chat); err == nil &&
