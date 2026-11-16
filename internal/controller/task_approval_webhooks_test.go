@@ -529,6 +529,35 @@ func TestApprovalWebhooksOptOutDuringBackoffRetiresNotices(t *testing.T) {
 	}
 }
 
+// Projection retires deselected notices when it observes the opt-out, so a
+// notice from before the opt-out is never sent even when no delivery pass
+// runs until the event is selected again.
+func TestApprovalWebhooksProjectionRetiresDeselectedNotices(t *testing.T) {
+	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusServiceUnavailable)
+	h.request(approvalWebhookTestUID, "approval-1")
+	h.reconcile()
+	if got := len(h.receiver.all()); got != 1 {
+		t.Fatalf("receipts = %d, want one failed attempt", got)
+	}
+
+	for _, selection := range [][]corev1alpha1.TaskWebhookEvent{{corev1alpha1.TaskWebhookEventApprovalResolved}, nil} {
+		h.setWebhookEvents(selection...)
+		// Only the reconcile-side projection observes the opt-out.
+		if _, err := h.notifier().prepareApprovalNotices(context.Background(), h.client.Status(), h.events, h.task()); err != nil {
+			t.Fatal(err)
+		}
+		if notice := h.task().Status.ApprovalWebhooks.Notices[0]; notice.State != corev1alpha1.TaskWebhookDeliveryFailed {
+			t.Fatalf("selection %v: notice = %s, want retired by projection", selection, notice.State)
+		}
+	}
+	h.setWebhookEvents(bothApprovalEvents...)
+	h.now = h.now.Add(time.Hour)
+	h.reconcile()
+	if got := len(h.receiver.all()); got != 1 {
+		t.Fatalf("receipts = %d after re-selecting, want no notice from before the opt-out", got)
+	}
+}
+
 func TestApprovalWebhooksRetryBoundIsShorterThanTerminal(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusBadGateway)
 	h.request(approvalWebhookTestUID, "approval-1")

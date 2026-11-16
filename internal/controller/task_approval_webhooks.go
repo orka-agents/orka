@@ -485,17 +485,29 @@ func (w *WebhookNotifier) prepareApprovalNotices(
 	task *corev1alpha1.Task,
 ) (time.Duration, error) {
 	selected := selectedApprovalWebhookEvents(task)
+	// Retire deselected notices as soon as an opt-out is observed, before
+	// anything is handed to delivery, so selecting the event again later
+	// never revives a notice from before the opt-out.
+	retired := retireDeselectedApprovalNotices(ctx, task.Status.ApprovalWebhooks, selected)
 	if len(selected) == 0 {
 		if state := task.Status.ApprovalWebhooks; state != nil && state.Tracking {
 			// Opting out ends tracking, so selecting again starts from the
 			// stream's high-water mark rather than replaying what happened
 			// while nothing was selected.
 			state.Tracking = false
+			retired = true
+		}
+		if retired {
 			if err := status.Update(ctx, task); err != nil {
 				return 0, err
 			}
 		}
 		return 0, nil
+	}
+	if retired {
+		if err := status.Update(ctx, task); err != nil {
+			return 0, err
+		}
 	}
 	if eventStore == nil || task.UID == "" {
 		return 0, nil
