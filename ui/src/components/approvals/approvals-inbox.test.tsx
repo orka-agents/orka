@@ -148,4 +148,27 @@ describe('ApprovalsInbox', () => {
     render(<ApprovalsInbox />)
     await waitFor(() => expect(screen.getByText('Approvals are unavailable')).toBeInTheDocument())
   })
+
+  it('loads later pages through the continue token', async () => {
+    const seen: Array<string | null> = []
+    server.use(
+      http.get('/api/v1/approvals', ({ request }) => {
+        const token = new URL(request.url).searchParams.get('continue')
+        seen.push(token)
+        const items = token === 'page-2' ? [approvalItem('second', false, true)] : [approvalItem('first', false, true)]
+        return HttpResponse.json({
+          namespace: 'default', generatedAt: new Date().toISOString(), items, total: 2, counts: { approval: 2 }, incomplete: false,
+          sources: { approvals: 'included', monitors: 'notRequested' }, metadata: token === 'page-2' ? {} : { continue: 'page-2' },
+        })
+      }),
+    )
+    render(<ApprovalsInbox />)
+    expect(await screen.findByText('Approval requested for tool-first')).toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 2 pending approvals.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByText('Approval requested for tool-second')).toBeInTheDocument()
+    expect(seen).toContain('page-2')
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Showing 1 of 2/)).not.toBeInTheDocument()
+  })
 })

@@ -98,8 +98,10 @@ when the server reports that you may approve; it opens the Task's
 **Decline** appears only when you may decline and posts the decision for the
 exact Task the inbox listed. If someone else decided first, the row says
 **Already decided**. When neither hint is settled, the row links to the Task
-instead. When a scan bound was hit, each view says the list may be
-incomplete.
+instead. The inbox loads further pages with **Load more**. The board reads
+up to 2,000 attention items before it groups Tasks; past that it says Agent
+working and Done may include Tasks that need you. When a scan bound was hit,
+each view says the list may be incomplete.
 
 ## Execution events
 

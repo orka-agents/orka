@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api } from '@/lib/api-client'
 import { executionEventApiPath } from '@/lib/execution-events'
-import { pollUnlessForbidden, retryUnlessForbidden } from '@/lib/list-api'
+import { pageParams, pollUnlessForbidden, retryUnlessForbidden } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { AttentionResponse } from '@/schemas/attention'
@@ -20,21 +20,70 @@ export function useAttention(limit = 50, refetchInterval: number | false = 15000
   })
 }
 
-/** Decidable approvals across the namespace's Tasks, soonest deadline first. */
-export function usePendingApprovals(limit = 100, refetchInterval: number | false = 10000) {
+/** Pages of the board's attention walk; later items stay unresolved. */
+export const maxAttentionWalkPages = 10
+
+export interface AttentionWalk extends AttentionResponse {
+  /** More attention items exist past the walk bound; their Tasks are unclassified. */
+  truncated: boolean
+}
+
+/**
+ * Every attention item the board needs, walked page by page (bounded), so a
+ * Task ranked past the first page is never shown as Done. The ranking totals
+ * and incomplete flag come from the first page; scan bounds hit on any page
+ * are kept.
+ */
+export function useAttentionAll(pageLimit = 200, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
   return useQuery({
+    queryKey: ['attention', 'all', namespace, pageLimit],
+    enabled: Boolean(token),
+    queryFn: async (): Promise<AttentionWalk> => {
+      let first: AttentionResponse | undefined
+      const items: AttentionResponse['items'] = []
+      const reasons = new Set<string>()
+      const seen = new Set<string>()
+      let incomplete = false
+      let next: string | undefined
+      let pages = 0
+      do {
+        const page = await api.get<AttentionResponse>('/attention', pageParams({ namespace, limit: String(pageLimit) }, next))
+        first ??= page
+        items.push(...page.items)
+        incomplete ||= page.incomplete
+        for (const reason of page.incompleteReasons ?? []) reasons.add(reason)
+        next = page.metadata?.continue || undefined
+        if (next && seen.has(next)) throw new Error('attention pagination repeated continuation cursor')
+        if (next) seen.add(next)
+        pages += 1
+      } while (next && pages < maxAttentionWalkPages)
+      return { ...first!, items, incomplete, incompleteReasons: [...reasons].sort(), metadata: {}, truncated: Boolean(next) }
+    },
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(refetchInterval),
+  })
+}
+
+const inboxStopsRetrying = (error: unknown) => error instanceof ApiError && (error.status === 403 || error.status === 501)
+
+/**
+ * Decidable approvals across the namespace's Tasks, soonest deadline first,
+ * one page at a time: later pages follow metadata.continue on demand.
+ */
+export function usePendingApprovals(limit = 100, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  const token = useAuthStore((s) => s.token)
+  return useInfiniteQuery({
     queryKey: ['approvals', 'pending', namespace, limit],
     enabled: Boolean(token),
-    queryFn: () => api.get<AttentionResponse>('/approvals', { namespace, status: 'pending', limit: String(limit) }),
-    retry: (failureCount, error) =>
-      !(error instanceof ApiError && (error.status === 403 || error.status === 501)) && failureCount < 3,
-    refetchInterval: (query) => {
-      const error = query.state.error
-      if (error instanceof ApiError && (error.status === 403 || error.status === 501)) return false
-      return refetchInterval
-    },
+    queryFn: ({ pageParam }) =>
+      api.get<AttentionResponse>('/approvals', pageParams({ namespace, status: 'pending', limit: String(limit) }, pageParam || undefined)),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
+    retry: (failureCount, error) => !inboxStopsRetrying(error) && failureCount < 3,
+    refetchInterval: (query) => (inboxStopsRetrying(query.state.error) ? false : refetchInterval),
   })
 }
 

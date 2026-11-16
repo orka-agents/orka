@@ -92,19 +92,24 @@ function ApprovalRow({ item }: { item: AttentionItem }) {
 
 /** Every decidable approval in the namespace, soonest deadline first. */
 export function ApprovalsInbox() {
-  const { data, isLoading, error } = usePendingApprovals()
-  const items = data?.items ?? []
+  const { data, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage } = usePendingApprovals()
+  const pages = data?.pages ?? []
+  const first = pages[0]
+  // The server re-ranks on every read, so a page boundary can repeat an item.
+  const items = [...new Map(pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()]
+  const incomplete = pages.some((page) => page.incomplete)
+  const incompleteReasons = [...new Set(pages.flatMap((page) => page.incompleteReasons ?? []))]
   const shownError = error && !data ? error : null
 
   return (
     <div className="space-y-4">
       <PageHeader title="Approvals" description="Requests from agents waiting on a person, soonest deadline first" />
-      {data?.incomplete && (
-        <p className="text-sm text-status-failed" role="status">{incompleteText(data.incompleteReasons)}</p>
+      {incomplete && (
+        <p className="text-sm text-status-failed" role="status">{incompleteText(incompleteReasons)}</p>
       )}
-      {data && data.total > items.length && (
+      {first && first.total > items.length && (
         <p className="text-sm text-muted-foreground" role="status">
-          Showing {items.length.toLocaleString()} of {data.total.toLocaleString()} pending approvals.
+          Showing {items.length.toLocaleString()} of {first.total.toLocaleString()} pending approvals.
         </p>
       )}
       <Card>
@@ -122,9 +127,18 @@ export function ApprovalsInbox() {
           ) : items.length === 0 ? (
             <EmptyState icon={Inbox} headline="No pending approvals" hint="Requests that need a decision appear here." />
           ) : (
-            <ul className="divide-y" aria-label="Pending approvals">
-              {items.map((item) => <ApprovalRow key={item.id} item={item} />)}
-            </ul>
+            <>
+              <ul className="divide-y" aria-label="Pending approvals">
+                {items.map((item) => <ApprovalRow key={item.id} item={item} />)}
+              </ul>
+              {hasNextPage && (
+                <div className="flex justify-center pt-3">
+                  <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+                    {isFetchingNextPage ? 'Loading…' : 'Load more'}
+                  </Button>
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>

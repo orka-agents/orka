@@ -328,4 +328,51 @@ describe('KanbanBoard', () => {
     expect(nav).toHaveTextContent('Needs you')
     expect(nav).toHaveTextContent('By phase')
   })
+
+  it('attention view walks later attention pages before placing Tasks in Done', async () => {
+    const now = new Date().toISOString()
+    const failed = (name: string) => ({
+      id: `failed:u-${name}`, kind: 'failed', rank: 3, since: now, summary: 'Task failed',
+      task: { namespace: 'default', name, uid: `u-${name}`, phase: 'Failed' },
+    })
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: ['failed-a', 'failed-b'].map((name) => ({ metadata: { name, namespace: 'default', uid: `u-${name}`, creationTimestamp: now }, spec: { type: 'agent' }, status: { phase: 'Failed' } })),
+          metadata: {},
+        }),
+      ),
+      http.get('/api/v1/attention', ({ request }) => {
+        const second = new URL(request.url).searchParams.get('continue') === 'next'
+        return HttpResponse.json({
+          namespace: 'default', generatedAt: now, total: 2, counts: { failed: 2 }, incomplete: false,
+          sources: { approvals: 'included', monitors: 'included' },
+          metadata: second ? {} : { continue: 'next' }, items: [failed(second ? 'failed-b' : 'failed-a')],
+        })
+      }),
+    )
+    render(<KanbanBoard view="attention" />)
+    const needsYou = await screen.findByRole('region', { name: 'Needs you' })
+    await waitFor(() => expect(needsYou).toHaveTextContent('failed-b'))
+    expect(needsYou).toHaveTextContent('failed-a')
+    expect(screen.getByRole('region', { name: 'Done' })).not.toHaveTextContent('failed-b')
+  })
+
+  it('attention view flags Tasks it could not classify past the walk bound', async () => {
+    const now = new Date().toISOString()
+    let page = 0
+    server.use(
+      http.get('/api/v1/attention', () => {
+        page += 1
+        return HttpResponse.json({
+          namespace: 'default', generatedAt: now, total: 5000, counts: { failed: 5000 }, incomplete: false,
+          sources: { approvals: 'included', monitors: 'included' }, metadata: { continue: `page-${page}` },
+          items: [{ id: `failed:${page}`, kind: 'failed', rank: 3, since: now, summary: 'Task failed', task: { namespace: 'default', name: `t-${page}`, uid: `u-${page}` } }],
+        })
+      }),
+    )
+    render(<KanbanBoard view="attention" />)
+    expect(await screen.findByText(/Agent working and Done may include Tasks that need you/)).toBeInTheDocument()
+    expect(page).toBe(10)
+  })
 })

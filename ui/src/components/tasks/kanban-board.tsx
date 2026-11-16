@@ -4,7 +4,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { isForbiddenError } from '@/lib/api-client'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskListAll } from '@/hooks/use-tasks'
-import { useAttention } from '@/hooks/use-attention'
+import { useAttentionAll } from '@/hooks/use-attention'
 import { phaseStyle } from '@/lib/task-status'
 import { attentionLanes, groupByAttention, incompleteText, type AttentionLane, type KanbanView } from '@/lib/attention-lanes'
 import { cn } from '@/lib/utils'
@@ -180,12 +180,11 @@ function LaneHeader({ label, count, loading }: { label: string; count: number; l
  */
 function AttentionBoard() {
   const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
-  const attention = useAttention(200, 10000)
+  const attention = useAttentionAll(200, 10000)
   const error = listError && (isForbiddenError(listError) || !data) ? listError : null
   const attentionError = attention.error && (isForbiddenError(attention.error) || !attention.data) ? attention.error : null
   const items = attention.data?.items ?? []
   const grouped = groupByAttention(data?.items ?? [], items)
-  const moreItems = (attention.data?.total ?? 0) - items.length
 
   if (error) {
     return <Card><CardContent><ListAccessError error={error} resource="tasks" /></CardContent></Card>
@@ -194,6 +193,11 @@ function AttentionBoard() {
     <>
       {attention.data?.incomplete && (
         <p className="text-sm text-status-failed" role="status">{incompleteText(attention.data.incompleteReasons)}</p>
+      )}
+      {attention.data?.truncated && (
+        <p className="text-sm text-status-failed" role="status">
+          Needs you shows the first {items.length.toLocaleString()} of {attention.data.total.toLocaleString()} items. Agent working and Done may include Tasks that need you.
+        </p>
       )}
       {data?.truncated && (
         <p className="text-sm text-muted-foreground" role="status">
@@ -221,14 +225,7 @@ function AttentionBoard() {
                   ) : items.length === 0 ? (
                     <p className="text-xs text-muted-foreground text-center py-8">Nothing needs you right now</p>
                   ) : (
-                    <>
-                      {items.map((item) => <AttentionItemCard key={item.id} item={item} />)}
-                      {moreItems > 0 && (
-                        <p className="text-xs text-muted-foreground text-center py-2">
-                          {moreItems.toLocaleString()} more not shown. <Link to="/approvals" className="text-primary underline">Open approvals</Link>
-                        </p>
-                      )}
-                    </>
+                    items.map((item) => <AttentionItemCard key={item.id} item={item} />)
                   )
                 ) : grouped[lane].length === 0 ? (
                   <p className="text-xs text-muted-foreground text-center py-8">No {label.toLowerCase()} tasks</p>
