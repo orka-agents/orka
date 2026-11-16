@@ -195,10 +195,47 @@ func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRouteP
 		problems = append(problems, fmt.Sprintf("namespace source %d has no documented code", policy.namespace))
 	}
 	for _, extra := range policy.permissions[1:] {
-		if !strings.Contains(row.additional, "`"+extra.verb+"`") ||
-			!strings.Contains(row.additional, extra.resource+"`") {
+		if !apiAuthorizationDocNamesPermission(row.additional, extra) {
 			problems = append(problems, fmt.Sprintf("additional checks do not name `%s` on `%s/%s`", extra.verb, extra.group, extra.resource))
 		}
 	}
 	return problems
+}
+
+// apiAuthorizationDocNamesPermission reports whether one semicolon-separated
+// clause of an additional-checks cell grants the permission's verb on its
+// resource, written "`verb`[, `verb`...] on `[group/]resource`[ and ...]".
+// Matching within a clause keeps verbs paired with their own resources.
+func apiAuthorizationDocNamesPermission(additional string, permission apiResourcePermission) bool {
+	for clause := range strings.SplitSeq(additional, ";") {
+		verbs, targets, ok := strings.Cut(clause, " on ")
+		if !ok || !strings.Contains(verbs, "`"+permission.verb+"`") {
+			continue
+		}
+		if strings.Contains(targets, "`"+permission.resource+"`") ||
+			strings.Contains(targets, "`"+permission.group+"/"+permission.resource+"`") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAPIAuthorizationDocNamesPermissionPairsVerbsWithResources(t *testing.T) {
+	const group = "core.orka.ai"
+	create := apiResourcePermission{group, "repositorymonitors/runs", "create", "name"}
+	patch := apiResourcePermission{group, "repositorymonitors", "patch", "name"}
+	listTasks := apiResourcePermission{group, "tasks", "list", ""}
+
+	correct := "`create` on `core.orka.ai/repositorymonitors/runs`, `:name`; `patch` on `core.orka.ai/repositorymonitors`, `:name`"
+	require.True(t, apiAuthorizationDocNamesPermission(correct, create))
+	require.True(t, apiAuthorizationDocNamesPermission(correct, patch))
+
+	swapped := "`patch` on `core.orka.ai/repositorymonitors/runs`, `:name`; `create` on `core.orka.ai/repositorymonitors`, `:name`"
+	require.False(t, apiAuthorizationDocNamesPermission(swapped, create))
+	require.False(t, apiAuthorizationDocNamesPermission(swapped, patch))
+
+	require.True(t, apiAuthorizationDocNamesPermission("`list`, `create`, and `delete` on `core.orka.ai/tasks`, empty name", listTasks))
+	require.True(t, apiAuthorizationDocNamesPermission("`list` on `repositorymonitors` and `tasks`", listTasks))
+	require.False(t, apiAuthorizationDocNamesPermission("`list` on `repositoryscans/tasks`", listTasks), "a subresource must not match its last segment")
+	require.False(t, apiAuthorizationDocNamesPermission("`list` mentioned; `tasks` mentioned", listTasks))
 }
