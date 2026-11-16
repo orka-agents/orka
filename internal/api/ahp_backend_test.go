@@ -3472,3 +3472,72 @@ func TestAHPAgentChoicesFollowAgentUseAuthorization(t *testing.T) {
 	require.Equal(t, []ahpAgentChoice{{Agent: "b-allowed-claude", Runtime: corev1alpha1.AgentRuntimeClaude, Model: "shared"}}, choices,
 		"a model is offered through an Agent the person may use, and not through one they may not")
 }
+
+// ahpPausingStore pauses one call, when armed, until the test lets it go.
+type ahpPausingStore struct {
+	store.AHPStore
+	pauseDeletes chan chan struct{} // DeleteAHPRecords of content
+	pauseRead    chan chan struct{} // GetAHPRecord of a session
+}
+
+func (s *ahpPausingStore) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error {
+	if kind == ahpRecordContent {
+		select {
+		case release := <-s.pauseDeletes:
+			<-release
+		default:
+		}
+	}
+	return s.AHPStore.DeleteAHPRecords(ctx, userKey, kind, prefix)
+}
+
+func (s *ahpPausingStore) GetAHPRecord(ctx context.Context, userKey, kind, key string) (store.AHPRecord, error) {
+	record, err := s.AHPStore.GetAHPRecord(ctx, userKey, kind, key)
+	if kind == ahpRecordSession {
+		select {
+		case release := <-s.pauseRead:
+			<-release
+		default:
+		}
+	}
+	return record, err
+}
+
+// A session update that read the session before it was disposed of cannot
+// write it back after: disposal deletes the record under the lock updates
+// hold from their read to their write.
+func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	pausing := &ahpPausingStore{AHPStore: env.backend.store, pauseDeletes: make(chan chan struct{}, 1), pauseRead: make(chan chan struct{}, 1)}
+	env.backend.store = pausing
+
+	// Disposal stops just before it deletes the session's record.
+	releaseDispose := make(chan struct{})
+	pausing.pauseDeletes <- releaseDispose
+	disposed := make(chan error, 1)
+	go func() { disposed <- env.backend.DisposeSession(ctx, alice, ahpTestSession) }()
+	require.Eventually(t, func() bool { return len(pausing.pauseDeletes) == 0 }, 5*time.Second, 5*time.Millisecond)
+
+	// An update reads the session and stops before writing it.
+	releaseUpdate := make(chan struct{})
+	pausing.pauseRead <- releaseUpdate
+	updated := make(chan error, 1)
+	go func() {
+		updated <- env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.Plan = "late" })
+	}()
+	require.Eventually(t, func() bool { return len(pausing.pauseRead) == 0 }, 5*time.Second, 5*time.Millisecond)
+
+	close(releaseDispose)
+	time.Sleep(100 * time.Millisecond) // disposal deletes now, unless it waits for the update
+	close(releaseUpdate)
+	require.NoError(t, <-updated)
+	require.NoError(t, <-disposed)
+	var record ahpSession
+	require.ErrorIs(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record), store.ErrNotFound,
+		"the disposed session is not written back")
+}

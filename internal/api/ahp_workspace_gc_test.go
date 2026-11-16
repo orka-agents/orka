@@ -731,3 +731,31 @@ func TestAHPWorkspaceWatchCountsAsUse(t *testing.T) {
 	w.collectOnce(context.Background())
 	require.NoError(t, env.kube.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}), "a watched workspace is not idle")
 }
+
+// Without an idle timeout only a session's or shell's end removes a workspace,
+// so listing agents warms one only for a person who has a session: one who
+// connects and does nothing would otherwise keep it, and its credentials.
+func TestAHPAgentsWarmNoWorkspaceForSomeoneWithoutASession(t *testing.T) {
+	env := newAHPTestEnv(t)
+	backend := env.backend
+	backend.cfg.WorkspaceIdleTimeout = 0
+	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
+	clientset, err := kubernetes.NewForConfig(unreachable)
+	require.NoError(t, err)
+	w := &ahpWorkspaces{b: backend, clientset: clientset, rest: unreachable, namespace: "orka-ahp-workspaces",
+		image: "example.com/git@sha256:" + ahpHash("x")}
+	backend.workspaces = w
+	carol := ahphost.Principal{Issuer: "https://issuer.example", Subject: "carol", Username: "carol", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "carol")}
+	podExists := func() bool {
+		return env.kube.Get(context.Background(), types.NamespacedName{Namespace: w.namespace, Name: ahpWorkspacePodName(carol.UserKey)}, &corev1.Pod{}) == nil
+	}
+	_, err = backend.Agents(context.Background(), carol)
+	require.NoError(t, err)
+	require.Never(t, podExists, 300*time.Millisecond, 20*time.Millisecond, "no workspace is warmed without a session")
+
+	require.NoError(t, backend.putRecord(context.Background(), carol.UserKey, ahpRecordSession, "ahp-session:/carol", ahpSession{Session: "ahp-session:/carol"}))
+	_, err = backend.Agents(context.Background(), carol)
+	require.NoError(t, err)
+	require.Eventually(t, podExists, 5*time.Second, 20*time.Millisecond, "a person with a session gets a warm workspace")
+}
