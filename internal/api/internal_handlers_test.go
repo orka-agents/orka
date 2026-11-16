@@ -1488,6 +1488,33 @@ func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
 	require.NotNil(t, recalled.LastRecalledAt)
 }
 
+func TestInternalListMemoriesDoesNotCountARecallTooLargeToReturn(t *testing.T) {
+	app, ss := recallFixture(t, nil, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+	ctx := context.Background()
+	require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: "mem-big", Namespace: "default",
+		Content: "big " + strings.Repeat("x", tools.MemoryRecallResultLimit)}))
+	require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: "mem-a", Namespace: "default", Content: "small"}))
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall&query=big", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var listed []store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&listed))
+	require.Len(t, listed, 1, "the response itself is unchanged")
+	require.Equal(t, "mem-big", listed[0].ID)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall&query=small", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Eventually(t, func() bool {
+		small, err := ss.GetMemory(ctx, "default", "mem-a")
+		return err == nil && small.RecalledCount == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	big, err := ss.GetMemory(ctx, "default", "mem-big")
+	require.NoError(t, err)
+	require.Zero(t, big.RecalledCount, "a response larger than the recall tool reads is not counted")
+}
+
 func TestInternalListMemoriesCountsRecallsOnlyFromTaskWorkers(t *testing.T) {
 	other := &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default", AuthType: AuthTypeTokenReview}
 	app, ss := recallFixture(t, nil, other)

@@ -25,7 +25,13 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-const internalMemoryToolBodyLimit = 1 << 20 // 1MB
+// MemoryRecallResultLimit is the largest encoded recall result an agent
+// receives: the native tool reads at most this much of the controller's
+// response, and the ACP broker refuses a larger tool result. A recall whose
+// result is larger is not counted, since the agent never gets all of it.
+const MemoryRecallResultLimit = 1 << 20
+
+const internalMemoryToolBodyLimit = MemoryRecallResultLimit
 
 // RecallMemoryTool retrieves durable namespace-scoped memories relevant to the current task.
 type RecallMemoryTool struct{}
@@ -129,8 +135,14 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		if memories == nil {
 			memories = []store.Memory{}
 		}
-		RecordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
-		return marshalMemoryToolResult(memories)
+		result, err := marshalMemoryToolResult(memories)
+		if err != nil {
+			return "", err
+		}
+		if len(result) <= MemoryRecallResultLimit {
+			RecordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
+		}
+		return result, nil
 	}
 
 	values := url.Values{}

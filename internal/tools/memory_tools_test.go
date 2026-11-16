@@ -198,6 +198,29 @@ func TestRecallMemoryToolRecordsBrokeredRecall(t *testing.T) {
 	}
 }
 
+func TestRecallMemoryToolDoesNotCountAResultTooLargeToReturn(t *testing.T) {
+	big := store.Memory{ID: "mem-big", Namespace: "test-ns", Content: strings.Repeat("x", MemoryRecallResultLimit)}
+	memories := &recordingMemoryRecalls{memories: []store.Memory{big}}
+	ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
+		MemoryReader: memories, MemoryRecallRecorder: memories})
+	if _, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// A recall that fits is counted, so waiting on it also waits on any
+	// count the oversized recall would have started.
+	memories.memories = []store.Memory{{ID: "mem-a", Namespace: "test-ns"}}
+	if _, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	require.Eventually(t, func() bool { return len(memories.recorded()) > 0 && len(memoryRecallSlots) == 0 },
+		5*time.Second, 5*time.Millisecond)
+	recorded := memories.recorded()
+	if len(recorded) != 1 || !slices.Equal(recorded[0].IDs, []string{"mem-a"}) {
+		t.Fatalf("recorded %#v; a result larger than the broker accepts must not be counted", recorded)
+	}
+}
+
 func TestRecallMemoryToolRecordsNothingForAnEmptyRecall(t *testing.T) {
 	memories := &recordingMemoryRecalls{}
 	ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
