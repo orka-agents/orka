@@ -77,9 +77,24 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	}
 
 	task.Status.WebhookDelivery = delivery
-	return w.attemptNotice(ctx, status, task, terminalWebhookRecord, notice, superseded, w.terminalRetry(), func(task *corev1alpha1.Task) {
-		task.Status.WebhookDelivered = true
-	})
+	sent := notice
+	return w.attemptNotice(ctx, status, task, terminalWebhookRecord, notice, superseded, w.terminalRetry(),
+		func(current *corev1alpha1.Task) bool { return terminalNoticeStillCurrent(current, sent) },
+		func(task *corev1alpha1.Task) {
+			task.Status.WebhookDelivered = true
+		})
+}
+
+// terminalNoticeStillCurrent reports whether task's current state still
+// owes exactly notice: the same event, due now, with a byte-identical body.
+// Otherwise the pending notice is superseded before its next attempt.
+func terminalNoticeStillCurrent(task *corev1alpha1.Task, notice webhookNotice) bool {
+	eventType, disposition := taskWebhookEvent(task)
+	if disposition != webhookNoticeDue || eventType != notice.EventType {
+		return false
+	}
+	rebuilt, err := buildWebhookNotice(task, notice.DeliveryID, notice.EventType, notice.OccurredAt)
+	return err == nil && rebuilt.Digest == notice.Digest
 }
 
 // terminalNoticeOutstanding reports whether the Task's terminal notice still
@@ -144,8 +159,10 @@ func (w *WebhookNotifier) terminalRetry() webhookRetryPolicy {
 // by at most one attempt. It applies the destination policy, the attempt
 // bound, and the signing requirement, claims the attempt durably under a
 // lease, sends the signed notice, and records the result. fresh means the
-// record was just created and holds no attempt yet. delivered runs on the
-// Task before the success is persisted.
+// record was just created and holds no attempt yet. stillCurrent reports
+// whether a re-read Task still renders exactly notice; a result is recorded
+// on a re-read Task only when it does. delivered runs on the Task before the
+// success is persisted.
 //
 //nolint:gocyclo // Every refusal before the send stays inline so none can be skipped.
 func (w *WebhookNotifier) attemptNotice(
@@ -156,6 +173,7 @@ func (w *WebhookNotifier) attemptNotice(
 	notice webhookNotice,
 	fresh bool,
 	retry webhookRetryPolicy,
+	stillCurrent func(*corev1alpha1.Task) bool,
 	delivered func(*corev1alpha1.Task),
 ) (time.Duration, error) {
 	log := logf.FromContext(ctx)
@@ -265,7 +283,9 @@ func (w *WebhookNotifier) attemptNotice(
 	default:
 		log.Info("webhook delivery attempt failed", "deliveryID", notice.DeliveryID, "attempt", attempt, "retryIn", requeue, "reason", boundedWebhookError(result.Err))
 	}
-	if err := recordWebhookAttemptResult(ctx, status, task, recordResult); err != nil {
+	if err := recordWebhookAttemptResult(ctx, status, task, func(current *corev1alpha1.Task) bool {
+		return stillCurrent(current) && recordResult(current)
+	}); err != nil {
 		// The claimed lease still bounds the next attempt.
 		return 0, err
 	}
@@ -285,16 +305,19 @@ func holdsWebhookAttemptClaim(delivery *corev1alpha1.TaskWebhookDelivery, attemp
 // recordWebhookAttemptResult persists an attempt's result, already applied
 // to task. Delivery runs beside the Task reconciler and other controllers
 // that write Task status, so a conflicting write is expected. When the
-// writer can re-read the Task, the result is applied again to the current
-// record, but only while that record still holds this attempt's claim: a
-// claim that was replaced or settled is not this attempt's to record. A
-// result that is never recorded leaves the claim's lease to bound the next
-// attempt, as a crash does.
+// writer can re-read the Task, rerecord applies the result again to the
+// current Task, and reports false, recording nothing, unless that Task still
+// renders the sent notice and its record still holds this attempt's claim. A
+// claim that was replaced or settled is not this attempt's to record, and a
+// notice whose Task state changed must be superseded, as ADR 0042 requires,
+// rather than settled by a send of the older body. A result that is not
+// recorded leaves the claim's lease to bound the next attempt, as a crash
+// does.
 func recordWebhookAttemptResult(
 	ctx context.Context,
 	status taskStatusWriter,
 	task *corev1alpha1.Task,
-	recordResult func(*corev1alpha1.Task) bool,
+	rerecord func(*corev1alpha1.Task) bool,
 ) error {
 	err := status.Update(ctx, task)
 	rereader, ok := status.(taskStatusRereader)
@@ -302,8 +325,8 @@ func recordWebhookAttemptResult(
 		if err := rereader.reread(ctx, task); err != nil {
 			return err
 		}
-		if !recordResult(task) {
-			logf.FromContext(ctx).Info("webhook attempt result not recorded: its claim no longer holds")
+		if !rerecord(task) {
+			logf.FromContext(ctx).Info("webhook attempt result not recorded: its claim or its notice is no longer current")
 			return nil
 		}
 		err = status.Update(ctx, task)

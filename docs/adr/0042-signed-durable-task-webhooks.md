@@ -121,6 +121,8 @@ lease.
   Because the reconciler and other controllers can now write the Task's status
   while an attempt is in flight, a result write that conflicts is applied again
   to a fresh read, but only while the record still holds that attempt's claim
-  (same attempt count and lease). The reconciler still holds back parent
+  (same attempt count and lease) and the fresh Task still renders the sent
+  body. Otherwise nothing is recorded, and after the lease the notice is
+  superseded as before. The reconciler still holds back parent
   history enforcement until the terminal notice settles; the runnable's status
   writes reconcile the Task again.

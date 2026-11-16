@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -187,45 +188,94 @@ func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 }
 
 // An attempt's result survives a status write that another writer, such as
-// the Task reconciler, committed while the request was in flight.
-func TestWebhookAttemptResultSurvivesAConcurrentStatusWrite(t *testing.T) {
-	receiver := newWebhookReceiver(t, http.StatusOK)
-	task := completedWebhookTask("concurrent", receiver.server.URL+"/hook")
-	r := newUnitReconciler(newTestScheme(), task)
-	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
-	status := &conflictOnceTaskStatus{rereadingTaskStatus: rereadingTaskStatus{writer: r.Status(), reader: r.Client}}
-	status.beforeResult = func(ctx context.Context) {
-		// Another writer updates the Task's status after the claim.
-		current := &corev1alpha1.Task{}
-		if err := r.Get(ctx, ctrlclient.ObjectKeyFromObject(task), current); err != nil {
-			t.Fatal(err)
-		}
-		current.Status.Message = "updated by the reconciler"
-		if err := r.Status().Update(ctx, current); err != nil {
-			t.Fatal(err)
-		}
-	}
+// the Task reconciler, committed while the request was in flight, as long as
+// the Task still renders the notice that was sent. When that write changed
+// the Task's terminal state, the sent notice is stale: its result is not
+// recorded, and once the claim's lease ends the notice is superseded by one
+// that carries the newer state, as ADR 0042 requires.
+func TestWebhookAttemptResultAfterAConcurrentStatusWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mutate        func(*corev1alpha1.Task)
+		wantDelivered bool
+	}{
+		{
+			name: "body unchanged",
+			mutate: func(task *corev1alpha1.Task) {
+				task.Status.Conditions = append(task.Status.Conditions, metav1.Condition{
+					Type: "Unrelated", Status: metav1.ConditionTrue, Reason: "Test", LastTransitionTime: metav1.Now(),
+				})
+			},
+			wantDelivered: true,
+		},
+		{
+			name:   "terminal state changed",
+			mutate: func(task *corev1alpha1.Task) { task.Status.Message = "updated by the reconciler" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			receiver := newWebhookReceiver(t, http.StatusOK)
+			task := completedWebhookTask("concurrent", receiver.server.URL+"/hook")
+			r := newUnitReconciler(newTestScheme(), task)
+			clock := &webhookTestClock{now: time.Now().Truncate(time.Second)}
+			r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), clock)
+			status := &conflictOnceTaskStatus{rereadingTaskStatus: rereadingTaskStatus{writer: r.Status(), reader: r.Client}}
+			status.beforeResult = func(ctx context.Context) {
+				current := &corev1alpha1.Task{}
+				if err := r.Get(ctx, ctrlclient.ObjectKeyFromObject(task), current); err != nil {
+					t.Fatal(err)
+				}
+				tc.mutate(current)
+				if err := r.Status().Update(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			read := func() *corev1alpha1.Task {
+				t.Helper()
+				current := &corev1alpha1.Task{}
+				if err := r.Get(context.Background(), ctrlclient.ObjectKeyFromObject(task), current); err != nil {
+					t.Fatal(err)
+				}
+				return current
+			}
 
-	current := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), ctrlclient.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.WebhookNotifier.reconcileDelivery(context.Background(), status, current); err != nil {
-		t.Fatalf("reconcileDelivery() error = %v", err)
-	}
-	if err := r.Get(context.Background(), ctrlclient.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatal(err)
-	}
-	if !status.conflicted {
-		t.Fatal("the result write never met the concurrent status write")
-	}
-	if !current.Status.WebhookDelivered || current.Status.WebhookDelivery.State != corev1alpha1.TaskWebhookDeliveryDelivered ||
-		current.Status.WebhookDelivery.Attempts != 1 || current.Status.Message != "updated by the reconciler" {
-		t.Fatalf("status after a concurrent write = delivered %v, %+v, message %q; want the result and the other write kept",
-			current.Status.WebhookDelivered, current.Status.WebhookDelivery, current.Status.Message)
-	}
-	if got := len(receiver.all()); got != 1 {
-		t.Fatalf("receipts = %d, want 1", got)
+			if _, err := r.WebhookNotifier.reconcileDelivery(context.Background(), status, read()); err != nil {
+				t.Fatalf("reconcileDelivery() error = %v", err)
+			}
+			if !status.conflicted {
+				t.Fatal("the result write never met the concurrent status write")
+			}
+			current := read()
+			first := current.Status.WebhookDelivery
+			if len(receiver.all()) != 1 || first == nil || first.Attempts != 1 {
+				t.Fatalf("after one attempt: receipts = %d, delivery = %+v", len(receiver.all()), first)
+			}
+			if tc.wantDelivered {
+				if !current.Status.WebhookDelivered || first.State != corev1alpha1.TaskWebhookDeliveryDelivered || len(current.Status.Conditions) != 1 {
+					t.Fatalf("status = delivered %v, %+v, conditions %v; want the result and the other write kept",
+						current.Status.WebhookDelivered, first, current.Status.Conditions)
+				}
+				return
+			}
+			if current.Status.WebhookDelivered || first.State != corev1alpha1.TaskWebhookDeliveryPending || first.NextAttemptTime == nil {
+				t.Fatalf("stale notice = delivered %v, %+v; want its claim left pending", current.Status.WebhookDelivered, first)
+			}
+			clock.now = first.NextAttemptTime.Time
+			if _, err := r.WebhookNotifier.reconcileDelivery(context.Background(), r.Status(), read()); err != nil {
+				t.Fatalf("reconcileDelivery() after the lease error = %v", err)
+			}
+			current = read()
+			second := current.Status.WebhookDelivery
+			if !current.Status.WebhookDelivered || second.DeliveryID == first.DeliveryID || second.Superseded != 1 ||
+				second.State != corev1alpha1.TaskWebhookDeliveryDelivered || len(receiver.all()) != 2 {
+				t.Fatalf("after the lease: delivered %v, %+v, receipts %d; want a superseding notice with the newer state",
+					current.Status.WebhookDelivered, second, len(receiver.all()))
+			}
+			var payload WebhookPayload
+			if err := json.Unmarshal(receiver.all()[1].body, &payload); err != nil || payload.Message != "updated by the reconciler" {
+				t.Fatalf("superseding payload = %+v, %v; want the newer message", payload, err)
+			}
+		})
 	}
 }
 
