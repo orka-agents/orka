@@ -2,15 +2,18 @@ package supervisor
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -20,7 +23,15 @@ import (
 // would.
 func runFirstPromptThenAwaitAdapterExit(t *testing.T, mode string) (*Server, Config, harnessv2.CreateRuntimeSessionRequest, *sessionState) {
 	t.Helper()
+	return runFirstPromptThenAwaitAdapterExitWith(t, mode, nil)
+}
+
+func runFirstPromptThenAwaitAdapterExitWith(t *testing.T, mode string, configure func(*Server)) (*Server, Config, harnessv2.CreateRuntimeSessionRequest, *sessionState) {
+	t.Helper()
 	server, cfg, profile := newTestServer(t, mode)
+	if configure != nil {
+		configure(server)
+	}
 	create := testCreateSessionRequest(t, cfg, profile)
 	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if created.Code != http.StatusCreated {
@@ -186,5 +197,46 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 		if !scheduled {
 			t.Fatal("lost-adapter session cleanup was not scheduled")
 		}
+	}
+}
+
+// Creation validates the workspace once, but the agent can write it between
+// prompts. An idle adapter restart must re-run that check before launching a
+// replacement, and retire the session rather than start the provider over
+// configuration that creation would have refused.
+func TestSupervisorRevalidatesWorkspaceBeforeIdleAdapterRelaunch(t *testing.T) {
+	var validations atomic.Int32
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(server *Server) {
+		server.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+			validations.Add(1)
+			return rejectOpenCodeProjectConfiguration(paths)
+		}
+	})
+	if got := validations.Load(); got != 1 {
+		t.Fatalf("workspace validations after create = %d, want 1", got)
+	}
+	writeTestFile(t, filepath.Join(state.paths.Workspace, "opencode.json"), "{}")
+	exited := state.runtime.Process()
+
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("prompt after unsafe workspace change status = %d body=%s", response.Code, response.Body.String())
+	}
+	var body harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != harnessv2.ErrorCodePromptNotAccepted || body.Retryable {
+		t.Fatalf("error = %#v, want non-retryable prompt-not-accepted", body)
+	}
+	if got := validations.Load(); got != 2 {
+		t.Fatalf("workspace validations after relaunch attempt = %d, want 2", got)
+	}
+	if state.runtime.AdapterRestarts() != 0 || state.runtime.Process() != exited {
+		t.Fatal("idle adapter restart launched a replacement over a rejected workspace")
+	}
+	if _, exists := state.runtime.Tombstone(string(next.Metadata.PromptID)); exists {
+		t.Fatal("rejected relaunch submitted the next ACP prompt")
 	}
 }

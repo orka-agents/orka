@@ -293,7 +293,9 @@ routing outside the Orka tool policy:
   workspace root contains `.opencode/`, `opencode.json`, or `opencode.jsonc`,
   and fails the Task with `RuntimeSessionStartFailed`. It does not remove
   those files, because they may be published. The check runs on every
-  session start, including a resume.
+  session start, including a resume, and again before Orka restarts an
+  adapter that exited while idle. If the agent created such a file in the
+  meantime, Orka retires the session instead of restarting OpenCode.
 
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
 

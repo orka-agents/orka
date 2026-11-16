@@ -1366,6 +1366,10 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	var validateAdapterRelaunch func() error
+	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
+		validateAdapterRelaunch = func() error { return validate(paths) }
+	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
@@ -1379,16 +1383,20 @@ func (s *Server) createSession(
 			GID:           gid,
 			ClientOptions: acp.Options{MaxMessageBytes: s.cfg.Capabilities.Limits.MaxRequestBytes},
 		},
-		MCPServers:            []acp.MCPServer{mcpServer},
-		NewSessionMeta:        projection.NewSessionMeta,
-		ResumeSessionID:       resumeSessionID,
-		AuthMethodID:          s.cfg.Provider.AuthMethodID,
-		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
-		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
-		PermissionTimeout:     defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
-		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
-		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
-		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
+		MCPServers:      []acp.MCPServer{mcpServer},
+		NewSessionMeta:  projection.NewSessionMeta,
+		ResumeSessionID: resumeSessionID,
+		AuthMethodID:    s.cfg.Provider.AuthMethodID,
+		// The agent can write the workspace between prompts; an idle adapter
+		// restart must not launch the provider over configuration that
+		// creation would have refused.
+		ValidateAdapterRelaunch: validateAdapterRelaunch,
+		InitializeTimeout:       defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
+		PromptLease:             time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
+		PermissionTimeout:       defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
+		CancelGrace:             defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
+		MaxBufferedEvents:       s.cfg.Capabilities.Limits.MaxBufferedEvents,
+		MaxBufferedEventBytes:   supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
 		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
