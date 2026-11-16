@@ -120,6 +120,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted |
 | [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted |
 | [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
+| [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
 
 ### Agent hosts and the Agent Host Protocol
 
