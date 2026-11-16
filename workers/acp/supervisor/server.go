@@ -255,6 +255,19 @@ func sessionCreationRejected(err error) error {
 	return &sessionCreationError{stage: "workspace validation", cause: err, rejectedMessage: message}
 }
 
+// validateWorkspaceAsSessionChild re-runs workspace validation for an idle
+// adapter restart. By then the session tree belongs to the child, and a
+// write-intent workspace is its private 0700 directory; the supervisor has no
+// DAC_OVERRIDE, so as itself it could not even look inside, and would retire
+// every clean session. The check runs as the child would see the tree. It only
+// inspects entries without following them, so anything the child changes can
+// at worst make the check fail, which retires the session.
+func validateWorkspaceAsSessionChild(validate func(acp.SessionPaths) error, paths acp.SessionPaths, uid, gid int) func() error {
+	return func() error {
+		return asSessionChild(uid, gid, func() error { return validate(paths) })
+	}
+}
+
 func sessionCreationRejection(err error) (string, bool) {
 	creation, ok := errors.AsType[*sessionCreationError](err)
 	if !ok || creation.rejectedMessage == "" {
@@ -1368,7 +1381,7 @@ func (s *Server) createSession(
 	}
 	var validateAdapterRelaunch func() error
 	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
-		validateAdapterRelaunch = func() error { return validate(paths) }
+		validateAdapterRelaunch = validateWorkspaceAsSessionChild(validate, paths, uid, gid)
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),

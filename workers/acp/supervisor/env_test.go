@@ -348,6 +348,24 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 			}
 		})
 	}
+
+	// The child owns the session root after it has run, so a restart's check
+	// must not follow a workspace it replaced with a link to another tree.
+	linked := newPaths(t)
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere", "workspace")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(filepath.Dir(elsewhere), "opencode.json"), `{}`)
+	if err := os.RemoveAll(linked.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, linked.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := profile.ValidateWorkspace(linked); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("workspace replaced by a link = %v, want rejection", err)
+	}
 }
 
 func writeTestFile(t *testing.T, name, content string) {

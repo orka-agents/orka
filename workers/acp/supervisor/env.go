@@ -882,6 +882,15 @@ func rejectOpenCodeProjectConfiguration(paths acp.SessionPaths) error {
 	if strings.TrimSpace(paths.Workspace) == "" {
 		return fmt.Errorf("OpenCode workspace path is required")
 	}
+	// Once the child has run it owns the session root, so before an adapter
+	// restart it could have swapped the workspace for a link to a tree whose
+	// ancestors this walk would never see. No child process runs between this
+	// check and the launch, so the answer cannot change in between.
+	if info, err := os.Lstat(paths.Workspace); err != nil {
+		return fmt.Errorf("inspect OpenCode workspace: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("OpenCode workspace is not a directory")
+	}
 	var found []string
 	for directory := filepath.Clean(paths.Workspace); ; directory = filepath.Dir(directory) {
 		for _, name := range openCodeProjectConfigNames {
