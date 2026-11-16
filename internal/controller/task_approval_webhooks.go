@@ -50,6 +50,15 @@ const (
 	defaultApprovalWebhookMaxAttempts = 5
 	defaultApprovalWebhookMaxBackoff  = time.Minute
 
+	// approvalWebhookSigningWindow bounds how long a queued approval notice
+	// waits for signing keys: the retry window above plus two minutes of
+	// grace. Terminal notices wait until signing is fixed, but an approval
+	// notice is worthless once its review window closes, and stream-order
+	// delivery would otherwise let one unsignable notice hold back every
+	// later one and fill the queue until it overflows.
+	approvalWebhookSigningWindow  = 5 * time.Minute
+	approvalWebhookSigningExpired = "webhook signing key unavailable past the approval notice window"
+
 	// approvalWebhookAttemptsPerPass bounds the sends of one reconcile. Task
 	// reconciles share one worker, so, as for the terminal notice, a slow
 	// receiver holds it for at most one request per pass.
@@ -194,7 +203,7 @@ func approvalExpiryEnforced(approval approvals.Approval) bool {
 // newApprovalNotice builds the record for a transition, keeping only
 // identifiers that match their safe shape. It reports false when the
 // approval ID itself is not safe to send.
-func newApprovalNotice(task *corev1alpha1.Task, t approvalTransition) (corev1alpha1.TaskApprovalWebhookNotice, bool, error) {
+func newApprovalNotice(task *corev1alpha1.Task, t approvalTransition, now time.Time) (corev1alpha1.TaskApprovalWebhookNotice, bool, error) {
 	approval := t.approval
 	if !approvalWebhookIDPattern.MatchString(approval.ID) {
 		return corev1alpha1.TaskApprovalWebhookNotice{}, false, nil
@@ -223,7 +232,7 @@ func newApprovalNotice(task *corev1alpha1.Task, t approvalTransition) (corev1alp
 			return corev1alpha1.TaskApprovalWebhookNotice{}, false, nil
 		}
 	}
-	err := sealApprovalNotice(task, &notice, t.occurredAt)
+	err := sealApprovalNotice(task, &notice, t.occurredAt, now)
 	return notice, err == nil, err
 }
 
@@ -234,18 +243,19 @@ func newApprovalOverflowNotice(task *corev1alpha1.Task, firstOmittedSeq int64, n
 		Transition: corev1alpha1.TaskApprovalWebhookOverflow,
 		StreamSeq:  firstOmittedSeq,
 	}
-	return notice, sealApprovalNotice(task, &notice, now)
+	return notice, sealApprovalNotice(task, &notice, now, now)
 }
 
-// sealApprovalNotice fills the delivery record of a new notice: its
-// deterministic ID, event, time, and the digest of the body rendered from
-// the record alone.
-func sealApprovalNotice(task *corev1alpha1.Task, notice *corev1alpha1.TaskApprovalWebhookNotice, occurredAt time.Time) error {
+// sealApprovalNotice fills the delivery record of a new notice queued at
+// queuedAt: its deterministic ID, event, time, signing deadline, and the
+// digest of the body rendered from the record alone.
+func sealApprovalNotice(task *corev1alpha1.Task, notice *corev1alpha1.TaskApprovalWebhookNotice, occurredAt, queuedAt time.Time) error {
 	notice.DeliveryID = approvalWebhookDeliveryID(string(task.UID), notice.ApprovalID, notice.Transition)
 	notice.EventType = approvalWebhookEventType(notice.Transition)
 	// Status times have second precision; the body must survive a round trip.
 	notice.OccurredAt = metav1.NewTime(occurredAt.UTC().Truncate(time.Second))
 	notice.State = corev1alpha1.TaskWebhookDeliveryPending
+	notice.SigningDeadline = approvalSigningDeadline(queuedAt)
 	rendered, err := renderApprovalNotice(task, notice)
 	if err != nil {
 		return err
@@ -321,7 +331,7 @@ func projectApprovalNotices(
 			state.Omitted++
 			continue
 		}
-		notice, ok, err := newApprovalNotice(task, t)
+		notice, ok, err := newApprovalNotice(task, t, now)
 		if err != nil {
 			return false, err
 		}
@@ -621,7 +631,52 @@ func (w *WebhookNotifier) deliverApprovalNotices(
 }
 
 func (w *WebhookNotifier) approvalRetry() webhookRetryPolicy {
-	return webhookRetryPolicy{maxAttempts: w.approvalMaxAttempts, maxBackoff: w.approvalMaxBackoff}
+	return webhookRetryPolicy{
+		maxAttempts:        w.approvalMaxAttempts,
+		maxBackoff:         w.approvalMaxBackoff,
+		signingUnavailable: expireUnsignedApprovalNotices,
+	}
+}
+
+// approvalSigningDeadline is the signing deadline of a notice queued at
+// queuedAt. Status times have second precision, so it is rounded up and
+// survives a round trip unchanged.
+func approvalSigningDeadline(queuedAt time.Time) *metav1.Time {
+	deadline := metav1.NewTime(ceilToSecond(queuedAt.UTC().Add(approvalWebhookSigningWindow)))
+	return &deadline
+}
+
+// expireUnsignedApprovalNotices runs while signing keys are unavailable.
+// Every pending approval notice waits on the same keys, so each one at or
+// past its persisted signing deadline is retired unsent. A notice queued
+// without a deadline, by an earlier controller, gets one starting now. Only
+// the head notice is ever attempted, so no other pending notice holds an
+// attempt lease. It reports whether status changed and how long until the
+// earliest remaining deadline (zero when none remains).
+func expireUnsignedApprovalNotices(ctx context.Context, task *corev1alpha1.Task, now time.Time) (bool, time.Duration) {
+	state := task.Status.ApprovalWebhooks
+	if state == nil {
+		return false, 0
+	}
+	changed := false
+	next := time.Duration(0)
+	for i := range state.Notices {
+		notice := &state.Notices[i]
+		if notice.State != corev1alpha1.TaskWebhookDeliveryPending {
+			continue
+		}
+		if notice.SigningDeadline == nil {
+			notice.SigningDeadline = approvalSigningDeadline(now)
+			changed = true
+		}
+		if now.Before(notice.SigningDeadline.Time) {
+			next = minPositiveDuration(next, notice.SigningDeadline.Sub(now))
+			continue
+		}
+		retireApprovalNotice(ctx, notice, approvalWebhookSigningExpired)
+		changed = true
+	}
+	return changed, next
 }
 
 func approvalNoticeRecord(deliveryID string) webhookRecordRef {

@@ -274,6 +274,13 @@ How approvals reach a receiver:
 - An approval notice gets **5 attempts**, retried after 10s, 20s, 40s and 60s,
   so it settles within about three minutes. Review windows are short, and a
   late alert is of little use.
+- While no signing key is available, an approval notice waits without using
+  an attempt, as a terminal notice does, but only until its `signingDeadline`,
+  five minutes after it was queued. A notice still waiting then is marked
+  `Failed` unsent, with `lastError` "webhook signing key unavailable past the
+  approval notice window", and is never sent or recreated. Later notices then
+  go ahead once a key is back. Terminal notices keep waiting until a key is
+  available.
 - Selecting approval events on a Task whose spec can still change, or
   selecting them again after removing them all, does not replay earlier
   approval history. Notices start with the first transition recorded after
@@ -306,6 +313,7 @@ status:
         streamSeq: 42
         state: Delivered      # Pending, Delivered, or Failed
         attempts: 1
+        signingDeadline: "2026-11-16T09:06:30Z"
 ```
 
 The queue holds at most 16 notices. Delivered and failed notices are pruned,
@@ -314,7 +322,9 @@ are pending at once, the controller records one `task.approval_overflow` notice
 whose `streamSeq` is the first transition it did not notify, sets
 `overflowed: true`, and notifies no later transition for that Task. `omitted`
 counts the transitions it skipped. Read the approvals API after an overflow
-notice.
+notice. A signing outage alone overflows the queue only if 15 notices are
+queued within five minutes of each other, because each notice is marked
+`Failed` at its signing deadline and frees its slot.
 
 ## Signing keys and rotation
 

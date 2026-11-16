@@ -111,6 +111,13 @@ func terminalWebhookRecord(task *corev1alpha1.Task) *corev1alpha1.TaskWebhookDel
 type webhookRetryPolicy struct {
 	maxAttempts int32
 	maxBackoff  time.Duration
+	// signingUnavailable, when set, runs on the Task while signing keys are
+	// unavailable, before the notice is kept pending. It may retire notices
+	// whose wait for keys has ended, including this one, and reports whether
+	// it changed status and how long until the next such retirement (zero
+	// for none). Without it, as for terminal notices, a notice waits until
+	// signing is fixed.
+	signingUnavailable func(ctx context.Context, task *corev1alpha1.Task, now time.Time) (bool, time.Duration)
 }
 
 func (w *WebhookNotifier) terminalRetry() webhookRetryPolicy {
@@ -172,7 +179,7 @@ func (w *WebhookNotifier) attemptNotice(
 	}
 	keys, err := w.keys.SigningKeys(ctx)
 	if err != nil {
-		return w.recordSigningUnavailable(ctx, status, task, delivery, fresh, err)
+		return w.recordSigningUnavailable(ctx, status, task, delivery, fresh, retry, err)
 	}
 
 	// Claim the attempt durably before sending. Loading keys can block on
@@ -308,16 +315,28 @@ func taskWebhookEvent(task *corev1alpha1.Task) (string, webhookNoticeDisposition
 
 // recordSigningUnavailable keeps the notice, already placed in task status,
 // pending without consuming an attempt: nothing is ever sent unsigned, and a
-// configuration fix resumes delivery.
+// configuration fix resumes delivery. A retry policy with a signing hook may
+// instead retire the notice unsent; it then reports zero so the caller moves
+// on to the next notice.
 func (w *WebhookNotifier) recordSigningUnavailable(
 	ctx context.Context,
 	status taskStatusWriter,
 	task *corev1alpha1.Task,
 	delivery *corev1alpha1.TaskWebhookDelivery,
 	changed bool,
+	retry webhookRetryPolicy,
 	cause error,
 ) (time.Duration, error) {
 	logf.FromContext(ctx).Error(cause, "webhook signing key unavailable; delivery deferred", "deliveryID", delivery.DeliveryID)
+	requeue := webhookSigningRetryInterval
+	if retry.signingUnavailable != nil {
+		expired, next := retry.signingUnavailable(ctx, task, w.now())
+		changed = changed || expired
+		requeue = minPositiveDuration(requeue, next)
+	}
+	if delivery.State != corev1alpha1.TaskWebhookDeliveryPending {
+		return 0, status.Update(ctx, task)
+	}
 	message := boundedWebhookError(errors.New("webhook signing key is unavailable"))
 	if changed || delivery.LastError != message {
 		delivery.LastError = message
@@ -325,7 +344,7 @@ func (w *WebhookNotifier) recordSigningUnavailable(
 			return 0, err
 		}
 	}
-	return webhookSigningRetryInterval, nil
+	return requeue, nil
 }
 
 // ceilToSecond rounds t up to the next whole second.

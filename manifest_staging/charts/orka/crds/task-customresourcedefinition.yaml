@@ -2339,6 +2339,14 @@ spec:
                           description: Severity is the approval's severity label.
                           maxLength: 16
                           type: string
+                        signingDeadline:
+                          description: |-
+                            SigningDeadline is the latest time the notice may wait for webhook signing
+                            keys. It is set when the notice is queued. While the keys are
+                            unavailable at or after it, the notice is retired unsent so later
+                            notices can proceed. It is not part of the payload.
+                          format: date-time
+                          type: string
                         state:
                           description: State is the notice lifecycle state.
                           enum:

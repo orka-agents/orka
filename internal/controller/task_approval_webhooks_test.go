@@ -61,6 +61,8 @@ type approvalWebhookHarness struct {
 	keys     taskwebhook.KeySet
 	// maxAttempts overrides the approval attempt bound when non-zero.
 	maxAttempts int32
+	// signingUnavailable configures a key source whose keys are missing.
+	signingUnavailable bool
 }
 
 func newApprovalWebhookHarness(t *testing.T, task *corev1alpha1.Task, statuses ...int) *approvalWebhookHarness {
@@ -114,6 +116,9 @@ func (h *approvalWebhookHarness) notifier() *WebhookNotifier {
 	notifier.now = func() time.Time { return h.now }
 	if h.maxAttempts > 0 {
 		notifier.approvalMaxAttempts = h.maxAttempts
+	}
+	if h.signingUnavailable {
+		notifier.SetKeySource(taskwebhook.StaticKeySource{})
 	}
 	return notifier
 }

@@ -114,7 +114,9 @@ of the first transition not notified, and sets `overflowed`. From then on no
 transition is notified, `omitted` counts them, and the cursor keeps advancing.
 A receiver that gets the overflow notice reads the approvals API. Draining
 needs 15 undelivered notices inside one retry window, so the latch is meant to
-be rare, not a throttle.
+be rare, not a throttle. A signing outage is held to the same rule by the
+signing deadline below: it overflows the queue only when 15 notices are
+queued within one signing window.
 
 **Payload.** The body is separate from the terminal body. It carries
 `schemaVersion: orka.ai/task-approval-webhook/v1` and only these fields:
@@ -152,6 +154,24 @@ notices. A notice that arrives after a ten-minute review window closed has lost
 its value, and stream-order delivery means one failing notice holds back the
 Task's later ones only this long.
 
+**Signing outage.** ADR 0042 keeps a notice pending without consuming an
+attempt while no signing key is available, so a configuration fix resumes
+delivery. For an approval notice that alone would let one unsignable notice
+hold back every later one until the queue overflows. Each approval notice
+therefore records `signingDeadline` when it is queued: five minutes, the retry
+window plus two minutes of grace, rounded up to a whole second. The deadline
+lives in the status record, so a restarted controller enforces the same one,
+and it is not part of the body. Whenever the keys are unavailable, every
+pending approval notice at or past its deadline is retired `Failed` unsent,
+with no attempt consumed and the bounded `lastError` "webhook signing key
+unavailable past the approval notice window", and the next notice goes ahead.
+Only the head notice is ever attempted, so no retired notice holds a lease.
+A retired notice is never regenerated: the cursor already covers its
+transition, and the retained record keeps its delivery ID. A notice recorded
+without a deadline, by an earlier controller, gets one from the first pass
+that finds the keys unavailable. Terminal notices keep ADR 0042's behaviour
+and wait until signing is fixed.
+
 **Prompt reconcile.** Each producer already causes a reconcile:
 
 - the decision API patches the Task's annotations;
@@ -184,4 +204,6 @@ notices, as for the terminal notice.
 - Opted-in Tasks read their approval events on each reconcile and cost two
   status writes per attempt. Legacy Tasks do no new work.
 - Task status grows by at most 16 small records.
+- An approval notice queued during a signing outage longer than five minutes
+  is never sent. The receiver sees a gap and reads the approvals API.
 - `approvals.Approval` gains an unserialized `RequestSeq`.

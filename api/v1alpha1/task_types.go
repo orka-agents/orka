@@ -811,6 +811,13 @@ type TaskApprovalWebhookNotice struct {
 	// +optional
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 
+	// SigningDeadline is the latest time the notice may wait for webhook signing
+	// keys. It is set when the notice is queued. While the keys are
+	// unavailable at or after it, the notice is retired unsent so later
+	// notices can proceed. It is not part of the payload.
+	// +optional
+	SigningDeadline *metav1.Time `json:"signingDeadline,omitempty"`
+
 	// Parked reports a parked-turn sign-off approval (ADR 0041).
 	// +optional
 	Parked bool `json:"parked,omitempty"`
