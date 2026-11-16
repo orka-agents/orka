@@ -256,3 +256,14 @@ func TestAHPEndpointServesThroughFiber(t *testing.T) {
 		t.Fatal("revoking the token must close its connection")
 	}
 }
+
+// A GitHub sign-in session cannot mint AHP tokens yet, and is told so rather
+// than refused as a delegated context token.
+func TestAHPTokensRefuseAGitHubSessionByName(t *testing.T) {
+	h := newAHPTestHarness(t, ContextTokenAuthorizationConfig{})
+	h.identity = &UserInfo{AuthType: AuthTypeGitHubSession, Username: "alice", Subject: "852750", Issuer: "https://github.com"}
+	status, raw := h.do(http.MethodPost, "/api/v1/ahp-tokens", `{"description":"laptop"}`)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Contains(t, string(raw), "GitHub sign-in session")
+	require.NotContains(t, string(raw), "delegated context token")
+}
