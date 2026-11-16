@@ -5350,8 +5350,9 @@ func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *
 }
 
 // approvalNoticesHoldRun reports whether a run must be kept because a Task in
-// its continuation chain, from head, still has a pending approval notice, or
-// approval events its projection has not reached yet (ADR 0053). Deleting a
+// its continuation chain, from head, still has a pending approval notice or
+// an outstanding terminal notice, or approval events its projection has not
+// reached yet (ADR 0053). Deleting a
 // Task drops its queued notices and its stream, and only a reconcile of the
 // Task itself can project and send them. It reads uncached state, because the
 // notices may have been queued earlier in the same reconcile, and follows at
@@ -5374,8 +5375,15 @@ func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev
 		return true
 	}
 	storeFailed := false
+	now := r.WebhookNotifier.now()
 	for range taskwait.MaxChainLength + 1 {
 		if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) >= 0 {
+			return true
+		}
+		// The terminal notice is sent asynchronously, after the run's own
+		// reconcile queued it, so the parent can see a finished run whose
+		// notice is still waiting for a delivery worker.
+		if outstanding, _ := terminalNoticeOutstanding(current, now); outstanding {
 			return true
 		}
 		unprojected, err := r.approvalEventsAwaitProjection(ctx, current)

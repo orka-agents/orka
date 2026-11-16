@@ -4,7 +4,9 @@ Date: 2026-11-16
 
 ## Status
 
-Accepted. Amends [ADR 0042](0042-signed-durable-task-webhooks.md), which left
+Accepted, partly superseded by [ADR 0054](0054-task-webhook-delivery-workers.md),
+which moves delivery attempts out of the Task reconcile. Amends
+[ADR 0042](0042-signed-durable-task-webhooks.md), which left
 non-terminal events open, with opt-in approval notices on the same signed,
 durable delivery path. It answers, for Task webhooks, the approval notification
 that [ADR 0032](0032-gateway-interim-delivery.md) deferred to a separate ADR.
@@ -248,11 +250,3 @@ keys, so holding on it would let an outage keep every run.
 - An approval notice queued during a signing outage longer than five minutes
   is never sent. The receiver sees a gap and reads the approvals API.
 - `approvals.Approval` gains an unserialized `RequestSeq`.
-- 2026-11-16: Approval notice attempts run in ADR 0042's delivery runnable,
-  not in the Task reconcile worker. Projection still runs before the phase
-  work, and the notice is handed off after it. The statement under Delivery
-  that Task reconciles share one worker no longer describes delivery: a slow
-  receiver holds one delivery worker per attempt, and stream order still holds
-  because a Task is never in two workers at once. The settling attempt's status
-  write, rather than a one-second requeue, reconciles the Task again for its
-  history enforcement.

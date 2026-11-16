@@ -354,13 +354,14 @@ func TestScheduledRunHistoryParentHoldsUnprojectedApprovalEvents(t *testing.T) {
 }
 
 // unprojectedApprovalRun is a finished run that tracks both approval events,
-// with its cursor at seq.
+// with its cursor at seq. Its terminal notice was already delivered.
 func unprojectedApprovalRun(seq int64) *corev1alpha1.Task {
 	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
 	run.Spec.WebhookURL = "https://receiver.example/hook"
 	run.Spec.WebhookEvents = bothApprovalEvents
 	completed := metav1.NewTime(approvalWebhookTestNow.Add(-time.Minute))
 	run.Status.CompletionTime = &completed
+	run.Status.WebhookDelivered = true
 	run.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true, ProjectedSeq: seq}
 	return run
 }
@@ -372,6 +373,26 @@ func approvalHoldReconciler(t *testing.T, run *corev1alpha1.Task, eventStore sto
 	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	r.WebhookNotifier.now = func() time.Time { return now }
 	return r
+}
+
+// Delivery is asynchronous, so a finished run can still be waiting for a
+// worker to send its terminal notice. The parent keeps it until that notice
+// settles, since deleting the run drops the notice.
+func TestScheduledRunHistoryHoldsAnOutstandingTerminalNotice(t *testing.T) {
+	run := unprojectedApprovalRun(0)
+	run.Spec.WebhookEvents = nil
+	run.Status.WebhookDelivered = false
+	r := approvalHoldReconciler(t, run.DeepCopy(), nil, approvalWebhookTestNow)
+	if !r.approvalNoticesHoldRun(context.Background(), run) {
+		t.Fatal("a run whose terminal notice is not yet sent must be kept")
+	}
+
+	settled := run.DeepCopy()
+	settled.Status.WebhookDelivery = &corev1alpha1.TaskWebhookDelivery{State: corev1alpha1.TaskWebhookDeliveryFailed}
+	r = approvalHoldReconciler(t, settled.DeepCopy(), nil, approvalWebhookTestNow)
+	if r.approvalNoticesHoldRun(context.Background(), settled) {
+		t.Fatal("a run whose terminal notice settled must not be kept")
+	}
 }
 
 // A failed event store read keeps a recently settled run, since it cannot
