@@ -138,7 +138,7 @@ type TaskTransaction struct {
 	Context map[string]string `json:"context,omitempty"`
 }
 
-// TaskWebhookEvent is an opt-in, non-terminal webhook event (ADR 0051).
+// TaskWebhookEvent is an opt-in, non-terminal webhook event (ADR 0053).
 // +kubebuilder:validation:Enum=task.approval_requested;task.approval_resolved
 type TaskWebhookEvent string
 
@@ -209,7 +209,7 @@ type TaskSpec struct {
 	// +optional
 	WebhookURL string `json:"webhookURL,omitempty"`
 
-	// WebhookEvents opts spec.webhookURL into non-terminal notices (ADR 0051).
+	// WebhookEvents opts spec.webhookURL into non-terminal notices (ADR 0053).
 	// Terminal notices (task.succeeded, task.failed, task.cancelled) are always
 	// sent and cannot be listed here; empty or absent keeps terminal notices
 	// only. Selecting any approval event also enables the task.approval_overflow
@@ -567,7 +567,7 @@ type TaskStatus struct {
 	WebhookDelivery *TaskWebhookDelivery `json:"webhookDelivery,omitempty"`
 
 	// ApprovalWebhooks records the opt-in approval notices selected by
-	// spec.webhookEvents (ADR 0051): a bounded queue projected from the Task's
+	// spec.webhookEvents (ADR 0053): a bounded queue projected from the Task's
 	// durable approval events, and the projection cursor that keeps a
 	// transition from ever being notified twice. It is independent of the
 	// terminal notice in webhookDelivery.

@@ -455,7 +455,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Opt-in approval notices (ADR 0051) follow the approval events in every
+	// Opt-in approval notices (ADR 0053) follow the approval events in every
 	// phase, including after a parked turn Succeeded while its sign-off is
 	// still decidable. They never hold back the Task's own progress.
 	approvalRequeue, err := r.reconcileApprovalWebhooks(ctx, task)

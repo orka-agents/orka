@@ -295,7 +295,7 @@ type WebhookNotifier struct {
 	maxBackoff     time.Duration
 	attemptLease   time.Duration
 
-	// Approval notices (ADR 0051) share the initial backoff and lease but
+	// Approval notices (ADR 0053) share the initial backoff and lease but
 	// have a shorter bound.
 	approvalMaxAttempts int32
 	approvalMaxBackoff  time.Duration

@@ -28,7 +28,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Approval webhook notices (ADR 0051).
+// Approval webhook notices (ADR 0053).
 //
 // A Task that selects approval events in spec.webhookEvents has its durable
 // approval events projected, during Task reconcile, into a bounded queue in
@@ -64,7 +64,7 @@ const (
 )
 
 // approvalWebhookNamespace scopes deterministic approval notice delivery IDs.
-var approvalWebhookNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://orka.ai/adr/0051/approval-webhook-delivery"))
+var approvalWebhookNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://orka.ai/adr/0053/approval-webhook-delivery"))
 
 var (
 	approvalWebhookIDPattern       = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,256}$`)
