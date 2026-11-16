@@ -2357,8 +2357,32 @@ func TestHandleScheduledTask_InvalidCron(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Errorf("expected phase Failed for invalid cron, got %s", task.Status.Phase)
+	assertInvalidCronTerminalStatus(t, r, task)
+}
+
+// assertInvalidCronTerminalStatus checks that an invalid schedule ends the
+// Task through the standard terminal-failure path, both in memory and in the
+// persisted status.
+func assertInvalidCronTerminalStatus(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) {
+	t.Helper()
+	persisted := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), persisted); err != nil {
+		t.Fatalf("get persisted task: %v", err)
+	}
+	for name, got := range map[string]*corev1alpha1.Task{"in-memory": task, "persisted": persisted} {
+		if got.Status.Phase != corev1alpha1.TaskPhaseFailed {
+			t.Errorf("%s: expected phase Failed for invalid cron, got %s", name, got.Status.Phase)
+		}
+		if !strings.Contains(got.Status.Message, "invalid cron expression") {
+			t.Errorf("%s: expected invalid cron message, got %q", name, got.Status.Message)
+		}
+		if got.Status.CompletionTime == nil || got.Status.CompletionTime.IsZero() {
+			t.Errorf("%s: expected CompletionTime to be set", name)
+		}
+	}
+	complete := meta.FindStatusCondition(persisted.Status.Conditions, ConditionTypeComplete)
+	if complete == nil || complete.Status != metav1.ConditionFalse || complete.Reason != eventReasonTaskFailed {
+		t.Errorf("expected Complete=False/%s condition, got %#v", eventReasonTaskFailed, complete)
 	}
 }
 
@@ -2612,8 +2636,38 @@ func TestHandleScheduled_InvalidCron(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Errorf("expected Failed phase, got %s", task.Status.Phase)
+	assertInvalidCronTerminalStatus(t, r, task)
+}
+
+func TestHandleScheduled_InvalidCronReturnsStatusUpdateError(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "sched-bad-write", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "invalid",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	statusErr := errors.New("injected invalid schedule status update failure")
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegate client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				if current, ok := obj.(*corev1alpha1.Task); ok && current.Name == task.Name {
+					return statusErr
+				}
+			}
+			return delegate.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	if _, err := r.handleScheduled(context.Background(), task); !errors.Is(err, statusErr) {
+		t.Fatalf("handleScheduled() error = %v, want status update error", err)
 	}
 }
 
