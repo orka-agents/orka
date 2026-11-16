@@ -73,6 +73,10 @@ type ahpTurn struct {
 	id        string
 	task      string
 	startedAt time.Time
+	// finalReply is the reply a settled turn keeps in the session's history,
+	// recorded with the turn's end when hasFinalReply is set; t.mu guards both.
+	finalReply    string
+	hasFinalReply bool
 	// taskUID is the UID of the turn's Task once it is known; t.mu guards it.
 	// Events, approvals and a Task that carry another UID belong to a Task
 	// created later under the same name.
@@ -302,15 +306,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		// number stays used, so a Task the server kept under the name never
 		// stands in the next turn's way.
 		_ = b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
-		// A session still recording the turn would refuse every later
-		// message: the take-back is tried until it lands.
-		b.updateSessionUntilDone(ctx, principal.UserKey, record.Session, "take back a turn whose Task was not created", func(s *ahpSession) {
-			if s.ActiveTurn != action.TurnId {
-				return
-			}
-			s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
-			s.Agent, s.Model, s.SessionTurns, s.History = record.Agent, record.Model, record.SessionTurns, record.History
-		})
+		b.takeBackUncreatedTurn(ctx, principal, record, action.TurnId, emit)
 		b.mu.Lock()
 		if b.turns[turnKey] == turn {
 			delete(b.turns, turnKey)
@@ -556,6 +552,28 @@ func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 // Task's name is taken for the turn's. It is recorded as the Task's UID, so a
 // later recovery knows the Task was gone too.
 const ahpTaskGoneUID = "\x00gone"
+
+// takeBackUncreatedTurn takes back a turn whose Task was not created. A
+// session still recording the turn would refuse every later message: the
+// take-back is tried until it lands. Messages waiting behind the turn run once
+// it has: a drain before then finds the turn still recorded and leaves them.
+func (b *ahpBackend) takeBackUncreatedTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, turnID string, emit ahphost.Emitter) {
+	takenBack := b.updateSessionUntilDone(ctx, principal.UserKey, record.Session, "take back a turn whose Task was not created", func(s *ahpSession) {
+		if s.ActiveTurn != turnID {
+			return
+		}
+		s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
+		s.Agent, s.Model, s.SessionTurns, s.History = record.Agent, record.Model, record.SessionTurns, record.History
+	})
+	select {
+	case <-takenBack:
+	default:
+		go func() {
+			<-takenBack
+			b.runPending(context.WithoutCancel(ctx), principal.UserKey, record.Session, emit)
+		}()
+	}
+}
 
 // adoptCreatedTask makes the Task the turn just created its own: from then on
 // only events, approvals and a result of that Task are the turn's.
@@ -1236,6 +1254,9 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		}
 		s.Published = s.Published || published
 	}), t.session.Session, "record the reply")
+	// A reply that write lost lands with the turn's end, which is tried until
+	// it does: a model switch builds its prompt from the history.
+	t.finalReply, t.hasFinalReply = reply, true
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded:
 		if note := ahpDeliveryNote(task); note != "" {
@@ -1368,10 +1389,16 @@ func (t *ahpTurn) finishSession() {
 	// nothing else ends it while this process runs. The turn's publication
 	// lands with its end: a model switch, which only a later turn makes,
 	// must see that the branch was pushed, or it would continue on it.
+	// The caller holds t.mu; a retry runs later, so it uses what it saw now.
+	published, reply, hasReply := t.published, t.finalReply, t.hasFinalReply
 	ended := t.b.updateSessionUntilDone(t.ctx, t.principal.UserKey, t.session.Session, "end the turn", func(s *ahpSession) {
-		if s.ActiveTurn == t.id {
-			s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
-			s.Published = s.Published || t.published
+		if s.ActiveTurn != t.id {
+			return
+		}
+		s.ActiveTurn, s.ActiveTask, s.ActiveTaskUID, s.ActiveStartedAt = "", "", "", ""
+		s.Published = s.Published || published
+		if n := len(s.History); hasReply && n > 0 && s.History[n-1].Reply == "" {
+			s.History[n-1].Reply = reply
 		}
 	})
 	go func() {
