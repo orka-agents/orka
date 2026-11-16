@@ -106,3 +106,6 @@ lease.
   notice: `task.cancelled` if cancelled, and `task.failed` if expired or if it
   was abandoned after a successful turn. `phase` in that body stays the Task's own
   phase. The event set is unchanged.
+- 2026-11-16: [ADR 0051](0051-approval-webhook-events.md) adds opt-in approval
+  events through `spec.webhookEvents`, recorded in `status.approvalWebhooks` and
+  sent on this delivery path. Terminal notices are unchanged.

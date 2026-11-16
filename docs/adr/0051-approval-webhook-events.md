@@ -1,0 +1,162 @@
+# 51. Approval webhook events
+
+Date: 2026-11-16
+
+## Status
+
+Accepted. Amends [ADR 0042](0042-signed-durable-task-webhooks.md), which left
+non-terminal events open, with opt-in approval notices on the same signed,
+durable delivery path. It answers, for Task webhooks, the approval notification
+that [ADR 0032](0032-gateway-interim-delivery.md) deferred to a separate ADR.
+Approval delivery through gateway adapters stays open.
+
+## Context
+
+A human approval is the one point where an agent Task waits on a person.
+Reviewers find out by polling the approvals API or the UI, and review windows
+are short: brokered ACP reviews expire after about ten minutes. A receiver that
+already gets the signed terminal notice wants to be told when an approval is
+requested and how it ended.
+
+Approvals are event-sourced in the Task's execution event stream and derived by
+`approvals.Derive`. Four producers write them:
+
+- the AI worker's approval gate and `request_approval` tool (through the
+  internal event API);
+- the ACP MCP broker, for brokered tool calls;
+- the wait controller, for a parked turn's sign-off (ADR 0041);
+- the approval decision API.
+
+The store keeps one terminal event per approval, so the first decision wins.
+Only brokered reviews and parked sign-offs carry an enforced `expiresAt`. A
+parked sign-off's expiry and cancellation are durable events. A brokered review
+is expired by the clock: the API and the broker treat it as expired once its
+`expiresAt` passes, and the broker records that only while it still owns the
+call. AI-worker approvals have no expiry and resolve only by explicit decision.
+A parked sign-off stays decidable after its Task reached `Succeeded`. Stream
+names are reused by later Tasks with the same name. Runtime-native ACP
+`session/request_permission` prompts are answered from frozen policy and never
+reach a person, so they are not approvals here.
+
+## Decision
+
+**Opt in per Task.** `spec.webhookEvents` is a set of at most two values,
+`task.approval_requested` and `task.approval_resolved`. Empty or absent keeps
+ADR 0042's terminal-only behaviour. Terminal events cannot be listed, so they
+cannot be removed. A non-empty set requires `spec.webhookURL` (CEL). The field
+is an execution input: it is frozen with the rest of the spec once execution
+authority is recorded, and `buildTaskContinuation` copies it with the spec.
+
+**Lifecycle.** An approval has one `requested` transition, from its
+`ApprovalRequested` event, and at most one resolution, from its first terminal
+event: `approved`, `declined`, `expired`, or `cancelled`. Notices report only
+durable events. The controller never invents a resolution. It does not cancel
+open approvals when a Task finishes: a parked sign-off is still decidable, and
+an AI-worker approval left pending by a finished Task never resolves.
+
+**Expiry is made durable before it is notified.** For a brokered review that
+is still pending five seconds after its `expiresAt`, the controller appends
+`ApprovalExpired` once (actor `orka-controller`) and requeues the Task for that
+moment. That matches what the API and broker already report. The store's
+one-terminal-event rule makes this the linearization point: a decision that
+committed first wins and the append is refused. The five seconds let a live
+broker record its own expiry first. The controller records nothing for
+approvals without an enforced expiry.
+
+**Projection.** During Task reconcile, in every phase, the controller lists
+the Task's approval events and keeps only approvals whose request names this
+Task's UID. A transition whose stream sequence is above the cursor
+`status.approvalWebhooks.projectedSeq` becomes a notice in
+`status.approvalWebhooks.notices`, and the cursor advances. Notices and cursor
+are written in one status update before any attempt. Each notice has:
+
+- a deterministic delivery ID, UUIDv5 of the Task UID, the approval ID and the
+  transition;
+- `occurredAt` from the event that recorded the transition;
+- the stream sequence;
+- the safe identifiers the payload carries.
+
+A transition at or below the cursor is never projected again, and a restarted
+controller recomputes the same IDs. This relies on per-stream sequences being
+visible in order, as the event store's other cursors do. A transition whose
+event is not selected still advances the cursor, so selecting an event later
+never replays older transitions.
+
+**Overflow.** The queue holds at most 16 notices, one slot reserved for
+overflow. A pending notice is never removed. Settled notices (`Delivered` or
+`Failed`) are pruned oldest first to make room, and `pruned` counts them. If 15
+pending notices fill the queue, the next transition records one
+`task.approval_overflow` notice in the reserved slot, with the stream sequence
+of the first transition not notified, and sets `overflowed`. From then on no
+transition is notified, `omitted` counts them, and the cursor keeps advancing.
+A receiver that gets the overflow notice reads the approvals API. Draining
+needs 15 undelivered notices inside one retry window, so the latch is meant to
+be rare, not a throttle.
+
+**Payload.** The body is separate from the terminal body. It carries
+`schemaVersion: orka.ai/task-approval-webhook/v1` and only these fields:
+
+- `deliveryId`, `eventType`, `occurredAt`, `streamSeq`;
+- `taskUID`, `taskName`, `taskNamespace`;
+- `approvalId`, and when present `targetTool`, `severity` and `expiresAt`;
+- `resolution` for a resolved notice;
+- `parked`.
+
+Identifiers that do not match a fixed safe shape are left out. A notice whose
+approval ID does not match is not sent. `expiresAt` appears only when the
+approval model enforces it. The body never carries:
+
+- argument previews or digests;
+- action, risk summary or reason text;
+- bindings or summaries;
+- who decided.
+
+The body is rendered from the status record alone. Its digest is checked before
+every attempt, and a mismatch retires the notice unsent.
+
+**Delivery.** Approval notices use ADR 0042's machinery unchanged: the
+dial-time destination policy, the Ed25519 JWS with `event` set to the notice's
+event type and `payload_sha256` over the body, the same headers, the
+status-persisted attempt lease, and sanitized errors. Notices are sent in
+stream order: a notice waits until every earlier one has settled. That puts a
+resolution after its request unless the request's notice failed. One attempt
+runs per reconcile, as for the terminal notice. Task reconciles share one
+worker, so a slow receiver holds it no longer than a terminal notice does.
+
+**Retry cap.** Five attempts at 10, 20, 40 and 60 seconds settle within about
+three minutes, against eight attempts capped at 15 minutes for terminal
+notices. A notice that arrives after a ten-minute review window closed has lost
+its value, and stream-order delivery means one failing notice holds back the
+Task's later ones only this long.
+
+**Prompt reconcile.** Each producer already causes a reconcile:
+
+- the decision API patches the Task's annotations;
+- the wait controller's appends are followed by its status write;
+- running ACP Tasks reconcile every second;
+- running native Tasks reconcile at least every five seconds and on Job events;
+- a pending brokered review requeues the Task for its expiry.
+
+**Ordering and lifecycle.** Approval and terminal notices are independent
+records. ADR 0042's terminal notice, including the parked-turn deferral, is
+unchanged, and a receiver may see it before a late parked resolution.
+Removing an event from `spec.webhookEvents`, where the spec is still
+mutable, retires its pending notices unsent. Deleting a Task drops its pending
+notices, as for the terminal notice.
+
+## Consequences
+
+- Receivers must deduplicate on `deliveryId`. Delivery is at-least-once, not
+  exactly-once: a crash between send and record repeats an attempt under the
+  same ID.
+- Receivers must tolerate gaps and order by `streamSeq` within a Task. Gaps
+  come from a failed notice, the overflow latch, or a later selection.
+- An approval notice is an alert, not authority. Receivers act through the
+  approvals API, which revalidates everything.
+- The controller now writes `ApprovalExpired` for an expired brokered review
+  of an opted-in Task when nothing else did. The approval API already reports
+  that state.
+- Opted-in Tasks read their approval events on each reconcile and cost two
+  status writes per attempt. Legacy Tasks do no new work.
+- Task status grows by at most 16 small records.
+- `approvals.Approval` gains an unserialized `RequestSeq`.
