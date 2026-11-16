@@ -45,7 +45,9 @@ signed-in person's host may do.
 3. It sends the GitHub access and refresh tokens to `POST /api/v1/auth/github` once.
    The endpoint is unauthenticated and every attempt spends the App's GitHub rate
    limit, so each API server rate-limits attempts per client and overall before the body is read;
-   one over the limit gets `429` with `Retry-After`. Orka then:
+   one over the limit gets `429` with `Retry-After`. Clients are told apart by address, so
+   behind an Ingress all sign-ins share the proxy's limit, sized for a team signing in
+   together. Orka then:
    - checks with the check-token API that the token was issued to its own app, so a
      token another app obtained cannot sign in;
    - redeems the refresh token once, requires the access token GitHub returns to be its

@@ -27,14 +27,17 @@ const (
 // four App-authenticated calls: it checks the submitted token, the token its
 // refresh token yields, and the token custody already holds, and revokes a
 // minted token it does not keep. The global rate allows at most 900 sign-ins,
-// 3,600 such calls, an hour, plus its burst, however many clients call; a
-// person signs in rarely, so one client gets a few attempts a minute. Session
-// renewals, which make one such call, share the limit, keyed by the person.
+// 3,600 such calls, an hour, plus its burst, however many clients call.
+// Clients are told apart by address, and behind an Ingress every sign-in
+// comes from the proxy's: one client's limit lets a team sign in together,
+// 20 at once and 12 a minute after, and stops a single source from using
+// the whole of the global rate. Session renewals, which make one such call,
+// share the limit, keyed by the person.
 const (
 	githubSignInGlobalRate  = rate.Limit(0.25)
 	githubSignInGlobalBurst = 30
-	githubSignInClientRate  = rate.Limit(0.1)
-	githubSignInClientBurst = 5
+	githubSignInClientRate  = rate.Limit(0.2)
+	githubSignInClientBurst = 20
 	githubSignInMaxClients  = 1024
 	githubSignInClientTTL   = 10 * time.Minute
 )

@@ -260,6 +260,10 @@ operator suspended is reported and left suspended. `orka login --no-host` links 
   member of an allowed org or team. Org membership never satisfies a team allow-list. Install
   the app on the allowed orgs with read access to members; if GitHub cannot answer, sign-in is
   refused.
+- Sign-in and renewal are rate-limited per client address and overall, to keep within the
+  GitHub App's rate limit. Behind an Ingress every sign-in comes from the proxy's address and
+  shares one client's allowance: 20 at once, then 12 a minute. An attempt over it gets `429`
+  with `Retry-After`.
 - The session lasts 12 hours and is stored only as a hash. The CLI renews it in its last two
   hours, refreshing the person's GitHub token and checking membership again; `orka logout`
   ends it. The CLI sends it only to the server that issued it, and never over plain HTTP except
