@@ -363,8 +363,13 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 			}
 			continue
 		}
-		// A baseline a hidden Task's report starts is its earlier usage.
-		if baselineKey := addSessionBaseline(current, observation, tasks); baselineKey != "" && data.HiddenTasks[tk] {
+		// A baseline a hidden Task's report starts is its earlier usage, and
+		// one on a session whose earlier usage may not be shown is hidden too.
+		if baselineKey := addSessionBaseline(current, observation, tasks); baselineKey != "" &&
+			(data.HiddenTasks[tk] || data.HiddenSessionBaselines[taskKey(observation.Namespace, strings.TrimSpace(cmp.Or(observation.SessionName, tasks[tk].SessionName)))]) {
+			if data.HiddenTasks == nil {
+				data.HiddenTasks = map[string]bool{}
+			}
 			data.HiddenTasks[baselineKey] = true
 		}
 		applyObservation(current, observation, tk)

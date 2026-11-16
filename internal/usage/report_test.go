@@ -255,3 +255,23 @@ func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
 		})
 	}
 }
+
+// A session whose first total is hidden needs no HiddenTasks from the caller.
+func TestBuildHidesASessionBaselineWithoutHiddenTasks(t *testing.T) {
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	in := int64(4242)
+	data := store.UsageData{
+		Tasks: []store.UsageTask{{Namespace: "default", TaskUID: "turn", TaskName: "turn", SessionName: "ahp-s", Phase: "Succeeded", StartedAt: start}},
+		Observations: []store.UsageObservation{{ID: "o", Namespace: "default", TaskUID: "turn", SessionName: "ahp-s", CounterID: "c",
+			Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted, ObservedAt: start.Add(time.Minute), InputTokens: &in}},
+		HiddenSessionBaselines: map[string]bool{"default/ahp-s": true},
+	}
+	report, err := usage.Build(data, store.UsageFilter{From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(report)
+	if strings.Contains(string(encoded), "4242") {
+		t.Fatalf("the hidden first total was shown: %s", encoded)
+	}
+}
