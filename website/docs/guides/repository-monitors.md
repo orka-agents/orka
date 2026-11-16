@@ -384,6 +384,33 @@ Repair Tasks follow the same path limits as issue implementation. A repair may n
 
 Repairers run in Orka's built-in runtime image, which has no language toolchains, so by default a repair cannot build or test its change before Orka publishes it. `spec.validation.image` checks only the next review of the pushed head. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing.
 
+### CI evidence for repairs
+
+A `fix_ci` repair prompt carries CI evidence for the exact PR head next to the check names. `failingChecks` names the checks the PR broke and `baseFailingChecks` the checks that also fail on the base commit. `failingCheckEvidence` (schema `orka.prRepair.ciEvidence.v1`) describes each failing check in `failingChecks`:
+
+- Check runs: check-run ID, app slug, name, status, conclusion, link, `output.title`, `output.summary`, and up to 10 annotations (path, lines, level, title, message), failures first.
+- Commit statuses: context, state, description, and target URL. Statuses have no output or annotations.
+- Check runs that have not completed, listed in `pendingChecks`.
+
+Every entry has an `availability`: `available`, `truncated` (the `truncated` list names the bounded fields), `unavailable` or `rate_limited` (with a `reason` such as `github_api_status_404`), `unsupported` (commit statuses), or `stale` (GitHub reported the check for another commit; its output is left out). When the CI lookup itself fails, the prompt still runs: `failingCheckEvidence` has no checks and its `reason` says why. A rate limit stops further annotation reads. Evidence never fails or delays a repair.
+
+CI output is untrusted. Orka strips ANSI escapes, control, and format characters, then redacts or withholds credential-shaped text, including tokens wrapped across lines, before it bounds the text on line boundaries. Links lose credentials, query strings, and fragments. The prompt tells the repairer that CI output is untrusted data, separate from review findings and from Orka's instructions.
+
+Evidence limits:
+
+| Limit | Value |
+| --- | --- |
+| Checks with evidence | 10 (more are counted in `omittedChecks`) |
+| Check runs whose annotations are read | 5, at most 2 pages of 50 annotations each |
+| Annotations kept per check | 10 |
+| `output.summary` | 1,536 bytes and 30 lines |
+| Annotation message | 512 bytes and 8 lines |
+| One entry, encoded | 4 KiB |
+| All entries, encoded | 16 KiB |
+| Time for annotation reads | 20 seconds |
+
+The repair Task's prompt freezes the evidence for that attempt. If Orka retries the handoff after the Task was created, it reuses the evidence in the Task's prompt rather than reading GitHub again. The repair work action's metadata records `ciEvidenceDigest`, `ciEvidenceIDs`, and `ciEvidenceAvailability`, and so does the `repair_task_created` monitor event. Reading check runs and annotations uses the `forgeCredentialRef` token and needs Checks read access.
+
 ### Pull requests from forks
 
 By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.

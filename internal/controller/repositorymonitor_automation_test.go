@@ -108,6 +108,15 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if err != nil || len(commands) != 1 || commands[0].Source != "controller_policy" || commands[0].Intent != repositoryMonitorCommandIntentFixCI {
 		t.Fatalf("automatic command = %#v, err=%v", commands, err)
 	}
+	// The repair attempt records the CI evidence its prompt carries.
+	frozen, ok := repositoryMonitorRepairCIInputFromPrompt(task.Spec.Prompt, "head31")
+	if !ok || len(frozen.Evidence.Checks) != 1 || frozen.Evidence.Checks[0].ID != "check_run:10" {
+		t.Fatalf("repair prompt CI evidence = %+v ok=%t", frozen, ok)
+	}
+	repairAction, err := monitorStore.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(commands[0].ID, repositoryMonitorCommandIntentFixCI))
+	if err != nil || !strings.Contains(repairAction.MetadataJSON, frozen.digest()) || !strings.Contains(repairAction.MetadataJSON, `"ciEvidenceIDs":["check_run:10"]`) {
+		t.Fatalf("repair work action = %+v err=%v, want evidence digest %s", repairAction, err, frozen.digest())
+	}
 	manual := &store.MonitorRun{ID: "next-inventory", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31"}
 	if _, _, _, err := reconciler.processPullRequestInventoryRun(ctx, monitor, manual, "orka-agents", "orka"); err != nil {
 		t.Fatal(err)

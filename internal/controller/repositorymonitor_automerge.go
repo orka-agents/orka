@@ -116,28 +116,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx co
 // statuses reported for sha.
 func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {
 	total := -1
-	var checks []struct {
-		ID         int64  `json:"id"`
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		App        struct {
-			ID int64 `json:"id"`
-		} `json:"app"`
-	}
+	var checks []repositoryMonitorCheckRunResponse
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
 		var response struct {
-			TotalCount int `json:"total_count"`
-			CheckRuns  []struct {
-				ID         int64  `json:"id"`
-				Name       string `json:"name"`
-				Status     string `json:"status"`
-				Conclusion string `json:"conclusion"`
-				App        struct {
-					ID int64 `json:"id"`
-				} `json:"app"`
-			} `json:"check_runs"`
+			TotalCount int                                 `json:"total_count"`
+			CheckRuns  []repositoryMonitorCheckRunResponse `json:"check_runs"`
 		}
 		if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
 			return repositoryMonitorCIResult{}, err
@@ -156,17 +140,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 	if len(checks) < total {
 		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
-	var pending []string
+	var pending []repositoryMonitorCIFailure
 	var failed []repositoryMonitorCIFailure
 	considered := 0
 	for _, check := range checks {
 		considered++
 		if check.Status != "completed" {
-			pending = append(pending, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
+			pending = append(pending, check.failure())
 			continue
 		}
 		if !repositoryMonitorCheckRunConclusionPassing(check.Conclusion) {
-			failed = append(failed, repositoryMonitorCIFailure{name: check.Name, source: fmt.Sprintf("check_run:%d", check.App.ID)})
+			failed = append(failed, check.failure())
 		}
 	}
 	// Check runs and commit statuses come from different CI systems. Read both
@@ -177,7 +161,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 	}
 	failed = append(failed, status.failed...)
 	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed, incomplete: status.incomplete || status.reason == repositoryMonitorCIChecksIncomplete}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed, pending: pending, incomplete: status.incomplete || status.reason == repositoryMonitorCIChecksIncomplete}, nil
 	}
 	if len(pending) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
@@ -225,7 +209,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 			case repositoryMonitorStatusPending:
 				pending = true
 			default:
-				failed = append(failed, repositoryMonitorCIFailure{name: status.Context, source: repositoryMonitorCIFailureSourceStatus})
+				failed = append(failed, repositoryMonitorCIFailure{name: status.Context, source: repositoryMonitorCIFailureSourceStatus, id: status.ID, conclusion: status.State, description: status.Description, url: status.TargetURL})
 			}
 		}
 		if len(response.Statuses) < 100 {
