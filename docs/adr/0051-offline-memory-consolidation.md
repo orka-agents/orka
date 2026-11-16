@@ -105,6 +105,8 @@ creates; a run that proposes one cites the Sessions it drew on.
   namespace (reading a transcript needs `get`), and in `Propose` mode also `create` on
   `memoryproposals`. Checking every spec change matters because the prompt steers the run
   and the Agent or provider decides where the transcripts are sent. The field is immutable.
+  The Orka API creates Tasks with its own identity, so its Task-creation authorization runs
+  the same checks against the person calling it, on every API path that creates a Task.
   A scheduled run is created by the controller from a parent that passed this check. The
   internal run routes accept only the authenticated worker of an active Task that carries
   the field.
@@ -122,13 +124,25 @@ creates; a run that proposes one cites the Sessions it drew on.
   a proposing run has yet to read. A retried Pod of the same Task gets the same window.
 - At most one run reads a namespace's memory at a time. Beginning a run while another in the
   namespace, of either mode, is running returns a conflict, so two runs never propose over
-  the same memories at once. A run whose Task died stops blocking after two hours.
+  the same memories at once. A run whose Task died stops blocking after two hours: the run
+  that takes over marks it abandoned in the same transaction, and an abandoned run can
+  neither resume nor complete.
+- Beginning a run records its input with it. A retried Pod reads the same input, and
+  completion is checked against exactly what the model saw, plus each target's current
+  generation, so a target edited during the model call is dropped. The recorded input is
+  cleared when the run finishes or is abandoned, so transcript excerpts never outlive it.
+- A run sends transcripts to the model of its Agent or Provider, resolved when each run
+  starts. Whoever can edit them can redirect every Task that uses them, as for any Task;
+  Orka does not freeze them for consolidation runs. A namespace that enables consolidation
+  must restrict who can edit the Agent and Provider a run uses, as it restricts Session
+  reads.
 - Inputs:
   - every active memory in the namespace (at most 200), with its generation and recall
-    counts, each cut to 2,000 characters;
+    counts, each cut to 2,000 characters with at most 10 tags of 40 characters;
   - chat and task Sessions, never gateway ones, that changed inside the window: the 50 most
-    recently changed, and the newest 40 user and assistant messages of each, each cut to
-    2,000 characters. A Session with a turn still running is read too: its transcript holds
+    recently changed, found by a store query on when they changed, and the newest 40 user
+    and assistant messages of each, found among its newest 200 records, each cut to 2,000
+    characters. A Session with a turn still running is read too: its transcript holds
     only finished turns, and releasing its lock does not change it again, so skipping it
     could miss it for good. Tool messages are dropped, so memory a run recalled cannot be
     read back as new evidence.
