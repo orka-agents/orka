@@ -158,8 +158,13 @@ creates; a run that proposes one cites the Sessions it drew on.
     and assistant messages of each, found among its newest 200 records, each cut to 2,000
     characters. A Session with a turn still running is read too: its transcript holds
     only finished turns, and releasing its lock does not change it again, so skipping it
-    could miss it for good. Tool messages are dropped, so memory a run recalled cannot be
-    read back as new evidence.
+    could miss it for good. Tool messages are dropped, so a recall result itself is never
+    read back as evidence. An assistant reply that repeats a recalled memory is still read,
+    and Orka cannot tell it from new evidence, so the prompt tells the model that text
+    repeating a memory it was given is not evidence for that memory. A window with more
+    changed Sessions than the run reads, or a Session with more messages than it reads,
+    marks the input truncated, as the character limits do, and the report says so; those
+    Sessions are read again only if they change again.
   - at most 60,000 characters of memories and, separately, 60,000 characters of
     transcripts, so memories never crowd out the evidence; the report says when either was
     cut. With the prompt, tool schema and the result, a run needs a model with about 130,000
