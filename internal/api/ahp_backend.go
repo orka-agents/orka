@@ -1081,7 +1081,10 @@ func (b *ahpBackend) sessionForChannel(ctx context.Context, userKey, channel str
 // resolveModel maps a turn's model to the Agent that runs it. An Orka Session
 // is bound to one runtime profile, so a session keeps its Agent until the
 // person picks another model; switching reports true and the turn moves the
-// session to a new Orka Session.
+// session to a new Orka Session. When the session's Agent is no longer
+// offered, such as one the controller marked not Ready, another Agent that
+// offers the same model takes over the same way: the model is listed through
+// it, and choosing it must not lead back to the Agent that is gone.
 func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Principal, record ahpSession, model *ahptypes.ModelSelection) (ahpAgentChoice, bool, error) {
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
@@ -1097,7 +1100,11 @@ func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Princip
 				return choice, false, nil
 			}
 		}
-		return ahpAgentChoice{}, false, &ahphost.Rejection{Reason: "this session's agent is no longer available to you"}
+		choice, ok := ahpChooseModel(choices, record.Runtime, wanted)
+		if !ok {
+			return ahpAgentChoice{}, false, &ahphost.Rejection{Reason: "this session's agent is no longer available to you"}
+		}
+		return choice, true, nil
 	}
 	choice, ok := ahpChooseModel(choices, record.Runtime, wanted)
 	if !ok {

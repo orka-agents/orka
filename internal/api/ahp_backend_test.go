@@ -327,6 +327,37 @@ func TestAHPBackendOffersNoModelOfAnUnusableAgent(t *testing.T) {
 	require.NotContains(t, models, "openai/broken")
 }
 
+// A session whose Agent stops being offered moves, as a model switch does,
+// to another Agent that offers the same model, rather than refusing the very
+// model the person is shown.
+func TestAHPBackendMovesASessionOffAnAgentThatIsNoLongerOffered(t *testing.T) {
+	env := newAHPTestEnv(t, ahpTestAgent("copilot-gpt-spare", corev1alpha1.AgentRuntimeCopilot, "gpt-5.4-nano"))
+	ctx := ahpCtx(t)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Username: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	record := ahpSession{Agent: "copilot-gpt", Model: "gpt-5.4-nano", Runtime: string(corev1alpha1.AgentRuntimeCopilot)}
+	choice, switching, err := env.backend.resolveModel(ctx, alice, record, &ahptypes.ModelSelection{Id: "gpt-5.4-nano"})
+	require.NoError(t, err)
+	require.Equal(t, "copilot-gpt", choice.Agent)
+	require.False(t, switching, "a session keeps its Agent while it is offered")
+
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: "copilot-gpt"}, agent))
+	agent.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, Reason: "ValidationFailed", LastTransitionTime: metav1.Now()}}
+	require.NoError(t, env.kube.Update(ctx, agent))
+	for _, selected := range []*ahptypes.ModelSelection{nil, {Id: "gpt-5.4-nano"}} {
+		choice, switching, err = env.backend.resolveModel(ctx, alice, record, selected)
+		require.NoError(t, err)
+		require.Equal(t, "copilot-gpt-spare", choice.Agent, "the Agent that still offers the model runs it")
+		require.True(t, switching, "the session moves to a new Orka Session for its new Agent")
+	}
+
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: "copilot-gpt-spare"}, agent))
+	require.NoError(t, env.kube.Delete(ctx, agent))
+	_, _, err = env.backend.resolveModel(ctx, alice, record, nil)
+	require.ErrorContains(t, err, "no longer available", "with no Agent left for the model, the session's turn is refused")
+}
+
 //nolint:gocyclo // One end-to-end turn checks every mapped action against the reduced state.
 func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
