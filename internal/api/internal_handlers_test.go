@@ -1425,9 +1425,35 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	}
 }
 
-func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+// recallFixture serves the internal memory list route to callers that are
+// the verified worker of an active Task, or to any other identity given.
+func recallFixture(t *testing.T, memoryStore func(*storageclient.Client) store.MemoryStore, caller *UserInfo) (*fiber.App, *storageclient.Client) {
+	t.Helper()
+	scheme := internalCallerAuthScheme(t)
+	task := internalCallerAuthTask()
+	job := internalCallerAuthJob(task, "job-a", "job-uid")
+	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	backing := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	var memories store.MemoryStore = backing
+	if memoryStore != nil {
+		memories = memoryStore(backing)
+	}
+	h := NewInternalHandlers(backing, backing, backing, backing, backing, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient,
+		MemoryStore: memories, MemoryProposalStore: backing})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, caller)
+		return c.Next()
+	})
 	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
+	return app, backing
+}
+
+func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
+	app, ss := recallFixture(t, nil, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 	ctx := context.Background()
 	for _, id := range []string{"mem-a", "mem-b"} {
 		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "deploy note " + id}))
@@ -1462,6 +1488,19 @@ func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
 	require.NotNil(t, recalled.LastRecalledAt)
 }
 
+func TestInternalListMemoriesCountsRecallsOnlyFromTaskWorkers(t *testing.T) {
+	other := &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default", AuthType: AuthTypeTokenReview}
+	app, ss := recallFixture(t, nil, other)
+	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the listing itself is still served")
+	require.Never(t, func() bool {
+		memory, err := ss.GetMemory(context.Background(), "default", "mem-a")
+		return err == nil && memory.RecalledCount > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "a caller that is no Task's worker cannot mark a listing as a recall")
+}
+
 // slowRecallStore keeps a recall count from finishing until its context ends,
 // like a storage write that keeps retrying.
 type slowRecallStore struct {
@@ -1477,10 +1516,9 @@ func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	previous := tools.MemoryRecallRecordTimeout
 	tools.MemoryRecallRecordTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { tools.MemoryRecallRecordTimeout = previous })
-	_, app, ss := setupTestInternalHandlers()
+	app, ss := recallFixture(t, func(backing *storageclient.Client) store.MemoryStore { return slowRecallStore{backing} },
+		internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
-	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{MemoryStore: slowRecallStore{ss}, MemoryProposalStore: ss})
-	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
 
 	started := time.Now()
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))

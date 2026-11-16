@@ -57,9 +57,13 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 		return err
 	}
 	// An agent's recall_memory call counts the memories it returned; a
-	// prompt's memory context and operator listings do not.
-	if c.Query(tools.MemoryListPurposeParam, "") == tools.MemoryListPurposeRecall {
-		tools.RecordMemoryRecall(c.Context(), h.memoryStore, namespace, memories)
+	// prompt's memory context and operator listings do not. Any ServiceAccount
+	// in the namespace can list here, so only the verified worker of an active
+	// Task can mark a listing as a recall.
+	if c.Query(tools.MemoryListPurposeParam, "") == tools.MemoryListPurposeRecall && len(memories) > 0 {
+		if _, err := h.internalCallerAuthorizer().resolveActiveTaskCaller(c, namespace); err == nil {
+			tools.RecordMemoryRecall(c.Context(), h.memoryStore, namespace, memories)
+		}
 	}
 	return c.JSON(memories)
 }
