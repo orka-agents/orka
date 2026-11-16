@@ -24,11 +24,17 @@ var (
 		`covers all (\d+) authenticated external route registrations, including (\d+) non-GET registrations under ` + "`/api/v1`")
 )
 
-// apiAuthorizationDocRoutes returns the "METHOD /path" keys listed in the
-// route permissions table: every table row whose first two cells are a
-// backticked HTTP method and a backticked path.
-func apiAuthorizationDocRoutes(doc string) []string {
-	var routes []string
+// apiAuthorizationDocRow is one route permissions table row.
+type apiAuthorizationDocRow struct {
+	route                                              string
+	group, resource, verb, name, namespace, additional string
+}
+
+// apiAuthorizationDocRoutes returns the route permissions table rows: every
+// table row whose first two cells are a backticked HTTP method and a
+// backticked path.
+func apiAuthorizationDocRoutes(doc string) []apiAuthorizationDocRow {
+	var routes []apiAuthorizationDocRow
 	for line := range strings.SplitSeq(doc, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "|") {
@@ -43,7 +49,16 @@ func apiAuthorizationDocRoutes(doc string) []string {
 		if method == nil || path == nil {
 			continue
 		}
-		routes = append(routes, method[1]+" "+path[1])
+		row := apiAuthorizationDocRow{route: method[1] + " " + path[1]}
+		if len(cells) >= 8 {
+			row.group = strings.TrimSpace(cells[2])
+			row.resource = strings.TrimSpace(cells[3])
+			row.verb = strings.TrimSpace(cells[4])
+			row.name = strings.TrimSpace(cells[5])
+			row.namespace = strings.TrimSpace(cells[6])
+			row.additional = strings.TrimSpace(strings.Join(cells[7:], "|"))
+		}
+		routes = append(routes, row)
 	}
 	return routes
 }
@@ -57,14 +72,20 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 	doc := string(raw)
 
 	documented := map[string]bool{}
-	var duplicates, unknown []string
-	for _, route := range apiAuthorizationDocRoutes(doc) {
+	var duplicates, unknown, mismatched []string
+	for _, row := range apiAuthorizationDocRoutes(doc) {
+		route := row.route
 		if documented[route] {
 			duplicates = append(duplicates, route)
 		}
 		documented[route] = true
-		if _, ok := externalAPIPolicies[route]; !ok {
+		policy, ok := externalAPIPolicies[route]
+		if !ok {
 			unknown = append(unknown, route)
+			continue
+		}
+		for _, problem := range apiAuthorizationDocRowProblems(row, policy) {
+			mismatched = append(mismatched, route+": "+problem)
 		}
 	}
 	var missing []string
@@ -80,6 +101,7 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 	slices.Sort(missing)
 	slices.Sort(unknown)
 	slices.Sort(duplicates)
+	slices.Sort(mismatched)
 
 	var problems []string
 	if len(missing) > 0 {
@@ -90,6 +112,9 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 	}
 	if len(duplicates) > 0 {
 		problems = append(problems, "duplicate rows:\n  "+strings.Join(duplicates, "\n  "))
+	}
+	if len(mismatched) > 0 {
+		problems = append(problems, "rows whose permission columns differ from the policy:\n  "+strings.Join(mismatched, "\n  "))
 	}
 
 	// The introduction states the inventory size; keep it accurate too.
@@ -111,4 +136,72 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 			"Update the doc's route permissions table so each policy has exactly one row with its permissions:\n%s",
 			strings.TrimPrefix(apiAuthorizationDocPath, "../../"), strings.Join(problems, "\n"))
 	}
+}
+
+// apiAuthorizationDocNamespaceCodes maps each namespace source to the code the
+// route permissions table uses for it.
+var apiAuthorizationDocNamespaceCodes = map[apiNamespaceSource]string{
+	apiQueryNamespace:         "`Q`",
+	apiCreateNamespace:        "`C`",
+	apiMetadataNamespace:      "`M`",
+	apiBodyNamespace:          "`B`",
+	apiQueryThenBodyNamespace: "`QB`",
+	apiBodyThenQueryNamespace: "`BQ`",
+	apiClusterScoped:          "`cluster`",
+	apiUsageTeamNamespaces:    "`Q`",
+}
+
+// apiAuthorizationDocRowProblems compares a table row's structured columns
+// with its route policy: the first permission fills the group, resource, verb,
+// name, and namespace columns, and every further permission must be named in
+// the additional-checks column by its verb and resource. Rows that defer to
+// another row ("Same ...") are checked through that row.
+func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRoutePolicy) []string {
+	var problems []string
+	check := func(column, got, want string) {
+		if got != want {
+			problems = append(problems, fmt.Sprintf("%s is %q, want %q", column, got, want))
+		}
+	}
+	if policy.identityOnly {
+		check("API group", row.group, "none")
+		check("resource", row.resource, "none")
+		check("verb", row.verb, "identity only")
+		check("namespace", row.namespace, "not applicable")
+		return problems
+	}
+	if len(policy.permissions) == 0 {
+		return []string{"policy has no permissions and is not identity only"}
+	}
+	primary := policy.permissions[0]
+	group := primary.group
+	if group == "" {
+		group = `""` // the core API group
+	}
+	check("API group", row.group, "`"+group+"`")
+	check("resource", row.resource, "`"+primary.resource+"`")
+	check("verb", row.verb, "`"+primary.verb+"`")
+	name := "empty"
+	if primary.nameParam != "" {
+		name = "`:" + primary.nameParam + "`"
+		if policy.trimStoreID {
+			name += ", trimmed"
+		}
+	}
+	check("name", row.name, name)
+	if code, ok := apiAuthorizationDocNamespaceCodes[policy.namespace]; ok {
+		check("namespace", row.namespace, code)
+	} else {
+		problems = append(problems, fmt.Sprintf("namespace source %d has no documented code", policy.namespace))
+	}
+	if strings.HasPrefix(row.additional, "Same ") {
+		return problems
+	}
+	for _, extra := range policy.permissions[1:] {
+		if !strings.Contains(row.additional, "`"+extra.verb+"`") ||
+			!strings.Contains(row.additional, extra.resource+"`") {
+			problems = append(problems, fmt.Sprintf("additional checks do not name `%s` on `%s/%s`", extra.verb, extra.group, extra.resource))
+		}
+	}
+	return problems
 }
