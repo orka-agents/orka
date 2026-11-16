@@ -1056,11 +1056,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskWithEvide
 		sessionKey = strings.ToLower(headRepo) + ":" + pr.HeadBranch
 	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
-	ciInput, legacyPrompt, err := r.repositoryMonitorRepairTaskCIInput(ctx, monitor, command.Intent, taskName, monitoredRepo, pr)
+	ciInput, storedPrompt, err := r.repositoryMonitorRepairTaskCIInput(ctx, monitor, command.Intent, taskName, monitoredRepo, pr)
 	if err != nil {
 		return 0, ciInput, err
 	}
-	prompt := legacyPrompt
+	prompt := storedPrompt
 	if prompt == "" {
 		prompt, err = r.buildRepositoryMonitorRepairPromptWithCI(ctx, monitor, command.Intent, monitoredRepo, pr, item, ciInput)
 		if err != nil {
@@ -1207,14 +1207,15 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskWithEvide
 
 // repositoryMonitorRepairTaskCIInput returns the CI input of a fix_ci
 // repair attempt, or nil for other intents. The repair Task's prompt freezes
-// it: once the Task exists, its input is reused, so rebuilding the prompt
-// for a retried handoff yields the same bytes rather than fresher evidence.
+// it: once the Task exists, its input is reused rather than fresher
+// evidence, and the second result is the Task's stored prompt, which the
+// handoff adopts as is. A rebuilt prompt would not match it whenever other
+// prompt inputs moved since, such as the skip reason the first handoff
+// cleared.
 //
 // A repair Task an earlier controller created before CI evidence existed has
-// no frozen input to reuse, and a rebuilt prompt could never match it. For
-// such a Task the second result is its stored prompt, which the handoff
-// adopts as is, and no CI input is returned, so no evidence is recorded as
-// having informed it.
+// no frozen input to reuse. Its stored prompt is adopted too, and no CI input
+// is returned, so no evidence is recorded as having informed it.
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskCIInput(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName, repo string, pr repositoryMonitorPullRequest) (*repositoryMonitorRepairCIInput, string, error) {
 	if intent != repositoryMonitorCommandIntentFixCI {
 		return nil, "", nil
@@ -1225,7 +1226,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskCIInput(ctx con
 	case err == nil:
 		if metav1.IsControlledBy(&existing, monitor) {
 			if input, ok := repositoryMonitorRepairCIInputFromPrompt(existing.Spec.Prompt, pr.HeadSHA); ok {
-				return &input, "", nil
+				return &input, existing.Spec.Prompt, nil
 			}
 			if repositoryMonitorRepairPromptPredatesCIEvidence(existing.Spec.Prompt, pr.HeadSHA) {
 				return nil, existing.Spec.Prompt, nil

@@ -434,6 +434,58 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 	repositoryMonitorAssertRepairEvidenceRecorded(t, reconciler, monitorStore, monitor, monitorRun, command, pr, task.Name, second)
 }
 
+// A retried handoff adopts the repair Task's stored prompt with its frozen
+// evidence, even when another prompt input moved since: the first handoff
+// clears the item's skip reason after writing it into the prompt.
+func TestRepositoryMonitorCIRepairRetryKeepsStoredPrompt(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	run := repositoryMonitorEvidenceTestRun(303, "unit", "completed", "failure", 1)
+	run["head_sha"] = "head33"
+	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head33": {run}}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-evidence-skip")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-ci-evidence-skip", Intent: repositoryMonitorCommandIntentFixCI, Source: "api"}
+	pr := repositoryMonitorPullRequest{Number: 33, HeadSHA: "head33", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "33", Number: 33, HeadSHA: pr.HeadSHA, SkipReason: "ci_failed"}
+	monitorRun := &store.MonitorRun{ID: "run-ci-evidence-skip"}
+	if created, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
+		t.Fatalf("first handoff = (%d, %v)", created, err)
+	}
+	if item.SkipReason != "" {
+		t.Fatalf("first handoff left skip reason %q", item.SkipReason)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}, &task); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Spec.Prompt, `"skipReason": "ci_failed"`) {
+		t.Fatalf("first prompt does not carry the skip reason: %q", task.Spec.Prompt)
+	}
+	created, input, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
+	if err != nil || created != 0 || input == nil {
+		t.Fatalf("retried handoff = (%d, %v, %v), want the existing Task recovered with its evidence", created, input, err)
+	}
+	var recovered corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &recovered); err != nil || recovered.Spec.Prompt != task.Spec.Prompt {
+		t.Fatalf("recovered Task prompt changed: err=%v", err)
+	}
+}
+
 // A fix_ci repair Task that a controller created before repair prompts
 // carried CI evidence is recovered with its stored prompt, and no fresh
 // evidence is reported as having informed it. A pre-evidence prompt for
@@ -757,6 +809,8 @@ func TestRepositoryMonitorEvidenceWithholdsCredentialYAMLBlocks(t *testing.T) {
 		{name: "quoted key", header: "  \"password\": |", body: block("    ", value), keepSibling: true},
 		{name: "sequence item", header: "  - password: |", body: block("      ", value), keepSibling: true},
 		{name: "blank lines inside", header: "  password: |", body: block("    ", value[:3]) + "\n\n" + block("    ", value[3:]), keepSibling: true},
+		{name: "tagged", header: "  password: !!str |", body: block("    ", value), keepSibling: true},
+		{name: "anchored and tagged", header: "  password: &db !secret >", body: block("    ", value), keepSibling: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := "config:\n" + tc.header + "\n" + tc.body + "\n  user: deploy-bot\nnext step"
