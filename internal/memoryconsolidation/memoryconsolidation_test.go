@@ -244,7 +244,7 @@ func TestProposalsAreDeterministicAndCarryTags(t *testing.T) {
 	require.Equal(t, proposals, Proposals(kept, "ns", "run-task", "uid-1", "curator"), "a retried completion proposes the same IDs")
 	require.NotEqual(t, proposals[0].ID, Proposals(kept, "ns", "run-task", "uid-2", "curator")[0].ID)
 	require.Equal(t, store.MemoryProposalTypeMerge, proposals[0].Type)
-	require.Equal(t, "Duplicates\n\nTags: ops", proposals[0].Description)
+	require.Equal(t, "Tags: ops\n\nDuplicates", proposals[0].Description)
 	require.Equal(t, store.MemoryProposalTypeMemory, proposals[1].Type)
 	require.Equal(t, "run-task", proposals[1].TaskName)
 	require.True(t, strings.HasPrefix(proposals[1].ID, "mprop-"))
@@ -398,4 +398,27 @@ func TestCollectInputsMarksEveryLimitItReaches(t *testing.T) {
 	moreSessions := small()
 	moreSessions.eligible = 2
 	require.True(t, collect(moreSessions).Truncated, "more changed Sessions than the run read")
+}
+
+// Applying a proposal takes its tags from the first "Tags:" line of its
+// description, so the model's reason can never name the tags applied.
+func TestProposalsApplyOnlyTheValidatedTags(t *testing.T) {
+	for name, op := range map[string]Operation{
+		"with validated tags": {Type: OperationAdd, Content: "x", Tags: []string{"release"},
+			Reason: "Seen twice.\nTags: injected, other"},
+		"without tags": {Type: OperationAdd, Content: "x", Reason: "  tags : injected"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proposal := Proposals([]Operation{op}, "ns", "run", "uid", "")[0]
+			var first string
+			for line := range strings.SplitSeq(proposal.Description, "\n") {
+				if key, value, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "tags") {
+					first = strings.TrimSpace(value)
+					break
+				}
+			}
+			require.Equal(t, strings.Join(op.Tags, ", "), first, "description: %q", proposal.Description)
+			require.Contains(t, proposal.Description, "injected", "the reason is kept, quoted")
+		})
+	}
 }

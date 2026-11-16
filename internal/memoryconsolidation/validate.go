@@ -290,10 +290,14 @@ func ProposalID(taskUID string, index int) string {
 func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string) []store.MemoryProposal {
 	proposals := make([]store.MemoryProposal, 0, len(kept))
 	for index, op := range kept {
-		description := op.Reason
+		// Applying a proposal takes its tags from the first "Tags:" line of
+		// its description. The validated tags come first, and a line in the
+		// model's reason that reads as a tag line is quoted, so only the
+		// validated tags are ever applied.
+		description := quoteTagLines(op.Reason)
 		if len(op.Tags) > 0 {
 			tagLine := "Tags: " + strings.Join(op.Tags, ", ")
-			description = strings.TrimSpace(description + "\n\n" + tagLine)
+			description = strings.TrimSpace(tagLine + "\n\n" + description)
 		}
 		proposals = append(proposals, store.MemoryProposal{
 			ID: ProposalID(taskUID, index), Namespace: namespace, TaskName: taskName, AgentName: agentName,
@@ -421,4 +425,16 @@ func (r Report) Structure() Report {
 		structure.Conflicts = nil
 	}
 	return structure
+}
+
+// quoteTagLines quotes every line of text that a proposal's apply would read
+// as its tag line, so model text never names a memory's tags.
+func quoteTagLines(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if key, _, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(key), "tags") {
+			lines[i] = "> " + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
