@@ -261,6 +261,7 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	require.NoError(t, gatewayv1alpha1.AddToScheme(scheme))
 
 	checkedDocuments := 0
+	skippedBlocks := 0
 	checkMarkdown := func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -268,9 +269,13 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 		if entry.IsDir() || !strings.HasSuffix(path, ".md") {
 			return nil
 		}
-		blocks, err := extractYAMLCodeBlocks(path)
+		blocks, skips, err := extractYAMLCodeBlocks(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
+		}
+		for _, skip := range skips {
+			skippedBlocks++
+			t.Logf("%s:%d: skipped strict decode: %s", path, skip.line, skip.reason)
 		}
 		for _, block := range blocks {
 			documents, err := splitYAMLDocumentsFrom(strings.NewReader(block.body))
@@ -318,6 +323,7 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	} {
 		require.NoError(t, filepath.WalkDir(root, checkMarkdown))
 	}
+	t.Logf("checked %d documented manifests, skipped %d explicit exceptions", checkedDocuments, skippedBlocks)
 	// Guard the guard: if the walk finds nothing, the docs moved and the test
 	// is validating air.
 	require.Greater(t, checkedDocuments, 40, "expected Orka manifests in documented code blocks")
@@ -335,17 +341,51 @@ type yamlCodeBlock struct {
 	wholeManifest bool
 }
 
-const docsStrictDecodeSkipMarker = "<!-- orka:skip-strict-decode"
+const docsStrictDecodeSkipMarker = "orka:skip-strict-decode"
+
+// skippedDocBlock records one deliberate opt-out: the 1-based line number of
+// the opening fence it suppresses and the trimmed reason from its directive.
+type skippedDocBlock struct {
+	line   int
+	reason string
+}
+
+var skipDirectiveRe = regexp.MustCompile(`^<!--\s*orka:skip-strict-decode\s+(.+?)\s*-->$`)
+
+// parseSkipDirective distinguishes a supported standalone skip comment from
+// unrelated text. It returns isAttempt=true only for lines that start with an
+// HTML comment and mention the marker; prose quoting the marker is ignored so
+// it cannot silently disable validation. A valid directive carries a nonblank
+// trimmed reason.
+func parseSkipDirective(line string) (reason string, isAttempt bool, valid bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.Contains(trimmed, docsStrictDecodeSkipMarker) {
+		return "", false, false
+	}
+	if !strings.HasPrefix(trimmed, "<!--") {
+		return "", false, false
+	}
+	m := skipDirectiveRe.FindStringSubmatch(trimmed)
+	if m == nil {
+		return "", true, false
+	}
+	reason = strings.TrimSpace(m[1])
+	if reason == "" {
+		return "", true, false
+	}
+	return reason, true, true
+}
 
 // extractYAMLCodeBlocks returns YAML fences and shell heredocs from a markdown
 // file, accepting backtick or tilde fences and respecting the opt-out marker.
-func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
+func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, []skippedDocBlock, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	lines := strings.Split(string(content), "\n")
 	var blocks []yamlCodeBlock
+	var skips []skippedDocBlock
 	for i := 0; i < len(lines); i++ {
 		fence, language, ok := parseOpeningFence(lines[i])
 		if !ok {
@@ -361,8 +401,16 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 			}
 			body = append(body, lines[i])
 		}
-		if start > 0 && strings.Contains(lines[start-1], docsStrictDecodeSkipMarker) {
-			continue
+		supported := language == "yaml" || language == "yml" || language == "bash" || language == "sh" || language == "shell" || language == "console"
+		if supported && start > 0 {
+			reason, isAttempt, valid := parseSkipDirective(lines[start-1])
+			if valid {
+				skips = append(skips, skippedDocBlock{line: start + 1, reason: reason})
+				continue
+			}
+			if isAttempt {
+				return nil, nil, fmt.Errorf("line %d: malformed orka:skip-strict-decode directive (expected <!-- orka:skip-strict-decode reason --> with a nonblank reason)", start)
+			}
 		}
 		switch language {
 		case "yaml", "yml":
@@ -373,12 +421,12 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 			// before any other, so they get checked too.
 			heredocs, err := extractShellHeredocs(start+2, body)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			blocks = append(blocks, heredocs...)
 		}
 	}
-	return blocks, nil
+	return blocks, skips, nil
 }
 
 var heredocOpener = regexp.MustCompile(`<<(-?)\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
@@ -456,8 +504,9 @@ func TestExtractYAMLCodeBlocks(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "example.md")
 				require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
-				blocks, err := extractYAMLCodeBlocks(path)
+				blocks, skips, err := extractYAMLCodeBlocks(path)
 				require.NoError(t, err)
+				require.Empty(t, skips)
 				require.Equal(t, []yamlCodeBlock{
 					{line: 4, body: manifest, strict: true},
 					{line: 10, body: manifest, strict: true, wholeManifest: true},
@@ -466,6 +515,131 @@ func TestExtractYAMLCodeBlocks(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestExtractYAMLCodeBlocks_SkipValid(t *testing.T) {
+	const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+	for _, fence := range []string{"```", "~~~"} {
+		t.Run("yaml/"+fence, func(t *testing.T) {
+			content := strings.Join([]string{
+				"# Example", "",
+				"<!-- orka:skip-strict-decode Intentionally invalid manifest used to explain a validation error. -->",
+				fence + "yaml", "kind: [Task", fence,
+				"", fence + "yaml", manifest, fence,
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			blocks, skips, err := extractYAMLCodeBlocks(path)
+			require.NoError(t, err)
+			require.Equal(t, []skippedDocBlock{{line: 4, reason: "Intentionally invalid manifest used to explain a validation error."}}, skips)
+			require.Equal(t, []yamlCodeBlock{{line: 9, body: manifest, strict: true}}, blocks)
+		})
+		t.Run("shell-heredoc/"+fence, func(t *testing.T) {
+			content := strings.Join([]string{
+				"<!-- orka:skip-strict-decode Demonstrates a rejected wristband. -->",
+				fence + "bash", "kubectl apply -f - <<'EOF'", manifest, "EOF", fence,
+				"", fence + "bash", "kubectl apply -f - <<'EOF'", manifest, "EOF", fence,
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			blocks, skips, err := extractYAMLCodeBlocks(path)
+			require.NoError(t, err)
+			require.Equal(t, []skippedDocBlock{{line: 2, reason: "Demonstrates a rejected wristband."}}, skips)
+			require.Equal(t, []yamlCodeBlock{{line: 11, body: manifest, strict: true, wholeManifest: true}}, blocks)
+		})
+		t.Run("whitespace/"+fence, func(t *testing.T) {
+			content := strings.Join([]string{
+				"   <!-- orka:skip-strict-decode    Trimmed reason with surrounding whitespace.   -->   ",
+				fence + "yaml", manifest, fence,
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			blocks, skips, err := extractYAMLCodeBlocks(path)
+			require.NoError(t, err)
+			require.Equal(t, []skippedDocBlock{{line: 2, reason: "Trimmed reason with surrounding whitespace."}}, skips)
+			require.Empty(t, blocks)
+		})
+	}
+}
+
+func TestExtractYAMLCodeBlocks_SkipBlankReason(t *testing.T) {
+	for _, directive := range []string{
+		"<!-- orka:skip-strict-decode -->",
+		"<!-- orka:skip-strict-decode   -->",
+		"<!--  orka:skip-strict-decode\t-->",
+	} {
+		t.Run(directive, func(t *testing.T) {
+			content := strings.Join([]string{
+				directive, "```yaml", "apiVersion: core.orka.ai/v1alpha1\nkind: Task", "```",
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			_, _, err := extractYAMLCodeBlocks(path)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "line 1: malformed orka:skip-strict-decode directive")
+		})
+	}
+}
+
+func TestExtractYAMLCodeBlocks_SkipMalformed(t *testing.T) {
+	for _, directive := range []string{
+		"<!-- orka:skip-strict-decode reason",
+		"<!-- orka:skip-strict-decode reason --> trailing prose",
+		"<!-- orka:skip-strict-decode reason --",
+	} {
+		t.Run(directive, func(t *testing.T) {
+			content := strings.Join([]string{
+				directive, "```yaml", "apiVersion: core.orka.ai/v1alpha1\nkind: Task", "```",
+			}, "\n")
+			path := filepath.Join(t.TempDir(), "example.md")
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+			_, _, err := extractYAMLCodeBlocks(path)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "line 1: malformed orka:skip-strict-decode directive")
+		})
+	}
+}
+
+func TestExtractYAMLCodeBlocks_SkipIgnored(t *testing.T) {
+	const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+	content := strings.Join([]string{
+		"# Example", "",
+		"<!-- just an ordinary comment -->",
+		"```yaml", manifest, "```", "",
+		"See <!-- orka:skip-strict-decode quoted reason --> for details.",
+		"```yaml", manifest, "```", "",
+		"<!-- orka:skip-strict-decode Stale directive far from any fence. -->",
+		"", "",
+		"```yaml", manifest, "```",
+	}, "\n")
+	path := filepath.Join(t.TempDir(), "example.md")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	blocks, skips, err := extractYAMLCodeBlocks(path)
+	require.NoError(t, err)
+	require.Empty(t, skips)
+	require.Len(t, blocks, 3)
+}
+
+func TestExtractYAMLCodeBlocks_SkipAppliesOnlyToNextFence(t *testing.T) {
+	const manifest = "apiVersion: core.orka.ai/v1alpha1\nkind: Task"
+	content := strings.Join([]string{
+		"<!-- orka:skip-strict-decode Skips only the first fence. -->",
+		"```yaml", "kind: [Task", "```", "",
+		"```yaml", manifest, "```",
+	}, "\n")
+	path := filepath.Join(t.TempDir(), "example.md")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	blocks, skips, err := extractYAMLCodeBlocks(path)
+	require.NoError(t, err)
+	require.Equal(t, []skippedDocBlock{{line: 2, reason: "Skips only the first fence."}}, skips)
+	require.Equal(t, []yamlCodeBlock{{line: 7, body: manifest, strict: true}}, blocks)
 }
 
 func TestExtractYAMLCodeBlocks_HeredocTerminators(t *testing.T) {
@@ -492,12 +666,13 @@ func TestExtractYAMLCodeBlocks_HeredocTerminators(t *testing.T) {
 			}, "\n")
 			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
-			blocks, err := extractYAMLCodeBlocks(path)
+			blocks, skips, err := extractYAMLCodeBlocks(path)
 			if tc.wantErr {
 				require.EqualError(t, err, "line 2: unterminated heredoc \"EOF\"")
 				return
 			}
 			require.NoError(t, err)
+			require.Empty(t, skips)
 			require.Equal(t, []yamlCodeBlock{{line: 3, body: manifest, strict: true, wholeManifest: true}}, blocks)
 		})
 	}
