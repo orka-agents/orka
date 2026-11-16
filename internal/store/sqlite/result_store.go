@@ -11,7 +11,10 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// SaveResult inserts or replaces a task result.
+// SaveResult inserts or replaces a task result. Data larger than
+// store.MaxResultBytes is rejected with store.ErrTooLarge, and a write whose
+// order stamp is not greater than the stored result's succeeds without
+// changing it.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
 	return writeOperationErr(ctx, s, "SaveResult", func(ctx context.Context) error {
 		return s.saveResultWrite(ctx, namespace, taskName, data)
@@ -19,17 +22,27 @@ func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data
 }
 
 func (s *Store) saveResultWrite(ctx context.Context, namespace, taskName string, data []byte) error {
+	if len(data) > store.MaxResultBytes {
+		return store.TooLargeError{What: "result", Size: int64(len(data)), Limit: store.MaxResultBytes}
+	}
+	stamp, err := writeStampFrom(ctx)
+	if err != nil {
+		return err
+	}
 	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
-		return s.saveResultUnfenced(ctx, namespace, taskName, data)
+		return s.saveResultUnfenced(ctx, namespace, taskName, data, stamp)
 	})
 }
 
-func (s *Store) saveResultUnfenced(ctx context.Context, namespace, taskName string, data []byte) error {
+func (s *Store) saveResultUnfenced(ctx context.Context, namespace, taskName string, data []byte, stamp writeStamp) error {
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-		`INSERT INTO results (namespace, task_name, data, created_at, updated_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		 ON CONFLICT(namespace, task_name) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
-		namespace, taskName, data,
+		`INSERT INTO results (namespace, task_name, data, created_at, updated_at, write_epoch, write_seq)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
+		 ON CONFLICT(namespace, task_name) DO UPDATE SET
+		   data = excluded.data, updated_at = excluded.updated_at,
+		   write_epoch = excluded.write_epoch, write_seq = excluded.write_seq`+
+			stamp.replaceCondition("results"),
+		namespace, taskName, data, stamp.epoch, stamp.sequence,
 	)
 	return err
 }
@@ -104,6 +117,9 @@ func (s *Store) savePromptResultReceiptWrite(ctx context.Context, receipt store.
 	}
 	if receipt.Data == nil {
 		return store.ValidationErrorf("prompt result receipt data is required")
+	}
+	if len(receipt.Data) > store.MaxResultBytes {
+		return store.TooLargeError{What: "prompt result receipt data", Size: int64(len(receipt.Data)), Limit: store.MaxResultBytes}
 	}
 	// The insert and the comparison share one transaction, so the receipt
 	// compared is the one stored when this call committed.

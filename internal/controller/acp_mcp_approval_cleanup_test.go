@@ -303,7 +303,7 @@ func TestMCPApprovalSessionCleanupAfterRecoveryReadRefusesProjection(t *testing.
 	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
 	defer cancel()
 	awaitApprovalCleanupSignal(t, ctx, entered)
-	require.NoError(t, f.events.DeleteSession(f.ctx, f.task.Namespace, session), "Session cleanup must not wait for a projection's read")
+	require.NoError(t, f.events.DeleteSession(f.ctx, f.task.Namespace, session, time.Now().UTC()), "Session cleanup must not wait for a projection's read")
 	release()
 	require.NoError(t, awaitApprovalCleanupResult(t, f.ctx, done))
 	require.Equal(t, saved, requireCancelledApprovalReceipt(t, f, call, effect))

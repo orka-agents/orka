@@ -1406,6 +1406,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
+	// No operator operation may run, or still be launching, when the session
+	// is torn down. An unfinished barrier fails deletion closed and keeps the
+	// session resources; the pool is replaced instead.
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		s.mu.Lock()
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced before deletion", nil, false)
+		return
+	}
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
@@ -1686,6 +1698,20 @@ func workspaceDeltaSegmentMatches(pattern, segment string) bool {
 	return err == nil && matched
 }
 
+// workspaceDeltaPathViolation returns the rejection message for one changed
+// path, or "" when the path passes. The repository-control check runs first so
+// a protected file is always reported as a control-path denial, even when it is
+// also outside the allowlist.
+func workspaceDeltaPathViolation(workspaceRelativeRoot, changedPath string, limits harnessv2.WorkspaceDeltaLimits) string {
+	if limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath) {
+		return harnessv2.WorkspaceDeltaRepositoryControlPathMessage
+	}
+	if !workspaceDeltaPathAllowed(changedPath, limits.AllowedPaths) {
+		return harnessv2.WorkspaceDeltaDisallowedPathMessage
+	}
+	return ""
+}
+
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {
 	return workspaceDeltaRepositoryControlPath(path.Join(strings.TrimSpace(workspaceRelativeRoot), changedPath))
 }
@@ -1947,6 +1973,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 
 	freezeCtx, cancel := context.WithTimeout(r.Context(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 	defer cancel()
+	// No operator operation may run, or start, while the workspace is frozen
+	// and its delta is captured.
+	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+		s.poisonSession(state, "operator operations could not be quiesced before the workspace freeze")
+		s.poisonPool("operator_quiesce_unproven")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced", nil, false)
+		return
+	}
 	if err := runtimeSession.Freeze(freezeCtx); err != nil {
 		s.poisonSession(state, "workspace freeze could not be proven")
 		s.poisonPool("workspace_freeze_unproven")
@@ -2019,14 +2053,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, changedPath := range changedPaths {
-		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
-			s.poisonSession(state, "workspace delta contains a disallowed path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
-			return
-		}
-		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
-			s.poisonSession(state, "workspace delta contains a protected repository-control path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+		if message := workspaceDeltaPathViolation(state.workspaceRelativeRoot, changedPath, request.Limits); message != "" {
+			s.poisonSession(state, message)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)
 			return
 		}
 	}

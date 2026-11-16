@@ -20,6 +20,10 @@ import (
 // CLI, so a test could leave one running against a real cluster and cache it in
 // the real ~/.orka. Tests that need either pass --kubeconfig or set HOME.
 func TestMain(m *testing.M) {
+	if mode := os.Getenv(fakeKubectlEnv); mode != "" {
+		// Tests run this binary as a stand-in for a kubectl port-forward.
+		os.Exit(fakeKubectl(mode, os.Args[1:]))
+	}
 	os.Exit(runWithoutAmbientCluster(m))
 }
 
@@ -50,7 +54,9 @@ func runWithoutAmbientCluster(m *testing.M) int {
 			return 1
 		}
 	}
-	for _, key := range []string{"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"} {
+	// The CLI reads these in place of its global flags, so an exported value
+	// would leak a developer's server, token or namespace into every test.
+	for _, key := range []string{"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", envServer, envToken, envNamespace} {
 		if err := os.Unsetenv(key); err != nil {
 			fmt.Fprintln(os.Stderr, "isolate CLI test environment:", err)
 			return 1

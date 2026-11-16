@@ -806,7 +806,7 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 			Expect(ss.CreateSession(ctx, &store.SessionRecord{Namespace: ns, Name: sessionName, SessionType: "task"})).To(Succeed())
-			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID))).To(Succeed())
+			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID), time.Now().UTC())).To(Succeed())
 
 			started := metav1.Now()
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
@@ -1748,6 +1748,54 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("invalid cron expression"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+		})
+
+		It("should fail with completion time when an existing schedule is edited to an invalid cron expression", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-edited-invalid-cron"
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: defaultNS,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Schedule: "*/5 * * * *",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through: finalizer → Pending → Scheduled
+			for range 3 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
+			Expect(task.Status.CompletionTime).To(BeNil())
+
+			// Edit the live schedule to an invalid expression.
+			task.Spec.Schedule = "not-a-cron"
+			Expect(k8sClient.Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("invalid cron expression"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+			complete := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(complete).NotTo(BeNil())
+			Expect(complete.Status).To(Equal(metav1.ConditionFalse))
+			Expect(complete.Reason).To(Equal(eventReasonTaskFailed))
 		})
 
 		It("should create child task when schedule time is reached", func() {

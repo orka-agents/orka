@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -26,12 +27,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const externalRuntimeEndpointAnnotation = "orka.ai/external-runtime-endpoint"
@@ -132,6 +135,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	if len(cfg.profile.Toolboxes) > 0 {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "execution-workspace RuntimePools cannot mount toolboxes")
+	}
+	if len(cfg.profile.Skills) > 0 {
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "execution-workspace RuntimePools cannot mount skills")
 	}
 	if w.Spec.Workload != nil && (w.Status.Allocation == nil || w.Status.Allocation.State != workspacev1alpha1.AllocationStopped) {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil {
@@ -285,11 +291,15 @@ func externalProviderOperationReport(w *workspacev1alpha1.ExecutionWorkspace) st
 }
 
 func (r *RuntimePoolReconciler) externalPoolProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
+	return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolProgressStatus(pool, lifecycle, message), time.Second)
+}
+
+func (r *RuntimePoolReconciler) externalPoolProgressStatus(pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) corev1alpha1.RuntimePoolStatus {
 	status := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
 	status.ActiveInstance = pool.Status.ActiveInstance
 	status.Lifecycle, status.AdmissionState, status.Message = lifecycle, corev1alpha1.RuntimePoolAdmissionClosed, message
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	return status
 }
 
 func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (ctrl.Result, error) {
@@ -337,6 +347,13 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "ORKA_ACP_DURABLE_WORKSPACE_KEY", Value: "shared"})
 	}
 	template = runtimePoolWorkspaceBootstrapTemplate(template, string(auth.Data[runtimePoolBootstrapNonceKey]), publicKey)
+	telemetryFits, telemetryMessage := true, ""
+	if nativeProcess {
+		// Fit telemetry last, to the room every other native setting leaves:
+		// the provider refuses an environment past the backend limit.
+		template.Spec.Containers[0].Env, telemetryFits, telemetryMessage = fitNativeRuntimeTelemetry(
+			template.Spec.Containers[0].Env, r.EnableTelemetry, os.Getenv)
+	}
 	container := template.Spec.Containers[0]
 	request := workspacev1alpha1.WorkloadRequest{
 		RestoreFrom: pool.Spec.ExecutionWorkspace.RestoreFrom.DeepCopy(),
@@ -349,7 +366,8 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		// A gateway-enforced backend has no Pod network to describe: its
 		// runtime reaches only the allowlisted host names, and Core's routed
 		// supervisor calls enter through the backend router.
-		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider)
+		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider,
+			telemetryCollectorEndpoints(request.Runtime.Template.Spec.Containers[0].Env))
 		if err != nil {
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, err.Error())
 		}
@@ -410,7 +428,23 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "public workload request published; waiting for provider materialization")
+	status := r.externalPoolProgressStatus(pool, corev1alpha1.RuntimePoolLifecycleStarting,
+		"public workload request published; waiting for provider materialization")
+	switch {
+	case telemetryMessage == "":
+		// This request carries no supervisor telemetry; a condition from an
+		// earlier request would describe a runtime that no longer exists.
+		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
+	case telemetryFits:
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
+			corev1alpha1.RuntimePoolReasonTelemetryProjected, telemetryMessage)
+	default:
+		log.FromContext(ctx).Info("Reduced supervisor telemetry to fit the native environment limit",
+			"runtimePool", pool.Name, "detail", telemetryMessage)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionFalse,
+			corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit, telemetryMessage)
+	}
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
@@ -708,11 +742,11 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 // Core's private provider Secret, so it never enters the sandbox. Otherwise
 // admission fails closed unless the operator explicitly allowed delivering
 // the token into the sandbox through the sealed bootstrap.
-func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret, collectors []string) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
 	// An origin that cannot be admitted at all is a configuration error, not
 	// a reason to consider delivering the token into the sandbox: report it
 	// on its own.
-	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
+	if _, err := r.externalRuntimeEgressForCollectors(cfg, nil, collectors); err != nil {
 		return nil, false, err
 	}
 	reason := "the workspace provider does not advertise " + string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
@@ -720,7 +754,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runti
 		if provider == nil || provider.Namespace == "" || provider.Name == "" {
 			return nil, false, fmt.Errorf("provider proxy token injection requires Core's private provider Secret")
 		}
-		egress, err := r.externalRuntimeEgress(cfg, &externalProviderTokenInjection{namespace: provider.Namespace, name: provider.Name})
+		egress, err := r.externalRuntimeEgressForCollectors(cfg, &externalProviderTokenInjection{namespace: provider.Namespace, name: provider.Name}, collectors)
 		if err == nil {
 			return egress, true, nil
 		}
@@ -729,7 +763,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runti
 	if !r.AllowProviderTokenInSandbox {
 		return nil, false, fmt.Errorf("provider proxy token injection is unavailable (%s); refusing to deliver the provider token into the sandbox without --acp-workspace-allow-provider-token-in-sandbox", reason)
 	}
-	egress, err := r.externalRuntimeEgress(cfg, nil)
+	egress, err := r.externalRuntimeEgressForCollectors(cfg, nil, collectors)
 	return egress, false, err
 }
 

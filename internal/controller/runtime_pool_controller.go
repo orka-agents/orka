@@ -1043,7 +1043,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	status corev1alpha1.RuntimePoolStatus,
 	postProbeFence runtimePoolPostProbeFence,
 ) (ctrl.Result, error) {
-	if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, cfg.profile.Toolboxes); err != nil {
+	if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills)); err != nil {
 		return ctrl.Result{}, err
 	}
 	if len(readyPods) == 0 {
@@ -1055,7 +1055,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 			// A restarted active Pod that fails its toolbox checks must still
 			// surface ToolboxUnavailable so waiting Tasks fail instead of
 			// retrying against a fence that can never serve again.
-			if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes, r.now()); ok {
+			if reason, message, ok := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills), r.now()); ok {
 				rolloutReason = reason
 				status.Message = message
 			}
@@ -1069,7 +1069,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "waiting for one Ready runtime Pod"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-		if reason, message, ok := runtimePoolToolboxFailure(pods, cfg.profile.Toolboxes, r.now()); ok {
+		if reason, message, ok := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills), r.now()); ok {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.Message = message
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, reason, message)
@@ -2572,20 +2572,25 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	// unreachable after runtimePoolToolboxAdmission; the template then omits
 	// the toolbox projection and the supervisor's digest check fails closed.
 	_ = applyRuntimePoolToolboxTemplate(&template, cfg.profile.Toolboxes, r.ToolboxPolicy)
+	_ = applyRuntimePoolSkillTemplate(&template, cfg.profile.Skills, cfg.maxResidentSessions, len(cfg.profile.Toolboxes) > 0, r.ToolboxPolicy)
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template
 }
 
 // runtimePoolToolboxAdmission fails closed when a pool's frozen profile
-// declares toolboxes that this controller cannot bind: the feature is off,
-// mounting is unavailable, the mount method is invalid, or the pool is
-// workspace-backed.
+// declares toolboxes or skills that this controller cannot bind: the feature
+// is off, mounting is unavailable, the mount method is invalid, the runtime has
+// no native skills folder, or the pool is workspace-backed.
 func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
-	if len(cfg.profile.Toolboxes) == 0 {
+	toolboxes, skills := cfg.profile.Toolboxes, cfg.profile.Skills
+	if len(toolboxes) == 0 && len(skills) == 0 {
 		return nil
 	}
 	if !r.ToolboxPolicy.Enabled {
 		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "toolboxes are disabled on this controller")
+	}
+	if len(skills) > 0 && !r.ToolboxPolicy.SkillsEnabled {
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "skills are disabled on this controller")
 	}
 	if reason := strings.TrimSpace(r.ToolboxPolicy.UnavailableReason); reason != "" {
 		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, reason)
@@ -2594,14 +2599,24 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.R
 		return fmt.Errorf("%s%v", acpToolboxUnavailablePrefix, err)
 	}
 	if pool != nil && pool.Spec.ExecutionWorkspace != nil {
-		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "execution-workspace RuntimePools cannot mount toolboxes")
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "execution-workspace RuntimePools cannot mount toolboxes or skills")
+	}
+	if len(skills) > 0 {
+		if reason := acpSkillRuntimeUnsupportedReason(corev1alpha1.AgentRuntimeType(cfg.profile.ProviderKind)); reason != "" {
+			return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, reason)
+		}
 	}
 	// The frozen profile was admitted under the allowlist of its day. Recheck
 	// it against the current allowlist so removing a registry also stops
 	// existing pools from recreating Pods with its images.
-	for i := range cfg.profile.Toolboxes {
-		if !ToolboxImageAllowed(cfg.profile.Toolboxes[i].Image, r.ToolboxPolicy.AllowedRegistries) {
-			return fmt.Errorf("%stoolbox image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, cfg.profile.Toolboxes[i].Image)
+	for i := range toolboxes {
+		if !ToolboxImageAllowed(toolboxes[i].Image, r.ToolboxPolicy.AllowedRegistries) {
+			return fmt.Errorf("%stoolbox image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, toolboxes[i].Image)
+		}
+	}
+	for i := range skills {
+		if !ToolboxImageAllowed(skills[i].Image, r.ToolboxPolicy.AllowedRegistries) {
+			return fmt.Errorf("%sskill image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, skills[i].Image)
 		}
 	}
 	return nil
@@ -3046,6 +3061,10 @@ func runtimePoolValidationTargetFromTemplate(
 	if err != nil {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool toolboxes are invalid: %w", err)
 	}
+	skills, err := runtimePoolSkillsFromEnvironment(environment)
+	if err != nil {
+		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool skills are invalid: %w", err)
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               environment["ORKA_ACP_ACP_PROFILE"],
 		AdapterDigests:           adapterDigests,
@@ -3061,6 +3080,7 @@ func runtimePoolValidationTargetFromTemplate(
 		ProxyCredentialScope:     environment["ORKA_ACP_PROXY_CREDENTIAL_SCOPE"],
 		ResourceClass:            environment["ORKA_ACP_RESOURCE_CLASS"],
 		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	if err := profile.Validate(); err != nil {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool profile is invalid: %w", err)
@@ -3925,6 +3945,7 @@ func runtimePoolHarnessProfile(spec corev1alpha1.RuntimePoolProfileSpec) (harnes
 		ProxyCredentialScope:     strings.TrimSpace(spec.ProxyCredentialScope),
 		ResourceClass:            strings.TrimSpace(spec.ResourceClass),
 		Toolboxes:                runtimeToolboxesFromPool(spec.Toolboxes),
+		Skills:                   runtimeSkillsFromPool(spec.Skills),
 	}
 	if err := profile.Validate(); err != nil {
 		return harnessv2.RuntimeProfile{}, fmt.Errorf("spec.runtime.profile is invalid: %w", err)

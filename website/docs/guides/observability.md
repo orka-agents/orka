@@ -121,10 +121,16 @@ therefore passes the fewest settings that keep each signal's SDK meaning:
   example separate OTLP/HTTP collectors per signal, supervisor metrics are
   dropped and traces are kept.
 
-A dropped signal never falls back to a generic endpoint. Trace settings that
-exceed three entries on their own, such as an OTLP/HTTP endpoint with an
-insecure or compression setting, or telemetry on a native runtime whose
-workspace can suspend, exceed the limit and the provider rejects the workload.
+A dropped signal never falls back to a generic endpoint. On a native runtime the
+three-entry budget does not apply: Orka fits telemetry last, from every
+configured signal, into the entries its other settings leave. A runtime whose
+workspace can suspend uses two more, and empty model limits are omitted. When
+traces and metrics do not fit, metrics are dropped; when traces alone do not
+fit, supervisor telemetry is left out rather than publishing a workload the
+provider would reject. With `--runtime-telemetry-collector-egress`, the gateway
+allowlist admits only the collectors the fitted runtime exports to. The RuntimePool's `TelemetryReady` condition is `True`
+with reason `TelemetryProjected` when every signal fits, and `False` with reason
+`NativeEnvironmentLimit` and the entry counts when a signal was left out.
 Headers, certificate paths,
 resource attributes and content-capture settings are never copied. Adding metrics
 settings changes the supervisor Pod template, so existing RuntimePools roll through
@@ -286,8 +292,8 @@ wins.
 
 Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
 executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
-children. Tool spans do not include raw arguments or complete result bodies, but a structured tool
-error message can appear in the span status description.
+children. Tool spans do not include raw arguments, result bodies or error
+messages.
 
 ### OpenTelemetry traces vs Task trace read model
 
@@ -590,7 +596,18 @@ Telemetry must not include:
 - raw prompts or completion content,
 - raw tool arguments or tool result bodies,
 - API keys, auth headers, TxTokens, context tokens, JWTs, cookies, or credentials,
-- raw transcripts or broad local filesystem paths.
+- raw transcripts or broad local filesystem paths,
+- error message text.
+
+A failed span records only an error class, such as a provider status code, a Go
+error type or a fixed Orka outcome name, in its status description and
+`error.type` attribute. Where a failed span also has an `exception` event, the
+event carries the same class and no message or stack trace. Orka's tracer
+providers do not record panics on spans, because the SDK would store the panic
+value as the exception message. A stop reason that is neither known to Orka
+nor a documented provider value is reported as `unknown_stop_reason`. A failed
+tool result whose `errorType` is outside Orka's tool error types is reported as
+`tool_error`; a Go error returned by a tool is reported by its error class.
 
 Future opt-in content capture must pass through Orka redaction and size caps
 before any span attribute or event is emitted.

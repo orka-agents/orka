@@ -273,6 +273,7 @@ func setupTestHandlersWithAuthzStore(
 	app.Get("/agents", handlers.ListAgents)
 	app.Get("/agents/:name", handlers.GetAgent)
 	app.Put("/agents/:name", handlers.UpdateAgent)
+	app.Put("/agents/:name/spec", handlers.UpdateAgentSpec)
 	app.Delete("/agents/:name", handlers.DeleteAgent)
 	app.Get("/memories", handlers.ListMemories)
 	app.Post("/memories", handlers.CreateMemory)
@@ -2988,9 +2989,9 @@ func (s *sessionAccessRecordingStore) GetSessionType(ctx context.Context, namesp
 	return s.typeReader.GetSessionType(ctx, namespace, name)
 }
 
-func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	s.deleteCalls++
-	return s.SessionStore.DeleteSession(ctx, namespace, name)
+	return s.SessionStore.DeleteSession(ctx, namespace, name, now)
 }
 
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *storageclient.Client) {

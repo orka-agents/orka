@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/ai
 
 # Runtime stage - using python slim for code_exec tool support
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # Install Node.js for JavaScript execution
 RUN apt-get update && apt-get install -y --no-install-recommends \

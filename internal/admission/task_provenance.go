@@ -81,6 +81,12 @@ var (
 		labels.AnnotationParentTaskNamespace,
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
+		// Continuation lineage lets a resumed turn act for its parked
+		// predecessor, so only the controller may write it.
+		labels.AnnotationContinuationOfName,
+		labels.AnnotationContinuationOfUID,
+		labels.AnnotationContinuationIndex,
+		labels.AnnotationContinuationChainDeadline,
 	}
 )
 
@@ -188,6 +194,15 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		fields := changedTaskCoordinationFields(oldTask, task, isKubernetesCleanupController(req.UserInfo.Username))
 		if len(fields) > 0 {
 			return ctrladmission.Denied("Task coordination ancestry is immutable: " + strings.Join(fields, ", "))
+		}
+		// The link finalizer keeps a continuation visible until its parked
+		// predecessor records it. Removing it early lets a deleted
+		// continuation look as if it was never created, so recovery would
+		// start the same work again.
+		if slices.Contains(oldTask.Finalizers, labels.ContinuationLinkFinalizer) &&
+			!slices.Contains(task.Finalizers, labels.ContinuationLinkFinalizer) &&
+			!isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
+			return ctrladmission.Denied("only the Orka controller may remove the " + labels.ContinuationLinkFinalizer + " finalizer")
 		}
 	}
 	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {

@@ -53,6 +53,11 @@ type ToolSpec struct {
 
 // HTTPExecution defines how to execute the tool via HTTP
 type HTTPExecution struct {
+	// GatewayTaskPass requires controller-only, per-call gateway authority.
+	// It cannot coexist with other authentication, headers, MCP or forwarding.
+	// +optional
+	GatewayTaskPass bool `json:"gatewayTaskPass,omitempty"`
+
 	// URL is the endpoint to call when the tool is invoked
 	// Required for plain HTTP tools. MCP actor-backed tools may omit it when
 	// HTTP is present only for transport auth settings.
@@ -425,7 +430,7 @@ type ToolActorStatus struct {
 // coding agent or the Orka MCP broker already serves: the broker would
 // resolve that name to its own tool and never create the forwarding gateway.
 // TestForwardingToolNamesCoverTheBrokeredBuiltIns keeps the list complete.
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name in ['bash','edit','glob','grep','read','webfetch','websearch','write','check_messages','check_pull_request_ci','comment_on_issue','create_pull_request','delegate_task','get_issue','list_connections','list_issues','list_pull_requests','post_review_comment','propose_memory','recall_memory','remember','reply_in_conversation','review_pull_request','run_validation','search_transcript','send_message','wait_for_tasks','web_fetch','web_search'])",message="a forwarding tool must not share a name with a built-in tool"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name in ['bash','edit','glob','grep','read','webfetch','websearch','write','check_messages','check_pull_request_ci','comment_on_issue','create_pull_request','delegate_task','get_issue','list_connections','list_issues','list_pull_requests','park_until','post_review_comment','propose_memory','recall_memory','remember','reply_in_conversation','review_pull_request','run_validation','search_transcript','send_message','wait_for_tasks','web_fetch','web_search'])",message="a forwarding tool must not share a name with a built-in tool"
 // A write tool is named after its Tool with the ":write" suffix, and tool
 // names are limited to 253 bytes.
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !has(self.spec.http.forward.writes) || size(self.metadata.name) <= 247",message="a forwarding tool that allows writes must have a name of at most 247 characters"

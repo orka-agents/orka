@@ -792,6 +792,18 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// taskUIDQueryParam optionally fences a Task route to one Task UID, so a
+// client that resolved a Task earlier never reaches a later Task that reuses
+// its name.
+const taskUIDQueryParam = "uid"
+
+// taskMatchesExpectedUID reports whether the request names no UID or the
+// loaded Task's UID.
+func taskMatchesExpectedUID(c fiber.Ctx, task *corev1alpha1.Task) bool {
+	expected := c.Query(taskUIDQueryParam)
+	return expected == "" || string(task.UID) == expected
+}
+
 // DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -817,8 +829,17 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "deleteTask", task); err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
-	if err := h.client.Delete(ctx, task); err != nil {
+	// Delete exactly the Task that was authorized, never a later Task that
+	// reused its name in the meantime.
+	uid := task.UID
+	if err := h.client.Delete(ctx, task, client.Preconditions{UID: &uid}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete task: %v", err))
 	}
 
@@ -973,6 +994,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
@@ -984,6 +1008,19 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
+	}
+	// Results are stored by name. A UID-fenced read confirms the same Task
+	// still holds the name after the read, so the output is that Task's. The
+	// check reads live: the cache could still hold the original Task after a
+	// same-name replacement has published its result.
+	if c.Query(taskUIDQueryParam) != "" {
+		current, err := h.taskAccess().loadLive(c, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !taskMatchesExpectedUID(c, current) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -1259,7 +1296,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	deleteSession := h.sessionStore.DeleteSession
+	deleteSession := func(ctx context.Context, namespace, name string) error {
+		return h.sessionStore.DeleteSession(ctx, namespace, name, time.Now().UTC())
+	}
 	if h.sessionManager != nil {
 		deleteSession = h.sessionManager.DeleteSession
 	}
@@ -1626,7 +1665,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
-	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
@@ -1645,21 +1683,36 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return err
 	}
 
+	return h.updateAgentSpec(c, namespace, req.Spec, nil)
+}
+
+// updateAgentSpec keeps both routes on the same validation and authorization
+// path. Only the conditional route supplies expectations; they never advance
+// when a patch retries after a resourceVersion conflict.
+func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alpha1.AgentSpec, expected *UpdateAgentSpecRequest) error {
+	name := c.Params(apiFieldName)
 	ctx := c.Context()
 	token := contextTokenFromUserInfo(GetUserInfo(c))
+	var reader client.Reader = h.client
+	if expected != nil {
+		reader = h.uncachedReader()
+	}
 
 	var agent *corev1alpha1.Agent
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Agent{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
 			return err
 		}
 		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
 			return err
 		}
 
+		if expected != nil && (string(current.UID) != expected.ExpectedUID || current.Generation != expected.ExpectedGeneration) {
+			return fiber.NewError(fiber.StatusConflict, "agent UID or generation does not match")
+		}
 		patchBase := current.DeepCopy()
-		current.Spec = req.Spec
+		current.Spec = spec
 		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}

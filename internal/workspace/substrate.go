@@ -1129,6 +1129,8 @@ func substrateControlError(op string, err error) error {
 		return NewError(op, ErrorKindTimeout, st.Message(), true, err)
 	case codes.Canceled:
 		return NewError(op, ErrorKindCanceled, st.Message(), true, err)
+	case codes.ResourceExhausted:
+		return NewError(op, ErrorKindResourceExhausted, st.Message(), true, err)
 	default:
 		return NewError(op, ErrorKindUnknown, st.Message(), true, err)
 	}

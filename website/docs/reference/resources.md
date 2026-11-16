@@ -365,6 +365,7 @@ spec:
 | `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Runtimes reject values they do not support: `none` is Codex-only and `max` is Claude-only. |
 | `runtime.runtimeRef` | Selects an external [AgentRuntime](../guides/bring-your-own-agent-runtime.md) instead of a built-in type. |
 | `runtime.toolboxes` | Built-in types only. Read-only [toolbox](../guides/toolboxes.md) images whose tool folders are added to the agent's `PATH`. |
+| `runtime.skills` | `codex`, `claude`, and `opencode` only. [Agent Skills](../guides/runtime-skills.md) (`name`, digest-pinned `image`, optional `path` under `/skills`) copied into each session's native skills folder. |
 
 All four built-in harness v2 runtimes support `spec.systemPrompt` and the optional
 [`spec.soul`](../concepts/soul.md) persona source. Copilot and OpenCode receive
@@ -905,7 +906,7 @@ spec:
 | `issueWorkflow.implementation.maxActive` | int32 | No | Concurrently active implementation jobs per monitor. Defaults to `2`. |
 | `issueWorkflow.implementation.maxAttemptsPerIssue` | int32 | No | Implementation attempts per issue. Defaults to `2`. |
 | `issueWorkflow.implementation.maxChangedFiles` | int32 | No | Files allowed in one implementation patch. Defaults to `12`. |
-| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation patches may touch. |
+| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation and pull request repair patches may touch. Repository control paths are always denied. |
 | `repair.enabled` | bool | No | Enables automatic, bounded pull request repair. Requires `agents.repairer` and the publication credentials. |
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |

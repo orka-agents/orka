@@ -502,6 +502,14 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if err := r.Identity.ValidateAgent(agent); err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
+	// The controller creates a parked turn's continuation, so its creation
+	// was never checked for the identity, and a Delegated identity would
+	// restart its maximum age at the wake. Parking refuses an identity-bound
+	// Task, so this catches an Agent granted an identity while a turn waited.
+	if task.Labels[labels.LabelContinuationOf] != "" || strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) != "" {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf(
+			"a parked turn's continuation cannot use identity-bound Agent %q; create a new Task to use it", agent.Name))
+	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	// Judge the Agent's live claim, not the copy the Task resolved earlier.
 	live := &corev1alpha1.Agent{}

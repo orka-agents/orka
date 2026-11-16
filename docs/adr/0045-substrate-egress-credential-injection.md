@@ -4,14 +4,14 @@ Date: 2026-11-06
 
 ## Status
 
-Accepted. Extends ADR 0039: native Substrate workspaces stop receiving the
+Accepted. Extends ADR 0049: native Substrate workspaces stop receiving the
 provider-auth-proxy token, and MCP Tool Actors can use upstream credentials, by
 having the Agent Substrate v1 egress gateway inject them. The sealed bootstrap of
-ADR 0039 still delivers the per-Actor controller and capability credentials.
+ADR 0049 still delivers the per-Actor controller and capability credentials.
 
 ## Context
 
-After ADR 0039 every native Substrate ACP runtime received the single
+After ADR 0049 every native Substrate ACP runtime received the single
 installation-wide provider-auth-proxy bearer through its sealed bootstrap. The
 runtime holds it in memory, so any process in the guest (the agent, a tool it
 runs, a dependency it installs) can read and exfiltrate it, and every runtime

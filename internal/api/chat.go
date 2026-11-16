@@ -29,7 +29,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -542,8 +541,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
 		return c.JSON(ChatResponse{
@@ -713,13 +711,18 @@ func (ch *ChatHandler) reserveChatTurn(
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(turnDeadline) {
 		turnDeadline = deadline.UTC()
 	}
-	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, &store.SessionRecord{
-		Namespace:   namespace,
-		Name:        sessionID,
-		SessionType: store.SessionTypeChat,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}, turnID, turnDeadline.Add(chatDurabilityTimeout))
+	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, store.AcquireChatTurnRequest{
+		Session: &store.SessionRecord{
+			Namespace:   namespace,
+			Name:        sessionID,
+			SessionType: store.SessionTypeChat,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		TurnID:    turnID,
+		Now:       now,
+		ExpiresAt: turnDeadline.Add(chatDurabilityTimeout),
+	})
 	if errors.Is(err, store.ErrGatewayOwnedSession) {
 		return "", time.Time{}, false, fiber.NewError(fiber.StatusNotFound, "chat session not found")
 	}
@@ -951,7 +954,7 @@ func (ch *ChatHandler) deleteChatSession(ctx context.Context, namespace, session
 	if ch.sessionManager != nil {
 		return ch.sessionManager.DeleteSession(ctx, namespace, sessionID)
 	}
-	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID)
+	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID, time.Now().UTC())
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -999,8 +1002,7 @@ func (ch *ChatHandler) runToolLoop(
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, err
 		default:
@@ -1012,8 +1014,7 @@ func (ch *ChatHandler) runToolLoop(
 		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1036,8 +1037,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(iterSpan, err)
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
@@ -1068,8 +1068,7 @@ func (ch *ChatHandler) runToolLoop(
 			)
 			setUsageSpanAttributes(iterSpan, usage)
 			if err != nil {
-				iterSpan.RecordError(err)
-				iterSpan.SetStatus(codes.Error, err.Error())
+				tracing.RecordSpanError(iterSpan, err)
 			}
 			iterSpan.End()
 			return content, usage, allToolCalls, err
@@ -1396,21 +1395,21 @@ func (ch *ChatHandler) saveChatSession(
 	// window added to the chat-turn lease.
 	durabilityCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
 	defer cancel()
-	return ch.sessionTurnCommitter.CommitSessionTurn(
-		durabilityCtx,
-		&store.SessionRecord{
+	return ch.sessionTurnCommitter.CommitSessionTurn(durabilityCtx, store.CommitSessionTurnRequest{
+		Session: &store.SessionRecord{
 			Namespace:   namespace,
 			Name:        sessionID,
 			SessionType: "chat",
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		},
-		turnID,
-		persistedCount,
-		storeMessages,
-		usage.InputTokens,
-		usage.OutputTokens,
-	)
+		TurnID:               turnID,
+		ExpectedMessageCount: persistedCount,
+		Messages:             storeMessages,
+		InputTokens:          usage.InputTokens,
+		OutputTokens:         usage.OutputTokens,
+		Now:                  time.Now().UTC(),
+	})
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
