@@ -43,6 +43,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -301,6 +302,62 @@ func TestAHPBackendOffersBuiltInRuntimesAndProjects(t *testing.T) {
 	require.Error(t, err, "a session outside a project is refused")
 }
 
+// A model whose Agent the controller found unusable is not offered: every
+// turn on it would fail. One whose Agent was not checked yet still is.
+func TestAHPBackendOffersNoModelOfAnUnusableAgent(t *testing.T) {
+	agent := func(name, model string, conditions ...metav1.Condition) *corev1alpha1.Agent {
+		agent := ahpTestAgent(name, corev1alpha1.AgentRuntimeOpencode, model)
+		agent.Status.Conditions = conditions
+		return agent
+	}
+	env := newAHPTestEnv(t,
+		agent("opencode-broken", "openai/broken", metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "ValidationFailed",
+			Message: "opencode runtime requires a positive spec.model.contextWindow", LastTransitionTime: metav1.Now()}),
+		agent("opencode-unchecked", "openai/unchecked"))
+	c := env.connect("alice")
+	result, _, err := c.Subscribe(ahpCtx(t), ahptypes.RootResourceURI)
+	require.NoError(t, err)
+	var models []string
+	for _, offered := range result.Snapshot.State.Root.Agents {
+		for _, model := range offered.Models {
+			models = append(models, model.Id)
+		}
+	}
+	require.Contains(t, models, "openai/unchecked")
+	require.NotContains(t, models, "openai/broken")
+}
+
+// A session whose Agent stops being offered moves, as a model switch does,
+// to another Agent that offers the same model, rather than refusing the very
+// model the person is shown.
+func TestAHPBackendMovesASessionOffAnAgentThatIsNoLongerOffered(t *testing.T) {
+	env := newAHPTestEnv(t, ahpTestAgent("copilot-gpt-spare", corev1alpha1.AgentRuntimeCopilot, "gpt-5.4-nano"))
+	ctx := ahpCtx(t)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Username: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	record := ahpSession{Agent: "copilot-gpt", Model: "gpt-5.4-nano", Runtime: string(corev1alpha1.AgentRuntimeCopilot)}
+	choice, switching, err := env.backend.resolveModel(ctx, alice, record, &ahptypes.ModelSelection{Id: "gpt-5.4-nano"})
+	require.NoError(t, err)
+	require.Equal(t, "copilot-gpt", choice.Agent)
+	require.False(t, switching, "a session keeps its Agent while it is offered")
+
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: "copilot-gpt"}, agent))
+	agent.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, Reason: "ValidationFailed", LastTransitionTime: metav1.Now()}}
+	require.NoError(t, env.kube.Update(ctx, agent))
+	for _, selected := range []*ahptypes.ModelSelection{nil, {Id: "gpt-5.4-nano"}} {
+		choice, switching, err = env.backend.resolveModel(ctx, alice, record, selected)
+		require.NoError(t, err)
+		require.Equal(t, "copilot-gpt-spare", choice.Agent, "the Agent that still offers the model runs it")
+		require.True(t, switching, "the session moves to a new Orka Session for its new Agent")
+	}
+
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: "copilot-gpt-spare"}, agent))
+	require.NoError(t, env.kube.Delete(ctx, agent))
+	_, _, err = env.backend.resolveModel(ctx, alice, record, nil)
+	require.ErrorContains(t, err, "no longer available", "with no Agent left for the model, the session's turn is refused")
+}
+
 //nolint:gocyclo // One end-to-end turn checks every mapped action against the reduced state.
 func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
@@ -512,6 +569,40 @@ func TestAHPBackendCancelsATurn(t *testing.T) {
 	turns := snapshot.Snapshot.State.Chat.Turns
 	require.Len(t, turns, 1)
 	require.Equal(t, ahptypes.TurnStateCancelled, turns[0].State)
+}
+
+// A turn its Task's deadline stopped ends with the reason and the limit, not
+// as cancelled: that reads as though the person had cancelled it.
+func TestAHPBackendShowsATurnItsDeadlineStoppedAsAnError(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "run long"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	require.NotNil(t, task.Spec.Timeout, "each turn's Task is bounded")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, task))
+	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+		Reason: controller.ACPTaskTimeoutReason, Message: "task deadline cancellation settled",
+	}
+	require.NoError(t, env.kube.Status().Update(ctx, task))
+
+	raw := waitForActionType(t, chatSub, "chat/error")
+	var failed ahptypes.ChatErrorAction
+	require.NoError(t, json.Unmarshal(raw, &failed))
+	require.Equal(t, controller.ACPTaskTimeoutReason, failed.Part.Error.ErrorType)
+	require.Contains(t, failed.Part.Error.Message, task.Spec.Timeout.Duration.String()+" time limit")
 }
 
 // A client's turn cancel that fails is tried again, so the Task does not run

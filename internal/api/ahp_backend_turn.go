@@ -29,6 +29,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/controller"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
@@ -1143,9 +1144,23 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		}
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatTurnCompleteAction{Type: ahptypes.ActionTypeChatTurnComplete, TurnId: t.id, Duration: duration}})
 	case corev1alpha1.TaskPhaseCancelled:
-		if !t.clientCancelled {
-			t.chat(ahptypes.StateAction{Value: &ahptypes.ChatTurnCancelledAction{Type: ahptypes.ActionTypeChatTurnCancelled, TurnId: t.id, Duration: duration}})
+		if t.clientCancelled {
+			break
 		}
+		// A turn its deadline stopped failed: shown only as cancelled, it
+		// reads as though the person had cancelled it.
+		if task.Status.Execution != nil && task.Status.Execution.Reason == controller.ACPTaskTimeoutReason {
+			message := "the turn ran past its time limit and was stopped"
+			if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
+				message = fmt.Sprintf("the turn ran past its %s time limit and was stopped", task.Spec.Timeout.Duration)
+			}
+			t.chat(ahptypes.StateAction{Value: &ahptypes.ChatErrorAction{
+				Type: ahptypes.ActionTypeChatError, TurnId: t.id, Duration: duration,
+				Part: ahptypes.ErrorResponsePart{Kind: ahptypes.ResponsePartKindError, Error: ahptypes.ErrorInfo{ErrorType: controller.ACPTaskTimeoutReason, Message: message}},
+			}})
+			break
+		}
+		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatTurnCancelledAction{Type: ahptypes.ActionTypeChatTurnCancelled, TurnId: t.id, Duration: duration}})
 	default:
 		reason, message := "TaskFailed", strings.TrimSpace(task.Status.Message)
 		if task.Status.Execution != nil && task.Status.Execution.Reason != "" {
