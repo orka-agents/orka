@@ -197,6 +197,7 @@ func TestWebhookAttemptResultAfterAConcurrentStatusWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		mutate        func(*corev1alpha1.Task)
+		moveToNew     bool
 		wantDelivered bool
 	}{
 		{
@@ -212,9 +213,16 @@ func TestWebhookAttemptResultAfterAConcurrentStatusWrite(t *testing.T) {
 			name:   "terminal state changed",
 			mutate: func(task *corev1alpha1.Task) { task.Status.Message = "updated by the reconciler" },
 		},
+		{
+			// A Task whose spec is still mutable may move its receiver while
+			// an attempt is in flight. The body does not cover the URL.
+			name:      "webhook URL changed",
+			moveToNew: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			receiver := newWebhookReceiver(t, http.StatusOK)
+			moved := newWebhookReceiver(t, http.StatusOK)
 			task := completedWebhookTask("concurrent", receiver.server.URL+"/hook")
 			r := newUnitReconciler(newTestScheme(), task)
 			clock := &webhookTestClock{now: time.Now().Truncate(time.Second)}
@@ -224,6 +232,13 @@ func TestWebhookAttemptResultAfterAConcurrentStatusWrite(t *testing.T) {
 				current := &corev1alpha1.Task{}
 				if err := r.Get(ctx, ctrlclient.ObjectKeyFromObject(task), current); err != nil {
 					t.Fatal(err)
+				}
+				if tc.moveToNew {
+					current.Spec.WebhookURL = moved.server.URL + "/hook"
+					if err := r.Update(ctx, current); err != nil {
+						t.Fatal(err)
+					}
+					return
 				}
 				tc.mutate(current)
 				if err := r.Status().Update(ctx, current); err != nil {
@@ -266,6 +281,15 @@ func TestWebhookAttemptResultAfterAConcurrentStatusWrite(t *testing.T) {
 			}
 			current = read()
 			second := current.Status.WebhookDelivery
+			if tc.moveToNew {
+				// The same notice is retried, now at the new receiver.
+				if !current.Status.WebhookDelivered || second.DeliveryID != first.DeliveryID || second.Attempts != 2 ||
+					len(receiver.all()) != 1 || len(moved.all()) != 1 {
+					t.Fatalf("after the lease: delivered %v, %+v, receipts old %d new %d; want the notice retried at the new receiver",
+						current.Status.WebhookDelivered, second, len(receiver.all()), len(moved.all()))
+				}
+				return
+			}
 			if !current.Status.WebhookDelivered || second.DeliveryID == first.DeliveryID || second.Superseded != 1 ||
 				second.State != corev1alpha1.TaskWebhookDeliveryDelivered || len(receiver.all()) != 2 {
 				t.Fatalf("after the lease: delivered %v, %+v, receipts %d; want a superseding notice with the newer state",
@@ -308,4 +332,62 @@ func reconcileThenDeliver(ctx context.Context, r *TaskReconciler, request ctrl.R
 		r.webhookDeliveries.drain(ctx)
 	}
 	return result, err
+}
+
+// A Task deleted while one of its approval notices is in flight stays behind
+// its finalizer. The pass must not go on to send its terminal notice once
+// recording the approval result has observed the deletion.
+func TestWebhookDeliveryStopsAfterObservingDeletion(t *testing.T) {
+	var r *TaskReconciler
+	var task *corev1alpha1.Task
+	var receipts []string
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		receipts = append(receipts, req.Header.Get("X-Orka-Event"))
+		first := len(receipts) == 1
+		mu.Unlock()
+		if first {
+			if err := r.Delete(context.Background(), task.DeepCopy()); err != nil {
+				t.Errorf("delete Task during the approval attempt: %v", err)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	task = completedWebhookTask("deleted", server.URL+"/hook")
+	task.Spec.WebhookEvents = []corev1alpha1.TaskWebhookEvent{corev1alpha1.TaskWebhookEventApprovalRequested}
+	now := time.Now().Truncate(time.Second)
+	notice := corev1alpha1.TaskApprovalWebhookNotice{
+		Transition: corev1alpha1.TaskApprovalWebhookRequested, StreamSeq: 1, ApprovalID: "approval-1",
+	}
+	if err := sealApprovalNotice(task, &notice, now, now); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{
+		Tracking: true, ProjectedSeq: 1, Notices: []corev1alpha1.TaskApprovalWebhookNotice{notice},
+	}
+	r = newUnitReconciler(newTestScheme(), task)
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	deliveries := attachTestWebhookDispatcher(t, r)
+
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), ctrlclient.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatal(err)
+	}
+	deliveries.enqueue(stored, true)
+	deliveries.drain(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(receipts) != 1 || receipts[0] != string(corev1alpha1.TaskWebhookEventApprovalRequested) {
+		t.Fatalf("receipts = %v, want only the approval notice in flight at deletion", receipts)
+	}
+	if err := r.Get(context.Background(), ctrlclient.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.DeletionTimestamp.IsZero() || stored.Status.WebhookDelivery != nil {
+		t.Fatalf("deleted Task: deletionTimestamp %v, terminal delivery %+v; want no terminal attempt", stored.DeletionTimestamp, stored.Status.WebhookDelivery)
+	}
 }

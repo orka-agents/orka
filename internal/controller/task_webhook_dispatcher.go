@@ -185,7 +185,9 @@ func (d *taskWebhookDispatcher) deliver(ctx context.Context, key types.Namespace
 		}
 		requeue = next
 	}
-	if request.terminal && task.Status.Phase.IsTerminal() {
+	// Recording the approval attempt may have re-read the Task, so deletion
+	// is checked again before the terminal notice is sent.
+	if request.terminal && task.Status.Phase.IsTerminal() && task.DeletionTimestamp.IsZero() {
 		next, err := d.notifier.reconcileDelivery(ctx, d.status, task)
 		if err != nil {
 			return 0, err

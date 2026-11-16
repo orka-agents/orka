@@ -161,8 +161,8 @@ func (w *WebhookNotifier) terminalRetry() webhookRetryPolicy {
 // lease, sends the signed notice, and records the result. fresh means the
 // record was just created and holds no attempt yet. stillCurrent reports
 // whether a re-read Task still renders exactly notice; a result is recorded
-// on a re-read Task only when it does. delivered runs on the Task before the
-// success is persisted.
+// on a re-read Task only when it does and still names the same webhook URL.
+// delivered runs on the Task before the success is persisted.
 //
 //nolint:gocyclo // Every refusal before the send stays inline so none can be skipped.
 func (w *WebhookNotifier) attemptNotice(
@@ -283,8 +283,11 @@ func (w *WebhookNotifier) attemptNotice(
 	default:
 		log.Info("webhook delivery attempt failed", "deliveryID", notice.DeliveryID, "attempt", attempt, "retryIn", requeue, "reason", boundedWebhookError(result.Err))
 	}
+	// Neither body covers the destination, so a re-read Task must also still
+	// name the receiver this attempt was sent to.
+	sentTo := task.Spec.WebhookURL
 	if err := recordWebhookAttemptResult(ctx, status, task, func(current *corev1alpha1.Task) bool {
-		return stillCurrent(current) && recordResult(current)
+		return current.Spec.WebhookURL == sentTo && stillCurrent(current) && recordResult(current)
 	}); err != nil {
 		// The claimed lease still bounds the next attempt.
 		return 0, err
@@ -307,7 +310,8 @@ func holdsWebhookAttemptClaim(delivery *corev1alpha1.TaskWebhookDelivery, attemp
 // that write Task status, so a conflicting write is expected. When the
 // writer can re-read the Task, rerecord applies the result again to the
 // current Task, and reports false, recording nothing, unless that Task still
-// renders the sent notice and its record still holds this attempt's claim. A
+// names the same receiver, renders the sent notice, and its record still
+// holds this attempt's claim. A
 // claim that was replaced or settled is not this attempt's to record, and a
 // notice whose Task state changed must be superseded, as ADR 0042 requires,
 // rather than settled by a send of the older body. A result that is not
