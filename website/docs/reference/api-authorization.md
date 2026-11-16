@@ -208,6 +208,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/attention` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history; monitor items need `list` on `repositorymonitors` and `monitorworkactions` |
+| `GET` | `/api/v1/approvals` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
