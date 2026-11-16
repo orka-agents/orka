@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/storageclient"
@@ -23,6 +24,7 @@ import (
 // literal token.
 var (
 	repositoryMonitorEvidenceTestGitHubToken = "gh" + "p_" + strings.Repeat("A1b2C3d4", 5)
+	repositoryMonitorEvidenceTestBearer      = strings.Repeat("Zq7vK2", 8)
 	repositoryMonitorEvidenceTestJWT         = "ey" + "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ey" + "JzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 
@@ -48,6 +50,11 @@ func TestRepositoryMonitorEvidenceTextRedactsCredentials(t *testing.T) {
 		{name: "format characters inside a token", input: "gh\u200bp_" + repositoryMonitorEvidenceTestGitHubToken[4:12] + "\u2060" + repositoryMonitorEvidenceTestGitHubToken[12:], leak: []string{repositoryMonitorEvidenceTestGitHubToken[12:]}, notWant: []string{"\u200b", "\u2060"}},
 		{name: "assignment continued on the next line", input: "password:\n  hunter2-correct-horse-battery\n(ok)", leak: []string{"hunter2-correct-horse-battery"}, want: []string{"(ok)"}},
 		{name: "a word after a credential is withheld with it", input: "auth " + repositoryMonitorEvidenceTestGitHubToken + "\nnext step\n(kept)", leak: []string{repositoryMonitorEvidenceTestGitHubToken[4:], "next step"}, want: []string{"(kept)"}},
+		{name: "authorization value wrapped inside the token", input: "> Authorization: Bearer " + repositoryMonitorEvidenceTestBearer[:8] + "\n" + repositoryMonitorEvidenceTestBearer[8:] + "\n< HTTP/1.1 401",
+			leak: []string{repositoryMonitorEvidenceTestBearer[:8], repositoryMonitorEvidenceTestBearer[8:]}, want: []string{"< HTTP/1.1 401"}},
+		{name: "authorization value wrapped at the space", input: "> Authorization: Bearer\n" + repositoryMonitorEvidenceTestBearer + "\n< HTTP/1.1 401",
+			leak: []string{repositoryMonitorEvidenceTestBearer}},
+		{name: "a redacted value does not withhold the next line", input: "deploy token=abc123 to stage\nnext step", want: []string{"next step"}},
 		{name: "ansi and controls", input: "\x1b[31;1merror\x1b[0m: \x1b]8;;https://x\x07link\x1b]8;;\x07 bad\x07 \u202eevil", want: []string{"error: link bad evil"}, notWant: []string{"\x1b", "\x07", "\u202e"}},
 		{name: "crlf", input: "first\r\nsecond\rthird", want: []string{"first\nsecond\nthird"}},
 	} {
@@ -449,5 +456,179 @@ func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *Rep
 	action, err = monitorStore.GetWorkAction(ctx, monitor.Namespace, action.ID)
 	if err != nil || !strings.Contains(action.MetadataJSON, "sha256:other") || !strings.Contains(action.MetadataJSON, `"ciEvidenceIDs"`) || !strings.Contains(action.MetadataJSON, `"actionKind"`) {
 		t.Fatalf("merged work action metadata = %s err=%v", action.MetadataJSON, err)
+	}
+}
+
+// repositoryMonitorEvidenceTestPEMBody is a synthetic, base64-shaped PEM
+// body of lines 64 characters wide.
+func repositoryMonitorEvidenceTestPEMBody(lines int) []string {
+	body := make([]string, 0, lines)
+	for i := range lines {
+		body = append(body, fmt.Sprintf("%02d", i%100)+strings.Repeat("Q3xR9+/w", 7)+"Ab12Cd")
+	}
+	return body
+}
+
+func TestRepositoryMonitorEvidenceWithholdsPEMBlocks(t *testing.T) {
+	body := repositoryMonitorEvidenceTestPEMBody(26)
+	begin, end := "-----"+"BEGIN RSA PRIVATE KEY-----", "-----"+"END RSA PRIVATE KEY-----"
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "plain block", input: "loading key\n" + begin + "\n" + strings.Join(body, "\n") + "\n" + end + "\n(after key)", want: []string{"loading key", "(after key)"}},
+		{name: "encrypted block with headers", input: "key:\n  " + begin + "\n  Proc-Type: 4,ENCRYPTED\n  DEK-Info: AES-128-CBC,0A1B2C3D\n\n  " + strings.Join(body, "\n  ") + "\n  " + end + "\n(after key)", want: []string{"(after key)"}},
+		{name: "block begun mid-line", input: "value=\"" + begin + "\n" + strings.Join(body, "\n") + "\n" + end + "\"\n(after key)", want: []string{"(after key)"}},
+		{name: "block without an end", input: "loading key\n" + begin + "\n" + strings.Join(body[:10], "\n") + "\n\n" + strings.Join(body[10:], "\n"), want: []string{"loading key"}},
+		// Tiny wrapped lines exhaust the per-field check budget before the
+		// block starts; the block is still withheld through its end.
+		{name: "block past the check budget", input: strings.Repeat("a\n", repositoryMonitorEvidenceSecretCheckBudget) + "(before key)\n" + begin + "\n" + strings.Join(body[:10], "\n") + "\n\n" + strings.Join(body[10:], "\n") + "\n" + end + "\n(after key)", want: []string{"(before key)", "(after key)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines, _ := repositoryMonitorEvidenceSanitizedLines(tc.input, len(tc.input))
+			got := strings.Join(lines, "\n")
+			for _, line := range body {
+				if strings.Contains(got, line[:20]) {
+					t.Fatalf("evidence kept PEM body line %q: %q", line, got)
+				}
+			}
+			if strings.Contains(got, "ENCRYPTED") || strings.Contains(got, "DEK-Info") || strings.Contains(got, "PRIVATE KEY") {
+				t.Fatalf("evidence kept PEM block lines: %q", got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("evidence = %q, want %q kept", got, want)
+				}
+			}
+		})
+	}
+	// The summary path withholds the block too.
+	got, _ := repositoryMonitorEvidenceText("FAIL\n"+begin+"\n"+strings.Join(body, "\n")+"\n"+end+"\n(after key)", repositoryMonitorCIEvidenceSummaryBytes, repositoryMonitorCIEvidenceSummaryLines)
+	if strings.Contains(got, body[0][:20]) || !strings.Contains(got, "FAIL") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
+// TestRepositoryMonitorEvidenceSanitizerStaysFast bounds the sanitizer's
+// work on input shaped to defeat it: every line continues into the next, so
+// each is checked with its whole text as context, or every line is a PEM
+// marker. A summary-sized field stays fast, and the work stays linear on
+// input far larger than any field.
+func TestRepositoryMonitorEvidenceSanitizerStaysFast(t *testing.T) {
+	shapes := func(size int) map[string]string {
+		return map[string]string{
+			"tiny lines":       strings.Repeat("a\n", size/2),
+			"long lines":       strings.Repeat(strings.Repeat("abc ", min(size/8, 1000))+"x\n", max(size/min(size/2, 4002), 1)),
+			"header lines":     strings.Repeat("Authorization: Bearer token is password: api_key = x\n", size/53),
+			"pem marker lines": strings.Repeat("-----"+"BEGIN KEY x\n-----"+"END KEY x\n", size/22),
+		}
+	}
+	for _, tc := range []struct {
+		size  int
+		limit time.Duration
+	}{
+		{size: repositoryMonitorEvidenceRawLimit(repositoryMonitorCIEvidenceSummaryBytes), limit: time.Second},
+		// The withholding loop once rewrote every line of a long chain from
+		// each of its lines: quadratic, about 40s for the tiny lines here.
+		{size: 256 << 10, limit: 10 * time.Second},
+	} {
+		for name, input := range shapes(tc.size) {
+			t.Run(fmt.Sprintf("%s %d bytes", name, tc.size), func(t *testing.T) {
+				start := time.Now()
+				_, _ = repositoryMonitorEvidenceSanitizedLines(input, len(input))
+				if elapsed := time.Since(start); elapsed > tc.limit {
+					t.Fatalf("sanitizing %d bytes took %s, over %s", len(input), elapsed, tc.limit)
+				}
+			})
+		}
+	}
+}
+
+func TestRepositoryMonitorCIEvidenceBoundsEscapedEntries(t *testing.T) {
+	// JSON escapes <, >, and & as six bytes each, so these fields encode to
+	// several times their sanitized size.
+	status := map[string]any{
+		"id": 9100, "context": strings.Repeat("<", 300), "state": "failure",
+		"description": strings.Repeat("&", 600), "target_url": "https://ci.example/" + strings.Repeat("&", 480),
+	}
+	run := repositoryMonitorEvidenceTestRun(201, strings.Repeat(">", 300), "completed", "failure", 0)
+	run["html_url"] = "https://ci.example/" + strings.Repeat("&", 480)
+	github := &repositoryMonitorRepairLabelsGitHub{
+		runs:          map[string][]map[string]any{"head51": {run}},
+		statusObjects: map[string][]map[string]any{"head51": {status}},
+	}
+	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-escaped")
+	evidence := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}).Evidence
+	if len(evidence.Checks)+evidence.OmittedChecks != 2 {
+		t.Fatalf("evidence = %d checks + %d omitted", len(evidence.Checks), evidence.OmittedChecks)
+	}
+	for _, check := range evidence.Checks {
+		if size := repositoryMonitorEvidenceEncodedSize(check); size > repositoryMonitorCIEvidenceEntryEncodedBytes {
+			t.Fatalf("entry %s is %d bytes, over %d", check.ID, size, repositoryMonitorCIEvidenceEntryEncodedBytes)
+		}
+		if check.Availability != repositoryMonitorEvidenceTruncated && check.Availability != repositoryMonitorEvidenceUnsupported || len(check.Truncated) == 0 {
+			t.Fatalf("entry %s = %s %v, want its bounded fields named", check.ID, check.Availability, check.Truncated)
+		}
+	}
+	// Bounding keeps name ahead of description and URL.
+	entry := repositoryMonitorCheckEvidence{ID: "commit_status:1", Kind: repositoryMonitorEvidenceKindCommitStatus, Name: strings.Repeat("<", 200), Description: strings.Repeat("&", 512), URL: "https://ci.example/" + strings.Repeat("&", 480), Availability: repositoryMonitorEvidenceUnsupported}
+	fitted := fitRepositoryMonitorCheckEvidence(entry, 1500)
+	if size := repositoryMonitorEvidenceEncodedSize(fitted); size > 1500 || fitted.Name != entry.Name || fitted.URL != "" ||
+		!slices.Contains(fitted.Truncated, repositoryMonitorEvidenceTruncatedFieldDesc) || !slices.Contains(fitted.Truncated, repositoryMonitorEvidenceTruncatedFieldURL) {
+		t.Fatalf("fitted entry is %d bytes: %+v", size, fitted)
+	}
+	fitted = fitRepositoryMonitorCheckEvidence(entry, 400)
+	if size := repositoryMonitorEvidenceEncodedSize(fitted); size > 400 || fitted.Description != "" || !strings.HasSuffix(fitted.Name, "…") ||
+		!slices.Contains(fitted.Truncated, repositoryMonitorEvidenceTruncatedFieldName) {
+		t.Fatalf("fitted entry is %d bytes: %+v", size, fitted)
+	}
+}
+
+func TestRepositoryMonitorCIEvidenceBoundsPendingChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failing     int
+		summary     string
+		pending     int
+		pendingName string
+	}{
+		{name: "count limit", failing: 1, pending: repositoryMonitorCIEvidenceMaxPendingChecks + 2, pendingName: "pending"},
+		// Four failing checks of about 3.6 KiB each leave room for only
+		// some of the escaped pending names.
+		{name: "total budget", failing: 4, summary: strings.Repeat("&", 560), pending: repositoryMonitorCIEvidenceMaxPendingChecks, pendingName: strings.Repeat("<", 150)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runs := make([]map[string]any, 0, tc.failing+tc.pending)
+			for i := range tc.failing {
+				run := repositoryMonitorEvidenceTestRun(int64(300+i), fmt.Sprintf("failing-%d", i), "completed", "failure", 0)
+				if tc.summary != "" {
+					run["output"].(map[string]any)["summary"] = tc.summary
+				}
+				runs = append(runs, run)
+			}
+			for i := range tc.pending {
+				runs = append(runs, repositoryMonitorEvidenceTestRun(int64(400+i), fmt.Sprintf("%s-%02d", tc.pendingName, i), "in_progress", "", 0))
+			}
+			github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head51": runs}}
+			reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-pending")
+			evidence := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}).Evidence
+			if len(evidence.Checks)+evidence.OmittedChecks != tc.failing || len(evidence.PendingChecks)+evidence.OmittedPendingChecks != tc.pending || evidence.OmittedPendingChecks == 0 {
+				t.Fatalf("evidence = %d+%d checks, %d+%d pending", len(evidence.Checks), evidence.OmittedChecks, len(evidence.PendingChecks), evidence.OmittedPendingChecks)
+			}
+			if evidence.Availability != repositoryMonitorEvidenceTruncated || evidence.Reason != repositoryMonitorEvidenceReasonEvidenceBudget {
+				t.Fatalf("evidence = %s %s, want truncated by the evidence budget", evidence.Availability, evidence.Reason)
+			}
+			total := 0
+			for _, check := range evidence.Checks {
+				total += repositoryMonitorEvidenceEncodedSize(check)
+			}
+			for _, pending := range evidence.PendingChecks {
+				total += repositoryMonitorEvidenceEncodedSize(pending)
+			}
+			if total > repositoryMonitorCIEvidenceTotalEncodedBytes {
+				t.Fatalf("evidence entries are %d bytes, over %d", total, repositoryMonitorCIEvidenceTotalEncodedBytes)
+			}
+		})
 	}
 }
