@@ -516,7 +516,7 @@ func (t *ahpTurn) knowTaskUID(ticks <-chan time.Time) bool {
 			return true
 		}
 		task := &corev1alpha1.Task{}
-		err := t.b.h.client.Get(t.ctx, types.NamespacedName{Namespace: t.session.Namespace, Name: t.task}, task)
+		err := t.b.h.uncachedReader().Get(t.ctx, types.NamespacedName{Namespace: t.session.Namespace, Name: t.task}, task)
 		uid := ""
 		switch {
 		case err == nil && task.UID != "":
@@ -1277,7 +1277,8 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 var ahpResultReadDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
 
 // readResult reads the turn's stored result, retrying a failed read a few
-// times: the answer is lost from the chat if it cannot be read now.
+// times: the answer is lost from the chat if it cannot be read now. The
+// caller holds t.mu.
 func (t *ahpTurn) readResult(task *corev1alpha1.Task) ([]byte, error) {
 	data, err := t.b.h.resultStore.GetResult(t.ctx, task.Namespace, task.Name)
 	for _, delay := range ahpResultReadDelays {
@@ -1293,8 +1294,29 @@ func (t *ahpTurn) readResult(task *corev1alpha1.Task) ([]byte, error) {
 	}
 	if err != nil {
 		log.Info("read an AHP turn's result", "namespace", task.Namespace, "task", task.Name, "reason", err.Error())
+		return data, err
 	}
-	return data, err
+	// Results are kept by the Task's name: one a Task created since under the
+	// name wrote is not the turn's answer.
+	if !t.nameStillOwned(task.Namespace, task.Name) {
+		return nil, store.ErrNotFound
+	}
+	return data, nil
+}
+
+// nameStillOwned reports whether no Task other than the turn's holds its
+// Task's name now, read past the cache. The caller holds t.mu.
+func (t *ahpTurn) nameStillOwned(namespace, name string) bool {
+	uid := t.taskUID
+	if uid == "" {
+		return true
+	}
+	current := &corev1alpha1.Task{}
+	err := t.b.h.uncachedReader().Get(t.ctx, types.NamespacedName{Namespace: namespace, Name: name}, current)
+	if err != nil {
+		return true
+	}
+	return string(current.UID) == uid
 }
 
 // failureMessage adds the runtime's own reason to a failed turn's message.
@@ -1432,8 +1454,10 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 		// under its name now, before it follows any event, and keeps it in the
 		// record, so a Task created later under the name is never the turn's.
 		if turn.taskUID == "" {
+			// Uncached: a cache that has not seen the Task yet must not mark
+			// it gone for good.
 			task := &corev1alpha1.Task{}
-			err := b.h.client.Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task)
+			err := b.h.uncachedReader().Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task)
 			switch {
 			case err == nil && task.UID != "":
 				turn.taskUID = string(task.UID)

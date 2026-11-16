@@ -744,6 +744,42 @@ func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.
 	require.NotEqual(t, "uid-of-another-task", record.ActiveTaskUID)
 }
 
+// Results are kept by the Task's name: a result a Task created since under
+// the name wrote is not the turn's answer.
+func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "hello"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	task := env.waitForTask(taskName)
+	var turn *ahpTurn
+	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice, ahpTestSession); return turn != nil },
+		5*time.Second, 20*time.Millisecond)
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("the turn's answer")))
+	read := func() ([]byte, error) {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		return turn.readResult(task)
+	}
+	data, err := read()
+	require.NoError(t, err)
+	require.Equal(t, "the turn's answer", string(data))
+
+	require.NoError(t, env.kube.Delete(ctx, task))
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
+		Spec: task.Spec}
+	require.NoError(t, env.kube.Create(ctx, replacement))
+	require.NoError(t, env.backend.h.resultStore.SaveResult(ctx, ahpTestNamespace, taskName, []byte("intruder")))
+	_, err = read()
+	require.ErrorIs(t, err, store.ErrNotFound, "another Task's result is not the turn's answer")
+}
+
 // A client's turn cancel that fails is tried again, so the Task does not run
 // on while the client shows the turn cancelled.
 func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
