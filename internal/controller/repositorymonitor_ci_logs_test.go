@@ -43,6 +43,13 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 			long.WriteString(ts + "##[error]early failure\n")
 		}
 	}
+	pemLog := func(bodyLines int) string {
+		lines := []string{ts + "-----" + "BEGIN RSA PRIVATE KEY-----"}
+		for _, line := range repositoryMonitorEvidenceTestPEMBody(bodyLines) {
+			lines = append(lines, ts+line)
+		}
+		return strings.Join(append(lines, ts+"-----"+"END RSA PRIVATE KEY-----", ts+"##[error]key rejected"), "\n") + "\n"
+	}
 	for _, tc := range []struct {
 		name          string
 		log           string
@@ -66,6 +73,11 @@ func TestRepositoryMonitorCILogExtraction(t *testing.T) {
 		{name: "single-word lines at an open edge are withheld", log: strings.Repeat(ts+"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n", 1000), limit: 1 << 10, wantKind: repositoryMonitorCILogExcerptTailOfReadPart, wantTruncated: true, notWant: []string{"QUJD"}},
 		{name: "secret across the excerpt edge", log: strings.Repeat(ts+"filler\n", 60) + ts + repositoryMonitorEvidenceTestGitHubToken[:20] + "\n" + ts + repositoryMonitorEvidenceTestGitHubToken[20:] + "\n" + ts + "##[error]failed\n",
 			limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError, want: []string{"##[error]failed"}, notWant: []string{repositoryMonitorEvidenceTestGitHubToken[20:], repositoryMonitorEvidenceTestGitHubToken[4:20]}},
+		{name: "pem block before the error", log: ts + "loading key\n" + pemLog(20), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError,
+			want: []string{"loading key", "##[error]key rejected"}, notWant: []string{"Q3xR9+/w", "PRIVATE KEY"}},
+		// The block's BEGIN line is outside the retained window.
+		{name: "excerpt starting inside a pem block", log: pemLog(80), limit: repositoryMonitorCILogReadLimit, wantKind: repositoryMonitorCILogExcerptLastError,
+			want: []string{"##[error]key rejected"}, notWant: []string{"Q3xR9+/w", "PRIVATE KEY"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scanner, truncated, err := readRepositoryMonitorCILog(strings.NewReader(tc.log), tc.limit)
