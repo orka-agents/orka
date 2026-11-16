@@ -469,6 +469,13 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 	return choices, nil
 }
 
+// hasSession reports whether the person has a session, as far as the store
+// can tell.
+func (b *ahpBackend) hasSession(ctx context.Context, principal ahphost.Principal) bool {
+	sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+	return err == nil && len(sessions) > 0
+}
+
 // The host recovers a user's turns when they connect, not only once a client
 // lists agents.
 var _ ahphost.ConnectionPreparer = (*ahpBackend)(nil)
@@ -491,7 +498,13 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 	if !recovered {
 		go b.recoverTurns(context.WithoutCancel(ctx), principal)
 	}
-	b.workspaces.warm(principal)
+	// Warming starts the workspace a first session or terminal needs. Without
+	// an idle timeout only a session's or shell's end removes it, so it is
+	// warmed then only for a person who has a session: one who only lists
+	// agents would otherwise keep a workspace, and its credentials, for good.
+	if b.cfg.WorkspaceIdleTimeout > 0 || b.hasSession(ctx, principal) {
+		b.workspaces.warm(principal)
+	}
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
 		return nil, err
@@ -1040,6 +1053,11 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	if err := b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordChat, record.Chat); err != nil {
 		return err
 	}
+	// Under b.mu, which every session update holds from its read to its
+	// write: one that read the record before this delete cannot write it back
+	// after.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordSession, session)
 }
 

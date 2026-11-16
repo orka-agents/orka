@@ -798,33 +798,71 @@ func (c *conn) listSessions(ctx context.Context, raw json.RawMessage) (any, erro
 		}
 		limit = int(min(*params.Limit, maxListLimit))
 	}
-	offset := 0
-	if params.Cursor != nil {
-		decoded, err := base64.RawURLEncoding.DecodeString(*params.Cursor)
-		if err != nil {
-			return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "invalid cursor")
-		}
-		if offset, err = strconv.Atoi(string(decoded)); err != nil || offset < 0 {
-			return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "invalid cursor")
-		}
-	}
 	sessions, err := c.host.cfg.Store.ListAHPSessions(ctx, c.principal.UserKey)
 	if err != nil {
 		return nil, err
 	}
+	// Sessions come most recently modified first, then by URI. A cursor names
+	// the last session a page held by that order, not its position: sessions
+	// created, disposed or modified between pages move the others, and a page
+	// resumes after the named one without repeating or skipping any.
+	start := 0
+	if params.Cursor != nil {
+		var ok bool
+		if start, ok = sessionCursorStart(*params.Cursor, sessions); !ok {
+			return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "invalid cursor")
+		}
+	}
 	result := ahptypes.ListSessionsResult{Items: []ahptypes.SessionSummary{}}
-	for i := offset; i < len(sessions) && len(result.Items) < limit; i++ {
+	last := -1
+	for i := start; i < len(sessions) && len(result.Items) < limit; i++ {
 		var summary ahptypes.SessionSummary
 		if err := json.Unmarshal(sessions[i].Summary, &summary); err != nil {
 			return nil, err
 		}
 		result.Items = append(result.Items, summary)
+		last = i
 	}
-	if next := offset + len(result.Items); next < len(sessions) {
-		cursor := base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(next)))
+	if last >= 0 && last+1 < len(sessions) {
+		cursor := sessionCursor(sessions[last])
 		result.NextCursor = &cursor
 	}
 	return result, nil
+}
+
+const sessionCursorPrefix = "s1:"
+
+// sessionCursor names session as the last a page held.
+func sessionCursor(session store.AHPSession) string {
+	key := sessionCursorPrefix + session.ModifiedAt.UTC().Format(time.RFC3339Nano) + "\x00" + session.Session
+	return base64.RawURLEncoding.EncodeToString([]byte(key))
+}
+
+// sessionCursorStart returns where the page after the cursor's session starts
+// in sessions, ordered as the store lists them. A cursor of the earlier
+// numeric form is an offset.
+func sessionCursorStart(cursor string, sessions []store.AHPSession) (int, bool) {
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, false
+	}
+	key, keyed := strings.CutPrefix(string(decoded), sessionCursorPrefix)
+	if !keyed {
+		offset, err := strconv.Atoi(string(decoded))
+		return offset, err == nil && offset >= 0
+	}
+	stamp, uri, found := strings.Cut(key, "\x00")
+	modified, err := time.Parse(time.RFC3339Nano, stamp)
+	if !found || err != nil {
+		return 0, false
+	}
+	for i, session := range sessions {
+		at := session.ModifiedAt.UTC()
+		if at.Before(modified) || (at.Equal(modified) && session.Session > uri) {
+			return i, true
+		}
+	}
+	return len(sessions), true
 }
 
 func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err error) {

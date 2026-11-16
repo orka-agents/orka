@@ -1041,3 +1041,40 @@ func TestInitialSubscriptionsAreDistinctAndBounded(t *testing.T) {
 	_, err = env.connect(alice.Token).Initialize(ctx, "desktop", ahptypes.SupportedProtocolVersions(), tooMany[:maxInitialSubscriptions])
 	require.NoError(t, err, "unknown channels within the bound are skipped as before")
 }
+
+// A page of sessions resumes after the last one the previous page held, not at
+// a position: a session created between pages neither repeats one already
+// listed nor pushes one off the list.
+func TestListSessionsPagesResumeAfterTheirLastSession(t *testing.T) {
+	env := newTestEnv(t, store.AHPJournalLimits{})
+	alice := env.connect(env.mint("alice").Token)
+	ctx := ctx5(t)
+	_, err := alice.Initialize(ctx, "alice-laptop", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+	for _, uri := range []string{"ahp-session:/a", "ahp-session:/b", "ahp-session:/c"} {
+		createSession(t, alice, uri)
+		time.Sleep(2 * time.Millisecond)
+	}
+	one := int64(1)
+	page := func(cursor *string) ahptypes.ListSessionsResult {
+		var list ahptypes.ListSessionsResult
+		require.NoError(t, alice.Request(ctx, "listSessions", ahptypes.ListSessionsParams{Channel: rootChannel, Limit: &one, Cursor: cursor}, &list))
+		return list
+	}
+	var seen []string
+	list := page(nil)
+	require.Len(t, list.Items, 1)
+	seen = append(seen, list.Items[0].Resource)
+	// A session created now sorts first, before the page already read.
+	createSession(t, alice, "ahp-session:/d")
+	for list.NextCursor != nil {
+		list = page(list.NextCursor)
+		for _, item := range list.Items {
+			seen = append(seen, item.Resource)
+		}
+	}
+	require.Equal(t, []string{"ahp-session:/c", "ahp-session:/b", "ahp-session:/a"}, seen,
+		"each session listed once, in order, though one was created between pages")
+	_, ok := sessionCursorStart("not base64!", nil)
+	require.False(t, ok, "a cursor that does not decode is refused")
+}
