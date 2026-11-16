@@ -13,12 +13,36 @@ import (
 const selectMemoryConsolidationRunSQL = `SELECT namespace, task_uid, task_name, mode, status, window_start, window_end,
 	input, report, created_at, completed_at FROM memory_consolidation_runs`
 
+// memoryConsolidationRunKey is all a BeginMemoryConsolidationRun receipt
+// keeps. The run itself holds the transcripts it read until it finishes, and
+// a receipt outlives that, so a replay rereads the run as it is now.
+type memoryConsolidationRunKey struct {
+	Namespace string `json:"namespace"`
+	TaskUID   string `json:"taskUID"`
+}
+
 // BeginMemoryConsolidationRun records a run unless its Task already began one,
-// and writes the stored run back either way.
+// and writes the stored run back either way. It checks a Task data fence in
+// its context.
 func (s *Store) BeginMemoryConsolidationRun(ctx context.Context, run *store.MemoryConsolidationRun) error {
-	_, err := writeOperationInto(ctx, s, "BeginMemoryConsolidationRun", nil, run, func(ctx context.Context) (noResult, error) {
-		return noResult{}, s.beginMemoryConsolidationRunWrite(ctx, run)
-	})
+	if run == nil {
+		return store.ValidationErrorf("memory consolidation run is required")
+	}
+	key := memoryConsolidationRunKey{Namespace: run.Namespace, TaskUID: run.TaskUID}
+	_, err := writeOperationRereading(ctx, s, "BeginMemoryConsolidationRun",
+		func(ctx context.Context) (memoryConsolidationRunKey, error) {
+			return key, s.withTaskDataFence(ctx, func(ctx context.Context) error {
+				return s.beginMemoryConsolidationRunWrite(ctx, run)
+			})
+		},
+		func(ctx context.Context, key memoryConsolidationRunKey) (memoryConsolidationRunKey, error) {
+			stored, err := s.readMemoryConsolidationRun(ctx, s.taskDataExecutor(ctx), key.Namespace, key.TaskUID)
+			if err != nil {
+				return key, err
+			}
+			*run = *stored
+			return key, nil
+		})
 	return err
 }
 
@@ -39,12 +63,16 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	case len(run.Input) > store.MaxMemoryConsolidationInputBytes:
 		return store.ValidationErrorf("a memory consolidation run's input is at most %d bytes", store.MaxMemoryConsolidationInputBytes)
 	}
-	executor := s.taskDataExecutor(ctx)
+	executor, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = executor.Rollback() }()
 	existing, err := s.readMemoryConsolidationRun(ctx, executor, run.Namespace, run.TaskUID)
 	switch {
 	case err == nil:
 		*run = *existing
-		return nil
+		return executor.Commit()
 	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
@@ -82,15 +110,25 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	if err != nil {
 		return err
 	}
+	if err := executor.Commit(); err != nil {
+		return err
+	}
 	*run = *stored
 	return nil
 }
 
 // CompleteMemoryConsolidationRun finishes a running run and creates its
-// proposals in one transaction. A finished run is returned unchanged.
+// proposals in one transaction. A finished run is returned unchanged. It
+// checks a Task data fence in its context.
 func (s *Store) CompleteMemoryConsolidationRun(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
 	return writeOperation(ctx, s, "CompleteMemoryConsolidationRun", nil, func(ctx context.Context) (*store.MemoryConsolidationRun, error) {
-		return s.completeMemoryConsolidationRunWrite(ctx, completion)
+		var completed *store.MemoryConsolidationRun
+		err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+			var err error
+			completed, err = s.completeMemoryConsolidationRunWrite(ctx, completion)
+			return err
+		})
+		return completed, err
 	})
 }
 
@@ -158,9 +196,16 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	return completed, nil
 }
 
-// GetMemoryConsolidationRun returns the run of a namespace's Task.
+// GetMemoryConsolidationRun returns the run of a namespace's Task. It checks
+// a Task data fence in its context.
 func (s *Store) GetMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) (*store.MemoryConsolidationRun, error) {
-	return s.readMemoryConsolidationRun(ctx, s.taskDataExecutor(ctx), namespace, taskUID)
+	var run *store.MemoryConsolidationRun
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		run, err = s.readMemoryConsolidationRun(ctx, s.taskDataExecutor(ctx), namespace, taskUID)
+		return err
+	})
+	return run, err
 }
 
 // GetMemoryConsolidationCursor returns the namespace's cursor: the window
@@ -218,8 +263,19 @@ func (s *Store) readMemoryConsolidationRun(ctx context.Context, q memoryConsolid
 
 // ListMemoryConsolidationSessions lists the namespace's chat and task
 // Sessions changed in (after, through], most recently changed first, and
-// counts them all.
+// counts them all. It checks a Task data fence in its context.
 func (s *Store) ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]store.SessionMetadata, int, error) {
+	var sessions []store.SessionMetadata
+	var total int
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		sessions, total, err = s.listMemoryConsolidationSessionsUnfenced(ctx, namespace, after, through, limit)
+		return err
+	})
+	return sessions, total, err
+}
+
+func (s *Store) listMemoryConsolidationSessionsUnfenced(ctx context.Context, namespace string, after, through time.Time, limit int) ([]store.SessionMetadata, int, error) {
 	if strings.TrimSpace(namespace) == "" {
 		return nil, 0, store.ValidationErrorf("namespace is required")
 	}
@@ -229,10 +285,11 @@ func (s *Store) ListMemoryConsolidationSessions(ctx context.Context, namespace s
 	const changed = ` FROM sessions WHERE namespace = ? AND session_type IN ('task', 'chat') AND updated_at > ? AND updated_at <= ?`
 	args := []any{namespace, after.UTC(), through.UTC()}
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+changed, args...).Scan(&total); err != nil {
+	executor := s.taskDataExecutor(ctx)
+	if err := executor.QueryRowContext(ctx, `SELECT COUNT(*)`+changed, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := executor.QueryContext(ctx,
 		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task, active_task_uid`+
 			changed+` ORDER BY updated_at DESC, name ASC LIMIT ?`, append(args, limit)...)
 	if err != nil {

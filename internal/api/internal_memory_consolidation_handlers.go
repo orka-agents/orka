@@ -65,29 +65,57 @@ var errAbandonedMemoryConsolidation = fiber.NewError(fiber.StatusConflict,
 // checked against exactly what the model saw. A run with too few changed
 // Sessions is recorded as skipped without calling the model.
 func (h *InternalHandlers) BeginMemoryConsolidation(c fiber.Ctx) error {
-	namespace, task, err := h.memoryConsolidationCaller(c)
-	if err != nil {
+	var response memoryconsolidation.BeginResponse
+	if err := h.withMemoryConsolidationRun(c, func(ctx context.Context, namespace string, task *corev1alpha1.Task) error {
+		var err error
+		response, err = h.beginOrResumeMemoryConsolidation(ctx, namespace, task)
+		return err
+	}); err != nil {
 		return err
 	}
-	ctx := c.Context()
+	return c.JSON(response)
+}
+
+// withMemoryConsolidationRun authorizes the caller as an active run's worker
+// and runs access under the namespace's Task data fence, so a revoked worker
+// can neither read the run's transcripts nor complete it, even with a request
+// authorized just before the revocation.
+func (h *InternalHandlers) withMemoryConsolidationRun(c fiber.Ctx,
+	access func(ctx context.Context, namespace string, task *corev1alpha1.Task) error) error {
+	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "memory consolidation is not configured")
+	}
+	var namespace string
+	var task *corev1alpha1.Task
+	return withInternalTaskData(c, h.sessionStore, "", func(context.Context) error {
+		var err error
+		namespace, task, err = h.memoryConsolidationCaller(c)
+		return err
+	}, func(ctx context.Context) error {
+		return access(ctx, namespace, task)
+	})
+}
+
+func (h *InternalHandlers) beginOrResumeMemoryConsolidation(ctx context.Context, namespace string,
+	task *corev1alpha1.Task) (memoryconsolidation.BeginResponse, error) {
 	settings := memoryconsolidation.SettingsFor(task.Spec.AI.MemoryConsolidation)
 	run, err := h.memoryConsolidationStore.GetMemoryConsolidationRun(ctx, namespace, string(task.UID))
 	if errors.Is(err, store.ErrNotFound) {
 		run, err = h.beginMemoryConsolidation(ctx, namespace, task, settings)
 	}
 	if err != nil {
-		return memoryStoreError("begin memory consolidation", "memory consolidation run", err)
+		return memoryconsolidation.BeginResponse{}, consolidationStoreError("begin memory consolidation", err)
 	}
 	switch run.Status {
 	case store.MemoryConsolidationRunning:
 	case store.MemoryConsolidationAbandoned:
-		return errAbandonedMemoryConsolidation
+		return memoryconsolidation.BeginResponse{}, errAbandonedMemoryConsolidation
 	default:
-		return finishedMemoryConsolidation(c, settings, run)
+		return finishedMemoryConsolidation(settings, run)
 	}
 	input, err := decodeMemoryConsolidationInput(run)
 	if err != nil {
-		return err
+		return memoryconsolidation.BeginResponse{}, err
 	}
 	if input.EligibleSessions < settings.MinNewSessions {
 		report := newMemoryConsolidationReport(settings, store.MemoryConsolidationSkipped, run, input, nil, nil, nil, "", nil)
@@ -95,11 +123,11 @@ func (h *InternalHandlers) BeginMemoryConsolidation(c fiber.Ctx) error {
 			input.EligibleSessions, settings.MinNewSessions)
 		completed, err := h.completeMemoryConsolidation(ctx, run, store.MemoryConsolidationSkipped, report, nil)
 		if err != nil {
-			return err
+			return memoryconsolidation.BeginResponse{}, err
 		}
-		return finishedMemoryConsolidation(c, settings, completed)
+		return finishedMemoryConsolidation(settings, completed)
 	}
-	return c.JSON(memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Input: &input})
+	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Input: &input}, nil
 }
 
 // beginMemoryConsolidation fixes a new run's window from its mode's cursor,
@@ -136,38 +164,43 @@ func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespa
 // for every kept operation, in the same write. A run that already finished
 // returns its report unchanged.
 func (h *InternalHandlers) CompleteMemoryConsolidation(c fiber.Ctx) error {
-	namespace, task, err := h.memoryConsolidationCaller(c)
-	if err != nil {
-		return err
-	}
+	// The body is read before the fence is resolved.
 	var submission memoryconsolidation.Submission
 	if err := c.Bind().JSON(&submission); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	ctx := c.Context()
+	var report *memoryconsolidation.Report
+	if err := h.withMemoryConsolidationRun(c, func(ctx context.Context, namespace string, task *corev1alpha1.Task) error {
+		var err error
+		report, err = h.completeSubmittedMemoryConsolidation(ctx, namespace, task, submission)
+		return err
+	}); err != nil {
+		return err
+	}
+	return c.JSON(report)
+}
+
+func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Context, namespace string, task *corev1alpha1.Task,
+	submission memoryconsolidation.Submission) (*memoryconsolidation.Report, error) {
 	settings := memoryconsolidation.SettingsFor(task.Spec.AI.MemoryConsolidation)
 	run, err := h.memoryConsolidationStore.GetMemoryConsolidationRun(ctx, namespace, string(task.UID))
 	if err != nil {
-		return memoryStoreError("read memory consolidation run", "memory consolidation run", err)
+		return nil, consolidationStoreError("read memory consolidation run", err)
 	}
 	switch run.Status {
 	case store.MemoryConsolidationRunning:
 	case store.MemoryConsolidationAbandoned:
-		return errAbandonedMemoryConsolidation
+		return nil, errAbandonedMemoryConsolidation
 	default:
-		report, err := decodeMemoryConsolidationReport(run)
-		if err != nil {
-			return err
-		}
-		return c.JSON(report)
+		return decodeMemoryConsolidationReport(run)
 	}
 	input, err := decodeMemoryConsolidationInput(run)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	current, err := h.currentTargetGenerations(ctx, namespace, submission)
+	current, err := h.currentTargetGenerations(ctx, namespace, input)
 	if err != nil {
-		return memoryStoreError("read memory consolidation targets", "memory consolidation run", err)
+		return nil, consolidationStoreError("read memory consolidation targets", err)
 	}
 	kept, rejected, conflicts := memoryconsolidation.Validate(submission, input, current, settings.MaxOperations)
 	var proposals []store.MemoryProposal
@@ -177,34 +210,28 @@ func (h *InternalHandlers) CompleteMemoryConsolidation(c fiber.Ctx) error {
 	report := newMemoryConsolidationReport(settings, store.MemoryConsolidationCompleted, run, input, kept, rejected, conflicts, submission.Summary, proposals)
 	completed, err := h.completeMemoryConsolidation(ctx, run, store.MemoryConsolidationCompleted, report, proposals)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if completed.Status == store.MemoryConsolidationAbandoned {
-		return errAbandonedMemoryConsolidation
+		return nil, errAbandonedMemoryConsolidation
 	}
-	stored, err := decodeMemoryConsolidationReport(completed)
-	if err != nil {
-		return err
-	}
-	return c.JSON(stored)
+	return decodeMemoryConsolidationReport(completed)
 }
 
 // currentTargetGenerations returns the current generation of every active
-// memory a submission targets.
-func (h *InternalHandlers) currentTargetGenerations(ctx context.Context, namespace string, submission memoryconsolidation.Submission) (map[string]uint64, error) {
-	var ids []string
-	for _, op := range submission.Operations {
-		for _, target := range op.Targets {
-			if len(ids) < store.MaxMemoryRecallIDs {
-				ids = append(ids, target.MemoryID)
-			}
-		}
+// memory the run read. Only those can be targeted, and the input holds at
+// most memoryconsolidation.MaxInputMemories of them, so whatever a
+// submission names, every permissible target is looked up.
+func (h *InternalHandlers) currentTargetGenerations(ctx context.Context, namespace string, input memoryconsolidation.Input) (map[string]uint64, error) {
+	ids := make([]string, 0, len(input.Memories))
+	for _, memory := range input.Memories {
+		ids = append(ids, memory.ID)
 	}
 	current := map[string]uint64{}
 	if len(ids) == 0 {
 		return current, nil
 	}
-	memories, err := h.memoryStore.ListMemories(ctx, store.MemoryFilter{Namespace: namespace, IDs: ids, Limit: store.MaxMemoryRecallIDs})
+	memories, err := h.memoryStore.ListMemories(ctx, store.MemoryFilter{Namespace: namespace, IDs: ids, Limit: len(ids)})
 	if err != nil {
 		return nil, err
 	}
@@ -224,8 +251,7 @@ func decodeMemoryConsolidationInput(run *store.MemoryConsolidationRun) (memoryco
 
 func (h *InternalHandlers) completeMemoryConsolidation(ctx context.Context, run *store.MemoryConsolidationRun, status string,
 	report memoryconsolidation.Report, proposals []store.MemoryProposal) (*store.MemoryConsolidationRun, error) {
-	report.Redact()
-	encoded, err := json.Marshal(report)
+	encoded, err := report.Encode(store.MaxMemoryConsolidationReportBytes)
 	if err != nil {
 		return nil, fmt.Errorf("encode memory consolidation report: %w", err)
 	}
@@ -234,7 +260,7 @@ func (h *InternalHandlers) completeMemoryConsolidation(ctx context.Context, run 
 		CompletedAt: time.Now().UTC(), Proposals: proposals,
 	})
 	if err != nil {
-		return nil, memoryStoreError("complete memory consolidation", "memory consolidation run", err)
+		return nil, consolidationStoreError("complete memory consolidation", err)
 	}
 	return completed, nil
 }
@@ -247,12 +273,12 @@ func newMemoryConsolidationReport(settings memoryconsolidation.Settings, status 
 	return report
 }
 
-func finishedMemoryConsolidation(c fiber.Ctx, settings memoryconsolidation.Settings, run *store.MemoryConsolidationRun) error {
+func finishedMemoryConsolidation(settings memoryconsolidation.Settings, run *store.MemoryConsolidationRun) (memoryconsolidation.BeginResponse, error) {
 	report, err := decodeMemoryConsolidationReport(run)
 	if err != nil {
-		return err
+		return memoryconsolidation.BeginResponse{}, err
 	}
-	return c.JSON(memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Report: report})
+	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Report: report}, nil
 }
 
 func decodeMemoryConsolidationReport(run *store.MemoryConsolidationRun) (*memoryconsolidation.Report, error) {
@@ -268,4 +294,14 @@ func agentNameOf(task *corev1alpha1.Task) string {
 		return task.Spec.AgentRef.Name
 	}
 	return ""
+}
+
+// consolidationStoreError is memoryStoreError for a fenced access: a stale
+// or revoked fence is returned unchanged, so withInternalTaskData retries it
+// or answers that the Job is no longer active.
+func consolidationStoreError(action string, err error) error {
+	if errors.Is(err, store.ErrTaskDataCleanupChanged) || errors.Is(err, store.ErrTaskJobRevoked) {
+		return err
+	}
+	return memoryStoreError(action, "memory consolidation run", err)
 }

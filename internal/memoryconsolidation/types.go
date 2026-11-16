@@ -220,6 +220,9 @@ type Report struct {
 	Rejected         []Rejection                          `json:"rejected,omitempty"`
 	Conflicts        []Conflict                           `json:"conflicts,omitempty"`
 	Summary          string                               `json:"summary,omitempty"`
+	// Abridged reports that detail was dropped to fit the report's size
+	// limit; see Report.Encode.
+	Abridged bool `json:"abridged,omitempty"`
 }
 
 // BeginResponse is the internal API's answer to a run that begins. Input is

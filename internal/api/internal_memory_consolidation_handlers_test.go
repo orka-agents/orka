@@ -238,3 +238,27 @@ func TestMemoryConsolidationAbandonedRunCannotResumeOrComplete(t *testing.T) {
 	require.Equal(t, http.StatusConflict, f.post(t, "begin", struct{}{}, nil), "a run taken over cannot resume")
 	require.Equal(t, http.StatusConflict, f.post(t, "complete", memoryconsolidation.Submission{}, nil), "nor complete")
 }
+
+func TestMemoryConsolidationRefusesARevokedWorker(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	var begun memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begun))
+	require.NotNil(t, begun.Input)
+
+	// Kubernetes still shows the Job running; only the store knows it was
+	// revoked.
+	require.NoError(t, f.store.RevokeTaskJob(t.Context(), store.TaskJobIdentity{Namespace: "default", TaskUID: "task-uid", JobUID: "job-uid"}))
+	require.Equal(t, http.StatusForbidden, f.post(t, "begin", struct{}{}, nil), "a revoked worker reads no transcripts")
+	submission := memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{{Type: memoryconsolidation.OperationAdd,
+		Content: "Release by running make test, then tagging.",
+		Sources: []store.MemoryProposalSource{{SessionName: "session-0", MessageID: "session-0-assistant"}}}}}
+	require.Equal(t, http.StatusForbidden, f.post(t, "complete", submission, nil), "a revoked worker completes nothing")
+
+	proposals, err := f.store.ListMemoryProposals(t.Context(), store.MemoryProposalFilter{Namespace: "default"})
+	require.NoError(t, err)
+	require.Empty(t, proposals)
+	run, err := f.store.GetMemoryConsolidationRun(t.Context(), "default", "task-uid")
+	require.NoError(t, err)
+	require.Equal(t, store.MemoryConsolidationRunning, run.Status)
+}

@@ -9,6 +9,7 @@ package memoryconsolidation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -60,7 +61,7 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 	reject := func(index int, op Operation, format string, args ...any) {
 		if len(rejected) < MaxRejected {
 			rejected = append(rejected, Rejection{Index: index, Type: truncateRunes(op.Type, 40),
-				Title: truncateRunes(op.Title, MaxTitleChars), Reason: fmt.Sprintf(format, args...)})
+				Title: truncateRunes(op.Title, MaxTitleChars), Reason: truncateRunes(fmt.Sprintf(format, args...), MaxReasonChars)})
 		}
 	}
 	operations := submission.Operations
@@ -344,4 +345,40 @@ func (r *Report) Redact() {
 		r.Conflicts[i].Note = redact.SensitiveText(r.Conflicts[i].Note)
 	}
 	r.Summary = redact.SensitiveText(r.Summary)
+}
+
+// Encode redacts the report and encodes it in at most limit bytes. Every
+// field is bounded, but text that is mostly multibyte or escaped can still
+// encode larger than a run's report may be. Encode then drops, in order, the
+// rejected operations, the conflicts, the summary, and the kept operations'
+// text, and marks the report Abridged: the kept operations' proposals keep
+// their full text, so the report loses nothing that a review needs.
+func (r *Report) Encode(limit int) ([]byte, error) {
+	r.Redact()
+	steps := []func(){
+		func() { r.Rejected = nil },
+		func() { r.Conflicts = nil },
+		func() { r.Summary = "" },
+		func() {
+			for i := range r.Operations {
+				r.Operations[i].Title, r.Operations[i].Content, r.Operations[i].Reason, r.Operations[i].Tags = "", "", "", nil
+			}
+		},
+	}
+	for _, step := range steps {
+		encoded, err := json.Marshal(r)
+		if err != nil || len(encoded) <= limit {
+			return encoded, err
+		}
+		step()
+		r.Abridged = true
+	}
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > limit {
+		return nil, fmt.Errorf("memory consolidation report is %d bytes, more than %d", len(encoded), limit)
+	}
+	return encoded, nil
 }

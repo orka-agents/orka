@@ -273,3 +273,41 @@ func TestReportRedactsFreeText(t *testing.T) {
 	require.NotContains(t, report.Conflicts[0].Note, "hunter2")
 	require.NotContains(t, report.Summary, "abc")
 }
+
+func TestValidateBoundsARejectionsReason(t *testing.T) {
+	huge := strings.Repeat("x", 300_000)
+	_, rejected, _ := Validate(Submission{Operations: []Operation{{Type: huge}}}, Input{}, nil, 5)
+	require.Len(t, rejected, 1)
+	require.LessOrEqual(t, len([]rune(rejected[0].Reason)), MaxReasonChars+1, "the reason and its ellipsis")
+	require.LessOrEqual(t, len([]rune(rejected[0].Type)), 41)
+}
+
+func TestReportEncodeAbridgesToFit(t *testing.T) {
+	// Escaped control characters encode six bytes each.
+	text := func(n int) string { return strings.Repeat("\x01", n) }
+	report := Report{Summary: text(MaxSummaryChars)}
+	for range MaxRejected {
+		report.Rejected = append(report.Rejected, Rejection{Type: text(40), Title: text(MaxTitleChars), Reason: text(MaxReasonChars)})
+	}
+	for range 20 {
+		report.Operations = append(report.Operations, Operation{Type: OperationAdd, Title: text(MaxTitleChars),
+			Content: text(MaxContentChars), Reason: text(MaxReasonChars)})
+	}
+	const limit = 256 << 10
+	whole, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Greater(t, len(whole), limit, "the fixture is larger than the limit")
+
+	encoded, err := report.Encode(limit)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(encoded), limit)
+	var decoded Report
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.True(t, decoded.Abridged)
+	require.Len(t, decoded.Operations, 20, "every kept operation is still reported")
+
+	small := Report{Summary: "fine"}
+	encoded, err = small.Encode(limit)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "abridged")
+}

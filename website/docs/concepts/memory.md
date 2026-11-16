@@ -118,7 +118,7 @@ Each run reads the Sessions that changed since the last completed run of its mod
 
 `DryRun` and `Propose` keep separate places, so dry runs never use up the Sessions a proposing run has yet to read. When fewer than `minNewSessions` Sessions changed, the run is skipped without calling the model. A skipped or failed run does not move its mode's place: the next run reads the same Sessions again, from where the first run started, up to 720 hours back.
 
-A run records its input when it begins: a retried Pod reads the same input, and its result is checked against exactly what the model saw. The recorded input is deleted when the run finishes.
+A run records its input when it begins: a retried Pod reads the same input, and its result is checked against exactly what the model saw. The recorded input is deleted when the run finishes, and no other copy of it is kept. Only the worker of the run's own active Task can begin or complete it, and once its Job is revoked it can do neither, even before Kubernetes shows the revocation.
 
 Only one run at a time reads a namespace's memory. A run that begins while another is running fails with a conflict. A run whose Task died stops blocking after two hours; the run that takes over marks it abandoned, so it can neither resume nor create proposals.
 
@@ -138,7 +138,7 @@ Contradictions the model could not settle are reported as conflicts, not propose
 
 ### The report
 
-The Task result is the run's report: its mode and status (`completed` or `skipped`), the window it read, how many memories and Sessions it read, each kept operation, each dropped one with its reason, the conflicts, the IDs of the proposals it created, and a short summary. A run that finds nothing to change is a normal, reported outcome. Proposals a `Propose` run creates are attributed to the run's Task, so `orka memory proposal list --task-name <run>` lists them.
+The Task result is the run's report: its mode and status (`completed` or `skipped`), the window it read, how many memories and Sessions it read, each kept operation, each dropped one with its reason, the conflicts, the IDs of the proposals it created, and a short summary. A report that would be larger than 256 KiB is marked `abridged`, dropping, in order, the dropped operations, the conflicts, the summary and the kept operations' text until it fits. The proposals keep their full text. A run that finds nothing to change is a normal, reported outcome. Proposals a `Propose` run creates are attributed to the run's Task, so `orka memory proposal list --task-name <run>` lists them.
 
 ## Worker behavior
 

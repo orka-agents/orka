@@ -105,6 +105,13 @@ const (
 //     before any completed, the earliest window start of a run in that mode,
 //     so skipped and failed runs keep the first run's start. It returns nil
 //     when the mode has no run.
+//
+// Begin, Complete, GetMemoryConsolidationRun and
+// ListMemoryConsolidationSessions check a Task data fence in their context
+// (see TaskDataFenceStore), since a running run's Input holds transcripts
+// and its completion creates proposals. A run's Input never outlives the
+// run's own row: an operation receipt for BeginMemoryConsolidationRun keeps
+// no copy of it, so a replay returns the run as it is now.
 type MemoryConsolidationStore interface {
 	BeginMemoryConsolidationRun(ctx context.Context, run *MemoryConsolidationRun) error
 	CompleteMemoryConsolidationRun(ctx context.Context, completion MemoryConsolidationCompletion) (*MemoryConsolidationRun, error)
