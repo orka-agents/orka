@@ -703,17 +703,22 @@ func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Appr
 }
 
 func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval, source string) attentionEntry {
-	// Action labels are built from call arguments for brokered and worker
-	// approvals, so only the controller's fixed parked label is returned.
+	// Action labels are built from call arguments, so only the controller's
+	// fixed parked label is returned. A tool name is returned only for a
+	// brokered approval, which the controller's broker records from the
+	// resolved tool descriptor; worker approval events are written from the
+	// worker Pod, where agent code runs, so their fields are not trusted here.
 	action := ""
-	tool := attentionSafeIdentifier(approval.TargetTool)
+	tool := ""
 	summary := "Approval requested"
-	switch {
-	case source == AttentionApprovalSourceParked:
+	switch source {
+	case AttentionApprovalSourceParked:
 		action = taskwait.ParkedApprovalAction
 		summary = "Agent sign-off requested"
-	case tool != "":
-		summary = "Approval requested for " + tool
+	case AttentionApprovalSourceBrokered:
+		if tool = attentionSafeIdentifier(approval.TargetTool); tool != "" {
+			summary = "Approval requested for " + tool
+		}
 	}
 	var expiresAt *time.Time
 	if approval.ExpiresAt != nil {

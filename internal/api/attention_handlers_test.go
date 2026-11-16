@@ -250,6 +250,7 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	parked := attentionParkedTask("parked", "parked-approval", now.Add(time.Hour))
 	brokered, binding := attentionBrokeredTask("brokered")
 	worker := attentionWaitingTask("worker")
+	workerIdentifier := attentionWaitingTask("worker-identifier")
 	expired := attentionWaitingTask("expired")
 	decided := attentionWaitingTask("decided")
 	quiet := attentionTask("quiet", string(corev1alpha1.TaskPhaseRunning)) // approval events, no condition
@@ -270,7 +271,7 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	otherNamespace := attentionWaitingTask("elsewhere")
 	otherNamespace.Namespace = "other"
 
-	f := newAttentionFixture(t, []client.Object{parked, brokered, worker, expired, decided, quiet, completed, unknown, failed, oldFailed, podWaiting, oddPod, otherNamespace})
+	f := newAttentionFixture(t, []client.Object{parked, brokered, worker, workerIdentifier, expired, decided, quiet, completed, unknown, failed, oldFailed, podWaiting, oddPod, otherNamespace})
 	parkedEvent, _, err := taskwait.ParkedApprovalRequestEvent(parked, parked.Status.Wait)
 	require.NoError(t, err)
 	_, err = f.events.AppendExecutionEvent(context.Background(), parkedEvent)
@@ -284,6 +285,9 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 		"approvalID": "worker-approval", "taskUID": "uid-worker", "action": "create_pr", "targetTool": "github\u0000_pr",
 		"riskSummary": attentionFreeText, "severity": attentionFreeText,
 	})
+	f.appendApproval("worker-identifier", map[string]any{
+		"approvalID": "worker-identifier-approval", "taskUID": "uid-worker-identifier", "targetTool": attentionFreeText,
+	})
 	f.appendApproval("expired", map[string]any{"approvalID": "expired-approval", "action": "old", "expiresAt": now.Add(-time.Minute).Format(time.RFC3339)})
 	f.appendApproval("decided", map[string]any{"approvalID": "decided-approval", "action": "done"})
 	f.appendDecision("decided", "decided-approval", events.ExecutionEventTypeApprovalApproved)
@@ -292,12 +296,12 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 
 	response := f.list("/api/v1/attention?namespace=default")
 	require.Equal(t, []string{
-		"approval/parked", "approval/brokered", "approval/worker",
+		"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier",
 		"outcomeUnknown/unknown", "failed/failed", "podWaiting/odd-pod", "podWaiting/pod-waiting",
 	}, attentionKinds(response.Items))
 	require.False(t, response.Incomplete)
-	require.Equal(t, 7, response.Total)
-	require.Equal(t, map[string]int{"approval": 3, "outcomeUnknown": 1, "failed": 1, "podWaiting": 2}, response.Counts)
+	require.Equal(t, 8, response.Total)
+	require.Equal(t, map[string]int{"approval": 4, "outcomeUnknown": 1, "failed": 1, "podWaiting": 2}, response.Counts)
 	require.Equal(t, attentionSourceUnavailable, response.Sources.Monitors)
 	require.Equal(t, attentionSourceIncluded, response.Sources.Approvals)
 	require.NotNil(t, response.Since)
@@ -313,13 +317,13 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	require.Empty(t, response.Items[1].Approval.Action, "argument-derived action labels are never returned")
 	require.Equal(t, "ops", response.Items[1].Approval.TargetTool)
 	require.Equal(t, "Approval requested for ops", response.Items[1].Summary)
-	require.Empty(t, response.Items[2].Approval.TargetTool, "a tool name that is not an identifier is dropped")
+	require.Empty(t, response.Items[2].Approval.TargetTool, "worker approval fields are written from the worker Pod and are not returned")
 	require.Empty(t, response.Items[2].Approval.Action)
 	require.Equal(t, "Approval requested", response.Items[2].Summary)
 	require.Empty(t, response.Items[2].Approval.Severity, "unknown severities are dropped")
-	require.Equal(t, "ErrImagePull", response.Items[6].Reason)
-	require.Equal(t, attentionPodWaitingUnknown, response.Items[5].Reason)
-	for _, item := range response.Items[:3] {
+	require.Equal(t, "ErrImagePull", response.Items[7].Reason)
+	require.Equal(t, attentionPodWaitingUnknown, response.Items[6].Reason)
+	for _, item := range response.Items[:4] {
 		require.NotNil(t, item.Approval.CanApprove, item.ID)
 		require.True(t, *item.Approval.CanApprove, item.ID)
 		require.True(t, *item.Approval.CanDecline, item.ID)
@@ -334,7 +338,7 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	}
 
 	inbox := f.list("/api/v1/approvals?namespace=default&status=pending")
-	require.Equal(t, []string{"approval/parked", "approval/brokered", "approval/worker"}, attentionKinds(inbox.Items))
+	require.Equal(t, []string{"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier"}, attentionKinds(inbox.Items))
 	require.Nil(t, inbox.Since)
 	require.Equal(t, attentionSourceNotRequired, inbox.Sources.Monitors)
 }
