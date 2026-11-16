@@ -15,6 +15,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -215,4 +218,30 @@ func TestRecallMemoryToolMarksNativeRecall(t *testing.T) {
 	if got := <-purposes; got != MemoryListPurposeRecall {
 		t.Fatalf("purpose = %q, want %q so the controller counts the recall", got, MemoryListPurposeRecall)
 	}
+}
+
+// blockingMemoryRecalls never finishes recording a recall until its context
+// ends, like a storage write that keeps retrying.
+type blockingMemoryRecalls struct {
+	recordingMemoryRecalls
+}
+
+func (r *blockingMemoryRecalls) RecordMemoryRecall(ctx context.Context, _ store.MemoryRecall) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRecallMemoryToolDoesNotWaitOnASlowCount(t *testing.T) {
+	previous := MemoryRecallRecordTimeout
+	MemoryRecallRecordTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { MemoryRecallRecordTimeout = previous })
+	memories := &blockingMemoryRecalls{recordingMemoryRecalls{memories: []store.Memory{{ID: "mem-a", Namespace: "test-ns"}}}}
+	ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: "test-ns", TaskID: "task-a",
+		MemoryReader: memories, MemoryRecallRecorder: memories})
+
+	started := time.Now()
+	got, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Contains(t, got, `"id":"mem-a"`)
+	require.Less(t, time.Since(started), 2*time.Second, "a stuck count gives up within its budget")
 }

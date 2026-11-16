@@ -68,11 +68,15 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 
 // recordMemoryRecall counts the memories an agent's recall_memory call
 // returned. A prompt's memory context and operator listings are not recalls.
-// Counting is best effort: a failure is logged and never fails the recall.
+// Counting is best effort: it waits at most tools.MemoryRecallRecordTimeout,
+// well inside the worker's request timeout, and a failure is logged and
+// never fails the recall.
 func (h *InternalHandlers) recordMemoryRecall(ctx context.Context, namespace string, memories []store.Memory) {
 	if len(memories) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, tools.MemoryRecallRecordTimeout)
+	defer cancel()
 	ids := make([]string, 0, len(memories))
 	for _, memory := range memories {
 		ids = append(ids, memory.ID)

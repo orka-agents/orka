@@ -166,12 +166,20 @@ const (
 	MemoryListPurposeRecall = "recall"
 )
 
+// MemoryRecallRecordTimeout bounds how long counting a recall may delay the
+// recall's result. A storage write can retry far longer, and a recall's
+// caller may give up first.
+var MemoryRecallRecordTimeout = 2 * time.Second
+
 // recordMemoryRecall counts the memories a recall returned. Counting is
-// best effort: a failure is logged and never fails the recall.
+// best effort: it waits at most MemoryRecallRecordTimeout, and a failure is
+// logged and never fails the recall.
 func recordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
 	if recorder == nil || len(memories) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, MemoryRecallRecordTimeout)
+	defer cancel()
 	ids := make([]string, 0, len(memories))
 	for _, memory := range memories {
 		ids = append(ids, memory.ID)

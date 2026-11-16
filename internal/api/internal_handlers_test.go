@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *storageclient.Client) {
@@ -1459,4 +1460,31 @@ func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
 	recalled, err := ss.GetMemory(ctx, "default", "mem-a")
 	require.NoError(t, err)
 	require.NotNil(t, recalled.LastRecalledAt)
+}
+
+// slowRecallStore keeps a recall count from finishing until its context ends,
+// like a storage write that keeps retrying.
+type slowRecallStore struct {
+	store.MemoryStore
+}
+
+func (s slowRecallStore) RecordMemoryRecall(ctx context.Context, _ store.MemoryRecall) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
+	previous := tools.MemoryRecallRecordTimeout
+	tools.MemoryRecallRecordTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tools.MemoryRecallRecordTimeout = previous })
+	_, app, ss := setupTestInternalHandlers()
+	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{MemoryStore: slowRecallStore{ss}, MemoryProposalStore: ss})
+	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
+
+	started := time.Now()
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a stuck count never fails the recall")
+	require.Less(t, time.Since(started), 2*time.Second, "a stuck count gives up within its budget")
 }
