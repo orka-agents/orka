@@ -113,6 +113,9 @@ type ahpTurn struct {
 	failure string
 	// planCall is the synthetic tool call that shows the agent's plan.
 	planCall string
+	// heldTools are the name, kind and input of calls announced before they
+	// were described, kept until each starts.
+	heldTools map[string]harnessv2.ToolCallUpdate
 }
 
 type ahpToolCall struct {
@@ -728,13 +731,33 @@ func (t *ahpTurn) thought(content string) {
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatReasoningAction{Type: ahptypes.ActionTypeChatReasoning, TurnId: t.id, PartId: t.thoughtPart, Content: content}})
 }
 
-func ahpToolName(update *harnessv2.ToolCallUpdate) string {
-	for _, name := range []string{update.Name, update.Kind} {
-		if strings.TrimSpace(name) != "" {
-			return name
-		}
+// ahpKindToolNames names a call the runtime described only by its ACP kind,
+// with no input. Clients draw a few tool names as typed calls that read a path
+// or a pattern from the input: the Copilot app shows a "read" as "View
+// unknown" without one. Such a call gets a name no client types instead, and
+// clients show its title.
+var ahpKindToolNames = map[string]string{
+	ahpToolKindRead: "read_files", ahpToolKindSearch: "search_files", ahpToolKindEdit: "edit_files",
+}
+
+// ACP tool kinds clients draw as typed calls.
+const (
+	ahpToolKindRead   = "read"
+	ahpToolKindSearch = "search"
+	ahpToolKindEdit   = "edit"
+)
+
+func ahpToolName(update *harnessv2.ToolCallUpdate, input json.RawMessage) string {
+	if strings.TrimSpace(update.Name) != "" {
+		return update.Name
 	}
-	return ahpToolFallbackName
+	if strings.TrimSpace(update.Kind) == "" {
+		return ahpToolFallbackName
+	}
+	if name, ok := ahpKindToolNames[strings.ToLower(strings.TrimSpace(update.Kind))]; ok && len(input) == 0 {
+		return name
+	}
+	return update.Kind
 }
 
 func (t *ahpTurn) startTool(id, name, title string) *ahpToolCall {
@@ -777,19 +800,43 @@ func (t *ahpTurn) readyTool(id string, call *ahpToolCall, title string, input js
 
 // tool advances one tool call through start, ready and complete.
 func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
-	call := t.startTool(update.ToolCallID, ahpToolName(update), ahpRelativeTitle(update.Title))
-	if len(update.RawInput) > 0 {
-		// Kept for a confirmation: a runtime that does not describe the call
-		// in its permission request may have reported it here first.
-		call.input = update.RawInput
-	}
-	// Later updates usually carry no title; keep the one the call started with.
-	title := ahpRelativeTitle(update.Title)
-	if title == "" {
-		title = call.title
-	}
 	if len(update.Diffs) > 0 {
 		t.recordDiffs(update.Diffs)
+	}
+	// What the call was announced with, for updates that do not repeat it.
+	held := t.heldTools[update.ToolCallID]
+	if update.Name != "" {
+		held.Name = update.Name
+	}
+	if update.Kind != "" {
+		held.Kind = update.Kind
+	}
+	if len(update.RawInput) > 0 {
+		held.RawInput = update.RawInput
+	}
+	input := held.RawInput
+	title := ahpRelativeTitle(update.Title)
+	if existing := t.tools[update.ToolCallID]; (existing == nil || !existing.started) && title == "" &&
+		update.Status == harnessv2.ToolCallStatusPending {
+		// A runtime may announce a call before it says what the call does.
+		// Clients keep the name and title a call starts with, so the start
+		// waits for an update that describes it, or for the call to run.
+		if t.heldTools == nil {
+			t.heldTools = map[string]harnessv2.ToolCallUpdate{}
+		}
+		t.heldTools[update.ToolCallID] = held
+		return
+	}
+	call := t.startTool(update.ToolCallID, ahpToolName(&held, input), title)
+	delete(t.heldTools, update.ToolCallID)
+	if len(input) > 0 {
+		// Kept for a confirmation: a runtime that does not describe the call
+		// in its permission request may have reported it here first.
+		call.input = input
+	}
+	// Later updates usually carry no title; keep the one the call started with.
+	if title == "" {
+		title = call.title
 	}
 	finished := update.Status == harnessv2.ToolCallStatusCompleted || update.Status == harnessv2.ToolCallStatusFailed
 	if call.completed || (call.approval != "" && !finished) {
@@ -808,10 +855,10 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 	}
 	switch update.Status {
 	case harnessv2.ToolCallStatusInProgress:
-		t.readyTool(update.ToolCallID, call, title, update.RawInput)
+		t.readyTool(update.ToolCallID, call, title, input)
 		t.toolOutput(update.ToolCallID, call, update)
 	case harnessv2.ToolCallStatusCompleted, harnessv2.ToolCallStatusFailed:
-		t.readyTool(update.ToolCallID, call, title, update.RawInput)
+		t.readyTool(update.ToolCallID, call, title, input)
 		content := update.Content
 		if !ahpHasText(content) && call.output != "" {
 			// Keep the output the call streamed when its result carries none.
@@ -986,11 +1033,21 @@ func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) 
 	}
 	switch approval.State {
 	case liveevents.ApprovalPending:
+		// A call announced but not yet described starts here, with what it
+		// was announced with.
+		held, wasHeld := t.heldTools[id]
+		delete(t.heldTools, id)
 		name := approval.ToolName
+		if name == "" && wasHeld {
+			name = ahpToolName(&held, held.RawInput)
+		}
 		if name == "" {
 			name = ahpToolFallbackName
 		}
 		call := t.startTool(id, name, approval.Title)
+		if len(call.input) == 0 && len(held.RawInput) > 0 {
+			call.input = held.RawInput
+		}
 		// A running call may ask again; each hold reopens its confirmation.
 		if call.completed || call.approval == approval.ID {
 			return
@@ -1237,6 +1294,8 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	defer t.mu.Unlock()
 	t.showStoredAnswer(task)
 	t.finishPlan()
+	// A call announced but never described or run was never shown.
+	t.heldTools = nil
 	for _, id := range t.order {
 		if call := t.tools[id]; call != nil && !call.completed {
 			title := "interrupted"
