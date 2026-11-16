@@ -324,8 +324,12 @@ type ahpSession struct {
 	Turns        int    `json:"turns"`
 	// The running turn, if any. It survives a controller restart, so the
 	// turn can still be settled from its Task.
-	ActiveTurn      string `json:"activeTurn,omitempty"`
-	ActiveTask      string `json:"activeTask,omitempty"`
+	ActiveTurn string `json:"activeTurn,omitempty"`
+	ActiveTask string `json:"activeTask,omitempty"`
+	// ActiveTaskUID is the UID of the Task created under ActiveTask. A Task
+	// created later under the same name is not the turn's, and its events,
+	// approvals and result are never taken for the turn's.
+	ActiveTaskUID   string `json:"activeTaskUID,omitempty"`
 	ActiveStartedAt string `json:"activeStartedAt,omitempty"`
 	// Plan is the agent's latest plan, as a markdown checklist.
 	Plan string `json:"plan,omitempty"`
