@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	kubernetestesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -197,6 +198,40 @@ func TestAHPPrivacyExemptsOnlyVerifiedServiceAccounts(t *testing.T) {
 	unnamed := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{}}}
 	require.False(t, ahpOwns(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}, unnamed),
 		"an empty identity matches no requester")
+}
+
+// The cross-Task attention and approvals lists show an AHP turn, and its
+// pending approval, only to the person who sent it, as ListTasks does.
+// Verified ServiceAccounts keep seeing it.
+func TestAHPTurnsStayOutOfOtherPeoplesAttention(t *testing.T) {
+	turn := attentionWaitingTask("ahp-alice-turn")
+	turn.Labels = map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}
+	turn.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"}
+	plain := attentionWaitingTask("plain")
+	f := newAttentionFixture(t, []client.Object{turn, plain})
+	f.appendApproval("ahp-alice-turn", map[string]any{"approvalID": "turn-approval", "action": "write"})
+	f.appendApproval("plain", map[string]any{"approvalID": "plain-approval", "action": "write"})
+
+	names := func(path string) []string {
+		items := f.list(path).Items
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			out = append(out, item.Task.Name)
+		}
+		return out
+	}
+	for _, path := range []string{"/api/v1/attention?namespace=default", "/api/v1/approvals?namespace=default"} {
+		f.user = &UserInfo{Username: "bob", AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}
+		got := names(path)
+		require.NotContains(t, got, "ahp-alice-turn", path)
+		require.Contains(t, got, "plain", path)
+
+		f.user = &UserInfo{Username: "alice", AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"}
+		require.Contains(t, names(path), "ahp-alice-turn", path)
+
+		f.user = &UserInfo{Username: "system:serviceaccount:default:ops", AuthType: AuthTypeTokenReview}
+		require.Contains(t, names(path), "ahp-alice-turn", path)
+	}
 }
 
 // A fork of a person's own AHP turn whose workspace is reused per session

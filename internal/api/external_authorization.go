@@ -95,6 +95,10 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks/:id/stream":    coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/trace":     coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/approvals": coreAPIPolicy("get", "tasks", "id"),
+	// The attention views list Tasks; each Task then passes the ListTasks
+	// filters, and monitor items need their own list grants in the handler.
+	"GET /api/v1/attention": coreAPIPolicy("list", "tasks", ""),
+	"GET /api/v1/approvals": coreAPIPolicy("list", "tasks", ""),
 	"POST /api/v1/tasks/:id/approvals/:approvalID/decision": coreAPIPolicy("update", "tasks/approvals", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "patch", "id"}),
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",

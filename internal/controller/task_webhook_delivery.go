@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/taskwait"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -49,7 +50,29 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 		return delivery.NextAttemptTime.Sub(now), nil
 	}
 
-	notice, superseded, err := w.currentNotice(task, delivery, now)
+	eventType, disposition := taskWebhookEvent(task)
+	switch disposition {
+	case webhookNoticeDeferred:
+		// The turn parked and its wait can still resume the work. The wait's
+		// own status transitions reconcile this Task again, so nothing is
+		// written and nothing is requeued.
+		return 0, nil
+	case webhookNoticeContinued:
+		// The continuation inherited spec.webhookURL and reports the chain's
+		// outcome. A notice recorded before this rule existed is retired
+		// rather than left pending forever.
+		if delivery == nil {
+			return 0, nil
+		}
+		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
+		delivery.NextAttemptTime = nil
+		delivery.LastError = boundedWebhookError(errors.New("the parked turn resumed as a continuation Task, which sends the notice for the chain"))
+		task.Status.WebhookDelivery = delivery
+		log.Info("retiring pending webhook notice of a resumed parked turn", "deliveryID", delivery.DeliveryID)
+		return 0, status.Update(ctx, task)
+	}
+
+	notice, superseded, err := w.currentNotice(task, delivery, eventType, now)
 	if err != nil {
 		return 0, err
 	}
@@ -162,8 +185,12 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 // currentNotice rebuilds the pending notice for the Task's current state. When
 // that state no longer matches the recorded digest, or the event changed, the
 // pending notice is superseded by a fresh one with a new delivery ID.
-func (w *WebhookNotifier) currentNotice(task *corev1alpha1.Task, delivery *corev1alpha1.TaskWebhookDelivery, now time.Time) (webhookNotice, bool, error) {
-	eventType := webhookEventType(task.Status.Phase)
+func (w *WebhookNotifier) currentNotice(
+	task *corev1alpha1.Task,
+	delivery *corev1alpha1.TaskWebhookDelivery,
+	eventType string,
+	now time.Time,
+) (webhookNotice, bool, error) {
 	if delivery != nil && delivery.DeliveryID != "" && delivery.EventType == eventType {
 		notice, err := buildWebhookNotice(task, delivery.DeliveryID, delivery.EventType, delivery.OccurredAt.Time)
 		if err != nil {
@@ -178,6 +205,55 @@ func (w *WebhookNotifier) currentNotice(task *corev1alpha1.Task, delivery *corev
 	occurredAt := now.UTC().Truncate(time.Second)
 	notice, err := buildWebhookNotice(task, w.newID(), eventType, occurredAt)
 	return notice, true, err
+}
+
+// webhookNoticeDisposition says whether a terminal Task owes its webhook a
+// notice now.
+type webhookNoticeDisposition int
+
+const (
+	// webhookNoticeDue means the notice is owed now.
+	webhookNoticeDue webhookNoticeDisposition = iota
+	// webhookNoticeDeferred means the Task's turn parked and its wait can
+	// still resume the work, so no outcome is known yet.
+	webhookNoticeDeferred
+	// webhookNoticeContinued means the wait resumed into a continuation Task.
+	// The continuation copies spec.webhookURL and reports instead.
+	webhookNoticeContinued
+)
+
+// taskWebhookEvent returns the event a terminal Task's notice reports.
+//
+// A parked Task's phase is the outcome of its own turn (ADR 0041), not of the
+// work, which continues through a controller-created continuation Task. Its
+// notice therefore follows status.wait: it is deferred while the wait can
+// still resume, owed by the continuation once the wait resumes, and, when the
+// wait ends without resuming, reports why the work stopped: a cancelled wait
+// is task.cancelled, and an expired or abandoned one is task.failed, as a
+// Task that runs past its deadline is Failed. A turn that itself failed or was
+// cancelled reports its phase, and a wait left by an earlier attempt that a
+// later, unparked attempt superseded does not decide the event.
+func taskWebhookEvent(task *corev1alpha1.Task) (string, webhookNoticeDisposition) {
+	phaseEvent := webhookEventType(task.Status.Phase)
+	wait := task.Status.Wait
+	switch {
+	case wait == nil:
+		return phaseEvent, webhookNoticeDue
+	case taskwait.Active(wait):
+		return "", webhookNoticeDeferred
+	case wait.State == corev1alpha1.TaskWaitStateResumed:
+		return "", webhookNoticeContinued
+	case task.Status.Phase != corev1alpha1.TaskPhaseSucceeded:
+		return phaseEvent, webhookNoticeDue
+	}
+	execution := task.Status.Execution
+	if execution == nil || execution.Attempt != wait.Attempt || execution.PromptID != wait.PromptID {
+		return phaseEvent, webhookNoticeDue
+	}
+	if wait.State == corev1alpha1.TaskWaitStateCancelled {
+		return webhookEventType(corev1alpha1.TaskPhaseCancelled), webhookNoticeDue
+	}
+	return webhookEventType(corev1alpha1.TaskPhaseFailed), webhookNoticeDue
 }
 
 // recordSigningUnavailable keeps the notice pending without consuming an

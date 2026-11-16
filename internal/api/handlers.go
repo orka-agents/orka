@@ -135,6 +135,8 @@ type Handlers struct {
 	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
+	// attentionBounds overrides the attention scan bounds; zero uses defaults.
+	attentionBounds attentionBounds
 }
 
 // HandlersConfig holds configuration for creating Handlers.
