@@ -24,7 +24,7 @@ import (
 // A consolidation Task that ends or is deleted without finishing its run
 // leaves no transcripts behind; a finished run, and other Tasks, are left
 // alone.
-func TestAbandonMemoryConsolidationRunClearsAnUnfinishedRun(t *testing.T) {
+func TestReleaseMemoryConsolidationRunClearsAnUnfinishedRun(t *testing.T) {
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "consolidation.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -48,19 +48,19 @@ func TestAbandonMemoryConsolidationRunClearsAnUnfinishedRun(t *testing.T) {
 	r := &TaskReconciler{ResultStore: runs}
 
 	begin("uid-plain")
-	require.NoError(t, r.abandonMemoryConsolidationRun(ctx, task("uid-plain", false)))
+	require.NoError(t, r.releaseMemoryConsolidationRun(ctx, task("uid-plain", false)))
 	plain, err := runs.GetMemoryConsolidationRun(ctx, "default", "uid-plain")
 	require.NoError(t, err)
 	require.Equal(t, store.MemoryConsolidationRunning, plain.Status, "only a consolidation Task's run is abandoned")
-	require.NoError(t, runs.AbandonMemoryConsolidationRun(ctx, "default", "uid-plain"))
+	require.NoError(t, runs.ReleaseMemoryConsolidationRun(ctx, "default", "uid-plain"))
 
 	begin("uid-failed")
-	require.NoError(t, r.abandonMemoryConsolidationRun(ctx, task("uid-failed", true)))
+	require.NoError(t, r.releaseMemoryConsolidationRun(ctx, task("uid-failed", true)))
 	failed, err := runs.GetMemoryConsolidationRun(ctx, "default", "uid-failed")
 	require.NoError(t, err)
 	require.Equal(t, store.MemoryConsolidationAbandoned, failed.Status)
 	require.Empty(t, failed.Input, "the failed run's transcripts are cleared")
 
-	require.NoError(t, r.abandonMemoryConsolidationRun(ctx, task("uid-never-began", true)), "a Task that never began a run")
-	require.NoError(t, (&TaskReconciler{}).abandonMemoryConsolidationRun(ctx, task("uid-failed", true)), "no store configured")
+	require.NoError(t, r.releaseMemoryConsolidationRun(ctx, task("uid-never-began", true)), "a Task that never began a run")
+	require.NoError(t, (&TaskReconciler{}).releaseMemoryConsolidationRun(ctx, task("uid-failed", true)), "no store configured")
 }

@@ -209,19 +209,75 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	return completed, nil
 }
 
-// AbandonMemoryConsolidationRun abandons a Task's running run and clears its
-// input, keeping its window.
-func (s *Store) AbandonMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error {
-	return writeOperationErr(ctx, s, "AbandonMemoryConsolidationRun", func(ctx context.Context) error {
+// ReleaseMemoryConsolidationRun releases the run of a Task that ended or is
+// being deleted: it clears the run's input and report, removes the run when
+// no cursor needs it, and removes earlier released runs a later completed run
+// supersedes.
+func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error {
+	return writeOperationErr(ctx, s, "ReleaseMemoryConsolidationRun", func(ctx context.Context) error {
 		if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
 			return store.ValidationErrorf("namespace and Task UID are required")
 		}
-		_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-			`UPDATE memory_consolidation_runs SET status = ?, input = NULL
-			 WHERE namespace = ? AND task_uid = ? AND status = ?`,
-			store.MemoryConsolidationAbandoned, namespace, taskUID, store.MemoryConsolidationRunning)
-		return err
+		tx, err := s.beginTx(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := releaseMemoryConsolidationRun(ctx, tx, namespace, taskUID); err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
+}
+
+// A mode's cursor is its latest completed run's window end or, before any
+// completed, its earliest run's window start (GetMemoryConsolidationCursor).
+// A run is kept while it could be that run: ties go to the greatest Task UID
+// among completed runs and the least among the others.
+const (
+	supersededCompletedRunSQL = `EXISTS (SELECT 1 FROM memory_consolidation_runs c
+		WHERE c.namespace = r.namespace AND c.mode = r.mode AND c.status = 'completed' AND c.task_uid <> r.task_uid
+		AND (c.window_end > r.window_end OR (c.window_end = r.window_end AND c.task_uid > r.task_uid)))`
+	supersededOtherRunSQL = `(EXISTS (SELECT 1 FROM memory_consolidation_runs c
+		WHERE c.namespace = r.namespace AND c.mode = r.mode AND c.status = 'completed')
+		OR EXISTS (SELECT 1 FROM memory_consolidation_runs n
+		WHERE n.namespace = r.namespace AND n.mode = r.mode AND n.status <> 'completed' AND n.task_uid <> r.task_uid
+		AND (n.window_start < r.window_start OR (n.window_start = r.window_start AND n.task_uid < r.task_uid))))`
+)
+
+func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, taskUID string) error {
+	var mode string
+	err := tx.QueryRowContext(ctx, `SELECT mode FROM memory_consolidation_runs WHERE namespace = ? AND task_uid = ?`,
+		namespace, taskUID).Scan(&mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memory_consolidation_runs
+		 SET status = CASE WHEN status = ? THEN ? ELSE status END, input = NULL, report = NULL
+		 WHERE namespace = ? AND task_uid = ?`,
+		store.MemoryConsolidationRunning, store.MemoryConsolidationAbandoned, namespace, taskUID); err != nil {
+		return err
+	}
+	// This run goes when no cursor needs it.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_consolidation_runs AS r WHERE r.namespace = ? AND r.task_uid = ? AND (
+		   (r.status = 'completed' AND `+supersededCompletedRunSQL+`) OR
+		   (r.status <> 'completed' AND `+supersededOtherRunSQL+`))`,
+		namespace, taskUID); err != nil {
+		return err
+	}
+	// An earlier released completed run kept as its mode's cursor goes once
+	// a later completed run supersedes it. A completed run that still has its
+	// report was not released, so its Task may still read it.
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM memory_consolidation_runs AS r
+		 WHERE r.namespace = ? AND r.mode = ? AND r.status = 'completed' AND r.report IS NULL AND `+supersededCompletedRunSQL,
+		namespace, mode)
+	return err
 }
 
 // GetMemoryConsolidationRun returns the run of a namespace's Task. It checks

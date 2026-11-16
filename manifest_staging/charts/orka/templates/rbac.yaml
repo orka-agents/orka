@@ -40,7 +40,10 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
-  # Scheduled Propose memory consolidation runs: see memory-consolidation-policy.yaml.
+  # Scheduled memory consolidation runs: see memory-consolidation-policy.yaml.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memories"]
+    verbs: ["list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["memoryproposals"]
     verbs: ["create"]

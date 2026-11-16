@@ -235,7 +235,8 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 		return nil
 	}
 	denied := fiber.NewError(fiber.StatusForbidden,
-		"not authorized to create a memory consolidation run: it needs list and get on sessions, and create on memoryproposals in Propose mode")
+		"not authorized to create a memory consolidation run: it needs list and get on sessions, list on memories, "+
+			"and create on memoryproposals in Propose mode")
 	username := ""
 	if userInfo != nil {
 		username = strings.TrimSpace(userInfo.Username)
@@ -246,6 +247,7 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 	checks := []authorizationv1.ResourceAttributes{
 		{Verb: apiObjectList, Resource: usageSessionResource},
 		{Verb: gatewayVerbGet, Resource: usageSessionResource},
+		{Verb: apiObjectList, Resource: "memories"},
 	}
 	if task.Spec.AI.MemoryConsolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
 		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: "memoryproposals"})

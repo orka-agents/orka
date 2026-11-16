@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -129,37 +130,67 @@ func runMemoryConsolidationRuns(t *testing.T, newProvider StateFactory) {
 			"a window that starts at the cursor begins")
 	})
 
-	t.Run("abandoning a run clears its input and keeps its window", func(t *testing.T) {
+	t.Run("releasing a run clears it and keeps every cursor", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
-		require.ErrorIs(t, p.AbandonMemoryConsolidationRun(ctx, "", "uid"), storagev1.ErrValidation)
-		require.ErrorIs(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, " "), storagev1.ErrValidation)
-		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "missing"), "a missing run is left alone")
+		require.ErrorIs(t, p.ReleaseMemoryConsolidationRun(ctx, "", "uid"), storagev1.ErrValidation)
+		require.ErrorIs(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, " "), storagev1.ErrValidation)
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "missing"), "a missing run is left alone")
+		cursor := func() time.Time {
+			t.Helper()
+			at, err := p.GetMemoryConsolidationCursor(ctx, conditionalNamespace, "Propose")
+			require.NoError(t, err)
+			require.NotNil(t, at)
+			return *at
+		}
+		complete := func(uid string, start, end time.Time) {
+			t.Helper()
+			require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun(uid, start, end)))
+			_, err := p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+				TaskUID: uid, Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{"run":"` + uid + `"}`), CompletedAt: end})
+			require.NoError(t, err)
+		}
+		gone := func(uid string) bool {
+			t.Helper()
+			_, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, uid)
+			if errors.Is(err, storagev1.ErrNotFound) {
+				return true
+			}
+			require.NoError(t, err)
+			return false
+		}
 
-		run := consolidationRun("uid-dead", at, at.Add(time.Hour))
-		run.Input = []byte(`{"transcript":"excerpt"}`)
-		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, run))
-		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead"))
-		stored, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead")
-		require.NoError(t, err)
-		require.Equal(t, storagev1.MemoryConsolidationAbandoned, stored.Status)
-		require.Empty(t, stored.Input, "an abandoned run keeps no transcripts")
-		cursor, err := p.GetMemoryConsolidationCursor(ctx, conditionalNamespace, "Propose")
-		require.NoError(t, err)
-		require.NotNil(t, cursor)
-		requireSameInstant(t, at, *cursor, "the abandoned run's start still holds the cursor")
-		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-next", at, at.Add(2*time.Hour))),
-			"an abandoned run blocks no other run")
+		dead := consolidationRun("uid-dead", at, at.Add(time.Hour))
+		dead.Input = []byte(`{"transcript":"excerpt"}`)
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, dead))
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead"))
+		released, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dead")
+		require.NoError(t, err, "the mode's only run holds its cursor, so it is kept")
+		require.Equal(t, storagev1.MemoryConsolidationAbandoned, released.Status)
+		require.Empty(t, released.Input, "a released run keeps no transcripts")
+		requireSameInstant(t, at, cursor(), "the released run's start still holds the cursor")
 
-		p = newProvider(t)
-		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-done", at, at.Add(time.Hour))))
-		_, err = p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
-			TaskUID: "uid-done", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{"done":true}`), CompletedAt: at.Add(time.Hour)})
+		complete("uid-first", at, at.Add(2*time.Hour))
+		complete("uid-kept", at.Add(2*time.Hour), at.Add(3*time.Hour))
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-first"))
+		require.True(t, gone("uid-first"), "a released completed run a later one supersedes is removed")
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-kept"))
+		latest, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-kept")
+		require.NoError(t, err, "the latest completed run holds the cursor, so it is kept")
+		require.Empty(t, latest.Report, "a released run keeps no report")
+		requireSameInstant(t, at.Add(3*time.Hour), cursor(), "the latest completed run's end")
+
+		complete("uid-unreleased", at.Add(3*time.Hour), at.Add(4*time.Hour))
+		complete("uid-last", at.Add(4*time.Hour), at.Add(5*time.Hour))
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-last"))
+		require.True(t, gone("uid-kept"), "the run kept as the cursor goes once a later run supersedes it")
+		unreleased, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-unreleased")
+		require.NoError(t, err, "a run whose Task has not released it is never removed")
+		require.JSONEq(t, `{"run":"uid-unreleased"}`, string(unreleased.Report))
+		requireSameInstant(t, at.Add(5*time.Hour), cursor(), "releasing never moves the cursor")
+
+		other, err := p.GetMemoryConsolidationCursor(ctx, conditionalNamespace, "DryRun")
 		require.NoError(t, err)
-		require.NoError(t, p.AbandonMemoryConsolidationRun(ctx, conditionalNamespace, "uid-done"))
-		finished, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-done")
-		require.NoError(t, err)
-		require.Equal(t, storagev1.MemoryConsolidationCompleted, finished.Status, "a finished run is left unchanged")
-		require.JSONEq(t, `{"done":true}`, string(finished.Report))
+		require.Nil(t, other, "another mode is untouched")
 	})
 
 	t.Run("a running run keeps another from beginning until its lease ends", func(t *testing.T) {

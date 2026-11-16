@@ -588,7 +588,8 @@ func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *tes
 		return true
 	}
 	createTasks := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "create"}
-	readSessions := []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions"), grant("get", "sessions")}
+	sessionsOnly := []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions"), grant("get", "sessions")}
+	readSessions := append(append([]authorizationv1.ResourceAttributes{}, sessionsOnly...), grant("list", "memories"))
 
 	for name, tc := range map[string]struct {
 		mode    string
@@ -596,6 +597,7 @@ func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *tes
 		allowed bool
 	}{
 		"a dry run with only list on sessions": {mode: "DryRun", grants: []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions")}},
+		"a dry run that cannot list memories":  {mode: "DryRun", grants: sessionsOnly},
 		"a dry run that can read sessions":     {mode: "DryRun", grants: readSessions, allowed: true},
 		"a proposing run that cannot propose":  {mode: "Propose", grants: readSessions},
 		"a proposing run": {mode: "Propose", allowed: true,

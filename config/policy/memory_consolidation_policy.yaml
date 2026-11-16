@@ -2,7 +2,7 @@
 # reads the transcripts of every user's Sessions in its namespace and, in
 # Propose mode, creates memory proposals. The live caller that creates such a
 # Task, or changes its spec, must hold those permissions itself: list and get
-# on sessions, and create on memoryproposals for Propose. A scheduled run is
+# on sessions, list on memories, and create on memoryproposals for Propose. A scheduled run is
 # created by the controller from a parent that passed this check.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -30,6 +30,11 @@ spec:
       (authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('list').allowed() &&
       authorizer.group('core.orka.ai').resource('sessions').namespace(request.namespace).check('get').allowed())
     message: caller is not authorized to list and get Sessions, which a memory consolidation run reads
+    reason: Forbidden
+  - expression: >-
+      !variables.checkedRun ||
+      authorizer.group('core.orka.ai').resource('memories').namespace(request.namespace).check('list').allowed()
+    message: caller is not authorized to list memories, which a memory consolidation run reads and reports on
     reason: Forbidden
   - expression: >-
       !variables.checkedRun ||

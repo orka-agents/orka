@@ -1263,6 +1263,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
   - memoryproposals
   verbs:
   - create
@@ -3872,6 +3878,10 @@ spec:
       && authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''get'').allowed())'
     message: caller is not authorized to list and get Sessions, which a memory consolidation
       run reads
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memories, which a memory consolidation
+      run reads and reports on
     reason: Forbidden
   - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
       != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'

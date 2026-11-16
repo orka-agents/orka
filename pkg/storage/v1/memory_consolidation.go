@@ -97,11 +97,14 @@ const (
 //     invalid or duplicate proposal changes nothing. A skipped run creates no
 //     proposals. A finished or abandoned run is returned unchanged and
 //     creates nothing. It returns the stored run.
-//   - AbandonMemoryConsolidationRun marks the running run of a namespace and
-//     TaskUID abandoned and clears its Input, for a Task that ended or was
-//     deleted without finishing its run. Its window is kept, so its mode's
-//     cursor does not move. A finished, abandoned or missing run is left
-//     unchanged. It requires a namespace and a TaskUID.
+//   - ReleaseMemoryConsolidationRun releases the run of a namespace and
+//     TaskUID whose Task ended or is being deleted: a running run becomes
+//     MemoryConsolidationAbandoned, and every run's Input and Report are
+//     cleared. A run the namespace's cursors no longer need is removed, as is
+//     any earlier released run in its mode that a later completed run
+//     supersedes, so released runs keep no transcripts or reports and do not
+//     accumulate; neither mode's cursor moves. A missing run is left alone.
+//     It requires a namespace and a TaskUID.
 //   - GetMemoryConsolidationRun returns the run of a namespace and TaskUID,
 //     or ErrNotFound.
 //   - ListMemoryConsolidationSessions returns the namespace's chat and task
@@ -124,7 +127,7 @@ const (
 type MemoryConsolidationStore interface {
 	BeginMemoryConsolidationRun(ctx context.Context, run *MemoryConsolidationRun) error
 	CompleteMemoryConsolidationRun(ctx context.Context, completion MemoryConsolidationCompletion) (*MemoryConsolidationRun, error)
-	AbandonMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error
+	ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) error
 	GetMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) (*MemoryConsolidationRun, error)
 	GetMemoryConsolidationCursor(ctx context.Context, namespace, mode string) (*time.Time, error)
 	ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]SessionMetadata, int, error)

@@ -63,9 +63,10 @@ func TestMemoryConsolidationPolicy(t *testing.T) {
 		t.Helper()
 		return admitsAgentUse(t, policy, gvk, "tasks", &agentUseGrants{}, object, oldObject, grants)
 	}
-	listOnly := map[string]bool{"list sessions": true}
-	reader := map[string]bool{"list sessions": true, "get sessions": true}
-	proposer := map[string]bool{"list sessions": true, "get sessions": true, "create memoryproposals": true}
+	listOnly := map[string]bool{"list sessions": true, "list memories": true}
+	sessionsOnly := map[string]bool{"list sessions": true, "get sessions": true}
+	reader := map[string]bool{"list sessions": true, "get sessions": true, "list memories": true}
+	proposer := map[string]bool{"list sessions": true, "get sessions": true, "list memories": true, "create memoryproposals": true}
 
 	plain := &consolidationGrants{}
 	require.True(t, admits(plain, task(nil), nil), "an ordinary Task needs no grant")
@@ -74,6 +75,8 @@ func TestMemoryConsolidationPolicy(t *testing.T) {
 	dryRun := map[string]any{}
 	require.True(t, admits(&consolidationGrants{allowed: reader}, task(dryRun), nil), "a dry run needs list and get on sessions")
 	require.False(t, admits(&consolidationGrants{allowed: listOnly}, task(dryRun), nil), "listing Sessions does not grant reading them")
+	require.False(t, admits(&consolidationGrants{allowed: sessionsOnly}, task(dryRun), nil),
+		"a run also reads, and reports on, the namespace's memories")
 	denied := &consolidationGrants{}
 	require.False(t, admits(denied, task(dryRun), nil), "a dry run reads every Session")
 	require.Contains(t, denied.checked, "list sessions")

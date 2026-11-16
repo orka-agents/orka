@@ -29,6 +29,11 @@ spec:
     reason: Forbidden
   - expression: >-
       !variables.checkedRun ||
+      authorizer.group('core.orka.ai').resource('memories').namespace(request.namespace).check('list').allowed()
+    message: caller is not authorized to list memories, which a memory consolidation run reads and reports on
+    reason: Forbidden
+  - expression: >-
+      !variables.checkedRun ||
       object.spec.ai.memoryConsolidation.?mode.orValue('DryRun') != 'Propose' ||
       authorizer.group('core.orka.ai').resource('memoryproposals').namespace(request.namespace).check('create').allowed()
     message: caller is not authorized to create memory proposals, which a Propose memory consolidation run creates

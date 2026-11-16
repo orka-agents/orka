@@ -205,9 +205,11 @@ type TaskReconciler struct {
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
-// The controller creates the scheduled runs of a Propose memory consolidation
-// Task, which the memory consolidation admission policy checks for create on
-// memoryproposals, as it checked the parent's creator.
+// The controller creates the scheduled runs of a memory consolidation Task,
+// which the memory consolidation admission policy checks for list on memories
+// and, in Propose mode, create on memoryproposals, as it checked the parent's
+// creator.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
@@ -852,7 +854,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
-		if err := r.abandonMemoryConsolidationRun(ctx, task); err != nil {
+		if err := r.releaseMemoryConsolidationRun(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.ResultStore != nil {
@@ -2959,7 +2961,7 @@ func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1al
 // Job cleanup included, then cancels what it delegated, and requeues it soon
 // while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
-	if err := r.abandonMemoryConsolidationRun(ctx, task); err != nil {
+	if err := r.releaseMemoryConsolidationRun(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
 	result, err := r.handleCompleted(ctx, task)
@@ -2970,11 +2972,12 @@ func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *c
 	return result, err
 }
 
-// abandonMemoryConsolidationRun abandons the run of a memory consolidation
-// Task that ended or is being deleted without finishing it, which clears the
-// transcripts its run recorded. A finished run is left unchanged, so this is
-// a no-op for a run that completed.
-func (r *TaskReconciler) abandonMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task) error {
+// releaseMemoryConsolidationRun releases the run of a memory consolidation
+// Task that ended or is being deleted. A run it did not finish is abandoned,
+// and every run's recorded transcripts and report are cleared; the store
+// removes runs no cursor needs, so a recurring run's history does not grow
+// the store. Releasing again is a no-op.
+func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task) error {
 	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
 		return nil
 	}
@@ -2982,8 +2985,8 @@ func (r *TaskReconciler) abandonMemoryConsolidationRun(ctx context.Context, task
 	if !ok {
 		return nil
 	}
-	if err := runs.AbandonMemoryConsolidationRun(ctx, task.Namespace, string(task.UID)); err != nil {
-		return fmt.Errorf("abandon memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
+	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID)); err != nil {
+		return fmt.Errorf("release memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
 	}
 	return nil
 }
