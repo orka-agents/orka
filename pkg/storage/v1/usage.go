@@ -159,6 +159,11 @@ type UsageData struct {
 	// HiddenTasks are accounted for only as cumulative-counter baselines. Their
 	// counts and identifiers must not appear in the public report.
 	HiddenTasks map[string]bool
+	// HiddenSessionBaselines names sessions, as namespace/session, whose
+	// counters' first total must not appear in the public report: it may hold
+	// usage of a Task the report cannot see, even one whose row is gone.
+	// Later gains are still attributed.
+	HiddenSessionBaselines map[string]bool
 }
 
 // UsageStore is independent of task/transcript cleanup. Implementations must

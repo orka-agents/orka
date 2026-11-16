@@ -403,6 +403,49 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 // A session's usage counter spans its turns, and the report shows the first
 // total it sees as the session's earlier usage. A turn hidden from a person
 // must not reach them through a visible turn that shares its counter.
+// A session's first total may hold an earlier turn's usage that the person
+// may not see. When retention has removed that turn's row, and it reported
+// nothing of its own, nothing shows the total is not theirs: it is not shown,
+// and only later gains are credited to their turn.
+func TestAHPUsageCounterShowsNoTotalAPrunedTurnMayHold(t *testing.T) {
+	const namespace = "default"
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	tokens := func(n int64) *int64 { return &n }
+	observe := func(id string, at time.Time, in int64) store.UsageObservation {
+		return store.UsageObservation{ID: id, Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", SessionName: "ahp-shared",
+			CounterID: "session", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted,
+			ObservedAt: at, InputTokens: tokens(in), OutputTokens: tokens(7)}
+	}
+	data := store.UsageData{
+		// The earlier turn's row is gone, and it reported nothing of its own.
+		Tasks: []store.UsageTask{{Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", TaskName: "alices-turn",
+			SessionName: "ahp-shared", Phase: "Succeeded", Runtime: "agent", StartedAt: start,
+			Requester: &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}}},
+		Observations: []store.UsageObservation{observe("first", start.Add(time.Minute), 4242), observe("later", start.Add(2*time.Minute), 4300)},
+	}
+	filter := store.UsageFilter{Namespaces: []string{namespace}, NamespaceUIDs: map[string]string{namespace: "namespace-uid"},
+		From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)}
+	app := fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &data, filter.AsOf)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), "alices-turn")
+	require.NotContains(t, string(encoded), "4242", "the first total, which may hold another person's usage, is not shown")
+	require.Contains(t, string(encoded), `"inputTokens":58`, "the later gain is the turn's")
+}
+
 func TestAHPUsageCounterDoesNotShowAHiddenTurn(t *testing.T) {
 	const namespace = "default"
 	scheme := runtime.NewScheme()

@@ -323,9 +323,25 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		if err := h.addHiddenAHPSessionTasks(c, ui, data, persisted, asOf, usageMaxRecords-loaded); err != nil {
 			return err
 		}
+		hideAHPSessionBaselines(data)
 	}
 	data.Works = slices.DeleteFunc(data.Works, func(work store.UsageWorkRequest) bool { return hiddenWorks[work.ID] })
 	return nil
+}
+
+// hideAHPSessionBaselines hides the first total of each AHP session's
+// counters from a person's report. It may hold the usage of an earlier turn
+// the person may not see, also once retention removed that turn's row, and
+// then nothing would show it is not theirs.
+func hideAHPSessionBaselines(data *store.UsageData) {
+	for _, observation := range data.Observations {
+		if session, ahp := ahpSessionName(observation.SessionName); ahp && observation.Scope == store.UsageScopeSession {
+			if data.HiddenSessionBaselines == nil {
+				data.HiddenSessionBaselines = map[string]bool{}
+			}
+			data.HiddenSessionBaselines[observation.Namespace+"/"+session] = true
+		}
+	}
 }
 
 // ahpObservedTasks returns the Tasks whose usage names an AHP session. A
