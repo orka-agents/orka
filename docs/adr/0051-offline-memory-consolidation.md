@@ -190,8 +190,10 @@ creates; a run that proposes one cites the Sessions it drew on.
   IDs and the counts. Anyone who can read a Task can read its result, and a report's text is
   drawn from everyone's Sessions and from memories, so the full report is served by
   `GET /api/v1/tasks/:id/memory-consolidation-report`, which also requires `list` and `get`
-  on `sessions` and `list` on `memories`, while the Task exists. A rejection's reason never
-  repeats a value the model supplied, only memories the run read.
+  on `sessions` and `list` on `memories`, while the Task exists. A rejection's reason is
+  Orka's own fixed text with counts and limits: it never quotes memory or transcript text
+  or a value the model supplied, and names a memory only by the ID of one the run read,
+  as the operation's targets do.
 
 ## Consequences
 
