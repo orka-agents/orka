@@ -63,6 +63,10 @@ const (
 	// reconciles share one worker, so, as for the terminal notice, a slow
 	// receiver holds it for at most one request per pass.
 	approvalWebhookAttemptsPerPass = 1
+	// approvalWebhookSettledRequeue requeues a Task promptly after its last
+	// pending approval notice settled, so the phase work that ran before the
+	// attempt, such as parent history enforcement, runs again.
+	approvalWebhookSettledRequeue = time.Second
 	// approvalWebhookReadRetry paces retries after an event store failure.
 	approvalWebhookReadRetry = 30 * time.Second
 	// approvalExpiryGrace lets the broker, which owns a live review, record
@@ -464,12 +468,14 @@ func approvalExpiryEvent(task *corev1alpha1.Task, listed []store.ExecutionEvent,
 	}, nil
 }
 
-// reconcileApprovalNotices projects the Task's approval events into notices
-// and advances their delivery. It returns how long to wait before calling
-// again (zero when nothing is pending). An event store failure never blocks
-// the Task: it is logged and retried later, while recorded notices are still
-// delivered.
-func (w *WebhookNotifier) reconcileApprovalNotices(
+// prepareApprovalNotices projects the Task's approval events into notices
+// and records them, with any due expiry, before the Task's phase work. It
+// sends nothing: sendApprovalNotices does that after the phase work, so a
+// slow receiver never delays the Task. It returns how long to wait before
+// projecting again (zero when nothing is due). An event store failure never
+// blocks the Task: it is logged and retried later, while recorded notices are
+// still delivered.
+func (w *WebhookNotifier) prepareApprovalNotices(
 	ctx context.Context,
 	status taskStatusWriter,
 	eventStore store.ExecutionEventStore,
@@ -486,35 +492,38 @@ func (w *WebhookNotifier) reconcileApprovalNotices(
 				return 0, err
 			}
 		}
-		if firstPendingApprovalNotice(task.Status.ApprovalWebhooks) < 0 {
-			return 0, nil
-		}
+		return 0, nil
 	}
-	log := logf.FromContext(ctx)
-	requeue := time.Duration(0)
-	if len(selected) > 0 && eventStore != nil && task.UID != "" {
-		// Projection decides overflow irreversibly, so notices whose wait for
-		// signing keys has ended must free their slots first.
-		if err := w.retireUnsignableApprovalNotices(ctx, status, task); err != nil {
-			return 0, err
-		}
-		projected, err := w.projectTaskApprovalEvents(ctx, eventStore, task, selected)
-		switch {
-		case err != nil:
-			log.Error(err, "failed to project approval webhook notices")
-			requeue = approvalWebhookReadRetry
-		case projected.changed:
-			if err := status.Update(ctx, task); err != nil {
-				return 0, err
-			}
-		}
-		requeue = minPositiveDuration(requeue, projected.nextExpiry)
+	if eventStore == nil || task.UID == "" {
+		return 0, nil
 	}
-	delivery, err := w.deliverApprovalNotices(ctx, status, task, selected)
-	if err != nil {
+	// Projection decides overflow irreversibly, so notices whose wait for
+	// signing keys has ended must free their slots first.
+	if err := w.retireUnsignableApprovalNotices(ctx, status, task); err != nil {
 		return 0, err
 	}
-	return minPositiveDuration(requeue, delivery), nil
+	requeue := time.Duration(0)
+	projected, err := w.projectTaskApprovalEvents(ctx, eventStore, task, selected)
+	switch {
+	case err != nil:
+		logf.FromContext(ctx).Error(err, "failed to project approval webhook notices")
+		requeue = approvalWebhookReadRetry
+	case projected.changed:
+		if err := status.Update(ctx, task); err != nil {
+			return 0, err
+		}
+	}
+	return minPositiveDuration(requeue, projected.nextExpiry), nil
+}
+
+// sendApprovalNotices advances the delivery of the Task's recorded approval
+// notices, retiring those whose event is no longer selected. It returns how
+// long to wait before the next attempt (zero when nothing is pending).
+func (w *WebhookNotifier) sendApprovalNotices(ctx context.Context, status taskStatusWriter, task *corev1alpha1.Task) (time.Duration, error) {
+	if firstPendingApprovalNotice(task.Status.ApprovalWebhooks) < 0 {
+		return 0, nil
+	}
+	return w.deliverApprovalNotices(ctx, status, task, selectedApprovalWebhookEvents(task))
 }
 
 type approvalProjection struct {

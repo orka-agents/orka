@@ -123,6 +123,25 @@ func (h *approvalWebhookHarness) notifier() *WebhookNotifier {
 	return notifier
 }
 
+// reconcileApprovalNotices runs one approval pass with no phase work between
+// recording notices and sending them, as the Task reconciler does around it.
+func (w *WebhookNotifier) reconcileApprovalNotices(
+	ctx context.Context,
+	status taskStatusWriter,
+	eventStore store.ExecutionEventStore,
+	task *corev1alpha1.Task,
+) (time.Duration, error) {
+	prepared, err := w.prepareApprovalNotices(ctx, status, eventStore, task)
+	if err != nil {
+		return 0, err
+	}
+	sent, err := w.sendApprovalNotices(ctx, status, task)
+	if err != nil {
+		return 0, err
+	}
+	return minPositiveDuration(prepared, sent), nil
+}
+
 // reconcile runs one approval pass for the stored Task.
 func (h *approvalWebhookHarness) reconcile() time.Duration {
 	h.t.Helper()

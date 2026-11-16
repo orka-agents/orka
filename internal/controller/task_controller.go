@@ -456,14 +456,36 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Opt-in approval notices (ADR 0053) follow the approval events in every
-	// phase, including after a parked turn Succeeded while its sign-off is
-	// still decidable. They never hold back the Task's own progress.
-	approvalRequeue, err := r.reconcileApprovalWebhooks(ctx, task)
+	return r.reconcileTaskPhaseAndApprovalNotices(ctx, task)
+}
+
+// reconcileTaskPhaseAndApprovalNotices runs the Task's phase work between
+// recording and sending its opt-in approval notices (ADR 0053). Notices
+// follow the approval events in every phase, including after a parked turn
+// Succeeded while its sign-off is still decidable, and never hold back the
+// Task's own progress: new notices are recorded in status before the phase
+// work, which the history hold and expiry recording rely on, and are sent
+// only after it, even when it failed, so a slow or unreachable receiver
+// cannot delay scheduling, monitoring or finalization. The Task requeues for
+// the earlier of the phase's requeue and the notices' next attempt.
+func (r *TaskReconciler) reconcileTaskPhaseAndApprovalNotices(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	approvalRequeue, err := r.prepareApprovalWebhooks(ctx, task)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	approvalsPending := firstPendingApprovalNotice(task.Status.ApprovalWebhooks) >= 0
 	result, err := r.reconcileTaskPhase(ctx, task)
+	if approvalsPending {
+		deliveryRequeue, deliveryErr := r.sendApprovalWebhooks(ctx, task)
+		switch {
+		case deliveryErr == nil:
+			approvalRequeue = minPositiveDuration(approvalRequeue, deliveryRequeue)
+		case err == nil:
+			err = deliveryErr
+		default:
+			logf.FromContext(ctx).Error(deliveryErr, "failed to advance approval webhook delivery")
+		}
+	}
 	if approvalRequeue > 0 && (result.RequeueAfter == 0 || approvalRequeue < result.RequeueAfter) {
 		result.RequeueAfter = approvalRequeue
 	}
@@ -487,12 +509,44 @@ func (r *TaskReconciler) reconcileTaskPhase(ctx context.Context, task *corev1alp
 	return ctrl.Result{}, nil
 }
 
-// reconcileApprovalWebhooks advances the Task's opt-in approval notices.
-func (r *TaskReconciler) reconcileApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
+// prepareApprovalWebhooks records the Task's new opt-in approval notices.
+func (r *TaskReconciler) prepareApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
 	if r.WebhookNotifier == nil {
 		return 0, nil
 	}
-	return r.WebhookNotifier.reconcileApprovalNotices(ctx, r.Status(), r.ExecutionEventStore, task)
+	return r.WebhookNotifier.prepareApprovalNotices(ctx, r.Status(), r.ExecutionEventStore, task)
+}
+
+// sendApprovalWebhooks attempts the Task's next pending approval notice once
+// its phase work is done. The phase work may have left task stale, or
+// changed in memory without persisting the change, so delivery runs against
+// an uncached read and never writes those changes. A Task that is gone,
+// replaced or being deleted drops its notices. When the attempt settles the
+// last pending notice, the Task is requeued promptly: its phase work then
+// runs again, and a finished scheduled run reaches its parent's history
+// enforcement, which held the run while the notice was pending.
+func (r *TaskReconciler) sendApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
+	if r.WebhookNotifier == nil {
+		return 0, nil
+	}
+	current := &corev1alpha1.Task{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if current.UID != task.UID || !current.DeletionTimestamp.IsZero() {
+		return 0, nil
+	}
+	requeue, err := r.WebhookNotifier.sendApprovalNotices(ctx, r.Status(), current)
+	if err != nil {
+		return 0, err
+	}
+	if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) < 0 {
+		return approvalWebhookSettledRequeue, nil
+	}
+	return requeue, nil
 }
 
 // projectACPTaskAdmissionStatus projects the execution workspace status and
@@ -4355,8 +4409,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 
 	// A run beyond the limit stays while its chain has a pending approval
 	// notice. It still counts, so no newer run is pruned in its place. The
-	// reconcile of the Task whose last notice settles reaches this again
-	// through enforceParentScheduledTaskHistory and prunes it then.
+	// attempt that settles the Task's last notice requeues it, and that
+	// reconcile reaches this again through enforceParentScheduledTaskHistory
+	// and prunes it then.
 	for i := 0; i < len(succeeded)-int(successLimit); i++ {
 		if r.approvalNoticesHoldRun(ctx, succeeded[i]) {
 			continue

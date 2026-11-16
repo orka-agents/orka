@@ -147,6 +147,12 @@ stream order: a notice waits until every earlier one has settled. That puts a
 resolution after its request unless the request's notice failed. One attempt
 runs per reconcile, as for the terminal notice. Task reconciles share one
 worker, so a slow receiver holds it no longer than a terminal notice does.
+Projection runs before the Task's phase work, which the expiry recording and
+the history hold rely on; the attempt runs after it, even when the phase work
+failed, against an uncached read of the Task. A slow or unreachable receiver
+therefore never delays the Task's own scheduling, monitoring or finalization.
+The reconcile requeues for the earlier of the phase's requeue and the head
+notice's next attempt.
 
 **Retry cap.** Five attempts at 10, 20, 40 and 60 seconds settle within about
 three minutes, against eight attempts capped at 15 minutes for terminal
@@ -198,8 +204,9 @@ alone, as `successfulRunsHistoryLimit: 0` did, lost the resolution. The check
 reads the run's head and follows its verified continuation links with
 uncached reads, bounded by the chain limit, and keeps the run when any read
 fails. A held run still counts toward the limit, so no newer run is pruned in
-its place. Retention is retried without polling: the reconcile of the Task
-whose last notice settles reaches its parent's history enforcement again. The
+its place. Retention is retried without polling: the attempt that settles a
+Task's last pending notice requeues the Task promptly, and that reconcile
+reaches its parent's history enforcement again. The
 hold is bounded, since a pending approval notice settles within its retry
 window or signing deadline. Terminal notices do not hold back parent-triggered
 pruning: the finished run already prunes only after its own terminal notice
