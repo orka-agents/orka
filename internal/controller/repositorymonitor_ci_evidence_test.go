@@ -319,7 +319,7 @@ func TestRepositoryMonitorCIRepairPromptDegradesWhenGitHubFails(t *testing.T) {
 	} {
 		t.Run(tc.wantReason+"/"+tc.wantAvailability, func(t *testing.T) {
 			reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, &repositoryMonitorRepairLabelsGitHub{checkRunFailure: tc.status}, "ci-evidence-degrade")
-			prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}, &store.MonitorItem{})
+			prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}, &store.MonitorItem{})
 			if err != nil {
 				t.Fatalf("a failed CI lookup failed the repair prompt: %v", err)
 			}
