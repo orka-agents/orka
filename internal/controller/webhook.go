@@ -294,6 +294,11 @@ type WebhookNotifier struct {
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	attemptLease   time.Duration
+
+	// Approval notices (ADR 0051) share the initial backoff and lease but
+	// have a shorter bound.
+	approvalMaxAttempts int32
+	approvalMaxBackoff  time.Duration
 }
 
 const (
@@ -324,6 +329,9 @@ func newWebhookNotifier(dialer *taskwebhook.Dialer) *WebhookNotifier {
 		initialBackoff: defaultWebhookInitialBackoff,
 		maxBackoff:     defaultWebhookMaxBackoff,
 		attemptLease:   defaultWebhookAttemptLease,
+
+		approvalMaxAttempts: defaultApprovalWebhookMaxAttempts,
+		approvalMaxBackoff:  defaultApprovalWebhookMaxBackoff,
 	}
 }
 
@@ -338,12 +346,18 @@ func (w *WebhookNotifier) SetKeySource(keys taskwebhook.KeySource) {
 	w.keys = keys
 }
 
+// backoff is the terminal notice's delay after its attempts-th failure.
 func (w *WebhookNotifier) backoff(attempts int32) time.Duration {
+	return w.backoffUpTo(attempts, w.maxBackoff)
+}
+
+// backoffUpTo doubles the initial backoff per failed attempt, up to maxBackoff.
+func (w *WebhookNotifier) backoffUpTo(attempts int32, maxBackoff time.Duration) time.Duration {
 	delay := w.initialBackoff
-	for i := int32(1); i < attempts && delay < w.maxBackoff; i++ {
+	for i := int32(1); i < attempts && delay < maxBackoff; i++ {
 		delay *= 2
 	}
-	return min(delay, w.maxBackoff)
+	return min(delay, maxBackoff)
 }
 
 // webhookAttemptResult is the sanitized outcome of one attempt.

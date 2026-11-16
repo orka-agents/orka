@@ -1,6 +1,6 @@
 ---
 sidebar_label: Task webhooks
-description: "Signed, durable completion webhooks for Orka Tasks, and how a receiver verifies them."
+description: "Signed, durable completion and approval webhooks for Orka Tasks, and how a receiver verifies them."
 ---
 
 # Task webhooks
@@ -10,7 +10,8 @@ Task reaches a terminal phase (`Succeeded`, `Failed`, or `Cancelled`). A
 [parked agent turn](#parked-agent-turns) reports when its work ends instead. Every
 notice is signed with an Ed25519 key. Delivery is durable across controller
 restarts, retried with bounded backoff, and limited to destinations that are
-safe for a controller to call.
+safe for a controller to call. A Task can also opt into
+[approval notices](#approval-events).
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -70,9 +71,17 @@ X-Orka-Signature: eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiIsInR5cCI6IkpXVCJ9...
  "attempts":1,"resultRef":{"available":true}}
 ```
 
-`eventType` is `task.succeeded`, `task.failed`, or `task.cancelled`. Every
-attempt of one delivery sends a byte-identical body under the same delivery
-ID; only `X-Orka-Delivery-Attempt` and the signature change.
+`eventType` is one of:
+
+| Event | Sent | Body |
+| --- | --- | --- |
+| `task.succeeded`, `task.failed`, `task.cancelled` | Always, once the Task's outcome is known | Terminal body above |
+| `task.approval_requested` | When selected in `spec.webhookEvents` | [Approval body](#approval-events) |
+| `task.approval_resolved` | When selected in `spec.webhookEvents` | [Approval body](#approval-events) |
+| `task.approval_overflow` | When any approval event is selected and the queue overflows | [Approval body](#approval-events) |
+
+Every attempt of one delivery sends a byte-identical body under the same
+delivery ID; only `X-Orka-Delivery-Attempt` and the signature change.
 
 For a parked agent turn, `eventType` reports the outcome of the work, which can differ
 from the Task's own `phase`; see [Parked agent turns](#parked-agent-turns).
@@ -201,6 +210,107 @@ As with any Task, deleting the parked Task or its continuation drops its pending
 notice. A notice that an earlier controller version left pending for a parked Task is
 never sent as `task.succeeded`: it is superseded when the wait ends without resuming,
 and marked `Failed` without being sent when the wait resumed.
+
+## Approval events
+
+List approval events in `spec.webhookEvents` to be told when the Task asks a
+person to approve something and how that ended. Terminal notices are always
+sent and cannot be listed or turned off; leaving `webhookEvents` empty or
+absent keeps terminal notices only. A Task with `webhookEvents` must set
+`webhookURL`. Continuations of a parked turn copy both fields.
+
+```yaml
+spec:
+  webhookURL: https://hooks.example.com/orka
+  webhookEvents:
+    - task.approval_requested
+    - task.approval_resolved
+```
+
+The approvals come from the approval gate, `request_approval`, brokered ACP tool
+calls, and [parked sign-offs](parking-agent-turns.md). A runtime's own
+permission prompt, which Orka answers from policy, is not an approval and sends
+nothing.
+
+Approval notices use the same signing, headers, destination rules and leases
+as terminal notices. The JWS `event` claim is the approval event. The body is
+different and versioned:
+
+```json
+{"schemaVersion":"orka.ai/task-approval-webhook/v1",
+ "deliveryId":"2b7c...","eventType":"task.approval_resolved","occurredAt":"2026-11-16T09:01:30Z",
+ "taskUID":"0b9e0f43-...","taskName":"release","taskNamespace":"team-a","streamSeq":42,
+ "approvalId":"acp-tool-approval-v2:sha256:...","targetTool":"github.create_pr","severity":"warning",
+ "expiresAt":"2026-11-16T09:10:00Z","resolution":"approved","parked":false}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | `orka.ai/task-approval-webhook/v1`. Reject versions you do not know. |
+| `deliveryId` | Deterministic per approval and transition, so a restarted controller sends the same ID. |
+| `occurredAt` | When the transition was recorded: the request, or the decision, expiry or cancellation. |
+| `streamSeq` | Position of that transition in the Task's approval history; order notices of one Task by it. |
+| `approvalId` | The approval to look up in `GET /api/v1/tasks/{task}/approvals`. Absent on `task.approval_overflow`. |
+| `targetTool`, `severity` | The gated tool and severity label, when the approval has them. |
+| `expiresAt` | Present only when the approval really expires then: brokered ACP reviews and parked sign-offs. |
+| `resolution` | On `task.approval_resolved`: `approved`, `declined`, `expired`, or `cancelled`. |
+| `parked` | `true` for a parked turn's sign-off. |
+
+A notice never carries the argument preview, the action or risk text, the
+reviewer's reason or identity, or any digest. Fetch details from the approvals
+API, which checks the caller's access.
+
+How approvals reach a receiver:
+
+- **Requested** is sent once per approval. **Resolved** is sent once, for the
+  first decision. A brokered review that passes its `expiresAt` resolves as
+  `expired` once the controller records it, a few seconds after the deadline.
+  An approval gate request that is still pending when its Task ends gets no
+  resolved notice, because nothing resolves it. A parked sign-off stays open
+  after its turn `Succeeded`, so its resolution arrives while the parked Task
+  is finished.
+- Notices of one Task are sent in `streamSeq` order, each after the previous
+  one settles. A request whose notice failed does not hold back its resolution.
+- An approval notice gets **5 attempts**, retried after 10s, 20s, 40s and 60s,
+  so it settles within about three minutes. Review windows are short, and a
+  late alert is of little use.
+- Selecting an event later does not replay older transitions. Removing one,
+  where the spec can still change, retires its pending notices unsent.
+- A Task with the same name as an earlier one never receives the earlier Task's
+  approvals.
+
+Receivers should:
+
+1. Verify the signature exactly as for terminal notices.
+2. Deduplicate on `deliveryId`. Delivery is at-least-once, not exactly-once.
+3. Order by `streamSeq`, and tolerate gaps and a resolution without its request.
+4. Treat a notice as an alert, never as authority: decide through the approvals
+   API, which revalidates the approval.
+
+Status records the queue and its cursor:
+
+```yaml
+status:
+  approvalWebhooks:
+    projectedSeq: 42
+    notices:
+      - deliveryID: 2b7c...
+        eventType: task.approval_resolved
+        transition: Resolved
+        approvalID: acp-tool-approval-v2:sha256:...
+        resolution: approved
+        streamSeq: 42
+        state: Delivered      # Pending, Delivered, or Failed
+        attempts: 1
+```
+
+The queue holds at most 16 notices. Delivered and failed notices are pruned,
+oldest first, to make room; a pending notice is never dropped. If 15 notices
+are pending at once, the controller records one `task.approval_overflow` notice
+whose `streamSeq` is the first transition it did not notify, sets
+`overflowed: true`, and notifies no later transition for that Task. `omitted`
+counts the transitions it skipped. Read the approvals API after an overflow
+notice.
 
 ## Signing keys and rotation
 

@@ -455,7 +455,22 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Handle based on current phase
+	// Opt-in approval notices (ADR 0051) follow the approval events in every
+	// phase, including after a parked turn Succeeded while its sign-off is
+	// still decidable. They never hold back the Task's own progress.
+	approvalRequeue, err := r.reconcileApprovalWebhooks(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err := r.reconcileTaskPhase(ctx, task)
+	if approvalRequeue > 0 && (result.RequeueAfter == 0 || approvalRequeue < result.RequeueAfter) {
+		result.RequeueAfter = approvalRequeue
+	}
+	return result, err
+}
+
+// reconcileTaskPhase dispatches to the handler of the Task's current phase.
+func (r *TaskReconciler) reconcileTaskPhase(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhasePending:
 		return r.handlePending(ctx, task)
@@ -468,8 +483,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompletedThenCascade(ctx, task)
 	}
-
 	return ctrl.Result{}, nil
+}
+
+// reconcileApprovalWebhooks advances the Task's opt-in approval notices.
+func (r *TaskReconciler) reconcileApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
+	if r.WebhookNotifier == nil {
+		return 0, nil
+	}
+	return r.WebhookNotifier.reconcileApprovalNotices(ctx, r.Status(), r.ExecutionEventStore, task)
 }
 
 // projectACPTaskAdmissionStatus projects the execution workspace status and
