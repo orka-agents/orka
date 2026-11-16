@@ -182,6 +182,15 @@ var memoryRecallSlots = make(chan struct{}, 16)
 // or reused once it returns. Counting is best effort, so a count that fails,
 // or finds no free slot, is logged and dropped.
 func RecordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
+	RecordAuthorizedMemoryRecall(ctx, nil, recorder, namespace, memories)
+}
+
+// RecordAuthorizedMemoryRecall is RecordMemoryRecall for a recall that counts
+// only when authorize allows it. Authorize runs in the background before the
+// count, on the count's context, so checking the caller never delays the
+// recall either.
+func RecordAuthorizedMemoryRecall(ctx context.Context, authorize func(context.Context) bool, recorder MemoryRecallRecorder,
+	namespace string, memories []store.Memory) {
 	if recorder == nil || len(memories) == 0 {
 		return
 	}
@@ -206,6 +215,9 @@ func RecordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, name
 		defer func() { <-memoryRecallSlots }()
 		ctx, cancel := context.WithTimeout(countCtx, timeout)
 		defer cancel()
+		if authorize != nil && !authorize(ctx) {
+			return
+		}
 		if err := recorder.RecordMemoryRecall(ctx, recall); err != nil {
 			logger.Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
 		}

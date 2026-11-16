@@ -284,3 +284,26 @@ func (g *gatedMemoryRecalls) RecordMemoryRecall(context.Context, store.MemoryRec
 	<-g.release
 	return nil
 }
+
+func TestRecordAuthorizedMemoryRecallChecksInTheBackground(t *testing.T) {
+	require.Eventually(t, func() bool { return len(memoryRecallSlots) == 0 }, 5*time.Second, 5*time.Millisecond)
+	for name, allowed := range map[string]bool{"allowed": true, "refused": false} {
+		t.Run(name, func(t *testing.T) {
+			memories := &recordingMemoryRecalls{}
+			release := make(chan struct{})
+			started := time.Now()
+			RecordAuthorizedMemoryRecall(context.Background(), func(context.Context) bool {
+				<-release
+				return allowed
+			}, memories, "test-ns", []store.Memory{{ID: "mem-a"}})
+			require.Less(t, time.Since(started), time.Second, "a slow caller check never delays the recall")
+			close(release)
+			require.Eventually(t, func() bool { return len(memoryRecallSlots) == 0 }, 5*time.Second, 5*time.Millisecond)
+			if allowed {
+				require.Len(t, memories.recorded(), 1)
+			} else {
+				require.Empty(t, memories.recorded(), "a refused caller's recall is not counted")
+			}
+		})
+	}
+}

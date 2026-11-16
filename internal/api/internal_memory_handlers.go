@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
+
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -59,10 +61,16 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	// An agent's recall_memory call counts the memories it returned; a
 	// prompt's memory context and operator listings do not. Any ServiceAccount
 	// in the namespace can list here, so only the verified worker of an active
-	// Task can mark a listing as a recall.
+	// Task can mark a listing as a recall. The check reads Kubernetes, so it
+	// runs with the count, after the response, on a copy of the caller.
 	if c.Query(tools.MemoryListPurposeParam, "") == tools.MemoryListPurposeRecall && len(memories) > 0 {
-		if _, err := h.internalCallerAuthorizer().resolveActiveTaskCaller(c, namespace); err == nil {
-			tools.RecordMemoryRecall(c.Context(), h.memoryStore, namespace, memories)
+		if caller := GetUserInfo(c); caller != nil {
+			callerCopy := *caller
+			authorizer := h.internalCallerAuthorizer()
+			tools.RecordAuthorizedMemoryRecall(c.Context(), func(ctx context.Context) bool {
+				task, err := authorizer.resolveTaskWorker(ctx, &callerCopy, namespace)
+				return err == nil && activeInternalWorkerTask(task)
+			}, h.memoryStore, namespace, memories)
 		}
 	}
 	return c.JSON(memories)
