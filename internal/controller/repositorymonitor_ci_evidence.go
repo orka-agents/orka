@@ -46,12 +46,13 @@ const (
 	repositoryMonitorEvidenceKindCommitStatus = "commit_status"
 
 	// Reasons that are not a GitHub error class.
-	repositoryMonitorEvidenceReasonIncomplete        = "ci_checks_incomplete"
-	repositoryMonitorEvidenceReasonAnnotationLimit   = "annotation_fetch_limit"
-	repositoryMonitorEvidenceReasonAfterRateLimit    = "skipped_after_rate_limit"
-	repositoryMonitorEvidenceReasonEvidenceBudget    = "evidence_budget_exhausted"
-	repositoryMonitorEvidenceReasonHeadMismatch      = "check_head_sha_mismatch"
-	repositoryMonitorEvidenceReasonCredentialMissing = "credential_unavailable"
+	repositoryMonitorEvidenceReasonIncomplete         = "ci_checks_incomplete"
+	repositoryMonitorEvidenceReasonAnnotationLimit    = "annotation_fetch_limit"
+	repositoryMonitorEvidenceReasonAfterRateLimit     = "skipped_after_rate_limit"
+	repositoryMonitorEvidenceReasonEvidenceBudget     = "evidence_budget_exhausted"
+	repositoryMonitorEvidenceReasonHeadMismatch       = "check_head_sha_mismatch"
+	repositoryMonitorEvidenceReasonCredentialMissing  = "credential_unavailable"
+	repositoryMonitorEvidenceReasonGraphQLRateLimited = "graphql_rate_limited"
 
 	// Evidence bounds. Text limits are UTF-8 bytes after sanitizing; encoded
 	// limits are bytes of the entry's JSON encoding.
@@ -495,6 +496,9 @@ func repositoryMonitorEvidenceErrorAvailability(err error) (string, string) {
 	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusTooManyRequests ||
 		apiErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(apiErr.Body)) {
 		return repositoryMonitorEvidenceRateLimited, repositoryMonitorReviewContextErrorClass(err)
+	}
+	if graphQLErr, ok := errors.AsType[*repositoryMonitorGraphQLError](err); ok && graphQLErr.rateLimited() {
+		return repositoryMonitorEvidenceRateLimited, repositoryMonitorEvidenceReasonGraphQLRateLimited
 	}
 	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
 		return repositoryMonitorEvidenceUnavailable, repositoryMonitorEvidenceReasonIncomplete

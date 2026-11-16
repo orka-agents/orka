@@ -364,6 +364,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubGraphQL(ctx context
 	var decoded struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
+			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
@@ -371,9 +372,26 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubGraphQL(ctx context
 		return fmt.Errorf("failed to parse GitHub GraphQL response: %w", err)
 	}
 	if len(decoded.Errors) > 0 {
-		return fmt.Errorf("GitHub GraphQL error: %s", decoded.Errors[0].Message)
+		return &repositoryMonitorGraphQLError{Type: decoded.Errors[0].Type, Message: decoded.Errors[0].Message}
 	}
 	return json.Unmarshal(decoded.Data, out)
+}
+
+// repositoryMonitorGraphQLError is the first error a GitHub GraphQL response
+// reported. GitHub answers a rate-limited GraphQL request with HTTP 200 and
+// an error of type RATE_LIMITED.
+type repositoryMonitorGraphQLError struct {
+	Type    string
+	Message string
+}
+
+func (e *repositoryMonitorGraphQLError) Error() string {
+	return "GitHub GraphQL error: " + e.Message
+}
+
+// rateLimited reports whether GitHub refused the operation for a rate limit.
+func (e *repositoryMonitorGraphQLError) rateLimited() bool {
+	return strings.EqualFold(strings.TrimSpace(e.Type), "RATE_LIMITED") || repositoryMonitorGitHubErrorLooksRateLimited(e.Message)
 }
 
 func repositoryMonitorGitHubBaseURL(r *RepositoryMonitorReconciler) string {

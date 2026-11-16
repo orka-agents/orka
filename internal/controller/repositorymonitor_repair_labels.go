@@ -270,8 +270,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 // repositoryMonitorRepairActorPermissionAllowed mirrors the permission check
 // for GitHub label commands.
 func repositoryMonitorRepairActorPermissionAllowed(spec corev1alpha1.RepositoryMonitorSpec, permission string) bool {
+	return repositoryMonitorPermissionMeets(spec.Triggers.GitHub.Labels.RequireActorPermission, spec.Policy.AllowedRepositoryPermissions, permission)
+}
+
+// repositoryMonitorPermissionMeets reports whether permission is at least
+// minimum (write, maintain, or admin; anything else means write) and, when
+// policy is set, listed in it.
+func repositoryMonitorPermissionMeets(minimum string, policy []string, permission string) bool {
 	allowed := []string{"write", githubPermissionMaintain, githubPermissionAdmin}
-	switch strings.ToLower(strings.TrimSpace(spec.Triggers.GitHub.Labels.RequireActorPermission)) {
+	switch strings.ToLower(strings.TrimSpace(minimum)) {
 	case githubPermissionAdmin:
 		allowed = []string{githubPermissionAdmin}
 	case githubPermissionMaintain:
@@ -280,7 +287,6 @@ func repositoryMonitorRepairActorPermissionAllowed(spec corev1alpha1.RepositoryM
 	if !repositoryMonitorPermissionListed(allowed, permission) {
 		return false
 	}
-	policy := spec.Policy.AllowedRepositoryPermissions
 	return len(policy) == 0 || repositoryMonitorPermissionListed(policy, permission)
 }
 
