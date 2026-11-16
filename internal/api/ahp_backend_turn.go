@@ -461,6 +461,11 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 	events := sub.C()
 	ticker := time.NewTicker(ahpTurnPollInterval)
 	defer ticker.Stop()
+	// Events are followed only once the Task they must come from is known;
+	// until then they wait in the subscription.
+	if !t.knowTaskUID(ticker.C) {
+		return
+	}
 	for {
 		select {
 		case event, ok := <-events:
@@ -499,6 +504,41 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 	}
 }
 
+// knowTaskUID makes sure the turn knows its Task's UID before it follows any
+// event: a turn recovered from a record without one, whose Task could not be
+// read then, reads it again at each tick. It reports false when the turn ended.
+func (t *ahpTurn) knowTaskUID(ticks <-chan time.Time) bool {
+	for {
+		t.mu.Lock()
+		known := t.taskUID != ""
+		t.mu.Unlock()
+		if known {
+			return true
+		}
+		task := &corev1alpha1.Task{}
+		err := t.b.h.client.Get(t.ctx, types.NamespacedName{Namespace: t.session.Namespace, Name: t.task}, task)
+		uid := ""
+		switch {
+		case err == nil && task.UID != "":
+			uid = string(task.UID)
+		case apierrors.IsNotFound(err):
+			uid = ahpTaskGoneUID
+		}
+		if uid != "" {
+			t.mu.Lock()
+			t.taskUID = uid
+			t.mu.Unlock()
+			t.recordTaskUID(t.ctx, uid)
+			return true
+		}
+		select {
+		case <-ticks:
+		case <-t.ctx.Done():
+			return false
+		}
+	}
+}
+
 // ownsTask reports whether task is the turn's Task, not one created later
 // under its name. A turn whose Task UID is still unknown, as a recovered one
 // whose Task could not be read, takes the UID of the Task it first finds and
@@ -518,7 +558,8 @@ func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 
 // ahpTaskGoneUID stands for the UID of a turn's Task that was already gone
 // when the turn was recovered. No Task has it, so none created later under the
-// Task's name is taken for the turn's.
+// Task's name is taken for the turn's. It is recorded as the Task's UID, so a
+// later recovery knows the Task was gone too.
 const ahpTaskGoneUID = "\x00gone"
 
 // recordTaskUID keeps the UID of the turn's Task in its session's record, if
@@ -526,7 +567,7 @@ const ahpTaskGoneUID = "\x00gone"
 // A write the store refuses is tried again: without the UID a later recovery
 // would take whatever Task then holds the name.
 func (t *ahpTurn) recordTaskUID(ctx context.Context, uid string) {
-	if uid == "" || uid == ahpTaskGoneUID {
+	if uid == "" {
 		return
 	}
 	t.b.updateSessionUntilDone(ctx, t.principal.UserKey, t.session.Session, "record the turn's Task UID", func(s *ahpSession) {
@@ -1401,6 +1442,7 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 				// The turn's Task is gone: one created under its name from now
 				// on is not the turn's, which ends as deleted.
 				turn.taskUID = ahpTaskGoneUID
+				turn.recordTaskUID(ctx, turn.taskUID)
 			}
 		}
 		// The previous leader may have streamed some or all of the answer.

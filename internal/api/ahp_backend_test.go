@@ -723,6 +723,8 @@ func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.
 	delete(env.backend.recovered, alice.UserKey)
 	env.backend.mu.Unlock()
 	env.backend.recoverTurns(ctx, alice)
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.Equal(t, ahpTaskGoneUID, record.ActiveTaskUID, "a later recovery knows the Task was gone too")
 
 	// Another Task is created under the name, says something and succeeds.
 	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
