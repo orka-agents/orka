@@ -233,6 +233,43 @@ func TestNewDashboardCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 }
 
+// ORKA_SERVER and ORKA_NAMESPACE stand in for --server and --namespace.
+func TestNewDashboardCmd_UsesServerAndNamespaceFromEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envServer, "http://env-server:9090")
+	t.Setenv(envNamespace, "orka-system")
+	stubDashboardProbe(t)
+
+	var gotNamespace string
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(_, namespace string) (string, error) {
+		gotNamespace = namespace
+		return "opaque-login-value-env", nil
+	}
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
+
+	var opened string
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(url string) error {
+		opened = url
+		return nil
+	}
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	root.SetOut(io.Discard)
+	root.SetArgs([]string{"dashboard"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if gotNamespace != "orka-system" {
+		t.Fatalf("namespace = %q, want %s", gotNamespace, envNamespace)
+	}
+	if !strings.HasPrefix(opened, "http://env-server:9090/login#") {
+		t.Fatalf("opened %q, want the %s dashboard", opened, envServer)
+	}
+}
+
 func TestNewDashboardCmd_NoOpenRedactsTokenByDefault(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
