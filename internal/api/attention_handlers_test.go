@@ -296,12 +296,12 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 
 	response := f.list("/api/v1/attention?namespace=default")
 	require.Equal(t, []string{
-		"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier",
+		"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier", "approval/expired",
 		"outcomeUnknown/unknown", "failed/failed", "podWaiting/odd-pod", "podWaiting/pod-waiting",
 	}, attentionKinds(response.Items))
 	require.False(t, response.Incomplete)
-	require.Equal(t, 8, response.Total)
-	require.Equal(t, map[string]int{"approval": 4, "outcomeUnknown": 1, "failed": 1, "podWaiting": 2}, response.Counts)
+	require.Equal(t, 9, response.Total)
+	require.Equal(t, map[string]int{"approval": 5, "outcomeUnknown": 1, "failed": 1, "podWaiting": 2}, response.Counts)
 	require.Equal(t, attentionSourceUnavailable, response.Sources.Monitors)
 	require.Equal(t, attentionSourceIncluded, response.Sources.Approvals)
 	require.NotNil(t, response.Since)
@@ -321,9 +321,15 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	require.Empty(t, response.Items[2].Approval.Action)
 	require.Equal(t, "Approval requested", response.Items[2].Summary)
 	require.Empty(t, response.Items[2].Approval.Severity, "unknown severities are dropped")
-	require.Equal(t, "ErrImagePull", response.Items[7].Reason)
-	require.Equal(t, attentionPodWaitingUnknown, response.Items[6].Reason)
-	for _, item := range response.Items[:4] {
+	require.Equal(t, "ErrImagePull", response.Items[8].Reason)
+	require.Equal(t, attentionPodWaitingUnknown, response.Items[7].Reason)
+	// A worker approval past its expiresAt stays decidable, as the per-Task
+	// API keeps it pending, and its untrusted expiresAt is not a deadline.
+	require.Equal(t, "expired-approval", response.Items[4].Approval.ID)
+	require.Equal(t, AttentionApprovalSourceWorker, response.Items[4].Approval.Source)
+	require.Nil(t, response.Items[4].Deadline)
+	require.Nil(t, response.Items[4].Approval.ExpiresAt)
+	for _, item := range response.Items[:5] {
 		require.NotNil(t, item.Approval.CanApprove, item.ID)
 		require.True(t, *item.Approval.CanApprove, item.ID)
 		require.True(t, *item.Approval.CanDecline, item.ID)
@@ -338,7 +344,7 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	}
 
 	inbox := f.list("/api/v1/approvals?namespace=default&status=pending")
-	require.Equal(t, []string{"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier"}, attentionKinds(inbox.Items))
+	require.Equal(t, []string{"approval/parked", "approval/brokered", "approval/worker", "approval/worker-identifier", "approval/expired"}, attentionKinds(inbox.Items))
 	require.Nil(t, inbox.Since)
 	require.Equal(t, attentionSourceNotRequired, inbox.Sources.Monitors)
 }
@@ -429,6 +435,60 @@ func TestAttentionPaginationIsStableAndCursorIsBound(t *testing.T) {
 
 	narrow := f.list("/api/v1/attention?namespace=default&since=90s")
 	require.Equal(t, []string{"failed/failed-b", "failed/failed-c"}, attentionKinds(narrow.Items))
+}
+
+// A continue token is not integrity-protected, so a hand-made one cannot
+// widen the window past the since limit or move it into the future.
+func TestAttentionCursorWindowIsBounded(t *testing.T) {
+	now := time.Now().UTC()
+	f := newAttentionFixture(t, nil)
+	forged := func(since time.Time) string {
+		return url.QueryEscape(encodeAttentionCursor(attentionCursor{
+			Version: attentionCursorVersion, Scope: attentionScopeAttention, Namespace: "default",
+			Since: since.UnixNano(), After: attentionSortKey{},
+		}))
+	}
+	for name, since := range map[string]time.Time{
+		"epoch":      time.Unix(0, 1),
+		"past limit": now.Add(-attentionMaxSince - attentionCursorWindowGrace - time.Minute),
+		"future":     now.Add(time.Hour),
+	} {
+		status, body := f.get("/api/v1/attention?namespace=default&continue=" + forged(since))
+		require.Equal(t, http.StatusBadRequest, status, "%s: %s", name, body)
+	}
+	for name, since := range map[string]time.Time{
+		"default window":          now.Add(-attentionDefaultSince),
+		"limit, walk in progress": now.Add(-attentionMaxSince - time.Minute),
+	} {
+		status, body := f.get("/api/v1/attention?namespace=default&continue=" + forged(since))
+		require.Equal(t, http.StatusOK, status, "%s: %s", name, body)
+	}
+}
+
+// An approval ID comes from event content with no length limit; the continue
+// token carries only its digest, so paging past it still works.
+func TestAttentionPaginatesPastLongApprovalIDs(t *testing.T) {
+	long := strings.Repeat("x", 3*attentionCursorMaxBytes)
+	f := newAttentionFixture(t, []client.Object{attentionWaitingTask("long"), attentionWaitingTask("short")})
+	f.appendApproval("long", map[string]any{"approvalID": long, "taskUID": "uid-long"})
+	f.appendApproval("short", map[string]any{"approvalID": "short-approval", "taskUID": "uid-short"})
+
+	seen := map[string]bool{}
+	path := "/api/v1/approvals?namespace=default&status=pending&limit=1"
+	for pages := 0; ; pages++ {
+		require.Less(t, pages, 3)
+		page := f.list(path)
+		for _, item := range page.Items {
+			seen[item.Approval.ID] = true
+		}
+		if page.Metadata.Continue == "" {
+			break
+		}
+		require.LessOrEqual(t, len(page.Metadata.Continue), attentionCursorMaxBytes)
+		path = "/api/v1/approvals?namespace=default&status=pending&limit=1&continue=" + url.QueryEscape(page.Metadata.Continue)
+	}
+	require.True(t, seen[long], "the item keeps the full approval ID for decisions")
+	require.True(t, seen["short-approval"])
 }
 
 func TestAttentionRequesterOnlyApproveRule(t *testing.T) {

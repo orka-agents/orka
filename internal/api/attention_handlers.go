@@ -10,7 +10,9 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,8 +75,11 @@ const (
 )
 
 const (
-	attentionDefaultSince        = 24 * time.Hour
-	attentionMaxSince            = 7 * 24 * time.Hour
+	attentionDefaultSince = 24 * time.Hour
+	attentionMaxSince     = 7 * 24 * time.Hour
+	// attentionCursorWindowGrace lets a continuation walk that started at the
+	// since limit finish after the limit has moved on.
+	attentionCursorWindowGrace   = time.Hour
 	attentionDefaultLimit        = 50
 	attentionMaxLimit            = 200
 	attentionTaskPageSize        = 500
@@ -424,7 +429,14 @@ func parseAttentionRequest(c fiber.Ctx, scope, namespace string, now time.Time) 
 		}
 		req.after = &cursor.After
 		if scope == attentionScopeAttention {
-			req.since = time.Unix(0, cursor.Since).UTC()
+			// The token is not integrity-protected, so its window is held to
+			// the same bound as a since parameter, with a little grace for a
+			// walk that started near the limit.
+			since := time.Unix(0, cursor.Since).UTC()
+			if since.After(now) || now.Sub(since) > attentionMaxSince+attentionCursorWindowGrace {
+				return req, fiber.NewError(fiber.StatusBadRequest, "invalid continue token")
+			}
+			req.since = since
 		}
 		return req, nil
 	}
@@ -667,20 +679,22 @@ func (h *Handlers) listBoundedTaskApprovalEvents(ctx context.Context, namespace,
 	}
 }
 
-// attentionApprovalDecidable mirrors the state checks of DecideTaskApproval
-// and drops approvals whose deadline has passed by the clock, even before the
-// controller records their expiry.
+// attentionApprovalDecidable mirrors the state checks of DecideTaskApproval.
+// Like deriveTaskApprovalState, only a brokered review's expiresAt is
+// enforced, so it is dropped by the clock even before the controller records
+// its expiry; a worker approval stays decidable past its expiresAt, and a
+// parked sign-off follows its wait's deadline.
 func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Approval, now time.Time) (string, bool) {
 	if approval.Status != approvals.StatusPending || !task.DeletionTimestamp.IsZero() {
-		return "", false
-	}
-	if approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
 		return "", false
 	}
 	wait := task.Status.Wait
 	parkedWait := wait != nil && wait.Kind == corev1alpha1.TaskWaitKindApproval && len(wait.References) == 1 && wait.References[0] == approval.ID
 	switch {
 	case approval.Binding != nil:
+		if approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
+			return "", false
+		}
 		if validateV2ApprovalTask(approval, task) != nil || task.Status.Phase.IsTerminal() {
 			return "", false
 		}
@@ -720,8 +734,10 @@ func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval
 			summary = "Approval requested for " + tool
 		}
 	}
+	// A worker approval's expiresAt is written from the worker Pod and is not
+	// enforced, so it neither ranks the item nor is reported as a deadline.
 	var expiresAt *time.Time
-	if approval.ExpiresAt != nil {
+	if approval.ExpiresAt != nil && source != AttentionApprovalSourceWorker {
 		value := approval.ExpiresAt.UTC()
 		expiresAt = &value
 	} else if wait := task.Status.Wait; source == AttentionApprovalSourceParked && wait != nil && !wait.Deadline.IsZero() {
@@ -839,8 +855,16 @@ func attentionItemSortKey(item AttentionItem, namespace, name, uid string) atten
 	}
 	return attentionSortKey{
 		Rank: item.Rank, Deadline: deadline, Since: item.Since.UnixNano(),
-		Namespace: namespace, Name: name, UID: uid, ID: item.ID,
+		Namespace: namespace, Name: name, UID: uid, ID: attentionSortKeyID(item.ID),
 	}
+}
+
+// attentionSortKeyID bounds the final tie-breaker, which a continue token
+// carries: an approval ID comes from event content and has no length limit,
+// so the key holds its digest and the item keeps the ID itself.
+func attentionSortKeyID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:])
 }
 
 // attentionSafeIdentifier keeps a tool name only when it is shaped like an
