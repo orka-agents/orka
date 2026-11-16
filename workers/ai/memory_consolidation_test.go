@@ -193,6 +193,13 @@ func TestRunMemoryConsolidationAsksAgainForAResultWithoutOperations(t *testing.T
 	_, err := runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
 	require.NoError(t, err)
 	require.Len(t, provider.requests, 2, "a result without operations is asked for again")
+	retry := provider.requests[1].Messages
+	require.Len(t, retry, 3)
+	require.Equal(t, roleAssistant, retry[1].Role)
+	require.Len(t, retry[1].ToolCalls, 1, "the model's tool call is replayed, never an empty assistant turn")
+	require.Equal(t, roleTool, retry[2].Role)
+	require.Equal(t, "call-1", retry[2].ToolCallID, "every replayed call is answered")
+	require.Contains(t, retry[2].Content, "operations list")
 	require.NotNil(t, submitted.Operations)
 	require.Empty(t, submitted.Operations)
 	require.Equal(t, "nothing to change", submitted.Summary)
@@ -202,4 +209,21 @@ func TestRunMemoryConsolidationAsksAgainForAResultWithoutOperations(t *testing.T
 	}}}
 	_, err = runMemoryConsolidation(t.Context(), provider, "model", modelSettings{}, "")
 	require.ErrorContains(t, err, "did not submit")
+}
+
+func TestConsolidationReminderNeverSendsAnEmptyAssistantTurn(t *testing.T) {
+	text := consolidationReminder(&llm.CompletionResponse{Content: "Memory looks fine."})
+	require.Len(t, text, 2)
+	require.Equal(t, roleAssistant, text[0].Role)
+	require.Equal(t, "Memory looks fine.", text[0].Content)
+	require.Equal(t, roleUser, text[1].Role)
+
+	empty := consolidationReminder(&llm.CompletionResponse{Content: "  "})
+	require.Len(t, empty, 1, "an empty reply is not replayed")
+	require.Equal(t, roleUser, empty[0].Role)
+	for _, message := range append(text, empty...) {
+		if message.Role == roleAssistant {
+			require.True(t, strings.TrimSpace(message.Content) != "" || len(message.ToolCalls) > 0)
+		}
+	}
 }

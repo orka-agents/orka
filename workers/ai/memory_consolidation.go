@@ -26,6 +26,7 @@ import (
 
 const (
 	roleAssistant = "assistant"
+	roleTool      = "tool"
 
 	memoryConsolidationResponseLimit = 8 << 20
 	memoryConsolidationHTTPTimeout   = 2 * time.Minute
@@ -196,13 +197,37 @@ func requestConsolidation(
 			return submission, nil
 		}
 		if attempt+1 < memoryConsolidationModelAttempts {
-			messages = append(messages,
-				llm.Message{Role: roleAssistant, Content: resp.Content},
-				llm.Message{Role: roleUser, Content: "Call " + memoryconsolidation.SubmitToolName +
-					" exactly once with your result. Submit an empty operations list if memory needs no change."})
+			messages = append(messages, consolidationReminder(resp)...)
 		}
 	}
 	return memoryconsolidation.Submission{}, errors.New("the model did not submit a memory consolidation result")
+}
+
+const consolidationReminderText = "Call " + memoryconsolidation.SubmitToolName +
+	" exactly once with your result, including its operations list." +
+	" Submit an empty operations list if memory needs no change."
+
+// consolidationReminder replays the model's turn and asks again. A turn that
+// called tools is answered with a result for each call, which carries the
+// reminder: providers reject an assistant turn with no text and no calls,
+// and every call needs its result.
+func consolidationReminder(resp *llm.CompletionResponse) []llm.Message {
+	if len(resp.ToolCalls) > 0 {
+		messages := make([]llm.Message, 0, 1+len(resp.ToolCalls))
+		messages = append(messages, llm.Message{Role: roleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		for _, call := range resp.ToolCalls {
+			messages = append(messages, llm.Message{Role: roleTool, Content: "Not accepted. " + consolidationReminderText,
+				ToolCallID: call.ID, Name: call.Name})
+		}
+		return messages
+	}
+	if strings.TrimSpace(resp.Content) == "" {
+		return []llm.Message{{Role: roleUser, Content: consolidationReminderText}}
+	}
+	return []llm.Message{
+		{Role: roleAssistant, Content: resp.Content},
+		{Role: roleUser, Content: consolidationReminderText},
+	}
 }
 
 func marshalConsolidationReport(report *memoryconsolidation.Report) (string, error) {
