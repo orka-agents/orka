@@ -217,6 +217,7 @@ func TestRepositoryMonitorCIEvidenceNormalizesFailingChecks(t *testing.T) {
 		annotationFailures: map[int64]int{102: http.StatusNotFound, 103: repositoryMonitorRepairLabelsRateLimited},
 	}
 	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence")
+	monitor.Spec.Repair.CIEvidence.Text = true
 	pr := repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}
 	input := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", pr)
 	evidence := input.Evidence
@@ -258,7 +259,7 @@ func TestRepositoryMonitorCIEvidenceNormalizesFailingChecks(t *testing.T) {
 		t.Fatalf("stale evidence = %+v", got)
 	}
 	if got := repositoryMonitorEvidenceByName(t, evidence, "jenkins"); got.ID != "commit_status:9001" || got.Kind != repositoryMonitorEvidenceKindCommitStatus || got.Availability != repositoryMonitorEvidenceUnsupported ||
-		got.Description != "Build #12 failed" || got.URL != "https://ci.example/job/12" || got.Conclusion != "failure" || got.Summary != "" {
+		got.Description != "Build #12 failed" || got.URL != "" || got.Conclusion != "failure" || got.Summary != "" {
 		t.Fatalf("jenkins evidence = %+v", got)
 	}
 	if len(evidence.PendingChecks) != 1 || evidence.PendingChecks[0] != (repositoryMonitorPendingCheckEntry{ID: "check_run:105", Name: "build", App: "github-actions", Status: "in_progress"}) {
@@ -292,6 +293,7 @@ func TestRepositoryMonitorCIEvidenceEnforcesCheckAndSizeLimits(t *testing.T) {
 	}
 	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head51": runs}, annotations: annotations}
 	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-limits")
+	monitor.Spec.Repair.CIEvidence.Text = true
 	evidence := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}).Evidence
 	if len(github.annotationReads) != repositoryMonitorCIEvidenceMaxAnnotationChecks {
 		t.Fatalf("annotation reads = %v, want one page for each of %d checks", github.annotationReads, repositoryMonitorCIEvidenceMaxAnnotationChecks)
@@ -393,6 +395,7 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	monitor, secret := repositoryMonitorInventoryTestObjects("ci-evidence-frozen")
+	monitor.Spec.Repair.CIEvidence.Text = true
 	monitor.Spec.Repair.Enabled = true
 	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 	configureRepositoryMonitorTestWriteCredentials(monitor)
@@ -710,6 +713,7 @@ func TestRepositoryMonitorCIEvidenceBoundsEscapedEntries(t *testing.T) {
 		statusObjects: map[string][]map[string]any{"head51": {status}},
 	}
 	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-escaped")
+	monitor.Spec.Repair.CIEvidence.Text = true
 	evidence := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}).Evidence
 	if len(evidence.Checks)+evidence.OmittedChecks != 2 {
 		t.Fatalf("evidence = %d checks + %d omitted", len(evidence.Checks), evidence.OmittedChecks)
@@ -763,6 +767,7 @@ func TestRepositoryMonitorCIEvidenceBoundsPendingChecks(t *testing.T) {
 			}
 			github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head51": runs}}
 			reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-pending")
+			monitor.Spec.Repair.CIEvidence.Text = true
 			evidence := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}).Evidence
 			if len(evidence.Checks)+evidence.OmittedChecks != tc.failing || len(evidence.PendingChecks)+evidence.OmittedPendingChecks != tc.pending || evidence.OmittedPendingChecks == 0 {
 				t.Fatalf("evidence = %d+%d checks, %d+%d pending", len(evidence.Checks), evidence.OmittedChecks, len(evidence.PendingChecks), evidence.OmittedPendingChecks)
@@ -859,6 +864,7 @@ func TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence(t *testing.T) {
 	}
 	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head51": runs}, annotations: annotations}
 	reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-indented")
+	monitor.Spec.Repair.CIEvidence.Text = true
 	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}, &store.MonitorItem{})
 	if err != nil {
 		t.Fatal(err)

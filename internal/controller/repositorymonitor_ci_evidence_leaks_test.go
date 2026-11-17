@@ -144,8 +144,9 @@ func TestRepositoryMonitorEvidenceTextWithholdsCICredentials(t *testing.T) {
 }
 
 // TestRepositoryMonitorCIRepairPromptWithholdsCICredentials checks the
-// assembled repair prompt, which namespace Task readers and the model see:
-// the credential is in a check run's title, summary, and annotation.
+// assembled repair prompt of a monitor that opts in to CI free text, which
+// namespace Task readers and the model see: the credential is in a check
+// run's title, summary, and annotation.
 func TestRepositoryMonitorCIRepairPromptWithholdsCICredentials(t *testing.T) {
 	for _, tc := range repositoryMonitorEvidenceLeakCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,6 +161,7 @@ func TestRepositoryMonitorCIRepairPromptWithholdsCICredentials(t *testing.T) {
 				statusObjects: map[string][]map[string]any{"head51": {{"id": 9101, "context": "deploy", "state": "failure", "description": tc.input}}},
 			}
 			reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-evidence-leaks")
+			monitor.Spec.Repair.CIEvidence.Text = true
 			prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}, &store.MonitorItem{})
 			if err != nil {
 				t.Fatal(err)
