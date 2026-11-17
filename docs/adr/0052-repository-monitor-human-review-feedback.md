@@ -139,9 +139,10 @@ with the existing repair admission. Two reconciles that pick different targets
 cannot both schedule a repair, or both fit into one remaining slot. Replaying
 the same command for the same monitor and pull request is idempotent. A
 queued feedback repair is rechecked before its Task starts. Feedback that was
-resolved, turned outdated, or was deleted withdraws it. A snapshot that could
-not be read, was read for a moved head, or could not check a target author's
-permission defers it. An attempt charges its feedback's budget once its repair
+resolved, turned outdated, or was deleted withdraws it. A withdrawal is not
+a failed repair: it leaves the head as if no repair had been requested. A
+snapshot that could not be read, was read for a moved head, or could not check
+a target author's permission defers it. An attempt charges its feedback's budget once its repair
 Task exists, or while its command is still queued. An attempt whose command
 ended before any Task ran addressed nothing, so it is not charged, though the
 pull request's repair budget still counts its command. A transient GitHub

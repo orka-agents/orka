@@ -93,6 +93,13 @@ func repositoryMonitorFeedbackCommand(command *store.CommandEvent) bool {
 	return command != nil && command.Source == repositoryMonitorControllerPolicySource && command.Permission == repositoryMonitorFeedbackCommandPermission
 }
 
+// repositoryMonitorFeedbackRepairWithdrawn reports whether action records a
+// feedback repair withdrawn before its Task existed because its feedback no
+// longer needed one.
+func repositoryMonitorFeedbackRepairWithdrawn(command *store.CommandEvent, action *store.WorkAction) bool {
+	return repositoryMonitorFeedbackCommand(command) && action != nil && action.Status == repositoryMonitorWorkActionStatusBlocked && action.BlockedReason == repositoryMonitorRepairSkipFeedbackWithdrawn
+}
+
 // repositoryMonitorFeedbackLedger summarizes the attempt ledger of one pull
 // request per feedback ID. recorded counts the ledger rows, which number the
 // next attempt. spent counts the attempts that charge the feedback's budget:
@@ -137,14 +144,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCounts(ctx
 }
 
 // repositoryMonitorFeedbackAttemptCharged reports whether an attempt charges
-// its feedback's budget: its repair job exists, or its command has not
-// finished. A missing command charges it too, so the budget fails closed.
+// its feedback's budget: its command has not finished, or its repair Task
+// was created. The repair job is written before its Task, so the job alone
+// does not show a Task ran: a job that left the queued phase was settled
+// from its Task, and a queued job's Task must still exist. A finished command
+// whose Task was never created, because creating it failed or the repair
+// was withdrawn first, addressed nothing and is not charged. A missing
+// command charges the attempt too, so the budget fails closed.
 func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCharged(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, attempt store.MonitorFeedbackAttempt) (bool, error) {
-	if _, err := r.Store.GetRepairJob(ctx, monitor.Namespace, attempt.RepairJobID); err == nil {
-		return true, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, attempt.CommandEventID)
 	if errors.Is(err, store.ErrNotFound) {
 		return true, nil
@@ -152,7 +159,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCharged(ct
 	if err != nil {
 		return false, err
 	}
-	return command.Status != repositoryMonitorCommandProcessed, nil
+	if command.Status != repositoryMonitorCommandProcessed {
+		return true, nil
+	}
+	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, attempt.RepairJobID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, job)
 }
 
 // repositoryMonitorFeedbackTargets picks the startable feedback with
@@ -218,15 +235,13 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorFeedbackRepair(ctx con
 	id := "feedback-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, strings.Join(keys, ",")))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
-		if labelled {
-			full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
-			permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
-			if err != nil {
-				return false, err
-			}
-			if !permitted {
-				return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, repositoryMonitorRepairSkipLabelActorNotPermitted)
-			}
+		full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
+		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled)
+		if err != nil {
+			return false, err
+		}
+		if reason != "" {
+			return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, reason)
 		}
 		now := time.Now().UTC()
 		command = &store.CommandEvent{ID: id, CommentID: id, DedupeKey: slot, IdempotencyKey: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation,
@@ -476,7 +491,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 	if !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) {
 		return "", "", false, nil
 	}
-	if full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr); !full {
+	full, _, labelled := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
+	if !full {
 		return "", "", false, nil
 	}
 	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
@@ -499,10 +515,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 		return "", "", false, err
 	}
 	// Feedback a repair can still address keeps the head pending, unless no
-	// repair can run at all.
+	// repair can run at all: the repair policy refuses one, or the account
+	// behind the repair label that scopes the pull request may not start one.
 	reason, _, _, err := r.repositoryMonitorRepairPolicy(ctx, monitor, snapshot.Repo, pr, "", repositoryMonitorCommandIntentFix)
 	if err != nil {
 		return "", "", false, err
+	}
+	if reason == "" {
+		owner, repo, _ := strings.Cut(snapshot.Repo, "/")
+		if reason, err = r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled); err != nil {
+			return "", "", false, err
+		}
 	}
 	attempts := repositoryMonitorFeedbackMaxAttempts(monitor.Spec)
 	addressing, needsPerson := 0, 0

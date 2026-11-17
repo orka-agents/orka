@@ -168,6 +168,25 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	return failures, nil
 }
 
+// repositoryMonitorRepairLabelActorRefusal returns the reason a new
+// automatic repair of a pull request whose repair scope comes from a repair
+// label is refused because no account that added a current repair label has
+// the permission label commands require. It returns "" when the pull request
+// is not labelled into scope or the label's account is permitted.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorRefusal(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repo string, pr repositoryMonitorPullRequest, full, labelled bool) (string, error) {
+	if !labelled {
+		return "", nil
+	}
+	permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
+	if err != nil {
+		return "", err
+	}
+	if !permitted {
+		return repositoryMonitorRepairSkipLabelActorNotPermitted, nil
+	}
+	return "", nil
+}
+
 // repositoryMonitorRepairLabelActorPermitted reports whether an account that
 // added one of labels to pr has the permission label commands require.
 // Inventory sees labels but not who added them, so the issue event log names
@@ -310,14 +329,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPolicyRepairWithdrawnReas
 	if !full && (!ciOnly || command.Intent != repositoryMonitorCommandIntentFixCI) {
 		return repositoryMonitorRepairSkipScopeWithdrawn, nil
 	}
-	if labelled {
-		permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
-		if err != nil {
-			return "", err
-		}
-		if !permitted {
-			return repositoryMonitorRepairSkipLabelActorNotPermitted, nil
-		}
+	if reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled); err != nil || reason != "" {
+		return reason, err
 	}
 	if command.Intent == repositoryMonitorCommandIntentFixCI {
 		// A lookup error or partial results defer the command rather than

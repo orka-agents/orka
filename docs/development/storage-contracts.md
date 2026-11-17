@@ -306,6 +306,10 @@ the observable parts.
   Revision 8 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
   artifact replacement order").
+  Revision 9 adds the reviewer feedback attempt ledger:
+  `AdmitMonitorFeedbackRepair`, which creates a feedback repair's command
+  event and its numbered attempts in one transaction, and
+  `ListMonitorFeedbackAttempts`.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

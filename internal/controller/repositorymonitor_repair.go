@@ -1951,6 +1951,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx co
 			if action.Status != repositoryMonitorWorkActionStatusFailed && action.Status != repositoryMonitorWorkActionStatusBlocked {
 				continue
 			}
+			// Withdrawn feedback needs no repair, so its withdrawn repair
+			// leaves the head as if none had been requested.
+			if repositoryMonitorFeedbackRepairWithdrawn(&command, action) {
+				continue
+			}
 			if state == "" || command.CreatedAt.After(latest) {
 				state, latest = repositoryMonitorRepairPhaseFailed, command.CreatedAt
 			}

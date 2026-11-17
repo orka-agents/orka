@@ -948,7 +948,11 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		if strings.TrimSpace(body) == "" {
 			continue
 		}
-		n.noteUnverified(commentID, author)
+		// A reply on an Orka finding thread never starts a repair, whatever
+		// its author's permission, so its unknown authority holds nothing.
+		if !thread.OrkaFindingThread {
+			n.noteUnverified(commentID, author)
+		}
 		comment := repositoryMonitorFeedbackComment{
 			ID: commentID, Author: author.login, AuthorType: author.kind, Permission: author.permission,
 			Body: body, URL: repositoryMonitorEvidenceURL(raw.URL), CreatedAt: raw.CreatedAt.UTC(),
