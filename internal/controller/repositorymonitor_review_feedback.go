@@ -65,6 +65,9 @@ const (
 	repositoryMonitorFeedbackReasonThreadPageLimit = "review_thread_page_limit"
 	repositoryMonitorFeedbackReasonReviewPageLimit = "review_page_limit"
 	repositoryMonitorFeedbackReasonMalformed       = "malformed_response"
+	// repositoryMonitorFeedbackReasonResponseTooLarge stops a read whose
+	// smallest page still exceeds the GitHub response limit.
+	repositoryMonitorFeedbackReasonResponseTooLarge = "review_feedback_response_too_large"
 
 	// Bounds. Text limits are UTF-8 bytes after sanitizing; encoded limits
 	// are bytes of the JSON encoding.
@@ -431,6 +434,12 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 	stop := func(err error) {
 		raw.partial = true
 		raw.availability, raw.reason = repositoryMonitorEvidenceErrorAvailability(err)
+		if errors.Is(err, errRepositoryMonitorGitHubResponseTooLarge) {
+			// A thread page is already as small as it gets, and reviews are
+			// not read in smaller pages, so reading again cannot help: like
+			// a page limit, this is more feedback than one read holds.
+			raw.availability, raw.reason = repositoryMonitorEvidenceAvailable, repositoryMonitorFeedbackReasonResponseTooLarge
+		}
 	}
 	// checkHead records the head each page reports and reports false, with
 	// the reason set, for a missing head or pages that disagree, which mean

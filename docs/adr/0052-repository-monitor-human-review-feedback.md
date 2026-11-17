@@ -221,6 +221,9 @@ Every decision about whether a snapshot is complete goes through one verdict:
   or permission lookup, the poll's permission lookup budget, or a read for
   another head. Readiness waits and a queued repair is deferred.
 - `needs_person`: a permanent limit: more feedback than the page limits hold,
+  a single thread whose response exceeds GitHub's limit even when read alone
+  (larger thread pages are read again at half the size, so they are not a
+  limit),
   an unresolved thread whose omitted replies may hide feedback, a thread or
   review left out of the 32 KiB budget that holds or may hide feedback that
   could start a repair, or more reviewers than one snapshot may look up.

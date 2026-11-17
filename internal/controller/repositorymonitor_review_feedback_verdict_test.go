@@ -133,3 +133,32 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
 		t.Fatalf("throttled poll made %d permission requests, want one per reviewer", got)
 	}
 }
+
+// A thread page over the GitHub response limit is read again in smaller
+// pages, so a too-large page alone is not incomplete. A single thread that is
+// still too large cannot be read by reading again, so a person must look.
+func TestRepositoryMonitorReviewFeedbackVerdictForTooLargeResponses(t *testing.T) {
+	ctx := context.Background()
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
+	for _, tc := range []struct {
+		name    string
+		maxSize int
+		want    repositoryMonitorFeedbackVerdict
+	}{
+		{name: "smaller pages fit", maxSize: 12, want: repositoryMonitorFeedbackComplete},
+		{name: "one thread is too large", maxSize: -1, want: repositoryMonitorFeedbackNeedsPerson},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := &repositoryMonitorFeedbackGitHub{t: t, threadPages: []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T1", 11, "writer", "Fix one.") + "]"},
+				permissions: map[string]string{"writer": "write"}, maxThreadPageSize: tc.maxSize}
+			r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
+			snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if verdict, description := snapshot.verdict(); verdict != tc.want {
+				t.Fatalf("verdict = %q (%s), availability %q reason %q, want %q", verdict, description, snapshot.Availability, snapshot.Reason, tc.want)
+			}
+		})
+	}
+}
