@@ -1654,6 +1654,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeAgentIdentityBind(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
 		return err
 	}
+	if err := authorizeAgentProviderRefsUse(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1729,6 +1732,9 @@ func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alp
 			return err
 		}
 		if err := authorizeAgentIdentityBind(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
+			return err
+		}
+		if err := authorizeAgentProviderRefsUse(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {

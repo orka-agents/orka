@@ -117,6 +117,11 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -153,6 +158,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,

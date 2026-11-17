@@ -370,7 +370,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			return authorizeContextTokenProviderReference(c, ch.contextTokenAuthorization, "chatProviderReference", namespace, provider)
 		},
 		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, provider, model)
+			if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, provider, model); err != nil {
+				return err
+			}
+			return authorizeChatProviderUse(c, ch.kubeClient, "chat", provider)
 		},
 		// Enforced scoped context tokens get no implicit Provider selection;
 		// callers must name one directly or use an Agent bound to one.
@@ -1657,6 +1660,9 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 			fbModel = fbProviderCRD.Spec.DefaultModel
 		}
 		if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chatFallback", namespace, fbProviderInfo, fbModel); err != nil {
+			return resultProvider, err
+		}
+		if err := authorizeChatProviderUse(c, ch.kubeClient, "chat", fbProviderInfo); err != nil {
 			return resultProvider, err
 		}
 

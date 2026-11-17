@@ -135,7 +135,6 @@ rules:
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -224,6 +223,7 @@ rules:
   - core.orka.ai
   resources:
   - agents
+  - providers
   verbs:
   - create
   - delete

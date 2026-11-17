@@ -258,6 +258,26 @@ Agent can therefore run the Agents its owner listed, so list only Agents its
 callers may run. The check is off by default, because turning it on denies
 every caller without a `use` grant.
 
+### Provider use
+
+A Provider holds a model credential and decides where prompts, and any
+transcripts a run reads, are sent. With `--provider-use-authorization-enabled`
+(Helm: `controller.providerUseAuthorization.enabled`), naming a Provider also
+needs the `use` verb on it: in a Task's `spec.ai.providerRef`, which overrides
+the Agent's Provider, in an Agent's `providerRef` or model fallbacks, and in
+every chat or OpenAI- or Anthropic-compatible request, which spends the
+Provider's credential directly. The API checks its caller, and
+ValidatingAdmissionPolicies check direct writes to Tasks and Agents that newly
+name a Provider. The Helm value installs those policies; without Helm, also
+apply `config/provider-use-policy`. A Task that runs its Agent's own Provider
+needs only Agent `use`. Without either check, anyone who may create Tasks,
+Agents, or chats in a namespace may use any Provider there, and, unless
+namespace isolation is enforced, any Provider in another namespace. Orka's
+controller and workers hold `use` on every Provider, so delegated child Tasks
+and agent-created Agents are not checked against the root caller. The check is
+off by default, because turning it on denies every caller without a `use`
+grant.
+
 ### Agent identities
 
 An Agent can name one external identity in `spec.identity`, starting with a
