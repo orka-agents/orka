@@ -117,6 +117,7 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
+	memoryConsolidationStore  store.MemoryConsolidationStore
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
@@ -153,14 +154,16 @@ type HandlersConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	Connectors                ConnectorConfig
-	SubstrateMCPProxy         SubstrateMCPProxyConfig
+	// MemoryConsolidationStore serves memory consolidation run reports.
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	Connectors               ConnectorConfig
+	SubstrateMCPProxy        SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -186,6 +189,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		artifactStore:             cfg.ArtifactStore,
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
+		memoryConsolidationStore:  cfg.MemoryConsolidationStore,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
@@ -297,6 +301,7 @@ type CreateTaskRequest struct {
 	Priority          *int32                           `json:"priority,omitempty"`
 	RetryPolicy       *corev1alpha1.RetryPolicy        `json:"retryPolicy,omitempty"`
 	WebhookURL        string                           `json:"webhookURL,omitempty"`
+	WebhookEvents     []corev1alpha1.TaskWebhookEvent  `json:"webhookEvents,omitempty"`
 	SecretRef         *corev1alpha1.SecretReference    `json:"secretRef,omitempty"`
 	SessionRef        *corev1alpha1.SessionReference   `json:"sessionRef,omitempty"`
 	AI                *corev1alpha1.AISpec             `json:"ai,omitempty"`
@@ -354,6 +359,9 @@ func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	}
 	if req.WebhookURL != "" {
 		spec.WebhookURL = req.WebhookURL
+	}
+	if req.WebhookEvents != nil {
+		spec.WebhookEvents = req.WebhookEvents
 	}
 	if req.SecretRef != nil {
 		spec.SecretRef = req.SecretRef
@@ -1650,6 +1658,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeAgentIdentityBind(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
 		return err
 	}
+	if err := authorizeAgentProviderRefsUse(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1725,6 +1736,9 @@ func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alp
 			return err
 		}
 		if err := authorizeAgentIdentityBind(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
+			return err
+		}
+		if err := authorizeAgentProviderRefsUse(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {

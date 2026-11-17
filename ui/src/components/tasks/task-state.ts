@@ -1,11 +1,14 @@
 import type { Task } from '@/schemas/task'
 import { isTaskTerminal } from '@/lib/task-phase'
+import { activeParkedApprovalId } from '@/lib/parked-approval'
 
 // Derived from the Task itself so list rows never need a per-row approvals
 // request. The controller declares a WaitingForApproval condition, and an
 // autonomous task parked on an approval reports "waiting for approval ..." as
-// its status message.
+// its status message. A parked turn has ended (its phase is terminal), but the
+// sign-off it waits on still takes a decision, so it also counts.
 export function isWaitingForApproval(task: Task): boolean {
+  if (activeParkedApprovalId(task) !== undefined) return true
   if (isTaskTerminal(task.status?.phase)) return false
   const condition = task.status?.conditions?.find((c) => c.type === 'WaitingForApproval')
   return condition?.status === 'True' || (task.status?.message?.startsWith('waiting for approval ') ?? false)

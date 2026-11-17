@@ -296,6 +296,42 @@ func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.Memor
 	return c.StateProvider.CreateMemoryProposal(ctx, proposal)
 }
 
+// CompleteMemoryConsolidationRun redacts every proposal a run creates, as
+// CreateMemoryProposal redacts one, and gives a proposal without an ID or
+// times one.
+func (c *Client) CompleteMemoryConsolidationRun(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
+	proposals := make([]store.MemoryProposal, len(completion.Proposals))
+	copy(proposals, completion.Proposals)
+	for i := range proposals {
+		proposal := &proposals[i]
+		if err := protectTexts(ctx, "CompleteMemoryConsolidationRun", map[string]*string{
+			"a proposal's title":       &proposal.Title,
+			"a proposal's description": &proposal.Description,
+			"a proposal's content":     &proposal.Content,
+			"a proposal's patch":       &proposal.Patch,
+			"a proposal's reviewer":    &proposal.Reviewer,
+			"a proposal's review note": &proposal.ReviewNote,
+			"a proposal's applier":     &proposal.AppliedBy,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	completion.Proposals = proposals
+	if callerOwnsEnvelope(ctx) {
+		for i := range proposals {
+			if err := requireStampedMemoryProposal(&proposals[i]); err != nil {
+				return nil, err
+			}
+		}
+		return c.StateProvider.CompleteMemoryConsolidationRun(ctx, completion)
+	}
+	ctx, now := c.ops.withIssueTime(ctx)
+	for i := range proposals {
+		identifyMemoryProposal(&proposals[i], now)
+	}
+	return c.StateProvider.CompleteMemoryConsolidationRun(ctx, completion)
+}
+
 // ReviewMemoryProposal redacts the reviewer and review note.
 func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
 	if err := protectTexts(ctx, "ReviewMemoryProposal", map[string]*string{
