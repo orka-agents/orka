@@ -132,17 +132,32 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 
 // CompleteMemoryConsolidationRun finishes a running run and creates its
 // proposals in one transaction. A finished run is returned unchanged. It
-// checks a Task data fence in its context.
+// checks a Task data fence in its context. Its receipt keeps only the run's
+// key, so releasing the run's report also removes the only copy of it, and a
+// replay returns the run as it is now.
 func (s *Store) CompleteMemoryConsolidationRun(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
-	return writeOperation(ctx, s, "CompleteMemoryConsolidationRun", nil, func(ctx context.Context) (*store.MemoryConsolidationRun, error) {
-		var completed *store.MemoryConsolidationRun
-		err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
-			var err error
-			completed, err = s.completeMemoryConsolidationRunWrite(ctx, completion)
-			return err
+	var completed *store.MemoryConsolidationRun
+	key := memoryConsolidationRunKey{Namespace: completion.Namespace, TaskUID: completion.TaskUID}
+	_, err := writeOperationRereading(ctx, s, "CompleteMemoryConsolidationRun",
+		func(ctx context.Context) (memoryConsolidationRunKey, error) {
+			return key, s.withTaskDataFence(ctx, func(ctx context.Context) error {
+				var err error
+				completed, err = s.completeMemoryConsolidationRunWrite(ctx, completion)
+				return err
+			})
+		},
+		func(ctx context.Context, key memoryConsolidationRunKey) (memoryConsolidationRunKey, error) {
+			stored, err := s.readMemoryConsolidationRun(ctx, s.taskDataExecutor(ctx), key.Namespace, key.TaskUID)
+			if err != nil {
+				return key, err
+			}
+			completed = stored
+			return key, nil
 		})
-		return completed, err
-	})
+	if err != nil {
+		return nil, err
+	}
+	return completed, nil
 }
 
 func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
