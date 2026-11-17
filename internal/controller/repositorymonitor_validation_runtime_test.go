@@ -626,6 +626,55 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorValidationJobAcceptsAPIDefaultedEnvFieldRef(t *testing.T) {
+	task := repositoryMonitorValidationRuntimeTask()
+	scheme := repositoryMonitorValidationRuntimeScheme(t)
+	expected, err := setupJobBuilder().BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{RepositoryMonitorValidation: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(task, expected, scheme); err != nil {
+		t.Fatal(err)
+	}
+	actual := expected.DeepCopy()
+	actual.UID = types.UID("validation-job-uid")
+	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {
+		t.Fatal(err)
+	}
+	actual.Spec.Template.Spec.DeprecatedServiceAccount = actual.Spec.Template.Spec.ServiceAccountName
+
+	// The API server, not Orka's normalizer, sets apiVersion on stored fieldRefs.
+	// Set it here independently so the test fails if the normalizer stops
+	// matching what Kubernetes stores.
+	fieldRefs := 0
+	for _, containers := range [][]corev1.Container{actual.Spec.Template.Spec.InitContainers, actual.Spec.Template.Spec.Containers} {
+		for i := range containers {
+			for j := range containers[i].Env {
+				if from := containers[i].Env[j].ValueFrom; from != nil && from.FieldRef != nil {
+					from.FieldRef.APIVersion = "v1"
+					fieldRefs++
+				}
+			}
+		}
+	}
+	if fieldRefs == 0 {
+		t.Fatal("validation Job has no env fieldRef; the regression this test covers cannot occur")
+	}
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected); err != nil {
+		t.Fatalf("Job with API-defaulted env fieldRef apiVersion rejected: %v", err)
+	}
+
+	mutated := actual.DeepCopy()
+	for i := range mutated.Spec.Template.Spec.Containers[0].Env {
+		if from := mutated.Spec.Template.Spec.Containers[0].Env[i].ValueFrom; from != nil && from.FieldRef != nil {
+			from.FieldRef.FieldPath = "metadata.name"
+		}
+	}
+	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+		t.Fatalf("changed env fieldRef path error = %v, want confinement failure", err)
+	}
+}
+
 func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T) {
 	task := repositoryMonitorValidationRuntimeTask()
 	scheme := repositoryMonitorValidationRuntimeScheme(t)
