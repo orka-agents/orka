@@ -62,12 +62,26 @@ type RuntimeSessionConfig struct {
 	MaxBufferedEventBytes int
 }
 
+// StartupTimings records how long each step of one RuntimeSession's creation
+// took inside NewRuntimeSession. It holds durations only, for diagnostics.
+type StartupTimings struct {
+	// ProcessStart covers launching the adapter child.
+	ProcessStart time.Duration
+	// Initialize covers the ACP initialize exchange.
+	Initialize time.Duration
+	// Authenticate covers ACP authenticate; zero when the provider uses none.
+	Authenticate time.Duration
+	// ProviderSession covers session/new, or session/resume for a native restore.
+	ProviderSession time.Duration
+}
+
 type RuntimeSession struct {
 	id                string
 	generation        int64
 	profileDigest     string
 	providerSessionID string
 	config            RuntimeSessionConfig
+	startup           StartupTimings
 
 	mu sync.Mutex
 	// process is the live adapter child. It is replaced in place when an
@@ -298,7 +312,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 
 	initCtx, cancel := context.WithTimeout(ctx, cfg.InitializeTimeout)
 	defer cancel()
-	process, capabilities, err := session.launchAdapter(initCtx)
+	process, capabilities, err := session.launchAdapter(initCtx, &session.startup)
 	if process == nil {
 		return nil, err
 	}
@@ -312,10 +326,12 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		if !capabilities.SessionCapability(SessionCapabilityResume) {
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
 		}
+		resumeStarted := time.Now()
 		_, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
 			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 		})
+		session.startup.ProviderSession = time.Since(resumeStarted)
 		if err != nil {
 			return nil, initializationFailed(session, fmt.Errorf("resume ACP provider session: %w", err))
 		}
@@ -323,11 +339,13 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		session.providerSessionID = cfg.ResumeSessionID
 		return session, nil
 	}
+	newSessionStarted := time.Now()
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,
 		MCPServers: append([]MCPServer{}, cfg.MCPServers...),
 		Meta:       newSessionMeta,
 	})
+	session.startup.ProviderSession = time.Since(newSessionStarted)
 	if err != nil {
 		return nil, initializationFailed(session, fmt.Errorf("create ACP provider session: %w", err))
 	}
@@ -344,10 +362,17 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 // owns its cleanup: creation proves it through Delete, while the in-place
 // resume stops it best-effort. It is shared by session creation and by the
 // in-place resume after an idle adapter exit, so both paths negotiate exactly
-// the same way.
-func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapabilities, error) {
+// the same way. Creation passes timings to record each handshake step; the
+// in-place resume passes nil.
+func (s *RuntimeSession) launchAdapter(ctx context.Context, timings *StartupTimings) (*Process, AgentCapabilities, error) {
 	cfg := s.config
+	var discard StartupTimings
+	if timings == nil {
+		timings = &discard
+	}
+	stepStarted := time.Now()
 	process, err := StartProcess(cfg.Process)
+	timings.ProcessStart = time.Since(stepStarted)
 	if err != nil {
 		return nil, AgentCapabilities{}, err
 	}
@@ -355,6 +380,7 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 	if clientInfo.Name == "" {
 		clientInfo = Implementation{Name: "orka-acp-runtime", Version: "development"}
 	}
+	stepStarted = time.Now()
 	initialized, err := process.Client().Initialize(ctx, InitializeRequest{
 		ProtocolVersion: ProtocolVersion,
 		ClientInfo:      &clientInfo,
@@ -368,6 +394,7 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 			Session: map[string]any{"notices": map[string]any{}},
 		},
 	})
+	timings.Initialize = time.Since(stepStarted)
 	if err != nil {
 		return process, AgentCapabilities{}, fmt.Errorf("initialize ACP adapter: %w", err)
 	}
@@ -378,7 +405,10 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
 			return process, AgentCapabilities{}, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
 		}
-		if err := process.Client().Authenticate(ctx, cfg.AuthMethodID); err != nil {
+		stepStarted = time.Now()
+		err := process.Client().Authenticate(ctx, cfg.AuthMethodID)
+		timings.Authenticate = time.Since(stepStarted)
+		if err != nil {
 			return process, AgentCapabilities{}, fmt.Errorf("authenticate ACP adapter: %w", err)
 		}
 	}
@@ -388,6 +418,9 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 func (s *RuntimeSession) ID() string                { return s.id }
 func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
+
+// StartupTimings returns how long each step of this session's creation took.
+func (s *RuntimeSession) StartupTimings() StartupTimings { return s.startup }
 
 // Process returns the current adapter child. After an in-place resume this is
 // the replacement process, not the one that exited.
@@ -550,7 +583,7 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	case <-resumeCtx.Done():
 		return nil, AgentCapabilities{}, fmt.Errorf("drain exited adapter output: %w", resumeCtx.Err())
 	}
-	process, capabilities, err := s.launchAdapter(resumeCtx)
+	process, capabilities, err := s.launchAdapter(resumeCtx, nil)
 	if err != nil {
 		if process != nil {
 			_ = stopProcessBestEffort(process, cfg.CancelGrace)

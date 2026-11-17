@@ -915,7 +915,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	timings := newSessionStartTimings()
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid, timings)
+	timings.finish()
+	span.SetAttributes(timings.spanAttributes()...)
 	if createErr != nil {
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
 			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
@@ -949,7 +952,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
-		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
+		slog.Error("ACP runtime session creation failed",
+			append([]any{"stage", sessionCreationStage(createErr), "runtimeSessionID", request.RuntimeSessionID}, timings.logAttrs()...)...)
 		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}
@@ -981,6 +985,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if drainCleanup {
 		go s.cleanupDrainedSession(request.RuntimeSessionID, state)
 	}
+	slog.Info("ACP runtime session created",
+		append([]any{"runtimeSessionID", request.RuntimeSessionID, "nativeRestore", request.NativeRestore != nil}, timings.logAttrs()...)...)
 	writeJSON(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 		Protocol:       harnessv2.ProtocolVersion,
 		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
@@ -995,6 +1001,7 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
+	timings *sessionStartTimings,
 ) (
 	resultRuntime *acp.RuntimeSession, resultDescriptor harnessv2.RuntimeSessionDescriptor, resultPaths acp.SessionPaths,
 	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
@@ -1008,6 +1015,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
+	timings.mark("sessionPaths")
 	cleanup := true
 	nativeJournalDir := ""
 	ownsNativeJournal := false
@@ -1172,11 +1180,13 @@ func (s *Server) createSession(
 				paths.Workspace = workspaceDir
 			}
 		}
+		timings.mark("durableWorkspace")
 	}
 	if materialize {
 		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
 		}
+		timings.mark("workspaceMaterialization")
 	}
 	var baseline *workspacedelta.Snapshot
 	readOnly := request.Workspace.Intent == harnessv2.WorkspaceIntentRead
@@ -1219,10 +1229,12 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
+	timings.mark("baselineCapture")
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
+		timings.mark("providerHome")
 	}
 	providerProxy, proxyBinding, err := s.providerProxy.newSessionForRequest(request)
 	if err != nil {
@@ -1244,6 +1256,7 @@ func (s *Server) createSession(
 			mcpProxy.close()
 		}
 	}()
+	timings.mark("proxySetup")
 	projection := ProviderSessionProjection{}
 	if s.cfg.Provider.ProjectSession != nil {
 		projection, err = s.cfg.Provider.ProjectSession(request, paths, proxyBinding)
@@ -1273,6 +1286,7 @@ func (s *Server) createSession(
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
 	}
 	maps.Copy(envValues, azureEnvironment)
+	timings.mark("providerConfiguration")
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1297,6 +1311,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
 		}
 		resumeSessionID = snapshot.ProviderSessionID
+		timings.mark("nativeRestore")
 	}
 	// Operator file copies reopen the workspace by path once the child, which
 	// may own the session root, is running, so its identity is pinned here and
@@ -1351,6 +1366,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	timings.mark("ownershipAndEnvironment")
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
@@ -1382,6 +1398,8 @@ func (s *Server) createSession(
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	timings.mark("adapterStartup")
+	timings.recordAdapter(runtimeSession.StartupTimings())
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
 		// creation that fails part-way leaves its binding pending, so the next
@@ -1414,6 +1432,7 @@ func (s *Server) createSession(
 			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
 		}
+		timings.mark("durableCommit")
 	}
 	cleanup = false
 	cleanupProviderProxy = false
