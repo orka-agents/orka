@@ -284,26 +284,34 @@ const repositoryMonitorPermissionMemoryTTL = 3 * time.Minute
 // authority unknown until a later poll checks it.
 var errRepositoryMonitorPermissionLookupBudget = errors.New("repository permission lookups for this poll are spent")
 
+// repositoryMonitorPermissionWaitingExpiry drops a waiting scope no poll
+// has deferred for this long, such as a pull request that closed.
+const repositoryMonitorPermissionWaitingExpiry = 15 * time.Minute
+
 // repositoryMonitorPermissionCache caches collaborator permissions for one
 // monitor poll, so every pull request, readiness, and repair label check
 // in it looks each account up at most once. A failed lookup is cached too,
 // so a throttled account is not asked again in the same poll. Permissions
 // can change, so the cache lives only as long as the poll's context.
 //
-// The budget is shared fairly across polls: accounts a poll could not look
-// up because its budget was spent are reserved budget in the next poll, up to
-// half of it, so pull requests visited late in every poll are not starved by
-// early ones.
+// The budget is shared fairly across polls by scope: the lookups one
+// feedback snapshot of a pull request needs, or one account looked up on
+// its own. A scope this poll's budget cut short waits, with every account it
+// needs, and later polls reserve whole waiting scopes, the longest-waiting
+// first, within half their budget. All of a reserved scope's accounts are
+// looked up in the same poll, so its snapshot completes even when
+// remembered permissions expire between polls.
 type repositoryMonitorPermissionCache struct {
 	mu      sync.Mutex
 	entries map[string]repositoryMonitorPermissionResult
 	lookups int
 	// memory is the monitor's permission memory, nil outside a poll.
 	memory *repositoryMonitorPermissionMemory
-	// reserved are the accounts the previous poll deferred that this poll
-	// has not looked up yet; deferred are the ones this poll defers.
+	// reserved are the accounts of the waiting scopes this poll reserves
+	// that it has not looked up yet.
 	reserved map[string]bool
-	deferred map[string]bool
+	// scopes are the scopes this poll looked up accounts for.
+	scopes map[string]*repositoryMonitorPermissionPollScope
 }
 
 type repositoryMonitorPermissionResult struct {
@@ -311,17 +319,20 @@ type repositoryMonitorPermissionResult struct {
 	err        error
 }
 
+// repositoryMonitorPermissionPollScope is what one poll saw of a scope: the
+// accounts it needed, and whether the budget refused any of them.
+type repositoryMonitorPermissionPollScope struct {
+	keys    map[string]bool
+	refused bool
+}
+
 // repositoryMonitorPermissionMemory is what one monitor's polls carry
-// forward: recent permission results, and the accounts the last poll
-// deferred.
+// forward: recent permission results, and the scopes waiting for budget.
 type repositoryMonitorPermissionMemory struct {
 	mu      sync.Mutex
 	results map[string]repositoryMonitorRememberedPermission
-	// deferred maps each account a poll deferred, and that has not been
-	// looked up since, to the poll that first deferred it, so reservations
-	// go to the accounts that have waited longest.
-	deferred map[string]int
-	polls    int
+	waiting map[string]*repositoryMonitorPermissionWaiting
+	polls   int
 }
 
 type repositoryMonitorRememberedPermission struct {
@@ -329,60 +340,97 @@ type repositoryMonitorRememberedPermission struct {
 	at         time.Time
 }
 
+// repositoryMonitorPermissionWaiting is a scope waiting for budget: the poll
+// that first cut it short, the accounts it needs, and when a poll last did.
+type repositoryMonitorPermissionWaiting struct {
+	since int
+	keys  map[string]bool
+	seen  time.Time
+}
+
 type repositoryMonitorPermissionCacheKey struct{}
 
 type repositoryMonitorFreshPermissionsKey struct{}
 
+type repositoryMonitorPermissionScopeKey struct{}
+
 // withRepositoryMonitorPermissionCache returns ctx with a new permission
 // cache for one monitor poll that carries nothing between polls.
 func withRepositoryMonitorPermissionCache(ctx context.Context) context.Context {
-	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, deferred: map[string]bool{}})
+	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, scopes: map[string]*repositoryMonitorPermissionPollScope{}})
+}
+
+// withRepositoryMonitorPermissionScope returns ctx whose permission lookups
+// belong to scope, such as one pull request's feedback snapshot.
+func withRepositoryMonitorPermissionScope(ctx context.Context, scope string) context.Context {
+	return context.WithValue(ctx, repositoryMonitorPermissionScopeKey{}, scope)
 }
 
 // withRepositoryMonitorPermissionPoll returns ctx with the permission cache
-// of one poll of monitor, and a function that ends the poll, carrying the
-// accounts it deferred to the next one.
+// of one poll of monitor, and a function that ends the poll. Ending it
+// merges what the poll saw into the waiting scopes: a scope it cut short
+// waits, keeping when it first waited, one it completed stops waiting, and
+// one it did not reach is left as it was, so a reconcile that looks nothing
+// up changes nothing.
 func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (context.Context, func()) {
-	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{results: map[string]repositoryMonitorRememberedPermission{}})
+	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{
+		results: map[string]repositoryMonitorRememberedPermission{}, waiting: map[string]*repositoryMonitorPermissionWaiting{},
+	})
 	memory := value.(*repositoryMonitorPermissionMemory)
-	// Reservations go to the accounts that have waited longest, so every
-	// deferred account is looked up within a bounded number of polls. At
-	// most half the budget is reserved, so accounts reached early keep
-	// progressing too; the rest wait for a later poll.
 	memory.mu.Lock()
 	memory.polls++
 	poll := memory.polls
-	deferred := slices.Collect(maps.Keys(memory.deferred))
-	slices.SortFunc(deferred, func(a, b string) int {
-		if c := memory.deferred[a] - memory.deferred[b]; c != 0 {
+	waiting := slices.Collect(maps.Keys(memory.waiting))
+	slices.SortFunc(waiting, func(a, b string) int {
+		if c := memory.waiting[a].since - memory.waiting[b].since; c != 0 {
 			return c
 		}
 		return strings.Compare(a, b)
 	})
-	firstDeferred := maps.Clone(memory.deferred)
-	memory.mu.Unlock()
 	reserved := map[string]bool{}
-	for _, key := range deferred[:min(len(deferred), repositoryMonitorPermissionLookupBudget/2)] {
-		reserved[key] = true
+	for _, scope := range waiting {
+		keys := memory.waiting[scope].keys
+		added := 0
+		for key := range keys {
+			if !reserved[key] {
+				added++
+			}
+		}
+		if len(reserved)+added > repositoryMonitorPermissionLookupBudget/2 {
+			break
+		}
+		maps.Copy(reserved, keys)
 	}
-	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, deferred: map[string]bool{}}
+	memory.mu.Unlock()
+	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, scopes: map[string]*repositoryMonitorPermissionPollScope{}}
 	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, cache), func() {
 		cache.mu.Lock()
-		deferredNow := slices.Collect(maps.Keys(cache.deferred))
+		scopes := cache.scopes
+		cache.scopes = map[string]*repositoryMonitorPermissionPollScope{}
 		cache.mu.Unlock()
+		now := time.Now()
 		memory.mu.Lock()
 		defer memory.mu.Unlock()
-		// An account deferred again keeps the poll that first deferred it;
-		// one looked up, or no longer reached, waits no more.
-		memory.deferred = map[string]int{}
-		for _, key := range deferredNow {
-			memory.deferred[key] = poll
-			if first, ok := firstDeferred[key]; ok {
-				memory.deferred[key] = first
+		for scope, seen := range scopes {
+			if !seen.refused {
+				delete(memory.waiting, scope)
+				continue
+			}
+			entry := memory.waiting[scope]
+			if entry == nil {
+				entry = &repositoryMonitorPermissionWaiting{since: poll, keys: map[string]bool{}}
+				memory.waiting[scope] = entry
+			}
+			maps.Copy(entry.keys, seen.keys)
+			entry.seen = now
+		}
+		for scope, entry := range memory.waiting {
+			if now.Sub(entry.seen) >= repositoryMonitorPermissionWaitingExpiry {
+				delete(memory.waiting, scope)
 			}
 		}
 		for key, remembered := range memory.results {
-			if time.Since(remembered.at) >= repositoryMonitorPermissionMemoryTTL {
+			if now.Sub(remembered.at) >= repositoryMonitorPermissionMemoryTTL {
 				delete(memory.results, key)
 			}
 		}
@@ -401,6 +449,18 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 		return r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
 	}
 	key := strings.ToLower(baseURL + "|" + owner + "/" + repo + "|" + actor)
+	scope, _ := ctx.Value(repositoryMonitorPermissionScopeKey{}).(string)
+	if scope == "" {
+		scope = "account:" + key
+	}
+	cache.mu.Lock()
+	seen := cache.scopes[scope]
+	if seen == nil {
+		seen = &repositoryMonitorPermissionPollScope{keys: map[string]bool{}}
+		cache.scopes[scope] = seen
+	}
+	seen.keys[key] = true
+	cache.mu.Unlock()
 	if permission, ok := cache.remembered(ctx, key); ok {
 		return permission, nil
 	}
@@ -409,13 +469,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 		cache.mu.Unlock()
 		return cached.permission, cached.err
 	}
-	// Accounts the previous poll deferred keep budget of their own.
+	// The accounts of reserved scopes keep budget of their own.
 	reserved := len(cache.reserved)
 	if cache.reserved[key] {
 		reserved--
 	}
 	if cache.lookups+reserved >= repositoryMonitorPermissionLookupBudget {
-		cache.deferred[key] = true
+		seen.refused = true
 		cache.mu.Unlock()
 		return "", errRepositoryMonitorPermissionLookupBudget
 	}

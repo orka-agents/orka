@@ -208,11 +208,19 @@ resumes from the record:
   fails with `repair_task_missing`, keeps its charge, and is not run again;
   repair ingestion settles it as soon as an uncached read confirms the Task
   is gone, even after the command's handoff succeeded.
-- A terminal outcome that is not yet marked projected has its projections
-  replayed on every repair ingestion: a still-queued job takes its end and
-  result head, its push mutation and work action end, and the item's repair
-  state is derived again. Each write only advances a projection that has not
-  ended, so the replay is idempotent; the outcome is then marked projected.
+- Projections always follow the stored outcome. Repair ingestion records a
+  Task's end only for an outcome that has not ended, then projects whatever
+  the stored outcome says, so a Task that succeeds after its repair was
+  refused never projects success. A terminal outcome that is not yet marked
+  projected has its projections replayed on every repair ingestion: its
+  repair job, push mutation, and work action are made to record its end,
+  whether they had not ended or ended differently, and the item's repair
+  state is derived again. Each write is idempotent, and the outcome is marked
+  projected only once no projection contradicts it.
+- A withdrawn repair's job, even one whose Task create the API server
+  refused, ends in the `withdrawn` phase, which readiness ignores, and its push
+  mutation ends too. Ingestion visits every queued job, so jobs that never
+  end cannot keep older ones from being ingested.
 
 The readiness projection skips a `withdrawn` repair, so a withdrawal leaves
 the head as if no repair had been requested. The pull request's repair budget
@@ -265,11 +273,15 @@ pull request, readiness, and repair label checks, and bounded to 60 lookups
 per poll in addition to the 20 per snapshot. A failed lookup is cached for the
 poll too, so a throttled account is not asked again until the next poll; both
 give `incomplete_retry`. The budget is fair across polls: a permission one
-poll read answers the monitor's later polls for three minutes, and accounts a
-poll deferred for lack of budget get up to half of later polls' budgets, the
-longest-waiting first, so every account is looked up within a bounded number
-of polls and pull requests that inventory reaches late are not starved by
-early ones. A repair
+poll read answers the monitor's later polls for three minutes. Lookups are
+scoped to the feedback snapshot of one pull request. A snapshot the budget
+cut short waits with every reviewer it needs, and later polls reserve whole
+waiting snapshots, the longest-waiting first, within half their budget, so
+all of a reserved snapshot's reviewers are looked up in the same poll and the
+snapshot completes even when remembered permissions expire between polls.
+Pull requests that inventory reaches late are therefore not starved by early
+ones. A reconcile that looks nothing up leaves the waiting snapshots as they
+were. A repair
 handoff, which creates a Task, never uses a remembered permission. The memory
 is the controller's; a restart starts afresh.
 

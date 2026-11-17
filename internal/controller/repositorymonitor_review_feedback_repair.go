@@ -93,6 +93,13 @@ func repositoryMonitorFeedbackMaxAttempts(spec corev1alpha1.RepositoryMonitorSpe
 	return repositoryMonitorFeedbackDefaultMaxAttempts
 }
 
+// repositoryMonitorFeedbackPermissionScope returns ctx whose permission
+// lookups belong to pr's feedback snapshot, so the poll's lookup budget
+// serves a snapshot's reviewers together.
+func repositoryMonitorFeedbackPermissionScope(ctx context.Context, pr repositoryMonitorPullRequest) context.Context {
+	return withRepositoryMonitorPermissionScope(ctx, "pull_request:"+strconv.FormatInt(pr.Number, 10))
+}
+
 // repositoryMonitorFeedbackCommand reports whether command is a feedback
 // repair the controller admitted.
 func repositoryMonitorFeedbackCommand(command *store.CommandEvent) bool {
@@ -241,7 +248,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorFeedbackRepair(ctx con
 	if !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) || monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 		return false, nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return false, err
 	}
@@ -366,7 +373,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackHandoff(ctx conte
 	if !repositoryMonitorRepairCarriesFeedback(monitor, command) {
 		return nil, "", nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return nil, "", err
 	}
@@ -533,7 +540,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 	if !full {
 		return "", "", false, nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return "", "", false, err
 	}

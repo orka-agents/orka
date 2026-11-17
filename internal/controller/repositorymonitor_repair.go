@@ -344,7 +344,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		ctx := withRepositoryMonitorFreshPermissions(ctx)
 		// An absence the cache reports is confirmed uncached, since it may
 		// let the handoff finalize a feedback repair or create its Task.
-		taskExists, _, err := r.repositoryMonitorRepairTaskExists(ctx, monitor.Namespace, repositoryMonitorRepairTaskName(monitor, pr, command))
+		taskExists, existingTask, err := r.repositoryMonitorRepairTaskExists(ctx, monitor.Namespace, repositoryMonitorRepairTaskName(monitor, pr, command))
 		if err != nil {
 			return true, 0, err
 		}
@@ -367,7 +367,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		// failed create; once it exists the repair started and is recovered.
 		// The feedback read for the recheck is the Task's input: a handoff
 		// reads feedback once.
-		handoff := repositoryMonitorRepairInputs{}
+		handoff := repositoryMonitorRepairInputs{existingTask: existingTask}
 		if !taskExists {
 			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
 			if err != nil {
@@ -1108,6 +1108,9 @@ type repositoryMonitorRepairInputs struct {
 	// feedbackRead reports that the caller already read feedback for this
 	// handoff into feedback, so creating the Task does not read it again.
 	feedbackRead bool
+	// existingTask is the repair Task the caller already found, whose
+	// prompt the attempt adopts without reading the Task again.
+	existingTask *corev1alpha1.Task
 }
 
 // metadata records which evidence informed the attempt.
@@ -1144,7 +1147,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 		sessionKey = strings.ToLower(headRepo) + ":" + pr.HeadBranch
 	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
-	ciInput, storedPrompt, err := r.repositoryMonitorRepairTaskInput(ctx, monitor, command.Intent, taskName, monitoredRepo, pr)
+	ciInput, storedPrompt, err := r.repositoryMonitorRepairTaskInputFrom(ctx, monitor, command.Intent, taskName, monitoredRepo, pr, inputs.existingTask)
 	inputs.ci = ciInput
 	if err != nil {
 		return 0, err
@@ -1309,16 +1312,27 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 // stored prompt is adopted too, and no CI input is returned, so no evidence
 // is recorded as having informed it.
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskInput(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName, repo string, pr repositoryMonitorPullRequest) (*repositoryMonitorRepairCIInput, string, error) {
+	return r.repositoryMonitorRepairTaskInputFrom(ctx, monitor, intent, taskName, repo, pr, nil)
+}
+
+// repositoryMonitorRepairTaskInputFrom is repositoryMonitorRepairTaskInput
+// for a caller that already read the Task, such as uncached because the
+// cache reported it missing; that Task's prompt is adopted without reading
+// the Task again.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskInputFrom(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName, repo string, pr repositoryMonitorPullRequest, found *corev1alpha1.Task) (*repositoryMonitorRepairCIInput, string, error) {
 	stored := ""
-	var existing corev1alpha1.Task
-	err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &existing)
-	switch {
-	case err == nil:
-		if metav1.IsControlledBy(&existing, monitor) && repositoryMonitorRepairPromptInstructionsMatch(existing.Spec.Prompt, intent) {
-			stored = existing.Spec.Prompt
+	existing := found
+	if existing == nil {
+		existing = &corev1alpha1.Task{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, existing); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, "", err
+			}
+			existing = nil
 		}
-	case !apierrors.IsNotFound(err):
-		return nil, "", err
+	}
+	if existing != nil && metav1.IsControlledBy(existing, monitor) && repositoryMonitorRepairPromptInstructionsMatch(existing.Spec.Prompt, intent) {
+		stored = existing.Spec.Prompt
 	}
 	if intent != repositoryMonitorCommandIntentFixCI {
 		if repositoryMonitorRepairPromptForAttempt(stored, intent, pr.HeadSHA) {
@@ -1756,9 +1770,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepoHeadContainsBase(ctx 
 
 //nolint:gocyclo // Repair ingestion keeps delivery, audit, and work-action settlement in one transaction.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
-	jobs, _, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRepairPhaseQueued, Limit: 100})
-	if err != nil {
-		return false, err
+	// Every queued job is visited, so jobs that never end cannot keep older
+	// ones from being ingested.
+	var jobs []store.RepairJob
+	for cursor := ""; ; {
+		page, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRepairPhaseQueued, Limit: 100, Cursor: cursor})
+		if err != nil {
+			return false, err
+		}
+		jobs = append(jobs, page...)
+		if next == "" {
+			break
+		}
+		cursor = next
 	}
 	ingested := false
 	for i := range jobs {
@@ -1769,7 +1793,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		var task corev1alpha1.Task
 		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
 			if client.IgnoreNotFound(err) == nil {
-				settled, err := r.failRepositoryMonitorFeedbackRepairWithMissingTask(ctx, monitor, &job)
+				settled, err := r.settleRepositoryMonitorFeedbackJobWithoutTask(ctx, monitor, &job)
 				if err != nil {
 					return ingested, err
 				}
@@ -1790,8 +1814,12 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if cancelled, cancelErr := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
 			return ingested, cancelErr
 		} else if cancelled {
-			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand, ""); err != nil {
-				return ingested, err
+			if feedbackOutcome != nil {
+				if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand, ""); err != nil {
+					return ingested, err
+				}
+				ingested = true
+				continue
 			}
 			completedAt := time.Now()
 			job.Phase = repositoryMonitorRepairPhaseFailed
@@ -1853,9 +1881,12 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			case job.Phase == repositoryMonitorRepairPhaseSucceeded:
 				state = store.MonitorFeedbackOutcomeSucceeded
 			}
-			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError, job.PushedSHA); err != nil {
+			// The stored outcome, not the Task, decides every projection.
+			if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError, job.PushedSHA); err != nil {
 				return ingested, err
 			}
+			ingested = true
+			continue
 		}
 		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
 		pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
@@ -1955,6 +1986,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx co
 		}
 		for _, job := range jobs {
 			if job.HeadSHA != head && (job.PushedSHA == "" || job.PushedSHA != head) {
+				continue
+			}
+			if job.Phase == repositoryMonitorRepairPhaseWithdrawn {
+				// A withdrawn feedback repair reads as if none was requested.
 				continue
 			}
 			if job.Phase == repositoryMonitorRepairPhaseQueued {
