@@ -144,8 +144,11 @@ const (
 	// feedback attempt ledger and outcomes:
 	// [RepositoryMonitorStore.AdmitMonitorFeedbackRepair],
 	// [RepositoryMonitorStore.ListMonitorFeedbackAttempts],
+	// [RepositoryMonitorStore.PrepareMonitorFeedbackRepairTask],
+	// [RepositoryMonitorStore.ReleaseMonitorFeedbackRepairTask],
 	// [RepositoryMonitorStore.StartMonitorFeedbackRepair],
 	// [RepositoryMonitorStore.FinishMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.MarkMonitorFeedbackOutcomeProjected],
 	// [RepositoryMonitorStore.GetMonitorFeedbackOutcome] and
 	// [RepositoryMonitorStore.ListMonitorFeedbackOutcomes].
 	ContractRevision = 9

@@ -562,12 +562,19 @@ type MonitorFeedbackAdmission struct {
 const MaxMonitorFeedbackAttemptsPerAdmission = 50
 
 // Feedback outcome states. A feedback repair's outcome is reserved when the
-// repair is admitted, started once its repair Task exists, and then ends in
-// exactly one terminal state, which never changes.
+// repair is admitted, creating while its repair Task's create is in flight,
+// started once the Task exists, and then ends in exactly one terminal state,
+// which never changes.
 const (
 	// MonitorFeedbackOutcomeReserved is a queued feedback repair whose Task
 	// does not exist yet. Every admitted feedback ID is reserved.
 	MonitorFeedbackOutcomeReserved = "reserved"
+	// MonitorFeedbackOutcomeCreating is a feedback repair whose Task create
+	// was requested and may have succeeded: its Task may exist, or may have
+	// run and been deleted. Every admitted feedback ID stays charged until
+	// the outcome starts, or returns to reserved because the API server
+	// definitely refused the create.
+	MonitorFeedbackOutcomeCreating = "creating"
 	// MonitorFeedbackOutcomeStarted is a feedback repair whose Task exists,
 	// with the feedback targets its prompt froze.
 	MonitorFeedbackOutcomeStarted = "started"
@@ -614,24 +621,41 @@ type MonitorFeedbackOutcome struct {
 	// subset of AdmittedIDs. Only a started outcome, or a terminal one that
 	// was started, has them.
 	Targets []string `json:"targets,omitempty"`
-	// TaskName is the repair Task's name, set when the outcome started.
+	// TaskName is the repair Task's name, set when its create was requested
+	// or the outcome started.
 	TaskName string `json:"taskName,omitempty"`
 	// Reason says why a terminal outcome ended as it did.
-	Reason      string     `json:"reason,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-	StartedAt   *time.Time `json:"startedAt,omitempty"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// ResultSHA is the head a succeeded repair pushed, so its result can be
+	// projected without its Task.
+	ResultSHA string    `json:"resultSHA,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	// TaskCreateAt is when the repair Task's create was requested, kept
+	// until a definite refusal releases it. An outcome with it set and no
+	// start may have run a Task.
+	TaskCreateAt *time.Time `json:"taskCreateAt,omitempty"`
+	StartedAt    *time.Time `json:"startedAt,omitempty"`
+	CompletedAt  *time.Time `json:"completedAt,omitempty"`
+	// ProjectedAt is when the controller confirmed that a terminal outcome's
+	// projections, such as its repair job and work action, record its end.
+	ProjectedAt *time.Time `json:"projectedAt,omitempty"`
 }
 
 // ChargedIDs returns the feedback IDs whose attempt budget the outcome
-// charges: every admitted ID while it is reserved, and afterwards only the
-// targets its repair Task was given, none when no Task ever existed.
+// charges: every admitted ID while it is reserved or creating, the targets
+// its repair Task was given once it started, every admitted ID when it ended
+// while its Task may have run, and none when no Task create was requested.
 func (o MonitorFeedbackOutcome) ChargedIDs() []string {
-	if o.State == MonitorFeedbackOutcomeReserved {
+	switch {
+	case o.State == MonitorFeedbackOutcomeReserved || o.State == MonitorFeedbackOutcomeCreating:
+		return o.AdmittedIDs
+	case len(o.Targets) > 0:
+		return o.Targets
+	case o.TaskCreateAt != nil:
 		return o.AdmittedIDs
 	}
-	return o.Targets
+	return nil
 }
 
 // MonitorFeedbackOutcomeFilter constrains feedback outcome list queries.
@@ -642,8 +666,33 @@ type MonitorFeedbackOutcomeFilter struct {
 	PRNumber    int64
 	HeadSHA     string
 	State       string
+	// Unprojected keeps only terminal outcomes whose projections were not
+	// confirmed.
+	Unprojected bool
 	Limit       int
 	Cursor      string
+}
+
+// PrepareMonitorFeedbackRepairTaskRequest records that a feedback repair's
+// Task create is about to be requested.
+type PrepareMonitorFeedbackRepairTaskRequest struct {
+	Namespace      string `json:"namespace"`
+	CommandEventID string `json:"commandEventID"`
+	TaskName       string `json:"taskName"`
+}
+
+// ReleaseMonitorFeedbackRepairTaskRequest records that the API server
+// definitely refused a feedback repair's Task create.
+type ReleaseMonitorFeedbackRepairTaskRequest struct {
+	Namespace      string `json:"namespace"`
+	CommandEventID string `json:"commandEventID"`
+}
+
+// MarkMonitorFeedbackOutcomeProjectedRequest records that a terminal
+// feedback outcome's projections record its end.
+type MarkMonitorFeedbackOutcomeProjectedRequest struct {
+	Namespace      string `json:"namespace"`
+	CommandEventID string `json:"commandEventID"`
 }
 
 // StartMonitorFeedbackRepairRequest records that a feedback repair's Task
@@ -662,4 +711,6 @@ type FinishMonitorFeedbackRepairRequest struct {
 	// State is a terminal outcome state.
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
+	// ResultSHA is the head a succeeded repair pushed.
+	ResultSHA string `json:"resultSHA,omitempty"`
 }

@@ -32,17 +32,24 @@ CREATE TABLE IF NOT EXISTS monitor_feedback_outcomes (
 			repo              TEXT NOT NULL,
 			pr_number         INTEGER NOT NULL,
 			head_sha          TEXT NOT NULL,
-			state             TEXT NOT NULL CHECK(state IN ('reserved', 'started', 'withdrawn', 'no_change', 'failed', 'succeeded')),
+			state             TEXT NOT NULL CHECK(state IN ('reserved', 'creating', 'started', 'withdrawn', 'no_change', 'failed', 'succeeded')),
 			admitted_ids      TEXT NOT NULL,
 			targets           TEXT NOT NULL DEFAULT '[]',
 			task_name         TEXT NOT NULL DEFAULT '',
 			reason            TEXT NOT NULL DEFAULT '',
+			result_sha        TEXT NOT NULL DEFAULT '',
 			created_at        TIMESTAMP NOT NULL,
 			updated_at        TIMESTAMP NOT NULL,
+			task_create_at    TIMESTAMP,
 			started_at        TIMESTAMP,
 			completed_at      TIMESTAMP,
+			projected_at      TIMESTAMP,
 			PRIMARY KEY(monitor_namespace, command_event_id)
 		);
 
 CREATE INDEX IF NOT EXISTS idx_monitor_feedback_outcomes_pull_request
 			ON monitor_feedback_outcomes(monitor_namespace, monitor_name, repo, pr_number);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_feedback_outcomes_unprojected
+			ON monitor_feedback_outcomes(monitor_namespace, monitor_name, created_at)
+			WHERE projected_at IS NULL;

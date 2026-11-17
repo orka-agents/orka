@@ -852,11 +852,31 @@ func (p envelopedState) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	})
 }
 
+func (p envelopedState) MarkMonitorFeedbackOutcomeProjected(ctx context.Context, a1 storagev1.MarkMonitorFeedbackOutcomeProjectedRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	err := p.ops.run(ctx, writeCall{method: "MarkMonitorFeedbackOutcomeProjected", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.MarkMonitorFeedbackOutcomeProjected(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
 	var r0 bool
 	err := p.ops.run(ctx, writeCall{method: "MarkWorkActionRetryPending", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
 		r0, err = p.StateProvider.MarkWorkActionRetryPending(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
+func (p envelopedState) PrepareMonitorFeedbackRepairTask(ctx context.Context, a1 storagev1.PrepareMonitorFeedbackRepairTaskRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	err := p.ops.run(ctx, writeCall{method: "PrepareMonitorFeedbackRepairTask", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.PrepareMonitorFeedbackRepairTask(ctx, a1)
 		return err
 	})
 	return r0, err
@@ -960,6 +980,16 @@ func (p envelopedState) ReleaseLockWithTokenUsage(ctx context.Context, a1 storag
 	return p.ops.run(ctx, writeCall{method: "ReleaseLockWithTokenUsage", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
 		return p.StateProvider.ReleaseLockWithTokenUsage(ctx, a1, a2, a3)
 	})
+}
+
+func (p envelopedState) ReleaseMonitorFeedbackRepairTask(ctx context.Context, a1 storagev1.ReleaseMonitorFeedbackRepairTaskRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	err := p.ops.run(ctx, writeCall{method: "ReleaseMonitorFeedbackRepairTask", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.ReleaseMonitorFeedbackRepairTask(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) ReleaseTaskDataFence(ctx context.Context, a1 storagev1.TaskDataFence) error {

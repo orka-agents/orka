@@ -153,8 +153,14 @@ func observeFeedbackOutcome(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	outcome, err := p.GetMonitorFeedbackOutcome(t.Context(), workflowNamespace, "feedback-1")
 	if err == nil {
-		// Transition times come from the provider's clock.
-		outcome.UpdatedAt, outcome.StartedAt, outcome.CompletedAt = time.Time{}, nil, nil
+		// Transition times come from the provider's clock; only whether
+		// they are set is observed.
+		outcome.UpdatedAt = time.Time{}
+		for _, at := range []**time.Time{&outcome.TaskCreateAt, &outcome.StartedAt, &outcome.CompletedAt, &outcome.ProjectedAt} {
+			if *at != nil {
+				*at = &time.Time{}
+			}
+		}
 	}
 	return observed(t, outcome, err)
 }
@@ -373,6 +379,37 @@ func init() {
 			},
 			args: fixed(storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1",
 				Targets: []string{"review_comment:1"}, TaskName: "task-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "PrepareMonitorFeedbackRepairTask",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.PrepareMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", TaskName: "task-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "ReleaseMonitorFeedbackRepairTask",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+				_, err = p.PrepareMonitorFeedbackRepairTask(t.Context(), storagev1.PrepareMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", TaskName: "task-1"})
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.ReleaseMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "MarkMonitorFeedbackOutcomeProjected",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+				_, err = p.FinishMonitorFeedbackRepair(t.Context(), storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", State: storagev1.MonitorFeedbackOutcomeWithdrawn})
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.MarkMonitorFeedbackOutcomeProjectedRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1"}),
 			observe: observeFeedbackOutcome,
 		},
 		monitorCase{

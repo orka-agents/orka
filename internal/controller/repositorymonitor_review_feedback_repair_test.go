@@ -448,7 +448,7 @@ func TestRepositoryMonitorReviewFeedbackChargesOnlyAttemptsThatRan(t *testing.T)
 		t.Fatalf("queued attempt ledger = %+v err=%v", ledger, err)
 	}
 	// The command ended without a Task, as a withdrawn or exhausted one does.
-	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, first.ID, store.MonitorFeedbackOutcomeFailed, "exhausted"); err != nil {
+	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, first.ID, store.MonitorFeedbackOutcomeFailed, "exhausted", ""); err != nil {
 		t.Fatal(err)
 	}
 	f.finishCommand(t, first.ID)
@@ -472,7 +472,7 @@ func TestRepositoryMonitorReviewFeedbackChargesOnlyAttemptsThatRan(t *testing.T)
 	if _, err := f.reconciler.startRepositoryMonitorFeedbackOutcome(ctx, f.monitor, second, []string{"review_comment:11"}, "task-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, second, store.MonitorFeedbackOutcomeFailed, "task failed"); err != nil {
+	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, second, store.MonitorFeedbackOutcomeFailed, "task failed", ""); err != nil {
 		t.Fatal(err)
 	}
 	f.finishCommand(t, second)
@@ -704,9 +704,7 @@ func TestRepositoryMonitorReviewFeedbackReadinessHonorsRepairLabelActor(t *testi
 func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesAreNotUnverified(t *testing.T) {
 	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{}, "flaky")
 	orka := repositoryMonitorFeedbackTestComment(501, "orka-bot", "Bot", "**P1: Bug**", 0)
-	orka.PullRequestReview = &struct {
-		FullDatabaseID string `json:"fullDatabaseId"`
-	}{FullDatabaseID: "9001"}
+	orka.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "9001"}
 	raw := repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{
 		repositoryMonitorFeedbackTestThread("T5", 50, false, orka, repositoryMonitorFeedbackTestComment(502, "flaky", "User", "This finding is wrong.", 1)),
 	}}
@@ -732,9 +730,7 @@ func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesAreNotUnverified(t *te
 // authors whose feedback could.
 func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesSkipPriorityLookups(t *testing.T) {
 	orka := repositoryMonitorFeedbackTestComment(501, "orka-bot", "Bot", "**P1: Bug**", 0)
-	orka.PullRequestReview = &struct {
-		FullDatabaseID string `json:"fullDatabaseId"`
-	}{FullDatabaseID: "9001"}
+	orka.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "9001"}
 	permissions := map[string]string{"replier": "write"}
 	// The reply is the newest activity, so newest-first priority would pick
 	// it first if it were a candidate.

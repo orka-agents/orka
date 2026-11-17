@@ -225,10 +225,82 @@ func encodeMonitorFeedbackIDs(ids []string) (string, error) {
 	return string(encoded), err
 }
 
-// StartMonitorFeedbackRepair moves a reserved feedback outcome to started.
+// transitionMonitorFeedbackOutcome runs one outcome transition in a write
+// operation: apply reads the current outcome and changes it, and the stored
+// outcome is returned.
+func (s *Store) transitionMonitorFeedbackOutcome(ctx context.Context, method, namespace, commandEventID string, apply func(context.Context, *sql.Tx, *store.MonitorFeedbackOutcome) error) (*store.MonitorFeedbackOutcome, error) {
+	return writeOperation(ctx, s, method, nil, func(ctx context.Context) (*store.MonitorFeedbackOutcome, error) {
+		var outcome *store.MonitorFeedbackOutcome
+		err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			current, err := getMonitorFeedbackOutcome(ctx, tx, namespace, commandEventID)
+			if err != nil {
+				return err
+			}
+			if err := apply(ctx, tx, current); err != nil {
+				return err
+			}
+			outcome, err = getMonitorFeedbackOutcome(ctx, tx, namespace, commandEventID)
+			return err
+		})
+		return outcome, err
+	})
+}
+
+func validateMonitorFeedbackOutcomeKey(namespace, commandEventID string) error {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(commandEventID) == "" {
+		return store.ValidationErrorf("a feedback repair outcome needs a namespace and command event")
+	}
+	return nil
+}
+
+// PrepareMonitorFeedbackRepairTask moves a reserved feedback outcome to
+// creating before its Task create is requested.
+func (s *Store) PrepareMonitorFeedbackRepairTask(ctx context.Context, request store.PrepareMonitorFeedbackRepairTaskRequest) (*store.MonitorFeedbackOutcome, error) {
+	if err := validateMonitorFeedbackOutcomeKey(request.Namespace, request.CommandEventID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.TaskName) == "" {
+		return nil, store.ValidationErrorf("preparing feedback repair %q needs a Task name", request.CommandEventID)
+	}
+	return s.transitionMonitorFeedbackOutcome(ctx, "PrepareMonitorFeedbackRepairTask", request.Namespace, request.CommandEventID, func(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome) error {
+		switch {
+		case current.State == store.MonitorFeedbackOutcomeReserved:
+			now := time.Now().UTC()
+			return updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, task_name = ?, task_create_at = ?, updated_at = ?`,
+				store.MonitorFeedbackOutcomeCreating, request.TaskName, now, now)
+		case (current.State == store.MonitorFeedbackOutcomeCreating || current.State == store.MonitorFeedbackOutcomeStarted) && current.TaskName == request.TaskName:
+			return nil
+		}
+		return store.ConflictErrorf("feedback repair %q is %s and cannot prepare Task %q", request.CommandEventID, current.State, request.TaskName)
+	})
+}
+
+// ReleaseMonitorFeedbackRepairTask returns a creating feedback outcome to
+// reserved after a definite refusal of its Task create.
+func (s *Store) ReleaseMonitorFeedbackRepairTask(ctx context.Context, request store.ReleaseMonitorFeedbackRepairTaskRequest) (*store.MonitorFeedbackOutcome, error) {
+	if err := validateMonitorFeedbackOutcomeKey(request.Namespace, request.CommandEventID); err != nil {
+		return nil, err
+	}
+	return s.transitionMonitorFeedbackOutcome(ctx, "ReleaseMonitorFeedbackRepairTask", request.Namespace, request.CommandEventID, func(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome) error {
+		switch current.State {
+		case store.MonitorFeedbackOutcomeReserved:
+			return nil
+		case store.MonitorFeedbackOutcomeCreating:
+			return updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, task_name = '', task_create_at = NULL, updated_at = ?`,
+				store.MonitorFeedbackOutcomeReserved, time.Now().UTC())
+		}
+		return store.ConflictErrorf("feedback repair %q is %s and cannot release its Task create", request.CommandEventID, current.State)
+	})
+}
+
+// StartMonitorFeedbackRepair moves a reserved or creating feedback outcome
+// to started.
 func (s *Store) StartMonitorFeedbackRepair(ctx context.Context, request store.StartMonitorFeedbackRepairRequest) (*store.MonitorFeedbackOutcome, error) {
-	if strings.TrimSpace(request.Namespace) == "" || strings.TrimSpace(request.CommandEventID) == "" || strings.TrimSpace(request.TaskName) == "" {
-		return nil, store.ValidationErrorf("starting a feedback repair needs a namespace, command event, and Task name")
+	if err := validateMonitorFeedbackOutcomeKey(request.Namespace, request.CommandEventID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.TaskName) == "" {
+		return nil, store.ValidationErrorf("starting feedback repair %q needs a Task name", request.CommandEventID)
 	}
 	if len(request.Targets) == 0 || slices.ContainsFunc(request.Targets, func(id string) bool { return strings.TrimSpace(id) == "" }) {
 		return nil, store.ValidationErrorf("starting feedback repair %q needs at least one feedback target", request.CommandEventID)
@@ -236,70 +308,67 @@ func (s *Store) StartMonitorFeedbackRepair(ctx context.Context, request store.St
 	targets := slices.Clone(request.Targets)
 	slices.Sort(targets)
 	targets = slices.Compact(targets)
-	return writeOperation(ctx, s, "StartMonitorFeedbackRepair", nil, func(ctx context.Context) (*store.MonitorFeedbackOutcome, error) {
-		var outcome *store.MonitorFeedbackOutcome
-		err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			current, err := getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
+	return s.transitionMonitorFeedbackOutcome(ctx, "StartMonitorFeedbackRepair", request.Namespace, request.CommandEventID, func(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome) error {
+		startable := current.State == store.MonitorFeedbackOutcomeReserved ||
+			current.State == store.MonitorFeedbackOutcomeCreating && current.TaskName == request.TaskName
+		switch {
+		case startable:
+			for _, target := range targets {
+				if !slices.Contains(current.AdmittedIDs, target) {
+					return store.ValidationErrorf("feedback %q was not admitted by command %q", target, request.CommandEventID)
+				}
+			}
+			encoded, err := encodeMonitorFeedbackIDs(targets)
 			if err != nil {
 				return err
 			}
-			switch {
-			case current.State == store.MonitorFeedbackOutcomeReserved:
-				for _, target := range targets {
-					if !slices.Contains(current.AdmittedIDs, target) {
-						return store.ValidationErrorf("feedback %q was not admitted by command %q", target, request.CommandEventID)
-					}
-				}
-				encoded, err := encodeMonitorFeedbackIDs(targets)
-				if err != nil {
-					return err
-				}
-				now := time.Now().UTC()
-				if err := updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, targets = ?, task_name = ?, started_at = ?, updated_at = ?`,
-					store.MonitorFeedbackOutcomeStarted, encoded, request.TaskName, now, now); err != nil {
-					return err
-				}
-			case current.StartedAt != nil && slices.Equal(current.Targets, targets) && current.TaskName == request.TaskName:
-				// A repeat of the same start.
-			default:
-				return store.ConflictErrorf("feedback repair %q is %s and cannot start with these targets", request.CommandEventID, current.State)
-			}
-			outcome, err = getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
-			return err
-		})
-		return outcome, err
+			now := time.Now().UTC()
+			return updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, targets = ?, task_name = ?, started_at = ?, updated_at = ?`,
+				store.MonitorFeedbackOutcomeStarted, encoded, request.TaskName, now, now)
+		case current.StartedAt != nil && slices.Equal(current.Targets, targets) && current.TaskName == request.TaskName:
+			// A repeat of the same start.
+			return nil
+		}
+		return store.ConflictErrorf("feedback repair %q is %s and cannot start with these targets", request.CommandEventID, current.State)
 	})
 }
 
 // FinishMonitorFeedbackRepair moves a feedback outcome to a terminal state.
 func (s *Store) FinishMonitorFeedbackRepair(ctx context.Context, request store.FinishMonitorFeedbackRepairRequest) (*store.MonitorFeedbackOutcome, error) {
-	if strings.TrimSpace(request.Namespace) == "" || strings.TrimSpace(request.CommandEventID) == "" {
-		return nil, store.ValidationErrorf("finishing a feedback repair needs a namespace and command event")
+	if err := validateMonitorFeedbackOutcomeKey(request.Namespace, request.CommandEventID); err != nil {
+		return nil, err
 	}
 	if !store.IsMonitorFeedbackOutcomeTerminal(request.State) {
 		return nil, store.ValidationErrorf("feedback outcome state %q is not terminal", request.State)
 	}
-	return writeOperation(ctx, s, "FinishMonitorFeedbackRepair", nil, func(ctx context.Context) (*store.MonitorFeedbackOutcome, error) {
-		var outcome *store.MonitorFeedbackOutcome
-		err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			current, err := getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
-			if err != nil {
-				return err
-			}
-			if current.State != request.State {
-				if !monitorFeedbackOutcomeCanFinish(current.State, request.State) {
-					return store.ConflictErrorf("feedback repair %q is %s and cannot end as %s", request.CommandEventID, current.State, request.State)
-				}
-				now := time.Now().UTC()
-				if err := updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, reason = ?, completed_at = ?, updated_at = ?`,
-					request.State, request.Reason, now, now); err != nil {
-					return err
-				}
-			}
-			outcome, err = getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
-			return err
-		})
-		return outcome, err
+	return s.transitionMonitorFeedbackOutcome(ctx, "FinishMonitorFeedbackRepair", request.Namespace, request.CommandEventID, func(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome) error {
+		if current.State == request.State {
+			return nil
+		}
+		if !monitorFeedbackOutcomeCanFinish(current.State, request.State) {
+			return store.ConflictErrorf("feedback repair %q is %s and cannot end as %s", request.CommandEventID, current.State, request.State)
+		}
+		now := time.Now().UTC()
+		return updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, reason = ?, result_sha = ?, completed_at = ?, updated_at = ?`,
+			request.State, request.Reason, request.ResultSHA, now, now)
+	})
+}
+
+// MarkMonitorFeedbackOutcomeProjected records that a terminal outcome's
+// projections record its end.
+func (s *Store) MarkMonitorFeedbackOutcomeProjected(ctx context.Context, request store.MarkMonitorFeedbackOutcomeProjectedRequest) (*store.MonitorFeedbackOutcome, error) {
+	if err := validateMonitorFeedbackOutcomeKey(request.Namespace, request.CommandEventID); err != nil {
+		return nil, err
+	}
+	return s.transitionMonitorFeedbackOutcome(ctx, "MarkMonitorFeedbackOutcomeProjected", request.Namespace, request.CommandEventID, func(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome) error {
+		switch {
+		case !store.IsMonitorFeedbackOutcomeTerminal(current.State):
+			return store.ConflictErrorf("feedback repair %q is %s and has not ended", request.CommandEventID, current.State)
+		case current.ProjectedAt != nil:
+			return nil
+		}
+		now := time.Now().UTC()
+		return updateMonitorFeedbackOutcome(ctx, tx, current, `projected_at = ?, updated_at = ?`, now, now)
 	})
 }
 
@@ -309,6 +378,8 @@ func monitorFeedbackOutcomeCanFinish(from, to string) bool {
 	switch from {
 	case store.MonitorFeedbackOutcomeReserved:
 		return to == store.MonitorFeedbackOutcomeWithdrawn || to == store.MonitorFeedbackOutcomeFailed
+	case store.MonitorFeedbackOutcomeCreating:
+		return to == store.MonitorFeedbackOutcomeFailed
 	case store.MonitorFeedbackOutcomeStarted:
 		return to == store.MonitorFeedbackOutcomeNoChange || to == store.MonitorFeedbackOutcomeFailed || to == store.MonitorFeedbackOutcomeSucceeded
 	}
@@ -359,21 +430,25 @@ func (s *Store) ListMonitorFeedbackOutcomes(ctx context.Context, filter store.Mo
 	monitorFilter(q, "pr_number", filter.PRNumber)
 	monitorFilter(q, "head_sha", filter.HeadSHA)
 	monitorFilter(q, "state", filter.State)
+	if filter.Unprojected {
+		q.sql.WriteString(" AND projected_at IS NULL AND state IN ('withdrawn', 'no_change', 'failed', 'succeeded')")
+	}
 	return queryPage(ctx, s.db, q, "created_at DESC, command_event_id DESC", filter.Cursor, filter.Limit, scanMonitorFeedbackOutcome)
 }
 
 func monitorFeedbackOutcomeSelectSQL() string {
 	return `SELECT monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha, state, admitted_ids, targets,
-	        task_name, reason, created_at, updated_at, started_at, completed_at FROM monitor_feedback_outcomes`
+	        task_name, reason, result_sha, created_at, updated_at, task_create_at, started_at, completed_at, projected_at
+	        FROM monitor_feedback_outcomes`
 }
 
 func scanMonitorFeedbackOutcome(r rowScanner) (store.MonitorFeedbackOutcome, error) {
 	var outcome store.MonitorFeedbackOutcome
 	var admitted, targets string
-	var started, completed sql.NullTime
+	var creating, started, completed, projected sql.NullTime
 	if err := r.Scan(&outcome.MonitorNamespace, &outcome.CommandEventID, &outcome.MonitorName, &outcome.Repo, &outcome.PRNumber,
-		&outcome.HeadSHA, &outcome.State, &admitted, &targets, &outcome.TaskName, &outcome.Reason, &outcome.CreatedAt,
-		&outcome.UpdatedAt, &started, &completed); err != nil {
+		&outcome.HeadSHA, &outcome.State, &admitted, &targets, &outcome.TaskName, &outcome.Reason, &outcome.ResultSHA, &outcome.CreatedAt,
+		&outcome.UpdatedAt, &creating, &started, &completed, &projected); err != nil {
 		return outcome, err
 	}
 	if err := json.Unmarshal([]byte(admitted), &outcome.AdmittedIDs); err != nil {
@@ -386,13 +461,17 @@ func scanMonitorFeedbackOutcome(r rowScanner) (store.MonitorFeedbackOutcome, err
 		outcome.Targets = nil
 	}
 	outcome.CreatedAt, outcome.UpdatedAt = outcome.CreatedAt.UTC(), outcome.UpdatedAt.UTC()
-	if started.Valid {
-		at := started.Time.UTC()
-		outcome.StartedAt = &at
-	}
-	if completed.Valid {
-		at := completed.Time.UTC()
-		outcome.CompletedAt = &at
-	}
+	outcome.TaskCreateAt = monitorFeedbackOutcomeTime(creating)
+	outcome.StartedAt = monitorFeedbackOutcomeTime(started)
+	outcome.CompletedAt = monitorFeedbackOutcomeTime(completed)
+	outcome.ProjectedAt = monitorFeedbackOutcomeTime(projected)
 	return outcome, nil
+}
+
+func monitorFeedbackOutcomeTime(value sql.NullTime) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	at := value.Time.UTC()
+	return &at
 }

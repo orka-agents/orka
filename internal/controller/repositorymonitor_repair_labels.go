@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -271,6 +273,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 // GitHub's rate limit on permission lookups.
 const repositoryMonitorPermissionLookupBudget = 60
 
+// repositoryMonitorPermissionMemoryTTL is how long a permission one poll
+// read answers later polls of the same monitor, so lookups a poll repeats do
+// not spend its budget. A repair handoff, which creates a Task, never uses a
+// remembered permission.
+const repositoryMonitorPermissionMemoryTTL = 3 * time.Minute
+
 // errRepositoryMonitorPermissionLookupBudget reports that this poll spent its
 // permission lookup budget. Like any failed lookup it leaves the reviewer's
 // authority unknown until a later poll checks it.
@@ -281,10 +289,20 @@ var errRepositoryMonitorPermissionLookupBudget = errors.New("repository permissi
 // in it looks each account up at most once. A failed lookup is cached too,
 // so a throttled account is not asked again in the same poll. Permissions
 // can change, so the cache lives only as long as the poll's context.
+//
+// The budget is shared fairly across polls: accounts a poll could not look
+// up because its budget was spent are reserved budget in the next poll, so
+// pull requests visited late in every poll are not starved by early ones.
 type repositoryMonitorPermissionCache struct {
 	mu      sync.Mutex
 	entries map[string]repositoryMonitorPermissionResult
 	lookups int
+	// memory is the monitor's permission memory, nil outside a poll.
+	memory *repositoryMonitorPermissionMemory
+	// reserved are the accounts the previous poll deferred that this poll
+	// has not looked up yet; deferred are the ones this poll defers.
+	reserved map[string]bool
+	deferred map[string]bool
 }
 
 type repositoryMonitorPermissionResult struct {
@@ -292,12 +310,62 @@ type repositoryMonitorPermissionResult struct {
 	err        error
 }
 
+// repositoryMonitorPermissionMemory is what one monitor's polls carry
+// forward: recent permission results, and the accounts the last poll
+// deferred.
+type repositoryMonitorPermissionMemory struct {
+	mu       sync.Mutex
+	results  map[string]repositoryMonitorRememberedPermission
+	deferred map[string]bool
+}
+
+type repositoryMonitorRememberedPermission struct {
+	permission string
+	at         time.Time
+}
+
 type repositoryMonitorPermissionCacheKey struct{}
 
+type repositoryMonitorFreshPermissionsKey struct{}
+
 // withRepositoryMonitorPermissionCache returns ctx with a new permission
-// cache for one monitor poll.
+// cache for one monitor poll that carries nothing between polls.
 func withRepositoryMonitorPermissionCache(ctx context.Context) context.Context {
-	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}})
+	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, deferred: map[string]bool{}})
+}
+
+// withRepositoryMonitorPermissionPoll returns ctx with the permission cache
+// of one poll of monitor, and a function that ends the poll, carrying the
+// accounts it deferred to the next one.
+func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (context.Context, func()) {
+	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{results: map[string]repositoryMonitorRememberedPermission{}})
+	memory := value.(*repositoryMonitorPermissionMemory)
+	memory.mu.Lock()
+	reserved := maps.Clone(memory.deferred)
+	memory.mu.Unlock()
+	if reserved == nil {
+		reserved = map[string]bool{}
+	}
+	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, deferred: map[string]bool{}}
+	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, cache), func() {
+		cache.mu.Lock()
+		deferred := maps.Clone(cache.deferred)
+		cache.mu.Unlock()
+		memory.mu.Lock()
+		defer memory.mu.Unlock()
+		memory.deferred = deferred
+		for key, remembered := range memory.results {
+			if time.Since(remembered.at) >= repositoryMonitorPermissionMemoryTTL {
+				delete(memory.results, key)
+			}
+		}
+	}
+}
+
+// withRepositoryMonitorFreshPermissions returns ctx whose permission
+// lookups never use a permission an earlier poll read.
+func withRepositoryMonitorFreshPermissions(ctx context.Context) context.Context {
+	return context.WithValue(ctx, repositoryMonitorFreshPermissionsKey{}, true)
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ctx context.Context, baseURL, owner, repo, token, actor string) (string, error) {
@@ -306,22 +374,52 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 		return r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
 	}
 	key := strings.ToLower(baseURL + "|" + owner + "/" + repo + "|" + actor)
+	if permission, ok := cache.remembered(ctx, key); ok {
+		return permission, nil
+	}
 	cache.mu.Lock()
 	if cached, ok := cache.entries[key]; ok {
 		cache.mu.Unlock()
 		return cached.permission, cached.err
 	}
-	if cache.lookups >= repositoryMonitorPermissionLookupBudget {
+	// Accounts the previous poll deferred keep budget of their own.
+	reserved := len(cache.reserved)
+	if cache.reserved[key] {
+		reserved--
+	}
+	if cache.lookups+reserved >= repositoryMonitorPermissionLookupBudget {
+		cache.deferred[key] = true
 		cache.mu.Unlock()
 		return "", errRepositoryMonitorPermissionLookupBudget
 	}
 	cache.lookups++
+	delete(cache.reserved, key)
 	cache.mu.Unlock()
 	permission, err := r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
 	cache.mu.Lock()
 	cache.entries[key] = repositoryMonitorPermissionResult{permission: permission, err: err}
 	cache.mu.Unlock()
+	if err == nil && cache.memory != nil {
+		cache.memory.mu.Lock()
+		cache.memory.results[key] = repositoryMonitorRememberedPermission{permission: permission, at: time.Now()}
+		cache.memory.mu.Unlock()
+	}
 	return permission, err
+}
+
+// remembered returns a permission an earlier poll of the monitor read within
+// the memory TTL, unless ctx asks for fresh permissions.
+func (c *repositoryMonitorPermissionCache) remembered(ctx context.Context, key string) (string, bool) {
+	if c.memory == nil || ctx.Value(repositoryMonitorFreshPermissionsKey{}) != nil {
+		return "", false
+	}
+	c.memory.mu.Lock()
+	defer c.memory.mu.Unlock()
+	remembered, ok := c.memory.results[key]
+	if !ok || time.Since(remembered.at) >= repositoryMonitorPermissionMemoryTTL {
+		return "", false
+	}
+	return remembered.permission, true
 }
 
 func (r *RepositoryMonitorReconciler) lookUpRepositoryMonitorCollaboratorPermission(ctx context.Context, baseURL, owner, repo, token, actor string) (string, error) {

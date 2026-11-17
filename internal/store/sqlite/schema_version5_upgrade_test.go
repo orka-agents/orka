@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -52,7 +53,7 @@ func TestSchemaVersion8LayoutIsVersion5PlusFeedbackLedger(t *testing.T) {
 	schema, err := readSchema(db)
 	require.NoError(t, err)
 	require.Equal(t, schema175, schemaFingerprint(schema))
-	require.Equal(t, "f9f7ba42799651261f714b2b6426ba7f952b8845a7f356e9ebadc9cdc99d3d51", schema175)
+	require.Equal(t, "f547a5ef2306f5a7fe120f8a6b3130933bcd5928b96eb3f4e0254adc9d6462ad", schema175)
 }
 
 // A version 5 store upgrades in place to the feedback ledger layout: it keeps
@@ -275,7 +276,8 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		ran       bool
 	}{
 		{"queued", "reserved", false},
-		{"queued-with-task", "reserved", false},
+		// Its Task may exist, or may have run and been deleted.
+		{"queued-with-task", "creating", false},
 		{"ran", "succeeded", true},
 		// A job settled from its Task before the command was settled.
 		{"ran-before-settlement", "succeeded", true},
@@ -283,9 +285,11 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		{"ran-and-failed", "failed", true},
 		{"never-ran", "failed", false},
 		{"withdrawn", "withdrawn", false},
+		// That build recorded every create failure the same way, so its
+		// Task may have been created too.
 		{"create-failed", "failed", false},
 		// Its Task may have run before a cancellation settled the command.
-		{"cancelled-before-ingestion", "failed", true},
+		{"cancelled-before-ingestion", "failed", false},
 	} {
 		outcome, err := s.GetMonitorFeedbackOutcome(t.Context(), "ns", want.id)
 		require.NoError(t, err, want.id)
@@ -293,16 +297,25 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		require.Equal(t, admitted(want.id), outcome.AdmittedIDs, want.id)
 		require.Equal(t, "org/repo", outcome.Repo, want.id)
 		require.Equal(t, int64(7), outcome.PRNumber, want.id)
+		// A queued job with a Task name may have created its Task, so its
+		// outcome keeps every admitted charge.
+		mayHaveRun := want.ran || slices.Contains([]string{"queued-with-task", "create-failed", "cancelled-before-ingestion"}, want.id)
 		if want.ran {
 			require.Equal(t, admitted(want.id), outcome.Targets, want.id)
-			require.Equal(t, admitted(want.id), outcome.ChargedIDs(), want.id)
-			require.Equal(t, "task-"+want.id, outcome.TaskName, want.id)
 			require.NotNil(t, outcome.StartedAt, want.id)
 		} else {
 			require.Empty(t, outcome.Targets, want.id)
 			require.Nil(t, outcome.StartedAt, want.id)
 		}
-		if want.state == "reserved" {
+		if mayHaveRun {
+			require.Equal(t, admitted(want.id), outcome.ChargedIDs(), want.id)
+			require.Equal(t, "task-"+want.id, outcome.TaskName, want.id)
+			require.NotNil(t, outcome.TaskCreateAt, want.id)
+		} else if want.state != "reserved" {
+			require.Empty(t, outcome.ChargedIDs(), want.id)
+		}
+		require.Nil(t, outcome.ProjectedAt, want.id)
+		if want.state == "reserved" || want.state == "creating" {
 			require.Equal(t, admitted(want.id), outcome.ChargedIDs(), want.id)
 			require.Nil(t, outcome.CompletedAt, want.id)
 		} else {

@@ -6,10 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -27,6 +27,9 @@ type repositoryMonitorFeedbackLifecycle struct {
 	// ambiguousCreate makes the next Task create fail without saying
 	// whether the Task was created, and create none.
 	ambiguousCreate bool
+	// staleTaskReads makes the cached client report every Task missing, as
+	// a cache that lags a create does; the uncached reader still sees it.
+	staleTaskReads bool
 }
 
 func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedbackLifecycle {
@@ -37,7 +40,14 @@ func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedb
 	f.github.reviewPages = nil
 	l := &repositoryMonitorFeedbackLifecycle{f: f, pr: repositoryMonitorFeedbackRepairTestPR()}
 	withWatch := f.reconciler.Client.(client.WithWatch)
+	f.reconciler.APIReader = withWatch
 	f.reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, task := obj.(*corev1alpha1.Task); task && l.staleTaskReads {
+				return apierrors.NewNotFound(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if _, task := obj.(*corev1alpha1.Task); task && l.ambiguousCreate {
 				l.ambiguousCreate = false
@@ -102,11 +112,12 @@ func (l *repositoryMonitorFeedbackLifecycle) resolveFeedback() {
 	l.f.github.threadPages = []string{strings.Replace(l.f.github.threadPages[0], `"isResolved":false`, `"isResolved":true`, 1)}
 }
 
-// endCommand ends the command with a terminal action of status, as a
-// cancellation or exhausted retries do, and settles the command.
-func (l *repositoryMonitorFeedbackLifecycle) endCommand(t *testing.T, status string) {
+// cancelCommand ends the command with a cancelled action, as a stop
+// command does, and settles the command.
+func (l *repositoryMonitorFeedbackLifecycle) cancelCommand(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
+	status := repositoryMonitorWorkActionStatusCancelled
 	if err := l.f.reconciler.recordRepositoryMonitorWorkActionState(ctx, l.f.monitor, nil, &l.command, repositoryMonitorPullRequestKind, 1, "head1111", "", repositoryMonitorRepairWorkflowActionKind(l.command.Intent), status, status, "", "stopped"); err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +134,12 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		run  func(t *testing.T, l *repositoryMonitorFeedbackLifecycle)
-		// want is the final outcome state; targets whether it started.
+		// want is the final outcome state; started whether it started with
+		// the frozen target, mayHaveRun whether it ended while its Task may
+		// have run without starting.
 		want        string
 		started     bool
+		mayHaveRun  bool
 		tasks       int
 		repairState string
 	}{
@@ -176,7 +190,7 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 		{
 			name: "ended by a cancellation before its Task",
 			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
-				l.endCommand(t, repositoryMonitorWorkActionStatusCancelled)
+				l.cancelCommand(t)
 			},
 			want: store.MonitorFeedbackOutcomeFailed, repairState: "",
 		},
@@ -196,8 +210,10 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 				if err := l.handoff(t); err == nil {
 					t.Fatal("handoff succeeded despite the lost create")
 				}
-				if state := l.outcome(t).State; state != store.MonitorFeedbackOutcomeReserved {
-					t.Fatalf("state after the lost create = %q", state)
+				// The Task may exist, so the outcome is creating and keeps the
+				// admitted charge.
+				if outcome := l.outcome(t); outcome.State != store.MonitorFeedbackOutcomeCreating || outcome.TaskCreateAt == nil {
+					t.Fatalf("outcome after the lost create = %+v", outcome)
 				}
 				l.mustHandoff(t)
 			},
@@ -252,7 +268,7 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
 				l.lostCreate = true
 				_ = l.handoff(t)
-				l.endCommand(t, repositoryMonitorWorkActionStatusCancelled)
+				l.cancelCommand(t)
 			},
 			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 1, repairState: repositoryMonitorRepairPhaseQueued,
 		},
@@ -271,7 +287,7 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 					t.Fatalf("reason = %q", reason)
 				}
 			},
-			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 0, repairState: repositoryMonitorRepairPhaseFailed,
+			want: store.MonitorFeedbackOutcomeFailed, mayHaveRun: true, tasks: 0, repairState: repositoryMonitorRepairPhaseFailed,
 		},
 		{
 			name: "Task deleted after its handoff, settled by repair ingestion",
@@ -281,15 +297,6 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 				if err := l.f.reconciler.Delete(context.Background(), &task); err != nil {
 					t.Fatal(err)
 				}
-				// Within the grace period a missing Task may be a lagging
-				// cache.
-				if _, err := l.f.reconciler.ingestCompletedRepositoryMonitorRepairTasks(context.Background(), l.f.monitor); err != nil {
-					t.Fatal(err)
-				}
-				if state := l.outcome(t).State; state != store.MonitorFeedbackOutcomeStarted {
-					t.Fatalf("state within the grace period = %q", state)
-				}
-				l.f.reconciler.feedbackMissingTaskGrace = time.Nanosecond
 				if _, err := l.f.reconciler.ingestCompletedRepositoryMonitorRepairTasks(context.Background(), l.f.monitor); err != nil {
 					t.Fatal(err)
 				}
@@ -303,43 +310,63 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 			name: "ended by a cancellation after its Task started",
 			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
 				l.mustHandoff(t)
-				l.endCommand(t, repositoryMonitorWorkActionStatusCancelled)
+				l.cancelCommand(t)
 			},
 			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 1, repairState: repositoryMonitorRepairPhaseQueued,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
 			l := newRepositoryMonitorFeedbackLifecycle(t)
 			tc.run(t, l)
-			outcome := l.outcome(t)
-			if outcome.State != tc.want {
-				t.Fatalf("outcome = %+v, want state %s", outcome, tc.want)
-			}
-			if started := outcome.StartedAt != nil; started != tc.started || started != slices.Equal(outcome.Targets, []string{"review_comment:11"}) {
-				t.Fatalf("outcome = %+v, want started=%t with the frozen target", outcome, tc.started)
-			}
-			if got := len(l.f.repairTasks(t)); got != tc.tasks {
-				t.Fatalf("tasks = %d, want %d", got, tc.tasks)
-			}
-			// The charge follows the outcome alone: reserved or started
-			// repairs charge the comment, others only if their Task started.
-			wantCharge := 0
-			if outcome.State == store.MonitorFeedbackOutcomeReserved || tc.started {
-				wantCharge = 1
-			}
-			if ledger := l.f.ledger(t); ledger.spent["review_comment:11"] != wantCharge || ledger.recorded["review_comment:11"] != 1 {
-				t.Fatalf("ledger = %+v, want charge %d", ledger, wantCharge)
-			}
-			state, err := l.f.reconciler.repositoryMonitorRepairStateForHead(ctx, l.f.monitor, 1, "head1111")
-			if err != nil || state != tc.repairState {
-				t.Fatalf("repair state = %q err=%v, want %q", state, err, tc.repairState)
-			}
-			// Every repair past reserved counts against the pull request.
-			_, prCount, _, err := l.f.reconciler.repositoryMonitorRepairPolicy(ctx, l.f.monitor, "orka-agents/orka", l.pr, "", repositoryMonitorCommandIntentFix)
-			if wantCount := map[bool]int{true: 0, false: 1}[outcome.State == store.MonitorFeedbackOutcomeReserved]; err != nil || prCount != wantCount {
-				t.Fatalf("pull request repair count = %d err=%v, want %d", prCount, err, wantCount)
-			}
+			l.check(t, repositoryMonitorFeedbackLifecycleWant{state: tc.want, started: tc.started, mayHaveRun: tc.mayHaveRun, tasks: tc.tasks, repairState: tc.repairState})
 		})
+	}
+}
+
+// repositoryMonitorFeedbackLifecycleWant is where a lifecycle case ends.
+type repositoryMonitorFeedbackLifecycleWant struct {
+	state               string
+	started, mayHaveRun bool
+	tasks               int
+	repairState         string
+}
+
+// check asserts that the outcome, the charge, the Task, the head's repair
+// state, and the pull request's repair budget agree with want.
+func (l *repositoryMonitorFeedbackLifecycle) check(t *testing.T, want repositoryMonitorFeedbackLifecycleWant) {
+	t.Helper()
+	ctx := context.Background()
+	outcome := l.outcome(t)
+	if outcome.State != want.state {
+		t.Fatalf("outcome = %+v, want state %s", outcome, want.state)
+	}
+	if started := outcome.StartedAt != nil; started != want.started || started != slices.Equal(outcome.Targets, []string{"review_comment:11"}) {
+		t.Fatalf("outcome = %+v, want started=%t with the frozen target", outcome, want.started)
+	}
+	if got := len(l.f.repairTasks(t)); got != want.tasks {
+		t.Fatalf("tasks = %d, want %d", got, want.tasks)
+	}
+	if mayHaveRun := outcome.StartedAt == nil && outcome.TaskCreateAt != nil && store.IsMonitorFeedbackOutcomeTerminal(outcome.State); mayHaveRun != want.mayHaveRun {
+		t.Fatalf("outcome = %+v, want mayHaveRun=%t", outcome, want.mayHaveRun)
+	}
+	// The charge follows the outcome alone: a repair that is
+	// reserved or creating, started, or ended while its Task may have
+	// run charges the comment; one that ended before any Task create
+	// charges nothing.
+	wantCharge := 0
+	if outcome.State == store.MonitorFeedbackOutcomeReserved || outcome.State == store.MonitorFeedbackOutcomeCreating || want.started || want.mayHaveRun {
+		wantCharge = 1
+	}
+	if ledger := l.f.ledger(t); ledger.spent["review_comment:11"] != wantCharge || ledger.recorded["review_comment:11"] != 1 {
+		t.Fatalf("ledger = %+v, want charge %d", ledger, wantCharge)
+	}
+	state, err := l.f.reconciler.repositoryMonitorRepairStateForHead(ctx, l.f.monitor, 1, "head1111")
+	if err != nil || state != want.repairState {
+		t.Fatalf("repair state = %q err=%v, want %q", state, err, want.repairState)
+	}
+	// Every repair past reserved counts against the pull request.
+	_, prCount, _, err := l.f.reconciler.repositoryMonitorRepairPolicy(ctx, l.f.monitor, "orka-agents/orka", l.pr, "", repositoryMonitorCommandIntentFix)
+	if wantCount := map[bool]int{true: 0, false: 1}[outcome.State == store.MonitorFeedbackOutcomeReserved]; err != nil || prCount != wantCount {
+		t.Fatalf("pull request repair count = %d err=%v, want %d", prCount, err, wantCount)
 	}
 }

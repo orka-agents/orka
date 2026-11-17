@@ -96,10 +96,9 @@ type RepositoryMonitorReconciler struct {
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]struct{}
 
-	// feedbackMissingTaskGrace is how long a started feedback repair's Task
-	// may be missing, as from a lagging cache, before the repair fails;
-	// zero means repositoryMonitorFeedbackMissingTaskGrace.
-	feedbackMissingTaskGrace time.Duration
+	// permissionMemory holds each monitor's repositoryMonitorPermissionMemory
+	// by UID. It lives in memory: a restarted controller starts afresh.
+	permissionMemory sync.Map
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
@@ -113,8 +112,6 @@ type RepositoryMonitorReconciler struct {
 // Reconcile keeps monitor metadata durable and publishes basic status.
 func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
-	// One poll looks each account's repository permission up at most once.
-	ctx = withRepositoryMonitorPermissionCache(ctx)
 
 	monitor, found, err := r.getRepositoryMonitor(ctx, req)
 	if err != nil {
@@ -124,6 +121,10 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !found {
 		return ctrl.Result{}, nil
 	}
+	// One poll looks each account's repository permission up at most once,
+	// within a budget shared fairly with the monitor's later polls.
+	ctx, endPermissionPoll := r.withRepositoryMonitorPermissionPoll(ctx, monitor)
+	defer endPermissionPoll()
 
 	state, handled, result, err := r.prepareRepositoryMonitor(ctx, monitor)
 	if err != nil || handled {

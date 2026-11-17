@@ -279,7 +279,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 			if action.Status == repositoryMonitorWorkActionStatusBlocked && (action.BlockedReason == repositoryMonitorRepairSkipFeedbackWithdrawn || action.BlockedReason == repositoryMonitorRepairSkipFeedbackNeedsPerson) {
 				state = store.MonitorFeedbackOutcomeWithdrawn
 			}
-			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, state, firstNonEmptyWorkflow(action.BlockedReason, action.Error, action.Status)); err != nil {
+			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, state, firstNonEmptyWorkflow(action.BlockedReason, action.Error, action.Status), ""); err != nil {
 				return false, err
 			}
 		}

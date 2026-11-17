@@ -164,40 +164,55 @@ action's status and metadata. Each was written at a different moment, and the
 attempt charge, the readiness projection, and the repair budget each inferred
 differently, which repeatedly disagreed on edge cases. Instead, each feedback
 repair has one mutable outcome record beside its immutable attempts, in the
-store table `monitor_feedback_outcomes`, keyed by the command event:
+store table `monitor_feedback_outcomes`, keyed by the command event. It is the
+only source of truth for what the repair did; the repair job, the work action,
+and the pull request item are projections of it.
 
 - `reserved`, written with the command and its attempts at admission, lists
   the admitted feedback IDs. All of them are charged, so a queued repair holds
   its attempts.
+- `creating` is written immediately before the repair Task's create is
+  requested, with the Task's name and the time. From then on the Task may
+  exist, or may have run and been deleted, so every admitted ID stays
+  charged. Only `started`, or a definite refusal by the API server (a request
+  it rejected as invalid, unauthorized, or throttled), which returns the
+  outcome to `reserved` and charges nothing, clears it. A timeout or an
+  internal error leaves it `creating`.
 - `started` is written only once the repair Task exists, with the
   `humanFeedbackTargets` its prompt froze and the Task's name. From then on
   only those targets are charged; admitted feedback that was resolved before
   the Task was created is released.
 - One terminal state follows and never changes: `withdrawn` (only from
-  `reserved`: the feedback no longer needed a repair, or needs a person),
-  `failed` (from either), `no_change` or `succeeded` (only from `started`).
+  `reserved`), `failed` (from `reserved`, `creating`, or `started`),
+  `no_change` or `succeeded` (only from `started`). A terminal outcome keeps
+  its reason and the head a succeeded repair pushed.
 
-The charge is a function of the record alone: `reserved` charges every
-admitted ID, anything else charges its targets, which are empty when no Task
-ever existed. An attempt without an outcome is charged, so the budget fails
-closed. Each transition is written where it becomes known, idempotently and
-under the controller's write fence: the handoff after creating or adopting
-the Task, the withdrawal and refusal paths before it, and repair ingestion,
-which records the Task's end before the job so a retried ingestion records the
-same end. A command that ends any other way, such as a cancellation or
-exhausted retries, ends its outcome as it is settled. A restart in any state
-resumes from the record. A `started` repair whose Task disappeared before its
-result was recorded fails with `repair_task_missing`, keeps its charge, and is
-not run again; repair ingestion settles it once the Task has been missing for
-five minutes, longer than a lagging cache. An outcome that already ended
-records that end on the job, the action, and the item again. Until the
-outcome starts, the repair job is marked `repair_task_create_pending`, and a
-Task create that failed without the API server refusing it, such as a
-timeout, keeps that mark. A `reserved` repair whose job is so marked and
-whose Task is missing may have run, so it fails with
-`repair_task_outcome_unknown` and keeps every admitted charge rather than
-running again. A create the API server refused outright stays retryable and
-charges nothing.
+The charge is a function of the record alone: `reserved` and `creating`
+charge every admitted ID, a repair that started charges its targets, one that
+ended while `creating` charges every admitted ID, and one that ended before
+any create was requested charges nothing. An attempt without an outcome is
+charged, so the budget fails closed. Every terminal path honours `creating`:
+a cancellation, exhausted retries, a refusal, a handoff that finds no Task,
+and repair ingestion first start the outcome from the Task if it exists, and
+otherwise end it `failed` with every admitted charge kept.
+
+Each transition is written where it becomes known, idempotently and under
+the controller's write fence, before the projections that follow from it.
+Absence of a Task is only ever concluded from an uncached read of the API
+server, never from the cache, which can lag a create. A restart in any state
+resumes from the record:
+
+- A `creating` repair whose Task is gone may have run, so it fails with
+  `repair_task_outcome_unknown` and is not created again.
+- A `started` repair whose Task disappeared before its result was recorded
+  fails with `repair_task_missing`, keeps its charge, and is not run again;
+  repair ingestion settles it as soon as an uncached read confirms the Task
+  is gone, even after the command's handoff succeeded.
+- A terminal outcome that is not yet marked projected has its projections
+  replayed on every repair ingestion: a still-queued job takes its end and
+  result head, its push mutation and work action end, and the item's repair
+  state is derived again. Each write only advances a projection that has not
+  ended, so the replay is idempotent; the outcome is then marked projected.
 
 The readiness projection skips a `withdrawn` repair, so a withdrawal leaves
 the head as if no repair had been requested. The pull request's repair budget
@@ -209,9 +224,14 @@ open-feedback readiness decides whether a person is needed.
 
 An unreleased build of this change wrote schema version 8 without the outcome
 table. Opening such a store repairs its layout in place at version 8 and
-recovers one outcome per admitted command: an unfinished command stays
-`reserved`, a finished one whose repair job settled from its Task charges
-every admitted ID, and any other finished one charges nothing.
+recovers one outcome per admitted command, unprojected so its projections are
+replayed: a repair job that settled from its Task keeps every admitted
+charge; a job still queued with a Task name may have created its Task, since
+that build recorded any create failure alike, so it recovers `creating`
+while its command is unfinished and `failed` once it finished, keeping every
+admitted charge; a finished command that was withdrawn recovers `withdrawn`,
+any other finished command `failed` without a charge, and an unfinished
+command without a job `reserved`.
 
 ### One read per handoff and one completeness verdict
 
@@ -232,7 +252,9 @@ Every decision about whether a snapshot is complete goes through one verdict:
   a single thread whose response exceeds GitHub's limit even when read alone
   (larger thread pages are read again at half the size, so they are not a
   limit),
-  an unresolved thread whose omitted replies may hide feedback, a thread or
+  an unresolved thread whose omitted replies may hide feedback, even one
+  whose fetched comments were all left out (comments in unsubmitted reviews
+  are excluded, not omitted), a thread or
   review left out of the 32 KiB budget that holds or may hide feedback that
   could start a repair, or more reviewers than one snapshot may look up.
   Readiness asks for a person and a queued repair is withdrawn with
@@ -241,7 +263,13 @@ Every decision about whether a snapshot is complete goes through one verdict:
 Collaborator permissions are cached for one monitor poll, shared by every
 pull request, readiness, and repair label checks, and bounded to 60 lookups
 per poll in addition to the 20 per snapshot. A failed lookup is cached for the
-poll too, so a throttled account is not asked again until the next poll.
+poll too, so a throttled account is not asked again until the next poll; both
+give `incomplete_retry`. The budget is fair across polls: a permission one
+poll read answers the monitor's later polls for three minutes, and accounts a
+poll deferred for lack of budget are served first by the next one, so pull
+requests that inventory reaches late are not starved by early ones. A repair
+handoff, which creates a Task, never uses a remembered permission. The memory
+is the controller's; a restart starts afresh.
 
 ### Budgets and maxRounds
 

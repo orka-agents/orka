@@ -1040,6 +1040,117 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 	})
 
+	t.Run("feedback outcomes record Task creates that may have run and their projections", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		admit := func(command string) {
+			t.Helper()
+			created, err := p.AdmitMonitorFeedbackRepair(ctx, storagev1.MonitorFeedbackAdmission{
+				Command: storagev1.CommandEvent{ID: command, MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, Kind: "pull_request", Number: 12,
+					DedupeKey: command, CommentID: command, Intent: "fix", Status: "accepted"},
+				Attempts: []storagev1.MonitorFeedbackAttempt{{ID: command + "|a", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, Repo: "org/repo",
+					PRNumber: 12, FeedbackID: "review_comment:" + command, Attempt: 1, HeadSHA: "head-1", SnapshotDigest: "sha256:aa", CommandEventID: command, RepairJobID: "repair-" + command}},
+			})
+			require.NoError(t, err)
+			require.True(t, created)
+		}
+		prepare := func(command, task string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.PrepareMonitorFeedbackRepairTask(ctx, storagev1.PrepareMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: command, TaskName: task})
+		}
+		release := func(command string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.ReleaseMonitorFeedbackRepairTask(ctx, storagev1.ReleaseMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: command})
+		}
+		finish := func(command, state, result string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.FinishMonitorFeedbackRepair(ctx, storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: command, State: state, Reason: "because", ResultSHA: result})
+		}
+		project := func(command string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.MarkMonitorFeedbackOutcomeProjected(ctx, storagev1.MarkMonitorFeedbackOutcomeProjectedRequest{Namespace: workflowNamespace, CommandEventID: command})
+		}
+		unprojected := func() []string {
+			t.Helper()
+			outcomes, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowNamespace, MonitorName: workflowMonitor, Unprojected: true})
+			require.NoError(t, err)
+			ids := make([]string, 0, len(outcomes))
+			for _, outcome := range outcomes {
+				ids = append(ids, outcome.CommandEventID)
+			}
+			slices.Sort(ids)
+			return ids
+		}
+
+		// A requested create keeps the admitted charge.
+		admit("cmd-1")
+		outcome, err := prepare("cmd-1", "task-1")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeCreating, outcome.State)
+		require.Equal(t, "task-1", outcome.TaskName)
+		require.NotNil(t, outcome.TaskCreateAt)
+		require.Equal(t, []string{"review_comment:cmd-1"}, outcome.ChargedIDs())
+		again, err := prepare("cmd-1", "task-1")
+		require.NoError(t, err)
+		require.Equal(t, outcome.TaskCreateAt, again.TaskCreateAt)
+		_, err = prepare("cmd-1", "task-2")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = prepare("cmd-1", "")
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		// A repair whose Task may exist is not withdrawn and has no result.
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeWithdrawn, "")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeSucceeded, "")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = p.StartMonitorFeedbackRepair(ctx, storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "cmd-1", Targets: []string{"review_comment:cmd-1"}, TaskName: "task-2"})
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		// A definite refusal releases it.
+		outcome, err = release("cmd-1")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeReserved, outcome.State)
+		require.Empty(t, outcome.TaskName)
+		require.Nil(t, outcome.TaskCreateAt)
+		_, err = release("cmd-1")
+		require.NoError(t, err)
+		// A repair that ends while its Task may have run keeps the charge.
+		_, err = prepare("cmd-1", "task-1")
+		require.NoError(t, err)
+		outcome, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeFailed, "")
+		require.NoError(t, err)
+		require.Equal(t, []string{"review_comment:cmd-1"}, outcome.ChargedIDs())
+		_, err = prepare("cmd-1", "task-1")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = release("cmd-1")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+
+		// A started outcome prepared again with its Task is a repeat, and its
+		// result head is kept.
+		admit("cmd-2")
+		_, err = prepare("cmd-2", "task-2")
+		require.NoError(t, err)
+		outcome, err = p.StartMonitorFeedbackRepair(ctx, storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "cmd-2", Targets: []string{"review_comment:cmd-2"}, TaskName: "task-2"})
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeStarted, outcome.State)
+		_, err = prepare("cmd-2", "task-2")
+		require.NoError(t, err)
+		_, err = release("cmd-2")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = project("cmd-2")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		outcome, err = finish("cmd-2", storagev1.MonitorFeedbackOutcomeSucceeded, "pushed-1")
+		require.NoError(t, err)
+		require.Equal(t, "pushed-1", outcome.ResultSHA)
+		require.Nil(t, outcome.ProjectedAt)
+
+		// Terminal outcomes stay unprojected until marked, once.
+		admit("cmd-3")
+		require.Equal(t, []string{"cmd-1", "cmd-2"}, unprojected())
+		outcome, err = project("cmd-2")
+		require.NoError(t, err)
+		require.NotNil(t, outcome.ProjectedAt)
+		repeat, err := project("cmd-2")
+		require.NoError(t, err)
+		require.Equal(t, outcome.ProjectedAt, repeat.ProjectedAt)
+		require.Equal(t, []string{"cmd-1"}, unprojected())
+		_, err = project("missing")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+	})
+
 	t.Run("monitor events page newest first", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		for i := range 5 {

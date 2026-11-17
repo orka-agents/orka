@@ -27,7 +27,7 @@ const (
 	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
 	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
-	schema175 = "f9f7ba42799651261f714b2b6426ba7f952b8845a7f356e9ebadc9cdc99d3d51" // schema version 8: monitor feedback attempt ledger and outcomes
+	schema175 = "f547a5ef2306f5a7fe120f8a6b3130933bcd5928b96eb3f4e0254adc9d6462ad" // schema version 8: monitor feedback attempt ledger and outcomes
 	// schema175Ledger is the version 8 layout an unreleased build wrote: the
 	// feedback attempt ledger without its outcome table. Its layout repair
 	// recovers the outcomes and keeps version 8.

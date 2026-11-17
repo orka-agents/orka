@@ -339,19 +339,21 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
-		var existingTask corev1alpha1.Task
-		taskErr := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}, &existingTask)
-		if taskErr != nil && !apierrors.IsNotFound(taskErr) {
-			return true, 0, taskErr
+		// The handoff creates a Task, so it never relies on a reviewer's
+		// or labeller's permission an earlier poll read.
+		ctx := withRepositoryMonitorFreshPermissions(ctx)
+		// An absence the cache reports is confirmed uncached, since it may
+		// let the handoff finalize a feedback repair or create its Task.
+		taskExists, _, err := r.repositoryMonitorRepairTaskExists(ctx, monitor.Namespace, repositoryMonitorRepairTaskName(monitor, pr, command))
+		if err != nil {
+			return true, 0, err
 		}
-		if apierrors.IsNotFound(taskErr) {
-			// A feedback repair's outcome may already say how it ended.
-			if settled, err := r.settleRepositoryMonitorFeedbackRepairWithoutTask(ctx, monitor, run, command, pr, item); err != nil || settled {
-				return true, 0, err
-			}
+		// A feedback repair's outcome may already say how it ended.
+		if settled, err := r.settleRepositoryMonitorFeedbackRepair(ctx, monitor, command, taskExists); err != nil || settled {
+			return true, 0, err
 		}
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
-			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeFailed, repositoryMonitorSkipReasonBlockedLabel); err != nil {
+			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeFailed, repositoryMonitorSkipReasonBlockedLabel, ""); err != nil {
 				return true, 0, err
 			}
 			item.RepairState = repositoryMonitorRepairPhaseFailed
@@ -366,7 +368,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		// The feedback read for the recheck is the Task's input: a handoff
 		// reads feedback once.
 		handoff := repositoryMonitorRepairInputs{}
-		if apierrors.IsNotFound(taskErr) {
+		if !taskExists {
 			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
 			if err != nil {
 				return true, 0, err
@@ -387,7 +389,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return true, 0, err
 		}
 		if reason != "" {
-			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeFailed, reason); err != nil {
+			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeFailed, reason, ""); err != nil {
 				return true, 0, err
 			}
 			item.RepairState = repositoryMonitorRepairPhaseFailed
@@ -1177,12 +1179,6 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 		TaskName:         taskName,
 		Branch:           pr.HeadBranch,
 	}
-	feedbackRepair := repositoryMonitorFeedbackCommand(command)
-	if feedbackRepair {
-		// Until the outcome starts, a feedback repair's job says its Task
-		// may exist, so a restart that finds no Task cannot run it twice.
-		job.LastError = repositoryMonitorRepairTaskCreatePending
-	}
 	if err := r.Store.CreateRepairJob(ctx, job); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "constraint") {
 			return 0, err
@@ -1260,20 +1256,26 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	if err != nil {
 		return 0, err
 	}
-	if err := r.markRepositoryMonitorFeedbackTaskCreatePending(ctx, job, feedbackRepair); err != nil {
+	// From here a feedback repair's Task may exist, until it starts or the
+	// API server definitely refuses the create.
+	if err := r.prepareRepositoryMonitorFeedbackTask(ctx, monitor, command, task.Name); err != nil {
 		return 0, err
 	}
 	if err := r.Create(ctx, task); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
+			if releaseErr := r.releaseRepositoryMonitorFeedbackTask(ctx, monitor, command, err); releaseErr != nil {
+				return 0, releaseErr
+			}
 			job.Phase = repositoryMonitorRepairPhaseQueued
-			job.LastError = repositoryMonitorRepairTaskCreateFailure(feedbackRepair, err)
+			job.LastError = repositoryMonitorRepairTaskCreateError
 			job.CompletedAt = nil
 			_ = r.Store.UpdateRepairJob(ctx, job)
 			return 0, err
 		}
 		created = 0
 		var existing corev1alpha1.Task
-		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); err != nil {
+		// The cache may not have the Task the create just found.
+		if err := r.repositoryMonitorUncachedReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); err != nil {
 			return 0, err
 		}
 		if err := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); err != nil {
@@ -1289,7 +1291,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	if err := r.retainMonitorUsageTask(ctx, task, usageWorkID, "repair", pr.Number); err != nil {
 		return created, err
 	}
-	if job.LastError == repositoryMonitorRepairTaskCreateError || job.LastError == repositoryMonitorRepairTaskCreatePending {
+	if job.LastError == repositoryMonitorRepairTaskCreateError {
 		job.Phase = repositoryMonitorRepairPhaseQueued
 		job.LastError = ""
 		job.CompletedAt = nil
@@ -1420,7 +1422,7 @@ func repositoryMonitorRepairCIEvidenceMetadata(input *repositoryMonitorRepairCII
 // blockRepositoryMonitorWithdrawnPolicyRepair settles a queued policy repair
 // whose grant was withdrawn before it ran, without creating work.
 func (r *RepositoryMonitorReconciler) blockRepositoryMonitorWithdrawnPolicyRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, item *store.MonitorItem, reason string) error {
-	if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeWithdrawn, reason); err != nil {
+	if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, store.MonitorFeedbackOutcomeWithdrawn, reason, ""); err != nil {
 		return err
 	}
 	item.RepairState = ""
@@ -1806,7 +1808,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if cancelled, cancelErr := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
 			return ingested, cancelErr
 		} else if cancelled {
-			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
+			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand, ""); err != nil {
 				return ingested, err
 			}
 			completedAt := time.Now()
@@ -1869,7 +1871,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			case job.Phase == repositoryMonitorRepairPhaseSucceeded:
 				state = store.MonitorFeedbackOutcomeSucceeded
 			}
-			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError); err != nil {
+			if err := r.endRepositoryMonitorFeedbackOutcomeFromTask(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError, job.PushedSHA); err != nil {
 				return ingested, err
 			}
 		}
@@ -1926,7 +1928,13 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		}
 		ingested = true
 	}
-	return ingested, nil
+	// Terminal feedback outcomes whose projections lag, including ones this
+	// pass just recorded, are projected again.
+	settled, err := r.settleRepositoryMonitorFeedbackOutcomes(ctx, monitor)
+	if err != nil {
+		return ingested, err
+	}
+	return ingested || settled, nil
 }
 
 // repositoryMonitorResetItemAfterRepairPush clears the review state that a

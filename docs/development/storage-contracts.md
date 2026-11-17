@@ -309,8 +309,10 @@ the observable parts.
   Revision 9 adds the reviewer feedback attempt ledger and outcomes:
   `AdmitMonitorFeedbackRepair`, which creates a feedback repair's command
   event, its numbered attempts, and its `reserved` outcome in one
-  transaction; `ListMonitorFeedbackAttempts`; `StartMonitorFeedbackRepair`
-  and `FinishMonitorFeedbackRepair`, the outcome's only transitions; and
+  transaction; `ListMonitorFeedbackAttempts`;
+  `PrepareMonitorFeedbackRepairTask`, `ReleaseMonitorFeedbackRepairTask`,
+  `StartMonitorFeedbackRepair`, `FinishMonitorFeedbackRepair` and
+  `MarkMonitorFeedbackOutcomeProjected`, the outcome's only transitions; and
   `GetMonitorFeedbackOutcome` and `ListMonitorFeedbackOutcomes` (see
   "Feedback repair outcomes").
   The revision Orka requires for each part belongs to Orka, not to the
@@ -324,18 +326,25 @@ the observable parts.
   `ErrIncompatible`. Orka treats both as the same verdict.
 - **Feedback repair outcomes.** Each feedback repair has one outcome, keyed
   by namespace and command event ID, beside its immutable attempts. It is
-  `reserved` with the sorted admitted feedback IDs at admission. Only
-  `StartMonitorFeedbackRepair` moves it to `started`, recording sorted
-  targets, a nonempty subset of the admitted IDs (otherwise `ErrValidation`),
-  and the Task name. Only `FinishMonitorFeedbackRepair` ends it: `withdrawn`
-  only from `reserved`, `no_change` and `succeeded` only from `started`,
-  `failed` from either; a state that is not terminal is `ErrValidation`.
-  Both are idempotent: repeating a start with the same targets and Task name,
-  even after the outcome ended, or a finish in the state already recorded,
-  returns the stored outcome unchanged. Any other transition fails with
-  `ErrConflict`, and a terminal outcome never changes. `ChargedIDs` derives
-  the attempt charge from the record alone. Deleting the monitor deletes its
-  outcomes with its attempts.
+  `reserved` with the sorted admitted feedback IDs at admission.
+  `PrepareMonitorFeedbackRepairTask` moves it to `creating` with a Task name
+  and create time before the Task create is requested;
+  `ReleaseMonitorFeedbackRepairTask` returns a `creating` outcome to
+  `reserved`, clearing both, after a definite refusal. Only
+  `StartMonitorFeedbackRepair` moves a `reserved` or `creating` outcome to
+  `started`, recording sorted targets, a nonempty subset of the admitted IDs
+  (otherwise `ErrValidation`), and the Task name, which must match a
+  `creating` outcome's. Only `FinishMonitorFeedbackRepair` ends it, with a
+  reason and result head: `withdrawn` only from `reserved`, `no_change` and
+  `succeeded` only from `started`, `failed` from any of the three; a state
+  that is not terminal is `ErrValidation`. All transitions are idempotent:
+  repeating one that already took effect returns the stored outcome
+  unchanged. Any other transition fails with `ErrConflict`, and a terminal
+  outcome never changes. `MarkMonitorFeedbackOutcomeProjected` records once
+  that a terminal outcome's projections are recorded; `ListMonitorFeedbackOutcomes`
+  with `Unprojected` returns the terminal outcomes not yet marked.
+  `ChargedIDs` derives the attempt charge from the record alone. Deleting the
+  monitor deletes its outcomes with its attempts.
 - **Health checks.** `HealthCheck` reaches the dataset, not only the provider
   process, takes no write lock and is cheap: Orka probes every few seconds
   with a short deadline, so it should finish in tens of milliseconds. It
