@@ -7,8 +7,10 @@ MIT License - see LICENSE file for details.
 package memoryconsolidation
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -103,11 +105,18 @@ var SubmitToolParameters = json.RawMessage(`{
 	"required": ["operations"]
 }`)
 
+// dataTag matches the data block's tags in any case, with or without the
+// closing slash.
+var dataTag = regexp.MustCompile(`(?i)<(/?)(orka-consolidation-data)`)
+
 // UserMessage is the one user turn of a run: the operator's focus, the
 // limits, and the input as JSON data. JSON encoding keeps transcript text
-// inside string values, so it cannot close the data block.
+// inside string values, and the data block's tag is escaped wherever that
+// text spells it, so the text can neither close the block nor open another.
+// Other HTML characters stay as they are, so the data is no longer than
+// CollectInputs counted it.
 func UserMessage(input Input, focus string, settings Settings) (string, error) {
-	data, err := json.Marshal(struct {
+	data, err := encodeData(struct {
 		Memories []InputMemory  `json:"memories"`
 		Sessions []InputSession `json:"sessions"`
 	}{input.Memories, input.Sessions})
@@ -124,4 +133,17 @@ func UserMessage(input Input, focus string, settings Settings) (string, error) {
 	b.Write(data)
 	b.WriteString("\n</orka-consolidation-data>")
 	return b.String(), nil
+}
+
+// encodeData encodes value as compact JSON without HTML escaping, then
+// escapes the "<" of every data block tag as a JSON \u003c escape, which
+// decodes to the same text.
+func encodeData(value any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return dataTag.ReplaceAll(bytes.TrimSuffix(buf.Bytes(), []byte("\n")), []byte(`\u003c$1$2`)), nil
 }

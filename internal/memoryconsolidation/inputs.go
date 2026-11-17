@@ -68,9 +68,9 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		read := InputMemory{ID: memory.ID, Generation: memory.Generation, Content: truncateRunes(memory.Content, MaxMemoryChars),
 			Tags: boundedTags(memory.Tags), RecalledCount: memory.RecalledCount, LastRecalledAt: memory.LastRecalledAt,
 			UpdatedAt: memory.UpdatedAt.UTC()}
-		size := utf8.RuneCountInString(read.Content)
+		size := encodedLen(read.Content)
 		for _, tag := range read.Tags {
-			size += utf8.RuneCountInString(tag)
+			size += encodedLen(tag)
 		}
 		if budget -= size; budget < 0 {
 			input.Truncated = true
@@ -112,7 +112,7 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		// to learn from; the model still reads them in order.
 		kept := len(messages)
 		for kept > 0 {
-			size := utf8.RuneCountInString(messages[kept-1].Content)
+			size := encodedLen(messages[kept-1].Content)
 			if budget-size < 0 {
 				input.Truncated = true
 				budget = 0
@@ -127,6 +127,26 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		}
 	}
 	return input, nil
+}
+
+// encodedLen is how many characters text takes in the run's JSON data: a
+// quote, backslash, newline, carriage return or tab is escaped as two, and
+// any other control character, or a line or paragraph separator, as at most
+// six. Text that spells the data block's tag
+// grows by five for each "<" escaped.
+func encodedLen(text string) int {
+	size := 0
+	for _, r := range text {
+		switch {
+		case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
+			size += 2
+		case r < 0x20 || r == '\u2028' || r == '\u2029':
+			size += 6
+		default:
+			size++
+		}
+	}
+	return size + 5*len(dataTag.FindAllStringIndex(text, -1))
 }
 
 // boundedTags returns at most MaxTags tags of a memory, each cut to
