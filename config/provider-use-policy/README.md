@@ -14,10 +14,10 @@ every Provider a chat request resolves. The Helm value
 the default (full-profile) AI and vendor worker ServiceAccounts are granted `use`
 on Providers in the namespaces where they write Tasks and Agents, so Tasks and
 Agents they write that name a Provider in their own namespace are not affected.
-Admission checks the identity that writes the object, not the original caller:
-a Task or Agent that names a Provider in another namespace, or one written by a
-custom role without `use`, is refused unless the writing ServiceAccount holds
-`use` on that Provider.
+Admission checks the identity that writes the object, user or ServiceAccount,
+not the original caller: a write that newly names a Provider, in another
+namespace or under a role without `use`, is refused unless the writing identity
+holds `use` on that Provider.
 
 Providers an Agent named before the check was enabled were never checked, and
 a Task that runs that Agent needs only `use` on the Agent. Review existing
