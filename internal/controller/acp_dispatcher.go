@@ -55,9 +55,22 @@ const (
 	attemptIDField      = "attemptID"
 )
 
+// DefaultACPDispatchWorkers is how many Agent Tasks the controller runs
+// through ACP runtimes at once, across all RuntimePools. It is one full
+// default-capacity RuntimePool for each of the four built-in runtimes, so the
+// global cap does not hold back pools that still have prompt capacity.
+const DefaultACPDispatchWorkers = 4 * int(corev1alpha1.DefaultRuntimePoolMaxRunningPrompts)
+
+// DefaultACPRuntimeSessionIdleTTL is how long a plain RuntimePool keeps an
+// idle resident RuntimeSession before retiring it to free its slot.
+const DefaultACPRuntimeSessionIdleTTL = 30 * time.Minute
+
+// MinACPRuntimeSessionIdleTTL is the shortest non-zero idle TTL the runtime
+// supervisor accepts.
+const MinACPRuntimeSessionIdleTTL = time.Minute
+
 const (
 	DefaultACPDispatchInterval               = time.Second
-	DefaultACPDispatchWorkers                = 4
 	DefaultACPIdlePoolTTL                    = 15 * time.Minute
 	DefaultACPRuntimePoolReservationTTL      = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval     = time.Second
@@ -2078,7 +2091,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 				return nil
 			}
-			if d.promptAdmissionRejectionRequeues(runtimeCtx, target) {
+			if d.promptAdmissionRejectionRequeues(runtimeCtx, target) ||
+				rejectedPromptRuntimeSessionGone(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, runtimeFence) {
 				return requeueRejectedAdmission()
 			}
 			if reservationLease != nil {

@@ -196,6 +196,9 @@ func (s *Server) finishOperation(lease *operatorLease) {
 	s.mu.Lock()
 	if lease.target.state != nil {
 		delete(lease.target.state.operators, lease.target.token)
+		// An operator's work counts as use: idle retirement waits a full
+		// TTL after the last one finishes.
+		lease.target.state.lastActivityAt = time.Now().UTC()
 	}
 	s.mu.Unlock()
 	if lease.releaseSlot != nil {
@@ -359,6 +362,7 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	}
 	state.operatorSeq++
 	state.operators[state.operatorSeq] = &operatorRegistration{}
+	state.lastActivityAt = time.Now().UTC()
 	return operatorTarget{
 		uid: uid, gid: gid, paths: state.paths,
 		childPath: harnessv2.RuntimeToolboxChildPath(acp.DefaultChildPath, s.cfg.Toolboxes),

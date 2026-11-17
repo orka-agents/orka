@@ -70,8 +70,12 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if unaccepted {
+			message := "runtime pool is draining"
+			if s.tombstones[request.Metadata.Fence.RuntimeSessionUID].idleRetired {
+				message = "runtime session was retired after idling and must be recreated"
+			}
 			s.mu.Unlock()
-			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, message, nil, true)
 			return
 		}
 	}
@@ -1536,8 +1540,9 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 }
 
 // drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
-// that drain cleanup already retired is provably unaccepted: the pool is still
-// draining, the request carries this supervisor's exact fence for that retired
+// that drain cleanup or idle retirement already retired is provably
+// unaccepted: the pool is still draining (or the session was retired for
+// idleness), the request carries this supervisor's exact fence for that retired
 // session (runtime instance, supervisor boot, controller epoch, pool identity,
 // session UID and generation, and profile), and neither the operation nor the
 // prompt was ever admitted on it. Such a prompt is rejected as retryable, like
@@ -1547,11 +1552,8 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 // retry. Replays of admitted work keep their existing classification. The
 // caller must hold s.mu.
 func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (bool, harnessv2.FenceMismatch) {
-	if !s.drain.Requested {
-		return false, harnessv2.FenceMatch
-	}
 	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
-	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID {
+	if !ok || tombstone.sessionID != sessionID || (!tombstone.idleRetired && (!tombstone.drainCleaned || !s.drain.Requested)) {
 		return false, harnessv2.FenceMatch
 	}
 	expected := s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration)

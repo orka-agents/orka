@@ -89,6 +89,9 @@ const (
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
 	EnvE2EPromptWriteAmbiguity   = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	// EnvIdleSessionTTL is a Go duration after which an idle resident
+	// RuntimeSession is retired. Unset or "0" keeps idle sessions resident.
+	EnvIdleSessionTTL = "ORKA_ACP_IDLE_SESSION_TTL"
 	// EnvToolboxes carries the frozen toolbox list as JSON. It is part of the
 	// runtime profile digest, so the controller and supervisor must agree.
 	EnvToolboxes = "ORKA_ACP_TOOLBOXES"
@@ -324,6 +327,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	idleSessionTTL, err := parseIdleSessionTTL(os.Getenv(EnvIdleSessionTTL))
+	if err != nil {
+		return Config{}, err
+	}
 	bootID := strings.TrimSpace(os.Getenv(EnvSupervisorBootID))
 	if bootID == "" {
 		bootID = uuid.NewString()
@@ -370,6 +377,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ArtifactUploader:              artifactUploader,
 		E2EPromptWriteFaultRecorder:   e2ePromptWriteFaultRecorder,
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
+		IdleSessionTTL:                idleSessionTTL,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
 		Skills:                        harnessv2.CloneRuntimeSkills(skills),

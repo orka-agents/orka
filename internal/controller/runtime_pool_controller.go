@@ -112,6 +112,7 @@ const (
 	runtimePoolCapabilitySecretFileEnv = "ORKA_ACP_CAPABILITY_SECRET_FILE"
 	runtimePoolProviderTokenFileEnv    = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 	runtimePoolE2EPromptWriteAmbiguity = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
+	runtimePoolIdleSessionTTLEnv       = "ORKA_ACP_IDLE_SESSION_TTL"
 
 	runtimePoolAuthVolume               = "pool-auth"
 	runtimePoolProviderCapabilityVolume = "provider-capability"
@@ -378,6 +379,15 @@ type RuntimePoolReconciler struct {
 	// WorkspaceCleanupOnly disables external workspace admission while keeping
 	// ordinary Deployment-backed pools and exact workspace cleanup active.
 	WorkspaceCleanupOnly bool
+	// RuntimeSessionIdleTTL retires a plain pool's resident RuntimeSession
+	// after it idles this long, freeing its slot; the Session's next turn
+	// recreates it. Zero keeps idle sessions resident. Workspace-backed pools,
+	// which hold one dedicated session, are unaffected.
+	RuntimeSessionIdleTTL time.Duration
+	// PodResources is the CPU and memory of standard built-in runtime Pods.
+	// Nil selects DefaultRuntimePoolPodResources. Changing it changes the Pod
+	// template, so existing pools roll through their normal drain-then-replace.
+	PodResources *RuntimePoolPodResources
 	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
 	// fault marker projected into built-in runtime supervisors.
 	E2EPromptWriteAmbiguityMarker string
@@ -2534,7 +2544,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					},
 					SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 				},
-				Resources: runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
+				Resources: r.runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 					{Name: runtimePoolProviderCapabilityVolume, MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
@@ -2567,6 +2577,11 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	}
 	if pool.Spec.ExecutionWorkspace == nil {
 		template.Annotations[runtimePoolBootEnrollmentAnnotation] = runtimePoolBootEnrollmentVersion
+		if r.RuntimeSessionIdleTTL > 0 {
+			template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
+				Name: runtimePoolIdleSessionTTLEnv, Value: r.RuntimeSessionIdleTTL.String(),
+			})
+		}
 	}
 	// Toolbox wiring is a no-op without toolboxes. A policy error here is
 	// unreachable after runtimePoolToolboxAdmission; the template then omits
@@ -2697,19 +2712,84 @@ func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
 	return store.CanonicalBytesDigest(payload)
 }
 
-func runtimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
+// Default CPU and memory of a standard built-in runtime Pod.
+const (
+	DefaultRuntimePoolCPURequest    = "250m"
+	DefaultRuntimePoolMemoryRequest = "512Mi"
+	DefaultRuntimePoolCPULimit      = "2"
+	DefaultRuntimePoolMemoryLimit   = "4Gi"
+)
+
+// RuntimePoolPodResources is the CPU and memory of every standard built-in
+// runtime Pod. Ephemeral storage stays fixed: it bounds the Pod's emptyDir
+// volumes, which are sized separately.
+type RuntimePoolPodResources struct {
+	CPURequest, MemoryRequest, CPULimit, MemoryLimit resource.Quantity
+}
+
+// DefaultRuntimePoolPodResources returns the built-in defaults.
+func DefaultRuntimePoolPodResources() RuntimePoolPodResources {
+	resources, err := NewRuntimePoolPodResources(
+		DefaultRuntimePoolCPURequest, DefaultRuntimePoolMemoryRequest, DefaultRuntimePoolCPULimit, DefaultRuntimePoolMemoryLimit,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("default RuntimePool Pod resources: %v", err))
+	}
+	return resources
+}
+
+// NewRuntimePoolPodResources parses and validates runtime Pod CPU and memory.
+// Each value must be positive and no request may exceed its limit.
+func NewRuntimePoolPodResources(cpuRequest, memoryRequest, cpuLimit, memoryLimit string) (RuntimePoolPodResources, error) {
+	var resources RuntimePoolPodResources
+	for _, field := range []struct {
+		name  string
+		value string
+		into  *resource.Quantity
+	}{
+		{"CPU request", cpuRequest, &resources.CPURequest},
+		{"memory request", memoryRequest, &resources.MemoryRequest},
+		{"CPU limit", cpuLimit, &resources.CPULimit},
+		{"memory limit", memoryLimit, &resources.MemoryLimit},
+	} {
+		quantity, err := resource.ParseQuantity(strings.TrimSpace(field.value))
+		if err != nil {
+			return RuntimePoolPodResources{}, fmt.Errorf("runtime Pod %s %q: %w", field.name, field.value, err)
+		}
+		if quantity.Sign() <= 0 {
+			return RuntimePoolPodResources{}, fmt.Errorf("runtime Pod %s must be positive", field.name)
+		}
+		*field.into = quantity
+	}
+	if resources.CPURequest.Cmp(resources.CPULimit) > 0 {
+		return RuntimePoolPodResources{}, fmt.Errorf("runtime Pod CPU request %s exceeds its limit %s", resources.CPURequest.String(), resources.CPULimit.String())
+	}
+	if resources.MemoryRequest.Cmp(resources.MemoryLimit) > 0 {
+		return RuntimePoolPodResources{}, fmt.Errorf("runtime Pod memory request %s exceeds its limit %s", resources.MemoryRequest.String(), resources.MemoryLimit.String())
+	}
+	return resources, nil
+}
+
+// runtimePoolResourceRequirements returns the runtime container's resources
+// for a resource class. Only the standard class is defined; it uses the
+// configured CPU and memory, or the defaults when none are configured.
+func (r *RuntimePoolReconciler) runtimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
 	if resourceClass != runtimePoolResourceClassStandard {
 		return corev1.ResourceRequirements{}
 	}
+	configured := DefaultRuntimePoolPodResources()
+	if r != nil && r.PodResources != nil {
+		configured = *r.PodResources
+	}
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:              resource.MustParse("250m"),
-			corev1.ResourceMemory:           resource.MustParse("512Mi"),
+			corev1.ResourceCPU:              configured.CPURequest.DeepCopy(),
+			corev1.ResourceMemory:           configured.MemoryRequest.DeepCopy(),
 			corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:              resource.MustParse("2"),
-			corev1.ResourceMemory:           resource.MustParse("4Gi"),
+			corev1.ResourceCPU:              configured.CPULimit.DeepCopy(),
+			corev1.ResourceMemory:           configured.MemoryLimit.DeepCopy(),
 			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
 		},
 	}

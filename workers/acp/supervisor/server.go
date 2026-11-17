@@ -48,6 +48,10 @@ type Server struct {
 	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
 	promptSlots        chan struct{}
 	operator           operatorAccessState
+
+	// idleSweepStop ends the idle-session sweeper, if one runs.
+	idleSweepStop chan struct{}
+	idleSweepOnce sync.Once
 }
 
 // Session-creation filesystem steps, replaceable in tests that check their
@@ -169,6 +173,9 @@ type sessionTombstone struct {
 	// drainCleaned marks a session retired by drain cleanup rather than by an
 	// authenticated delete, so a fresh prompt for it is provably unaccepted.
 	drainCleaned bool
+	// idleRetired marks a session retired after idling past the idle TTL;
+	// like drainCleaned, a fresh prompt for it is provably unaccepted.
+	idleRetired bool
 }
 
 // A retired prompt retains proof, never its input, output, or capabilities.
@@ -276,6 +283,15 @@ type sessionState struct {
 	agentDiagnosticFilter   *AgentDiagnosticFilter
 	creating                bool
 	drainCleanupScheduled   bool
+	// idleRetirementScheduled marks a drain-style cleanup started by the idle
+	// sweeper rather than by a drain.
+	idleRetirementScheduled bool
+	// lastActivityAt is the last recorded controller operation, state
+	// transition, or operator activity, which defers idle retirement.
+	lastActivityAt time.Time
+	// idleRetirementActivity is lastActivityAt as the idle sweep saw it when
+	// it scheduled retirement; any later activity cancels the retirement.
+	idleRetirementActivity  time.Time
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
@@ -360,6 +376,9 @@ func recordSessionOperationLocked(
 	}
 	state.operations[metadata.OperationID] = operationRecord(metadata, phase, terminal, at)
 	state.operationRetention[metadata.OperationID] = metadata.ExpiresAt.Add(operationReplayRetentionSlack)
+	if at.After(state.lastActivityAt) {
+		state.lastActivityAt = at
+	}
 }
 
 // pruneSessionOperationsLocked drops operations whose capability expiry and
@@ -496,6 +515,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		server.drain.AcceptingNewSessions = false
 	}
 	server.registerRoutes()
+	server.startIdleSessionSweeper()
 	keepIdentityLock = true
 	return server, nil
 }
@@ -1693,22 +1713,41 @@ func isDrainCleanupState(state *sessionState) bool {
 }
 
 func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, state *sessionState) {
+	s.retireResidentSession(sessionID, state, false)
+}
+
+// retireResidentSession deletes a scheduled session without a controller
+// request, for a drain or, when idle is set, after the session idled past the
+// idle TTL. It proves process cleanup and leaves a tombstone that refuses a
+// fresh prompt for the session as provably unaccepted; unproven cleanup
+// poisons the pool, as for any drain cleanup.
+func (s *Server) retireResidentSession(sessionID harnessv2.RuntimeSessionID, state *sessionState, idle bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s.mu.Lock()
-	if s.sessions[sessionID] != state || !state.drainCleanupScheduled {
+	if s.sessions[sessionID] != state || !state.drainCleanupScheduled || state.idleRetirementScheduled != idle {
 		s.mu.Unlock()
 		return
 	}
 	settled := state.prompt == nil || state.prompt.settlement != nil
-	if state.creating || state.runtime == nil || !settled || !isDrainCleanupState(state) {
+	stillEligible := isDrainCleanupState(state)
+	if idle {
+		// A prompt or operator may have arrived since the sweep scheduled it.
+		stillEligible = s.idleRetirementStillDueLocked(state)
+	}
+	if state.creating || state.runtime == nil || !settled || !stillEligible {
 		state.drainCleanupScheduled = false
+		state.idleRetirementScheduled = false
 		s.mu.Unlock()
 		return
 	}
 	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
+	reasonPrefix := "drain"
+	if idle {
+		reasonPrefix = "idle"
+	}
 	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
 		s.failDrainCleanup(sessionID, state, "operator_quiesce_unproven")
 		return
@@ -1723,26 +1762,31 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	}
 	cleanup, deleteErr := state.runtime.Delete(ctx)
 	if proxyErr != nil || deleteErr != nil || !cleanup.Proven {
-		s.failDrainCleanup(sessionID, state, "drain_session_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, reasonPrefix+"_session_cleanup_unproven")
 		return
 	}
 	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
-		slog.Error("ACP drained runtime session cleanup failed", "stage", "ownership reclaim")
-		s.failDrainCleanup(sessionID, state, "drain_session_root_ownership_reclaim_unproven")
+		slog.Error("ACP retired runtime session cleanup failed", "stage", "ownership reclaim", "idle", idle)
+		s.failDrainCleanup(sessionID, state, reasonPrefix+"_session_root_ownership_reclaim_unproven")
 		return
 	}
 	if err := s.removeSessionPrivateFiles(state); err != nil {
-		s.failDrainCleanup(sessionID, state, "drain_session_root_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, reasonPrefix+"_session_root_cleanup_unproven")
 		return
 	}
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
 		tombstone := s.tombstoneSessionLocked(state, deletedAt)
-		tombstone.drainCleaned = true
+		tombstone.drainCleaned = !idle
+		tombstone.idleRetired = idle
 		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()
+	if idle {
+		slog.Info("ACP runtime session retired after idling", "runtimeSessionID", sessionID,
+			"idleTTL", s.cfg.IdleSessionTTL.String())
+	}
 }
 
 func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *sessionState, reason string) {
@@ -1755,6 +1799,7 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		state.drainCleanupScheduled = false
+		state.idleRetirementScheduled = false
 	}
 	s.mu.Unlock()
 	s.startDrainCleanup(cleanup)
@@ -1797,6 +1842,7 @@ func (s *Server) tombstoneSessionLocked(state *sessionState, deletedAt time.Time
 // Close stops admission and tears down all resident runtime sessions. A cleanup
 // failure is returned so the caller can poison/restart the enclosing RuntimePool.
 func (s *Server) Close(ctx context.Context) error {
+	s.stopIdleSessionSweeper()
 	s.mu.Lock()
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
 	s.drain.AcceptingNewSessions = false

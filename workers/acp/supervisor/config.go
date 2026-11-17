@@ -121,6 +121,12 @@ type Config struct {
 	InitializeTimeout time.Duration
 	PermissionTimeout time.Duration
 	CancelGrace       time.Duration
+	// IdleSessionTTL retires a resident RuntimeSession that has had no prompt,
+	// controller operation, or operator activity for this long, freeing its
+	// slot. The controller recreates it for the Session's next turn from
+	// Orka's canonical transcript. Zero keeps idle sessions resident; any
+	// other value must be at least MinIdleSessionTTL.
+	IdleSessionTTL time.Duration
 
 	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
 	// exact prompt marker. The supervisor aborts the first authenticated request
@@ -195,6 +201,9 @@ func (c Config) Validate() error {
 	}
 	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
 		return fmt.Errorf("runtime timeouts must be non-negative")
+	}
+	if c.IdleSessionTTL != 0 && c.IdleSessionTTL < MinIdleSessionTTL {
+		return fmt.Errorf("idle session TTL must be zero or at least %s", MinIdleSessionTTL)
 	}
 	if err := c.validatePromptWriteFault(); err != nil {
 		return err

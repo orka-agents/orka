@@ -7720,7 +7720,7 @@ func TestReviewTaskWindowFollowsDispatchCapacity(t *testing.T) {
 		{8, 8, 32},
 		{1, 8, 4},
 		{32, 4, 16},
-		{0, 8, 16}, // the default dispatch capacity of 4
+		{0, 8, 32}, // the default dispatch capacity of 16
 	} {
 		pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Name: "acp-codex-pool", Namespace: defaultNS}}
 		pool.Status.Capacity.MaxRunningPrompts = int32(test.poolPrompts)
@@ -7768,9 +7768,12 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 	for i := range 14 {
 		objects = append(objects, review(fmt.Sprintf("other-%02d", i), "scan_other", corev1alpha1.TaskPhasePending))
 	}
-	reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()}
+	reconciler := &RepositoryScanReconciler{
+		Client:                        fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+		ACPDispatchMaxConcurrentTasks: 4,
+	}
 	// This run's own window is 4 before its pool is known, but only 2 of the
-	// 16 shared places are free.
+	// 16 shared places (four per place at a dispatch capacity of 4) are free.
 	got, err := reconciler.reviewTaskBudget(context.Background(), nil, "scan_this")
 	if err != nil {
 		t.Fatalf("reviewTaskBudget() error = %v", err)

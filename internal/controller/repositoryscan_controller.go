@@ -1401,9 +1401,13 @@ func (r *RepositoryScanReconciler) topUpReviewTasks(ctx context.Context, scan *c
 	return err
 }
 
-// maxOutstandingReviewTasks bounds a run's queued and running review Tasks
-// at the default ACP dispatch capacity of 4.
-const maxOutstandingReviewTasks = 16
+// reviewTasksPerPlace bounds a run's queued and running review Tasks at four
+// for each place that can run one of its prompts.
+const reviewTasksPerPlace = 4
+
+// maxOutstandingReviewTasks is that bound for a run on one RuntimePool at the
+// default prompt capacity.
+const maxOutstandingReviewTasks = reviewTasksPerPlace * int(corev1alpha1.DefaultRuntimePoolMaxRunningPrompts)
 
 // reviewTaskWindow bounds a run's queued and running review Tasks at four
 // per prompt the run can execute at once: the smaller of the ACP dispatch
@@ -1422,7 +1426,7 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 	if _, live := r.reviewRuntimePool(ctx, tasks, runID); live > 0 {
 		prompts = live
 	}
-	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+	return reviewTasksPerPlace * min(dispatch, prompts)
 }
 
 // reviewRuntimePool returns the RuntimePool a run's agent Tasks are queued
@@ -1500,7 +1504,7 @@ func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTask
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
 	}
-	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
+	perPlace := reviewTasksPerPlace
 	available = min(available, max(perPlace*dispatch-shared, 0))
 	// Scans whose reviews run on the same RuntimePool share its capacity too.
 	if poolPrompts > 0 {

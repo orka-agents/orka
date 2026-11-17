@@ -204,7 +204,7 @@ func assertToolboxCopyVolumes(t *testing.T, template corev1.PodTemplateSpec, cou
 	}
 	// The Pod's ephemeral-storage budget grows by the handoff volume plus one
 	// full toolbox volume per toolbox, so kubelet never evicts a filling Pod.
-	base := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	base := (&RuntimePoolReconciler{}).runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
 	want := base.Limits.StorageEphemeral().Value() + runtimePoolToolboxHandoffBytes + int64(count)*runtimePoolToolboxVolumeBytes
 	if got := template.Spec.Containers[0].Resources.Limits.StorageEphemeral().Value(); got != want {
 		t.Fatalf("runtime ephemeral-storage limit = %d, want %d", got, want)

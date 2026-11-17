@@ -642,7 +642,7 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 	f := newExternalRuntimePoolFixture(t)
 	w := f.publish(t)
 	request := w.Spec.Workload
-	plain := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	plain := (&RuntimePoolReconciler{}).runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
 	if plain.Requests.StorageEphemeral().Cmp(resource.MustParse("1Gi")) != 0 || plain.Limits.StorageEphemeral().Cmp(resource.MustParse("5Gi")) != 0 {
 		t.Fatal("plain Deployment storage quotas changed")
 	}

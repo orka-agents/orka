@@ -126,13 +126,30 @@ controller:
     pool:
       maxRunningPrompts: 4
       maxResidentSessions: 10
+      # Retire a resident session after it idles this long, freeing its slot
+      # for other sessions and letting an unused pool scale to zero. The
+      # Session's next turn recreates it from its transcript. "0" keeps idle
+      # sessions resident; otherwise at least 1m.
+      sessionIdleTTL: 30m
+      # CPU and memory of each built-in runtime Pod. Raise them with
+      # maxResidentSessions and maxRunningPrompts: every resident session
+      # runs its own agent process in the Pod. Changing them rolls existing
+      # RuntimePools through their normal drain and replacement.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
     # Agent Tasks the controller runs through ACP runtimes at once, across
     # all RuntimePools. Each running prompt holds one place, so raise this
     # with pool.maxRunningPrompts to run more prompts concurrently (1-1000).
-    # A coordinator waiting on ACP child Tasks keeps its place; keep this
-    # above the number of coordinators that can wait at once.
+    # The default fills one default pool for each of the four built-in
+    # runtimes. A coordinator waiting on ACP child Tasks keeps its place;
+    # keep this above the number of coordinators that can wait at once.
     dispatch:
-      maxConcurrentTasks: 4
+      maxConcurrentTasks: 16
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.

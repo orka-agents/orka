@@ -205,7 +205,7 @@ func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *works
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) != native {
 		t.Fatal("request did not freeze native-process materialization capability")
 	}
-	wantResources := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	wantResources := (&RuntimePoolReconciler{}).runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
 	if native {
 		wantResources = corev1.ResourceRequirements{}
 	}

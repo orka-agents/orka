@@ -1,6 +1,10 @@
 package supervisor
 
-import harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+import (
+	"time"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+)
 
 // sessionStateTransitionHook observes every RuntimeSession lifecycle write.
 // It is nil in production; tests set it to check each transition against
@@ -16,6 +20,7 @@ func setSessionState(state *sessionState, next harnessv2.RuntimeSessionState) {
 		hook(state.descriptor.State, next)
 	}
 	state.descriptor.State = next
+	state.lastActivityAt = time.Now().UTC()
 	if _, admitted := operatorAccessStates[next]; !admitted {
 		revokeSessionOperatorsLocked(state)
 	} else {

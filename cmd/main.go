@@ -373,6 +373,8 @@ func main() {
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
+	var acpRuntimePoolCPURequest, acpRuntimePoolMemoryRequest, acpRuntimePoolCPULimit, acpRuntimePoolMemoryLimit string
+	var acpRuntimeSessionIdleTTL time.Duration
 	var acpToolboxesEnabled bool
 	var acpToolboxAllowedRegistries string
 	var acpToolboxImagePullSecrets string
@@ -656,6 +658,16 @@ func main() {
 		"Resident RuntimeSessions each new built-in runtime RuntimePool keeps (1-1000).")
 	flag.IntVar(&acpDispatchMaxConcurrentTasks, "acp-dispatch-max-concurrent-tasks", controller.DefaultACPDispatchWorkers,
 		"Agent Tasks the controller runs through ACP runtimes at once across all RuntimePools (1-1000). A coordinator waiting on ACP child Tasks keeps its place.")
+	flag.DurationVar(&acpRuntimeSessionIdleTTL, "acp-runtime-session-idle-ttl", controller.DefaultACPRuntimeSessionIdleTTL,
+		"Retire a built-in runtime RuntimePool's resident RuntimeSession after it idles this long, freeing its slot; the Session's next turn recreates it. 0 keeps idle sessions resident; otherwise at least 1m.")
+	flag.StringVar(&acpRuntimePoolCPURequest, "acp-runtime-pool-cpu-request", controller.DefaultRuntimePoolCPURequest,
+		"CPU request of each built-in runtime Pod. Changing it rolls existing RuntimePools through drain and replacement.")
+	flag.StringVar(&acpRuntimePoolMemoryRequest, "acp-runtime-pool-memory-request", controller.DefaultRuntimePoolMemoryRequest,
+		"Memory request of each built-in runtime Pod. Changing it rolls existing RuntimePools through drain and replacement.")
+	flag.StringVar(&acpRuntimePoolCPULimit, "acp-runtime-pool-cpu-limit", controller.DefaultRuntimePoolCPULimit,
+		"CPU limit of each built-in runtime Pod; at least its request.")
+	flag.StringVar(&acpRuntimePoolMemoryLimit, "acp-runtime-pool-memory-limit", controller.DefaultRuntimePoolMemoryLimit,
+		"Memory limit of each built-in runtime Pod; at least its request.")
 	flag.StringVar(&acpProviderProxyPodLabels, "acp-provider-proxy-pod-labels", envutil.String("ORKA_ACP_PROVIDER_PROXY_POD_LABELS", "orka.ai/network-role=provider-auth-proxy"),
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
@@ -1922,6 +1934,19 @@ func main() {
 	runtimePoolReconciler.EnableTelemetry = enableTracing
 	runtimePoolReconciler.TelemetryCollectorEgress = runtimeTelemetryCollectorEgress
 	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
+	runtimePoolPodResources, err := controller.NewRuntimePoolPodResources(
+		acpRuntimePoolCPURequest, acpRuntimePoolMemoryRequest, acpRuntimePoolCPULimit, acpRuntimePoolMemoryLimit,
+	)
+	if err != nil {
+		setupLog.Error(err, "invalid built-in runtime Pod resources")
+		os.Exit(1)
+	}
+	runtimePoolReconciler.PodResources = &runtimePoolPodResources
+	if acpRuntimeSessionIdleTTL < 0 || (acpRuntimeSessionIdleTTL > 0 && acpRuntimeSessionIdleTTL < controller.MinACPRuntimeSessionIdleTTL) {
+		setupLog.Error(nil, "invalid --acp-runtime-session-idle-ttl: must be 0 or at least 1m", "ttl", acpRuntimeSessionIdleTTL.String())
+		os.Exit(1)
+	}
+	runtimePoolReconciler.RuntimeSessionIdleTTL = acpRuntimeSessionIdleTTL
 	runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
 
 	// Keep the provider connection and trust configuration available after
