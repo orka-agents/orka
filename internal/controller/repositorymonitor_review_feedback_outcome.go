@@ -293,10 +293,8 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 	if succeeded {
 		jobPhase = repositoryMonitorRepairPhaseSucceeded
 	}
-	completedJob := false
 	if ran {
-		var err error
-		if completedJob, err = r.projectRepositoryMonitorFeedbackJob(ctx, monitor, outcome, jobPhase); err != nil {
+		if err := r.projectRepositoryMonitorFeedbackJob(ctx, monitor, outcome, jobPhase); err != nil {
 			return err
 		}
 	}
@@ -330,9 +328,12 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 		if err != nil {
 			return err
 		}
-		if state != item.RepairState || completedJob && outcome.ResultSHA != "" {
+		// A pushed repair resets the review of the head it replaced, once:
+		// after the reset the item no longer records that head as reviewed.
+		resetReview := outcome.ResultSHA != "" && outcome.ResultSHA != outcome.HeadSHA && item.LastReviewedHeadSHA == outcome.HeadSHA
+		if state != item.RepairState || resetReview {
 			item.RepairState = state
-			if completedJob && outcome.ResultSHA != "" {
+			if resetReview {
 				repositoryMonitorResetItemAfterRepairPush(item)
 			}
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
@@ -344,39 +345,39 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 	return err
 }
 
-// projectRepositoryMonitorFeedbackJob ends a repair job, and its push
-// mutation, that is still queued for a terminal outcome whose Task may have
-// run, and reports whether it ended the job.
-func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackJob(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome store.MonitorFeedbackOutcome, phase string) (bool, error) {
-	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, "repair-"+repositoryMonitorShortHash(outcome.CommandEventID))
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil || job.Phase != repositoryMonitorRepairPhaseQueued {
-		return false, err
-	}
-	job.Phase, job.LastError, job.PushedSHA = phase, outcome.Reason, outcome.ResultSHA
+// projectRepositoryMonitorFeedbackJob ends the repair job and its push
+// mutation for a terminal outcome whose Task may have run. Each is advanced
+// on its own only while it has not ended, so a replay after an interrupted
+// projection finishes whichever is still open.
+func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackJob(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome store.MonitorFeedbackOutcome, phase string) error {
+	jobID := "repair-" + repositoryMonitorShortHash(outcome.CommandEventID)
+	lastError := outcome.Reason
 	if phase == repositoryMonitorRepairPhaseSucceeded {
-		job.LastError = ""
+		lastError = ""
 	}
-	job.CompletedAt = outcome.CompletedAt
-	if err := r.Store.UpdateRepairJob(ctx, job); err != nil {
-		return false, err
+	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, jobID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil
+	case err != nil:
+		return err
+	case job.Phase == repositoryMonitorRepairPhaseQueued:
+		job.Phase, job.LastError, job.PushedSHA, job.CompletedAt = phase, lastError, outcome.ResultSHA, outcome.CompletedAt
+		if err := r.Store.UpdateRepairJob(ctx, job); err != nil {
+			return err
+		}
 	}
-	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, "ghmut-"+repositoryMonitorShortHash(job.ID+"-push"))
+	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, "ghmut-"+repositoryMonitorShortHash(jobID+"-push"))
 	if errors.Is(err, store.ErrNotFound) {
-		return true, nil
+		return nil
 	}
-	if err != nil {
-		return false, err
+	if err != nil || mutation.Status == repositoryMonitorRunPhaseSucceeded || mutation.Status == repositoryMonitorRunPhaseFailed {
+		return err
 	}
-	if mutation.Status == repositoryMonitorRunPhaseSucceeded || mutation.Status == repositoryMonitorRunPhaseFailed {
-		return true, nil
-	}
-	mutation.CommandEventID, mutation.ExternalID, mutation.Error = outcome.CommandEventID, job.PushedSHA, job.LastError
+	mutation.CommandEventID, mutation.ExternalID, mutation.Error = outcome.CommandEventID, outcome.ResultSHA, lastError
 	mutation.Status = repositoryMonitorRunPhaseFailed
 	if phase == repositoryMonitorRepairPhaseSucceeded {
 		mutation.Status = repositoryMonitorRunPhaseSucceeded
 	}
-	return true, r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation)
+	return r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation)
 }

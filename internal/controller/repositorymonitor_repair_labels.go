@@ -291,8 +291,9 @@ var errRepositoryMonitorPermissionLookupBudget = errors.New("repository permissi
 // can change, so the cache lives only as long as the poll's context.
 //
 // The budget is shared fairly across polls: accounts a poll could not look
-// up because its budget was spent are reserved budget in the next poll, so
-// pull requests visited late in every poll are not starved by early ones.
+// up because its budget was spent are reserved budget in the next poll, up to
+// half of it, so pull requests visited late in every poll are not starved by
+// early ones.
 type repositoryMonitorPermissionCache struct {
 	mu      sync.Mutex
 	entries map[string]repositoryMonitorPermissionResult
@@ -340,11 +341,15 @@ func withRepositoryMonitorPermissionCache(ctx context.Context) context.Context {
 func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (context.Context, func()) {
 	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{results: map[string]repositoryMonitorRememberedPermission{}})
 	memory := value.(*repositoryMonitorPermissionMemory)
+	// At most half the budget is reserved, so accounts reached early keep
+	// progressing too; deferred accounts beyond it are deferred again when
+	// this poll reaches them.
 	memory.mu.Lock()
-	reserved := maps.Clone(memory.deferred)
+	deferred := slices.Sorted(maps.Keys(memory.deferred))
 	memory.mu.Unlock()
-	if reserved == nil {
-		reserved = map[string]bool{}
+	reserved := map[string]bool{}
+	for _, key := range deferred[:min(len(deferred), repositoryMonitorPermissionLookupBudget/2)] {
+		reserved[key] = true
 	}
 	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, deferred: map[string]bool{}}
 	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, cache), func() {

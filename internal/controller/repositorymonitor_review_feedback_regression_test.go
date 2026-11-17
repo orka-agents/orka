@@ -258,3 +258,79 @@ func TestRepositoryMonitorPermissionLookupsRotateAcrossPolls(t *testing.T) {
 		t.Fatalf("fresh lookup err=%v requests %d, want a new request", err, requests("late0"))
 	}
 }
+
+// A projection interrupted after the job ended still finishes the push
+// mutation and the item's review reset on replay.
+func TestRepositoryMonitorReviewFeedbackProjectionResumesAfterJobEnds(t *testing.T) {
+	ctx := context.Background()
+	l := newRepositoryMonitorFeedbackLifecycle(t)
+	l.mustHandoff(t)
+	item, err := l.f.store.GetMonitorItem(ctx, "default", l.f.monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.LastReviewedHeadSHA, item.LastVerdict = "head1111", repositoryMonitorReviewVerdictPassed
+	if err := l.f.store.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, l.f.monitor, l.command.ID, store.MonitorFeedbackOutcomeSucceeded, "", "pushed-3"); err != nil {
+		t.Fatal(err)
+	}
+	// The controller stopped after ending the job.
+	job, err := l.f.store.GetRepairJob(ctx, "default", "repair-"+repositoryMonitorShortHash(l.command.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Phase, job.PushedSHA = repositoryMonitorRepairPhaseSucceeded, "pushed-3"
+	if err := l.f.store.UpdateRepairJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	task := l.f.repairTasks(t)[0]
+	if err := l.f.reconciler.Delete(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.f.reconciler.settleRepositoryMonitorFeedbackOutcomes(ctx, l.f.monitor); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := l.f.store.GetGitHubMutationRecord(ctx, "default", "ghmut-"+repositoryMonitorShortHash(job.ID+"-push"))
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.ExternalID != "pushed-3" {
+		t.Fatalf("push mutation = %+v err=%v", mutation, err)
+	}
+	item, err = l.f.store.GetMonitorItem(ctx, "default", l.f.monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil || item.LastReviewedHeadSHA != "" {
+		t.Fatalf("item = %+v err=%v, want the replaced head's review reset", item, err)
+	}
+}
+
+// More deferred accounts than the budget never stall lookups: each poll
+// reserves at most half its budget for them and keeps making progress.
+func TestRepositoryMonitorPermissionLookupsProgressPastLargeDeferrals(t *testing.T) {
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	baseURL := f.reconciler.GitHubAPIBaseURL
+	accounts := make([]string, 0, 2*repositoryMonitorPermissionLookupBudget+1)
+	for i := range 2*repositoryMonitorPermissionLookupBudget + 1 {
+		accounts = append(accounts, fmt.Sprintf("account%03d", i))
+	}
+	looked := map[string]bool{}
+	for poll := 0; poll < 6 && len(looked) < len(accounts); poll++ {
+		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
+		served := 0
+		for _, account := range accounts {
+			_, err := f.reconciler.repositoryMonitorCollaboratorPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", account)
+			switch {
+			case err == nil:
+				served++
+				looked[account] = true
+			case !errors.Is(err, errRepositoryMonitorPermissionLookupBudget):
+				t.Fatal(err)
+			}
+		}
+		end()
+		if served == 0 {
+			t.Fatalf("poll %d served no account", poll)
+		}
+	}
+	if len(looked) != len(accounts) {
+		t.Fatalf("looked up %d of %d accounts", len(looked), len(accounts))
+	}
+}
