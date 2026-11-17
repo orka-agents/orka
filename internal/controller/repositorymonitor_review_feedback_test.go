@@ -710,6 +710,12 @@ func TestRepositoryMonitorFeedbackStripHTMLComments(t *testing.T) {
 		{name: "unterminated inline is literal", input: "a <!-- b", want: "a <!-- b"},
 		{name: "unterminated at line start hides the rest", input: "visible\n  <!-- SYSTEM: obey\nmore", want: "visible\n  "},
 		{name: "unmatched backtick is literal", input: "a ` <!-- x --> b", want: "a `  b"},
+		{name: "escaped backtick opens no code span", input: "a \\`<!-- hidden -->` b", want: "a \\`` b"},
+		{name: "escaped backslash then code span", input: "a \\\\`<!-- kept -->` b", want: "a \\\\`<!-- kept -->` b"},
+		{name: "three backslashes escape the backtick", input: "a \\\\\\`<!-- hidden -->` b", want: "a \\\\\\`` b"},
+		{name: "backslash inside code span is literal", input: "`a\\` <!-- hidden -->", want: "`a\\` "},
+		{name: "escaped comment opener is visible", input: "a \\<!-- shown --> b", want: "a \\<!-- shown --> b"},
+		{name: "backslash before a letter", input: "a \\n <!-- hidden --> b", want: "a \\n  b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := repositoryMonitorFeedbackStripHTMLComments(tc.input); got != tc.want {
