@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -390,10 +391,16 @@ type repositoryMonitorRawReviewFeedback struct {
 
 const repositoryMonitorFeedbackCommentFields = `fullDatabaseId author { login __typename } body url createdAt lastEditedAt isMinimized pullRequestReview { fullDatabaseId }`
 
-const repositoryMonitorFeedbackThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String) {
+// repositoryMonitorFeedbackThreadPageSize is the review threads requested
+// per page. Each thread carries up to 21 comment bodies, so a page of very
+// long comments can exceed the GitHub response limit; the read then asks
+// for that page again at half the size, down to one thread.
+const repositoryMonitorFeedbackThreadPageSize = 50
+
+const repositoryMonitorFeedbackThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String,$first:Int!) {
  repository(owner:$owner,name:$name) { pullRequest(number:$number) {
   headRefOid reviewDecision author { login __typename }
-  reviewThreads(first:50, after:$after) {
+  reviewThreads(first:$first, after:$after) {
    pageInfo { hasNextPage endCursor }
    nodes { id isResolved isOutdated path line originalLine diffSide
     root: comments(first:1) { totalCount nodes { ` + repositoryMonitorFeedbackCommentFields + ` } }
@@ -443,6 +450,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 		return true
 	}
 	var after any
+	pageSize := repositoryMonitorFeedbackThreadPageSize
 	for page := 1; ; page++ {
 		var response struct {
 			Repository *struct {
@@ -457,7 +465,16 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackThreadsQuery, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
+		variables := repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after)
+		variables["first"] = pageSize
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackThreadsQuery, variables, &response); err != nil {
+			if errors.Is(err, errRepositoryMonitorGitHubResponseTooLarge) && pageSize > 1 {
+				// Ask for the same page again, smaller; it does not count
+				// against the page limit.
+				pageSize = max(1, pageSize/2)
+				page--
+				continue
+			}
 			stop(err)
 			return raw
 		}
