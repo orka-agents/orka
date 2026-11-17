@@ -92,6 +92,19 @@ describe('attention lanes', () => {
     expect(groupByAttention([task('busy', { phase: 'Running' })], items).needsYou).toBe(items)
   })
 
+  it('keeps the approval card for a Task the ranking lists only for another reason', () => {
+    const items: AttentionItem[] = [
+      { id: 'podWaiting:u-stuck', kind: 'podWaiting', rank: 4, since: '', summary: 'Pod waiting: ImagePullBackOff', task: { namespace: 'default', name: 'stuck', uid: 'u-stuck' } },
+    ]
+    const grouped = groupByAttention([
+      task('stuck', { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }, 'u-stuck'),
+    ], items)
+    expect(grouped.needsYou.map((item) => item.kind)).toEqual(['approval', 'podWaiting'])
+    expect(isTaskDerivedItem(grouped.needsYou[0])).toBe(true)
+    expect(grouped.working).toEqual([])
+    expect(grouped.done).toEqual([])
+  })
+
   it('matches Tasks by UID so a same-named replacement is not flagged', () => {
     const items: AttentionItem[] = [
       { id: 'a', kind: 'failed', rank: 3, since: '', summary: 'Task failed', task: { namespace: 'default', name: 'reused', uid: 'old-uid' } },

@@ -88,13 +88,19 @@ function taskApprovalWaitItem(task: Task): AttentionItem {
  */
 export function groupByAttention(tasks: Task[], items: AttentionItem[]): { needsYou: AttentionItem[]; working: Task[]; done: Task[] } {
   const flagged = attentionTaskKeys(items)
+  // Only an approval item stands in for the Task's own approval wait: a
+  // Task listed for another reason, such as a stuck Pod, still gets its
+  // approval card when its approvals could not be read.
+  const approvalFlagged = attentionTaskKeys(items.filter((item) => item.kind === 'approval'))
   const derived: AttentionItem[] = []
   const working: Task[] = []
   const done: Task[] = []
   for (const task of tasks) {
-    if (flagged.has(taskKey(task))) continue
-    if (isTaskAwaitingApproval(task)) derived.push(taskApprovalWaitItem(task))
-    else if (isAgentWorking(task)) working.push(task)
+    const key = taskKey(task)
+    const awaitingApproval = isTaskAwaitingApproval(task)
+    if (awaitingApproval && !approvalFlagged.has(key)) derived.push(taskApprovalWaitItem(task))
+    if (flagged.has(key) || awaitingApproval) continue
+    if (isAgentWorking(task)) working.push(task)
     else done.push(task)
   }
   if (derived.length === 0) return { needsYou: items, working, done }
