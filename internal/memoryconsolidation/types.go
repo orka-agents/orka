@@ -165,6 +165,10 @@ type Input struct {
 	// model read, so an operation may not cover them, but it may not repeat
 	// them either.
 	LaterProposals []InputProposal `json:"-"`
+	// ClosedProposals names proposals the run read that a completion found
+	// no longer open: applied, rejected, archived or gone. An operation may
+	// not cover one, since the fact it proposed may already be in memory.
+	ClosedProposals map[string]bool `json:"-"`
 	// EligibleSessions counts every Session that changed in the window,
 	// including those beyond MaxInputSessions.
 	EligibleSessions int `json:"eligibleSessions"`

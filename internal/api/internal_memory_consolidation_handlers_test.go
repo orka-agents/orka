@@ -433,3 +433,26 @@ func TestMemoryConsolidationReportsALaterProposalReloadThatReachedItsLimit(t *te
 	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{}}, &report))
 	require.True(t, report.InputTruncated, "the later proposals a full reload left out were not checked")
 }
+
+// A proposal the run read but a reviewer archived while it ran can no longer
+// be covered: the fact it proposed may already be in memory.
+func TestMemoryConsolidationDoesNotCoverAProposalReviewedWhileItRan(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose, MinNewSessions: new(int32(1))})
+	f.seedSessions(t, 1)
+	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "mem-go", Namespace: "default", Content: "Use Go 1.24."}))
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "remembered", Namespace: "default",
+		Type: store.MemoryProposalTypeMemory, Title: "Go", Content: "Use Go 1.26."}))
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.Len(t, begin.Input.Proposals, 1)
+	require.NoError(t, f.store.ArchiveMemoryProposal(t.Context(), "default", "remembered"))
+
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{
+		{Type: "supersede", Content: "Use Go 1.26 for every build.", Covers: []string{"remembered"},
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-go", Generation: 1}}},
+	}}, &report))
+	require.Empty(t, report.Operations)
+	require.Len(t, report.Rejected, 1)
+	require.Empty(t, report.ProposalIDs)
+}

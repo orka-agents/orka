@@ -117,6 +117,10 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 			continue
 		}
 		op.Covers = open.known(op.Covers)
+		if slices.ContainsFunc(op.Covers, func(id string) bool { return input.ClosedProposals[id] }) {
+			reject(index, op, "a proposal it covers was reviewed while the run ran")
+			continue
+		}
 		if reason := open.check(op); reason != "" {
 			reject(index, op, "%s", reason)
 			continue

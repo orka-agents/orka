@@ -748,3 +748,26 @@ func TestCoversDropLongIDsAndGoWhenAReportIsAbridged(t *testing.T) {
 	require.True(t, report.Abridged)
 	require.NotContains(t, string(encoded), "short", "covers go last when a report must shrink")
 }
+
+func TestCollectInputsCountsAProposalSeenInBothListsOnce(t *testing.T) {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	// Accepted between the pending and accepted reads: both lists return it.
+	src := &fakeSource{proposals: []store.MemoryProposal{
+		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "fact", CreatedAt: at},
+		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusAccepted, Content: "fact", CreatedAt: at},
+	}}
+	input, err := CollectInputs(context.Background(), src, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Len(t, input.Proposals, 1)
+}
+
+func TestValidateRefusesToCoverAProposalReviewedWhileTheRunRan(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{{ID: "applied-meanwhile", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Content: "Use Go 1.26."}}
+	input.ClosedProposals = map[string]bool{"applied-meanwhile": true}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "Use Go 1.26 for every build.",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-b", Generation: 1}}, Covers: []string{"applied-meanwhile"}}}}, input, nil, 10)
+	require.Empty(t, kept, "the fact it covered may already be in memory")
+	require.Equal(t, "a proposal it covers was reviewed while the run ran", rejected[0].Reason)
+}

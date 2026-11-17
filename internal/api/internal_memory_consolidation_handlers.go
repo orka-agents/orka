@@ -236,6 +236,12 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 		return nil, consolidationStoreError("read open memory proposals", err)
 	}
 	input.Truncated = input.Truncated || laterTruncated
+	// A proposal the run read may have been applied, rejected or archived
+	// while it ran; an operation may then not cover it.
+	input.ClosedProposals, err = memoryconsolidation.ClosedProposals(ctx, h.memoryProposalStore, namespace, input.Proposals)
+	if err != nil {
+		return nil, consolidationStoreError("read memory proposals the run read", err)
+	}
 	kept, rejected, conflicts := memoryconsolidation.Validate(submission, input, current, settings.MaxOperations)
 	var proposals []store.MemoryProposal
 	if settings.Mode == corev1alpha1.MemoryConsolidationPropose {

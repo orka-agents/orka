@@ -8,6 +8,7 @@ package memoryconsolidation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -167,6 +168,34 @@ func OpenProposals(ctx context.Context, src ProposalLister, namespace string) ([
 	return input.Proposals, input.Truncated, nil
 }
 
+// ProposalReader reads one memory proposal.
+type ProposalReader interface {
+	GetMemoryProposal(ctx context.Context, namespace, id string) (*store.MemoryProposal, error)
+}
+
+// ClosedProposals returns which of the proposals a run read are no longer
+// open: applied, rejected, archived or gone. A completion reads each one, so
+// the answer does not depend on a bounded list.
+func ClosedProposals(ctx context.Context, src ProposalReader, namespace string, read []InputProposal) (map[string]bool, error) {
+	closed := map[string]bool{}
+	for _, proposal := range read {
+		current, err := src.GetMemoryProposal(ctx, namespace, proposal.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			closed[proposal.ID] = true
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read memory proposal %q: %w", proposal.ID, err)
+		}
+		open := (current.Status == store.MemoryProposalStatusPending || current.Status == store.MemoryProposalStatusAccepted) &&
+			current.AppliedMemoryID == ""
+		if !open {
+			closed[proposal.ID] = true
+		}
+	}
+	return closed, nil
+}
+
 // collectProposals reads the namespace's open memory proposals, the newest
 // first across both statuses: pending ones, and accepted ones not yet
 // applied. Proposals of other kinds, such as skills, are not memory changes
@@ -197,8 +226,15 @@ func collectProposals(ctx context.Context, src ProposalLister, namespace string,
 			}
 		}
 	}
-	// Merge the lists newest first, so the shared limits keep the newest.
+	// Merge the lists newest first, so the shared limits keep the newest. A
+	// proposal accepted between the two reads is in both lists; it counts once.
 	slices.SortStableFunc(open, func(a, b store.MemoryProposal) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	seen := make(map[string]bool, len(open))
+	open = slices.DeleteFunc(open, func(proposal store.MemoryProposal) bool {
+		duplicate := seen[proposal.ID]
+		seen[proposal.ID] = true
+		return duplicate
+	})
 	budget := MaxProposalInputChars
 	for _, proposal := range open {
 		if len(input.Proposals) >= MaxInputProposals {
