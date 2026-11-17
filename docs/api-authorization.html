@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">API authorization | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/api-authorization"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="API authorization | Orka"><meta data-rh="true" name="description" content="External API permissions, namespace resolution, and Kubernetes RBAC grant examples."><meta data-rh="true" property="og:description" content="External API permissions, namespace resolution, and Kubernetes RBAC grant examples."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/api-authorization"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/api-authorization" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/api-authorization" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"API authorization","item":"https://orka-agents.github.io/orka/docs/api-authorization"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.16ff5817.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.c98ad522.js" defer="defer"></script>
 <script src="/orka/assets/js/main.5a4e78cf.js" defer="defer"></script>
 </head>
 <body>
@@ -123,6 +123,32 @@ with each OIDC group prefixed the same way, so bind Roles to, for example,
 <code>https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main</code>.
 Display claims such as <code>preferred_username</code>, <code>email</code>, and <code>name</code> are not used.
 Permission to read, create, or edit an Agent does not grant <code>use</code>.</p>
+<p>Provider <code>use</code> is a separate opt-in check, enabled with
+<code>--provider-use-authorization-enabled</code> (Helm:
+<code>controller.providerUseAuthorization.enabled</code>). When it is on, the same
+identities need <code>use</code> on <code>providers</code> in <code>core.orka.ai</code>, with the Provider name
+and the Provider&#x27;s namespace, to:</p>
+<ul>
+<li class="">create a Task whose <code>spec.ai.providerRef</code> names the Provider;</li>
+<li class="">create or edit an Agent so that its <code>spec.providerRef</code> or a
+<code>spec.model.fallbacks[].providerRef</code> names the Provider. Fallbacks are checked
+in the Agent&#x27;s namespace, and Providers the Agent already named are not
+checked again;</li>
+<li class="">send a request through <code>POST /api/v1/chat</code>, <code>/openai/v1/chat/completions</code>,
+<code>/openai/v1/responses</code>, or <code>/anthropic/v1/messages</code>. Every Provider the request
+resolves is checked before its credential is read: one it names, its Agent&#x27;s,
+a fallback, or the configured default.</li>
+</ul>
+<p>A Task that runs its Agent&#x27;s own Provider needs only Agent <code>use</code>. An Agent from
+another namespace is the exception: it may be in a namespace no policy checked,
+its fallbacks and a <code>providerRef</code> without a namespace resolve in the Task&#x27;s
+namespace, and it can change after the Task is created. So while the check is
+on, an <code>ai</code> Task that would take a Provider from an Agent in another namespace,
+its <code>providerRef</code> when the Task sets none or any of its fallbacks, is refused: by
+the API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Set the Task&#x27;s own <code>spec.ai.providerRef</code> and use
+an Agent without fallbacks, or use an Agent from the Task&#x27;s namespace. Permission to read, create, or edit a Provider, or <code>create</code>
+on <code>chats</code>, does not grant <code>use</code>.</p>
 <p>Setting or changing <code>Agent.spec.identity</code> requires <code>bind</code> on the virtual resource
 <code>agentidentities</code> in <code>core.orka.ai</code>, with the issuer as the subresource (for example
 <code>agentidentities/entra</code>), the lowercased identity ID as the name, and the Agent
