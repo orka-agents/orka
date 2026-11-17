@@ -989,6 +989,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	timings.finish()
 	span.SetAttributes(timings.spanAttributes()...)
 	if createErr != nil {
+		// Log before any branch returns, so a create retained for unproven
+		// cleanup still reports its stage and timings.
+		slog.Error("ACP runtime session creation failed",
+			append([]any{"stage", sessionCreationStage(createErr), "runtimeSessionID", request.RuntimeSessionID}, timings.logAttrs()...)...)
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
 			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
@@ -1032,8 +1036,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
-		slog.Error("ACP runtime session creation failed",
-			append([]any{"stage", sessionCreationStage(createErr), "runtimeSessionID", request.RuntimeSessionID}, timings.logAttrs()...)...)
 		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}

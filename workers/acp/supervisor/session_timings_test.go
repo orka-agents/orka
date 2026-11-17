@@ -241,37 +241,52 @@ func TestSupervisorCreateLogsSessionStartTimings(t *testing.T) {
 	}
 }
 
+// captureSupervisorLogs sends the default slog logger to a JSON buffer for
+// the rest of the test.
+func captureSupervisorLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	logs := &bytes.Buffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+type createFailureLine struct {
+	Msg     string           `json:"msg"`
+	Stage   string           `json:"stage"`
+	TotalMs *int64           `json:"totalMs"`
+	Stages  map[string]int64 `json:"stagesMs"`
+	Adapter map[string]int64 `json:"adapterMs"`
+}
+
+// createFailureLogLine returns the one session-creation-failed line.
+func createFailureLogLine(t *testing.T, logs *bytes.Buffer) createFailureLine {
+	t.Helper()
+	var found []createFailureLine
+	for raw := range bytes.SplitSeq(logs.Bytes(), []byte("\n")) {
+		var line createFailureLine
+		if json.Unmarshal(raw, &line) == nil && line.Msg == "ACP runtime session creation failed" {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("found %d session-creation-failed lines, want 1, in logs:\n%s", len(found), logs.String())
+	}
+	return found[0]
+}
+
 // A create whose adapter handshake fails still logs the adapter stage and the
 // handshake steps it completed, so a slow failed startup is diagnosable.
 func TestSupervisorCreateFailureLogsAdapterTimings(t *testing.T) {
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
+	logs := captureSupervisorLogs(t)
 	server, cfg, profile := newTestServer(t, adapterSessionNewFailureMode)
 	create := testCreateSessionRequest(t, cfg, profile)
 	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if response.Code == http.StatusCreated {
 		t.Fatalf("create succeeded although session/new was rejected: %s", response.Body.String())
 	}
-	var line struct {
-		Msg     string           `json:"msg"`
-		Stage   string           `json:"stage"`
-		TotalMs *int64           `json:"totalMs"`
-		Stages  map[string]int64 `json:"stagesMs"`
-		Adapter map[string]int64 `json:"adapterMs"`
-	}
-	found := false
-	for raw := range bytes.SplitSeq(logs.Bytes(), []byte("\n")) {
-		if json.Unmarshal(raw, &line) == nil && line.Msg == "ACP runtime session creation failed" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("no session-creation-failed line in logs:\n%s", logs.String())
-	}
+	line := createFailureLogLine(t, logs)
 	if line.Stage != "provider adapter initialization" || line.TotalMs == nil {
 		t.Fatalf("failure line = %+v", line)
 	}
