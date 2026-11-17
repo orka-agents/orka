@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -189,6 +191,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || item == nil {
 		return false, 0, nil
 	}
+	// A command's handoff creates a Task or writes to GitHub, so it never
+	// relies on a reviewer's or labeller's permission an earlier poll read:
+	// remembered permissions serve only scheduling, readiness, and evidence.
+	ctx = withRepositoryMonitorFreshPermissions(ctx)
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
 	if err != nil {
 		if errorsIsStoreNotFound(err) {
@@ -212,7 +218,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		// Keep this control action retryable until its stop transition settles.
 		stopActionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop)
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand, stopActionID); err != nil {
+		if err := r.cancelRepositoryMonitorPullRequestWorkActions(ctx, monitor, pr.Number, repositoryMonitorIssueSkipStoppedByCommand, stopActionID); err != nil {
 			return true, 0, err
 		}
 		item.RepairState = repositoryMonitorRepairPhaseFailed
@@ -339,9 +345,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
-		// The handoff creates a Task, so it never relies on a reviewer's
-		// or labeller's permission an earlier poll read.
-		ctx := withRepositoryMonitorFreshPermissions(ctx)
 		// An absence the cache reports is confirmed uncached, since it may
 		// let the handoff finalize a feedback repair or create its Task.
 		taskExists, existingTask, err := r.repositoryMonitorRepairTaskExists(ctx, monitor.Namespace, repositoryMonitorRepairTaskName(monitor, pr, command))
@@ -1768,7 +1771,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepoHeadContainsBase(ctx 
 	return result.Status == "ahead" || result.Status == "identical", nil
 }
 
-//nolint:gocyclo // Repair ingestion keeps delivery, audit, and work-action settlement in one transaction.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
 	// Every queued job is visited, so jobs that never end cannot keep older
 	// ones from being ingested.
@@ -1785,174 +1787,181 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		cursor = next
 	}
 	ingested := false
+	// One job's failure does not hold up the others: it is logged and
+	// returned with the rest, and the next reconcile retries it.
+	var errs []error
 	for i := range jobs {
-		job := jobs[i]
-		if strings.TrimSpace(job.TaskName) == "" {
-			continue
-		}
-		var task corev1alpha1.Task
-		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				settled, err := r.settleRepositoryMonitorFeedbackJobWithoutTask(ctx, monitor, &job)
-				if err != nil {
-					return ingested, err
-				}
-				ingested = ingested || settled
-				continue
-			}
-			return ingested, err
-		}
-		if !task.Status.Phase.IsTerminal() {
-			continue
-		}
-		// A feedback repair's outcome records how its Task ended, before the
-		// job does, so a retried ingestion records the same outcome.
-		feedbackOutcome, err := r.repositoryMonitorFeedbackOutcome(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID])
+		jobIngested, err := r.ingestRepositoryMonitorRepairJob(ctx, monitor, jobs[i])
 		if err != nil {
-			return ingested, err
+			logf.FromContext(ctx).Error(err, "failed to ingest repair job", "repairJob", jobs[i].ID)
+			errs = append(errs, err)
 		}
-		if cancelled, cancelErr := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
-			return ingested, cancelErr
-		} else if cancelled {
-			if feedbackOutcome != nil {
-				if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand, ""); err != nil {
-					return ingested, err
-				}
-				ingested = true
-				continue
-			}
-			completedAt := time.Now()
-			job.Phase = repositoryMonitorRepairPhaseFailed
-			job.LastError = repositoryMonitorIssueSkipStoppedByCommand
-			job.CompletedAt = &completedAt
-			if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
-				return ingested, err
-			}
-			ingested = true
-			continue
-		}
-		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-			job.Phase = repositoryMonitorRepairPhaseFailed
-			job.LastError = "repair task result is missing"
-			if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(&task); delivered {
-				job.PushedSHA = headSHA
-				if branch != job.Branch {
-					job.LastError = "repair delivery branch did not match the requested PR head branch"
-				} else {
-					job.Phase = repositoryMonitorRepairPhaseSucceeded
-					job.LastError = ""
-				}
-			} else if noChange := repositoryMonitorACPNoChangeReceipt(&task, job.HeadSHA); noChange && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
-				containsBase, verifyErr := r.repositoryMonitorHeadContainsBase(ctx, monitor, &job)
-				if verifyErr != nil {
-					return ingested, verifyErr
-				}
-				if containsBase {
-					job.Phase = repositoryMonitorRepairPhaseSucceeded
-					job.PushedSHA = job.HeadSHA
-					job.LastError = ""
-				} else {
-					job.LastError = "PR head does not contain the requested base revision"
-				}
-			} else if noChange && feedbackOutcome != nil {
-				// Feedback can already be addressed at this head. The repair
-				// pushed nothing, so the head is unchanged, its attempt stays
-				// charged, and open-feedback readiness decides whether a
-				// person is needed.
-				job.Phase = repositoryMonitorRepairPhaseSucceeded
-				job.LastError = ""
-			} else {
-				job.LastError = "repair delivery " + repositoryMonitorACPDeliveryFailureReason(&task)
-			}
-		} else {
-			job.Phase = repositoryMonitorRepairPhaseFailed
-			job.LastError = fmt.Sprintf("task ended in phase %s", task.Status.Phase)
-		}
-		if reason := repositoryMonitorWorkspacePathRejectionReason(&task); reason != "" {
-			// The runtime rejected the repair's paths before publishing it.
-			job.Phase = repositoryMonitorRepairPhaseFailed
-			job.LastError = reason
-		}
-		if feedbackOutcome != nil {
-			state := store.MonitorFeedbackOutcomeFailed
-			switch {
-			case job.Phase == repositoryMonitorRepairPhaseSucceeded && job.PushedSHA == "":
-				state = store.MonitorFeedbackOutcomeNoChange
-			case job.Phase == repositoryMonitorRepairPhaseSucceeded:
-				state = store.MonitorFeedbackOutcomeSucceeded
-			}
-			// The stored outcome, not the Task, decides every projection.
-			if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError, job.PushedSHA); err != nil {
-				return ingested, err
-			}
-			ingested = true
-			continue
-		}
-		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
-		pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
-		pushMutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, pushMutationID)
-		if err != nil {
-			return ingested, err
-		}
-		pushMutation.CommandEventID = commandID
-		pushMutation.ExternalID = job.PushedSHA
-		pushMutation.GitHubURL = job.Branch
-		pushMutation.Error = job.LastError
-		pushMutation.Status = repositoryMonitorRunPhaseSucceeded
-		if job.Phase != repositoryMonitorRepairPhaseSucceeded {
-			pushMutation.Status = repositoryMonitorRunPhaseFailed
-		}
-		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
-			return ingested, err
-		}
-		completedAt := time.Now()
-		job.CompletedAt = &completedAt
-		if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
-			return ingested, err
-		}
-		workStatus := repositoryMonitorWorkActionStatusSucceeded
-		if job.Phase != repositoryMonitorRepairPhaseSucceeded {
-			workStatus = repositoryMonitorWorkActionStatusFailed
-		}
-		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: job.Intent}, repositoryMonitorPullRequestKind, job.PRNumber, job.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(job.Intent), workStatus, job.Phase, job.TaskName, job.LastError); err != nil {
-			return ingested, err
-		}
-		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
-		if err == nil {
-			if item.HeadSHA == job.HeadSHA || (job.PushedSHA != "" && item.HeadSHA == job.PushedSHA) {
-				item.RepairState = job.Phase
-				// A repair that pushed nothing left the head and its review
-				// as they were.
-				if job.Phase == repositoryMonitorRepairPhaseSucceeded && job.PushedSHA != "" {
-					repositoryMonitorResetItemAfterRepairPush(item)
-				}
-			} else {
-				state, stateErr := r.repositoryMonitorRepairStateForHead(ctx, monitor, job.PRNumber, item.HeadSHA)
-				if stateErr != nil {
-					return ingested, stateErr
-				}
-				item.RepairState = state
-			}
-			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
-				return ingested, updateErr
-			}
-		} else if !errorsIsStoreNotFound(err) {
-			return ingested, err
-		}
-		ingested = true
+		ingested = ingested || jobIngested
 	}
 	// Terminal feedback outcomes whose projections lag, including ones this
 	// pass just recorded, are projected again, and a window of projected
 	// ones is checked for projections a later writer contradicted.
 	settled, err := r.settleRepositoryMonitorFeedbackOutcomes(ctx, monitor)
-	if err != nil {
-		return ingested, err
-	}
+	errs = append(errs, err)
 	corrected, err := r.verifyProjectedRepositoryMonitorFeedbackOutcomes(ctx, monitor)
-	if err != nil {
-		return ingested, err
+	errs = append(errs, err)
+	return ingested || settled || corrected, errors.Join(errs...)
+}
+
+// ingestRepositoryMonitorRepairJob ingests one queued repair job whose Task
+// ended, and reports whether it recorded anything.
+//
+//nolint:gocyclo // Repair ingestion keeps delivery, audit, and work-action settlement in one transaction.
+func (r *RepositoryMonitorReconciler) ingestRepositoryMonitorRepairJob(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, job store.RepairJob) (bool, error) {
+	if strings.TrimSpace(job.TaskName) == "" {
+		return false, nil
 	}
-	return ingested || settled || corrected, nil
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			settled, err := r.settleRepositoryMonitorFeedbackJobWithoutTask(ctx, monitor, &job)
+			if err != nil {
+				return false, err
+			}
+			return settled, nil
+		}
+		return false, err
+	}
+	if !task.Status.Phase.IsTerminal() {
+		return false, nil
+	}
+	// A feedback repair's outcome records how its Task ended, before the
+	// job does, so a retried ingestion records the same outcome.
+	feedbackOutcome, err := r.repositoryMonitorFeedbackOutcome(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID])
+	if err != nil {
+		return false, err
+	}
+	if cancelled, cancelErr := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
+		return false, cancelErr
+	} else if cancelled {
+		if feedbackOutcome != nil {
+			if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, store.MonitorFeedbackOutcomeFailed, repositoryMonitorIssueSkipStoppedByCommand, ""); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		completedAt := time.Now()
+		job.Phase = repositoryMonitorRepairPhaseFailed
+		job.LastError = repositoryMonitorIssueSkipStoppedByCommand
+		job.CompletedAt = &completedAt
+		if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		job.Phase = repositoryMonitorRepairPhaseFailed
+		job.LastError = "repair task result is missing"
+		if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(&task); delivered {
+			job.PushedSHA = headSHA
+			if branch != job.Branch {
+				job.LastError = "repair delivery branch did not match the requested PR head branch"
+			} else {
+				job.Phase = repositoryMonitorRepairPhaseSucceeded
+				job.LastError = ""
+			}
+		} else if noChange := repositoryMonitorACPNoChangeReceipt(&task, job.HeadSHA); noChange && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
+			containsBase, verifyErr := r.repositoryMonitorHeadContainsBase(ctx, monitor, &job)
+			if verifyErr != nil {
+				return false, verifyErr
+			}
+			if containsBase {
+				job.Phase = repositoryMonitorRepairPhaseSucceeded
+				job.PushedSHA = job.HeadSHA
+				job.LastError = ""
+			} else {
+				job.LastError = "PR head does not contain the requested base revision"
+			}
+		} else if noChange && feedbackOutcome != nil {
+			// Feedback can already be addressed at this head. The repair
+			// pushed nothing, so the head is unchanged, its attempt stays
+			// charged, and open-feedback readiness decides whether a
+			// person is needed.
+			job.Phase = repositoryMonitorRepairPhaseSucceeded
+			job.LastError = ""
+		} else {
+			job.LastError = "repair delivery " + repositoryMonitorACPDeliveryFailureReason(&task)
+		}
+	} else {
+		job.Phase = repositoryMonitorRepairPhaseFailed
+		job.LastError = fmt.Sprintf("task ended in phase %s", task.Status.Phase)
+	}
+	if reason := repositoryMonitorWorkspacePathRejectionReason(&task); reason != "" {
+		// The runtime rejected the repair's paths before publishing it.
+		job.Phase = repositoryMonitorRepairPhaseFailed
+		job.LastError = reason
+	}
+	if feedbackOutcome != nil {
+		state := store.MonitorFeedbackOutcomeFailed
+		switch {
+		case job.Phase == repositoryMonitorRepairPhaseSucceeded && job.PushedSHA == "":
+			state = store.MonitorFeedbackOutcomeNoChange
+		case job.Phase == repositoryMonitorRepairPhaseSucceeded:
+			state = store.MonitorFeedbackOutcomeSucceeded
+		}
+		// The stored outcome, not the Task, decides every projection.
+		if err := r.recordRepositoryMonitorFeedbackTaskEnd(ctx, monitor, feedbackOutcome, &task, job.HeadSHA, state, job.LastError, job.PushedSHA); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
+	pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
+	pushMutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, pushMutationID)
+	if err != nil {
+		return false, err
+	}
+	pushMutation.CommandEventID = commandID
+	pushMutation.ExternalID = job.PushedSHA
+	pushMutation.GitHubURL = job.Branch
+	pushMutation.Error = job.LastError
+	pushMutation.Status = repositoryMonitorRunPhaseSucceeded
+	if job.Phase != repositoryMonitorRepairPhaseSucceeded {
+		pushMutation.Status = repositoryMonitorRunPhaseFailed
+	}
+	if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
+		return false, err
+	}
+	completedAt := time.Now()
+	job.CompletedAt = &completedAt
+	if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
+		return false, err
+	}
+	workStatus := repositoryMonitorWorkActionStatusSucceeded
+	if job.Phase != repositoryMonitorRepairPhaseSucceeded {
+		workStatus = repositoryMonitorWorkActionStatusFailed
+	}
+	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: job.Intent}, repositoryMonitorPullRequestKind, job.PRNumber, job.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(job.Intent), workStatus, job.Phase, job.TaskName, job.LastError); err != nil {
+		return false, err
+	}
+	item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
+	if err == nil {
+		if item.HeadSHA == job.HeadSHA || (job.PushedSHA != "" && item.HeadSHA == job.PushedSHA) {
+			item.RepairState = job.Phase
+			// A repair that pushed nothing left the head and its review
+			// as they were.
+			if job.Phase == repositoryMonitorRepairPhaseSucceeded && job.PushedSHA != "" {
+				repositoryMonitorResetItemAfterRepairPush(item)
+			}
+		} else {
+			state, stateErr := r.repositoryMonitorRepairStateForHead(ctx, monitor, job.PRNumber, item.HeadSHA)
+			if stateErr != nil {
+				return false, stateErr
+			}
+			item.RepairState = state
+		}
+		if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
+			return false, updateErr
+		}
+	} else if !errorsIsStoreNotFound(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 // repositoryMonitorResetItemAfterRepairPush clears the review state that a

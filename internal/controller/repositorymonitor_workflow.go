@@ -91,7 +91,10 @@ func (r *RepositoryMonitorReconciler) writeRepositoryMonitorWorkActionState(ctx 
 			return nil
 		}
 		verifiedUpdateBranchSuccess := desiredAction == repositoryMonitorCommandIntentUpdateBranch && status == repositoryMonitorWorkActionStatusSucceeded
-		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess {
+		// A cancelled action is final, except to the projection of a feedback
+		// repair's stored outcome, which a bulk cancel cannot overrule.
+		projecting := ctx.Value(repositoryMonitorFeedbackProjectingKey{}) != nil
+		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess && !projecting {
 			return nil
 		}
 		existing.RunID = firstNonEmptyWorkflow(runID(run), existing.RunID)

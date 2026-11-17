@@ -975,7 +975,7 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 	}
 	// Settle the cancelled work like a stop does, so a returning label
 	// does not find an orphaned running action holding readiness pending.
-	if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
+	if err := r.cancelRepositoryMonitorPullRequestWorkActions(ctx, monitor, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
 		return peers, err
 	}
 	// A targeted run never reaches missing-item cleanup, so revoke the

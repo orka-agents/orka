@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -10,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // A feedback repair's outcome record is the one source of truth for what
@@ -354,12 +356,15 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorFeedbackOutcomes(ct
 	if err != nil {
 		return false, err
 	}
+	// One outcome's failure does not hold up the others.
+	var errs []error
 	for _, outcome := range outcomes {
 		if err := r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome); err != nil {
-			return false, err
+			log.FromContext(ctx).Error(err, "failed to project feedback repair outcome", "commandEvent", outcome.CommandEventID)
+			errs = append(errs, err)
 		}
 	}
-	return len(outcomes) > 0, nil
+	return len(outcomes) > 0, errors.Join(errs...)
 }
 
 // repositoryMonitorFeedbackProjection is what a terminal outcome's
@@ -444,8 +449,49 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 			}
 		}
 	}
+	// A write the workflow refused, or one a concurrent writer undid, must
+	// never count as projected: the records are read back first.
+	contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+	if err != nil {
+		return err
+	}
+	if contradicted {
+		return fmt.Errorf("%w: feedback repair %s", errRepositoryMonitorFeedbackProjectionContradicted, outcome.CommandEventID)
+	}
 	_, err = r.Store.MarkMonitorFeedbackOutcomeProjected(ctx, store.MarkMonitorFeedbackOutcomeProjectedRequest{Namespace: monitor.Namespace, CommandEventID: outcome.CommandEventID})
 	return err
+}
+
+// errRepositoryMonitorFeedbackProjectionContradicted reports a projection
+// whose records, read back, still contradict the stored outcome.
+var errRepositoryMonitorFeedbackProjectionContradicted = errors.New("the projection does not record the stored outcome")
+
+// cancelRepositoryMonitorPullRequestWorkActions cancels a pull request's
+// active work actions, as CancelWorkActions does, and then projects again
+// every feedback repair whose outcome has ended: the bulk cancel cannot tell
+// such a repair's action from an active one, so it may have cancelled an
+// action its stored outcome records otherwise.
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorPullRequestWorkActions(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, reason, exceptID string) error {
+	_, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, number, reason, exceptID)
+	if err != nil {
+		return err
+	}
+	outcomes, err := r.repositoryMonitorFeedbackOutcomes(ctx, monitor, "", number)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, outcome := range outcomes {
+		if !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
+			continue
+		}
+		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+		if err == nil && contradicted {
+			err = r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome)
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 type repositoryMonitorFeedbackProjectingKey struct{}
@@ -512,22 +558,20 @@ func (r *RepositoryMonitorReconciler) verifyProjectedRepositoryMonitorFeedbackOu
 	}
 	r.feedbackVerifyCursors.Store(monitor.UID, next)
 	corrected := false
+	var errs []error
 	for _, outcome := range outcomes {
 		if outcome.ProjectedAt == nil || !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
 			continue
 		}
 		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
-		if err != nil {
-			return corrected, err
-		}
-		if contradicted {
-			if err := r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome); err != nil {
-				return corrected, err
+		if err == nil && contradicted {
+			if err = r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome); err == nil {
+				corrected = true
 			}
-			corrected = true
 		}
+		errs = append(errs, err)
 	}
-	return corrected, nil
+	return corrected, errors.Join(errs...)
 }
 
 // repositoryMonitorFeedbackProjectionContradicted reports whether the repair
@@ -554,10 +598,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackProjectionContrad
 	case !errors.Is(err, store.ErrNotFound):
 		return false, err
 	}
+	// A record that does not exist contradicts nothing.
 	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(outcome.CommandEventID, store.RepositoryMonitorDesiredActionForIntent(repositoryMonitorCommandIntentFix)))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return true, nil
+		return false, nil
 	case err != nil:
 		return false, err
 	}

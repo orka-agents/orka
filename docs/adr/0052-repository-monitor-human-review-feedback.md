@@ -218,10 +218,16 @@ resumes from the record:
   state is derived again. Each write is idempotent, and the outcome is marked
   projected only once no projection contradicts it. No other path writes the
   work action of a feedback repair whose outcome has ended: a retry, stale
-  head, or policy block that would projects the stored outcome instead. Each
-  repair ingestion also checks a rotating window of 20 projected outcomes and
-  projects again any whose job, push mutation, or work action a later writer
-  contradicted.
+  head, or policy block that would projects the stored outcome instead. A
+  bulk cancel, such as a stop command's, projects again every ended feedback
+  repair of the pull request it cancelled, and projection may settle a
+  cancelled action, which no other writer may reopen. The projector reads
+  its records back and marks an outcome projected only when they record it;
+  a write that was refused is retried. Each repair ingestion also checks a
+  rotating window of 20 projected outcomes and projects again any whose job,
+  push mutation, or work action a later writer contradicted. One repair's
+  ingestion or projection error is logged and retried without holding up the
+  others.
 - A withdrawn repair's job, even one whose Task create the API server
   refused, ends in the `withdrawn` phase, which readiness ignores, and its push
   mutation ends too. Ingestion visits every queued job, so jobs that never
@@ -293,7 +299,11 @@ The memory is kept per monitor UID: a deleted monitor's is evicted when its
 reconcile finds it gone, a monitor recreated under the same name drops the
 one it replaced, and memories unused for an hour, or beyond 1,024 monitors,
 are swept. A repair
-handoff, which creates a Task, never uses a remembered permission. The memory
+handoff never uses a remembered permission: every command handoff, of a
+feedback repair, any other fix, a CI fix, or a branch update, reads the
+permissions its repair label and feedback rest on fresh, because it creates
+a Task or writes to GitHub. Remembered permissions serve only scheduling,
+readiness, and evidence. The memory
 is the controller's; a restart starts afresh.
 
 ### Budgets and maxRounds
