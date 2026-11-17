@@ -78,7 +78,7 @@ var (
 	// YAML block scalars put their value on following indented lines. Match
 	// the credential-bearing header here; yamlBlockScalarAssignmentsLookLikeSecret
 	// reconstructs all content lines before evaluating the value.
-	policySensitiveYAMLBlockHeaderPattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?$`)
+	policySensitiveYAMLBlockHeaderPattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*(?:[!&]\S*\s+)*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?$`)
 	// A credential key with no value on its line; the scalar (if any) sits
 	// on the following indented lines.
 	policySensitiveYAMLEmptyValuePattern = regexp.MustCompile(`(?i)^[\t ]*(?:-\s*)?["']?(?:[A-Za-z0-9]+[_-]){0,3}(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|clien` + `t[_-]?secret|secr` + `et(?:[_-]?(?:access[_-]?)?key)?|cred` + `entials?|priv` + `ate[_-]?key)["']?\s*:\s*(?:#[^\r\n]*)?$`)
@@ -662,6 +662,22 @@ func cookieHeadersLookLikeSecret(scan *secretScan) bool {
 // whole text.
 func LooksLikeSecret(text string) bool {
 	return looksLikeSecret(newSecretScan(stripUnsafeTextRunes(text)))
+}
+
+// SensitiveYAMLBlockHeader reports whether line opens a YAML block scalar
+// (| or >, with optional chomping and indentation indicators) for a
+// credential-bearing key, the header LooksLikeSecret reconstructs a block
+// from. The scalar's value is on the following lines indented deeper than
+// line.
+func SensitiveYAMLBlockHeader(line string) bool {
+	return policySensitiveYAMLBlockHeaderPattern.MatchString(line)
+}
+
+// SensitiveYAMLEmptyValueKey reports whether line is a credential-bearing
+// YAML key with no value on the line, whose plain or quoted scalar value may
+// continue on the following lines indented deeper than line.
+func SensitiveYAMLEmptyValueKey(line string) bool {
+	return policySensitiveYAMLEmptyValuePattern.MatchString(line)
 }
 
 func looksLikeSecret(scan *secretScan) bool {

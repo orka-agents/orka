@@ -32,7 +32,11 @@ type ProviderProfile struct {
 	AuthMethodID          string
 	AdapterName           string
 	AdapterDigest         string
-	PrepareSession        func(acp.SessionPaths) error
+	// ValidateWorkspace rejects a materialized workspace the provider cannot
+	// run safely, before any provider state or child process exists. Its
+	// error fails the create permanently with a caller-visible reason.
+	ValidateWorkspace func(acp.SessionPaths) error
+	PrepareSession    func(acp.SessionPaths) error
 }
 
 type ProviderSessionProjection struct {
