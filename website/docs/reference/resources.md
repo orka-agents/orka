@@ -77,7 +77,7 @@ spec:
 | `agentRef` | `ai`, `agent` | The [Agent](#agent) to use. |
 | `prompt` | `ai`, `agent` | What to do. |
 | `image`, `command`, `args` | `container` | The container to run. See [Container tasks](../guides/container-tasks.md). |
-| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. |
+| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. A container Task's `valueFrom.secretKeyRef` and `valueFrom.configMapKeyRef` follow the `secretRef` policy; see [Container tasks](../guides/container-tasks.md#other-fields). |
 | `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. |
 | `workspace` | `agent`, `container` | The git repository to work in. See [Workspace](#workspace). |
 | `agentRuntime` | `agent` | Per-Task overrides of the Agent's runtime defaults: `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. |
@@ -345,7 +345,6 @@ spec:
     inline: "You are a senior software engineer."
   runtime:
     type: claude         # or "codex" / "copilot" / "opencode"
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -359,13 +358,14 @@ spec:
 | --- | --- |
 | `model.name` | Required. A model your gateway lists. |
 | `runtime.type` | `codex`, `claude`, `copilot`, or `opencode`. |
-| `runtime.contractVersion` | `orka.harness.v2`. |
+| `runtime.contractVersion` | Optional. Defaults to `orka.harness.v2`, the only supported value. |
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |
 | `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Runtimes reject values they do not support: `none` is Codex-only and `max` is Claude-only. |
 | `runtime.runtimeRef` | Selects an external [AgentRuntime](../guides/bring-your-own-agent-runtime.md) instead of a built-in type. |
 | `runtime.toolboxes` | Built-in types only. Read-only [toolbox](../guides/toolboxes.md) images whose tool folders are added to the agent's `PATH`. |
+| `runtime.skills` | `codex`, `claude`, and `opencode` only. [Agent Skills](../guides/runtime-skills.md) (`name`, digest-pinned `image`, optional `path` under `/skills`) copied into each session's native skills folder. |
 
 All four built-in harness v2 runtimes support `spec.systemPrompt` and the optional
 [`spec.soul`](../concepts/soul.md) persona source. Copilot and OpenCode receive
@@ -906,7 +906,7 @@ spec:
 | `issueWorkflow.implementation.maxActive` | int32 | No | Concurrently active implementation jobs per monitor. Defaults to `2`. |
 | `issueWorkflow.implementation.maxAttemptsPerIssue` | int32 | No | Implementation attempts per issue. Defaults to `2`. |
 | `issueWorkflow.implementation.maxChangedFiles` | int32 | No | Files allowed in one implementation patch. Defaults to `12`. |
-| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation patches may touch. |
+| `issueWorkflow.implementation.allowedPaths` | list | No | Path globs or prefixes, such as `api/**`, that implementation and pull request repair patches may touch. Repository control paths are always denied. |
 | `repair.enabled` | bool | No | Enables automatic, bounded pull request repair. Requires `agents.repairer` and the publication credentials. |
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |

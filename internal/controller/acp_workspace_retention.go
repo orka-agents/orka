@@ -35,6 +35,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -312,6 +313,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			r.recordRetention(workspace, "InvalidDurableCapability",
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) && operatoraccess.Tainted(workspace.Annotations) {
+			// Operator access forfeits retention: a tainted workspace is never
+			// captured into a data checkpoint for continuation or forks.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "OperatorTaintedIdleExpired",
+				"class idleTimeout elapsed for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", true)
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
@@ -1324,6 +1331,11 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
+	if operatoraccess.Tainted(workspace.Annotations) {
+		// Backstop for every suspension path: a tainted workspace is never
+		// checkpointed.
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
 	if settledTaskUID != "" &&
 		!acpWorkspaceResumeDemandBelongsToTask(
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], settledTaskUID,

@@ -62,6 +62,19 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state := s.sessions[sessionID]
+	if state == nil {
+		unaccepted, mismatch := s.drainCleanedPromptUnacceptedLocked(sessionID, request.Metadata)
+		if mismatch != harnessv2.FenceMatch {
+			s.mu.Unlock()
+			writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+			return
+		}
+		if unaccepted {
+			s.mu.Unlock()
+			writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+			return
+		}
+	}
 	if state == nil || state.creating {
 		s.mu.Unlock()
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -155,6 +168,13 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	prompt.genai = s.startInvokeAgent(r.Context(), state, request, now)
+	// Settlement records the span first; this only closes a prompt that never
+	// settled, such as one rejected before the agent accepted it.
+	defer prompt.genai.abandon()
+	if providerProxy != nil {
+		providerProxy.setPromptTelemetry(string(request.Metadata.PromptID), prompt.genai)
+	}
 	// Resume an adapter that exited while idle before this prompt gets any
 	// provider or MCP access. Some agents call the model during
 	// session/resume; with the prompt not yet active the provider proxy
@@ -316,6 +336,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result := <-run.Result
+	prompt.genai.setUsage(result.Usage)
 	if result.Err != nil {
 		stage, rpcCode, rpcService, rpcErrorName := promptExecutionDiagnostic(result.Err)
 		slog.Error(
@@ -1385,6 +1406,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
+	// No operator operation may run, or still be launching, when the session
+	// is torn down. An unfinished barrier fails deletion closed and keeps the
+	// session resources; the pool is replaced instead.
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		s.mu.Lock()
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced before deletion", nil, false)
+		return
+	}
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
@@ -1500,6 +1533,39 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	setSessionState(state, nextState)
 	state.descriptor.LastTransitionAt = now
 	return true, nil
+}
+
+// drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
+// that drain cleanup already retired is provably unaccepted: the pool is still
+// draining, the request carries this supervisor's exact fence for that retired
+// session (runtime instance, supervisor boot, controller epoch, pool identity,
+// session UID and generation, and profile), and neither the operation nor the
+// prompt was ever admitted on it. Such a prompt is rejected as retryable, like
+// any prompt that reaches a draining pool, so the controller can requeue it.
+// A request for that retired session with any other fence gets the
+// non-retryable stale-fence refusal through the returned mismatch, never a
+// retry. Replays of admitted work keep their existing classification. The
+// caller must hold s.mu.
+func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (bool, harnessv2.FenceMismatch) {
+	if !s.drain.Requested {
+		return false, harnessv2.FenceMatch
+	}
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID {
+		return false, harnessv2.FenceMatch
+	}
+	expected := s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration)
+	expected.RuntimeProfileDigest = tombstone.RuntimeProfileDigest
+	if mismatch := harnessv2.CompareFence(expected, metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		return false, mismatch
+	}
+	if tombstoneOperation(tombstone.RuntimeSessionTombstone, metadata.OperationID) != nil {
+		return false, harnessv2.FenceMatch
+	}
+	if _, ok := tombstone.cancellationOperations[metadata.OperationID]; ok {
+		return false, harnessv2.FenceMatch
+	}
+	return tombstone.prompt == nil || tombstone.prompt.metadata.PromptID != metadata.PromptID, harnessv2.FenceMatch
 }
 
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {
@@ -1630,6 +1696,20 @@ func workspaceDeltaSegmentsMatch(patternSegments, pathSegments []string) bool {
 func workspaceDeltaSegmentMatches(pattern, segment string) bool {
 	matched, err := path.Match(pattern, segment)
 	return err == nil && matched
+}
+
+// workspaceDeltaPathViolation returns the rejection message for one changed
+// path, or "" when the path passes. The repository-control check runs first so
+// a protected file is always reported as a control-path denial, even when it is
+// also outside the allowlist.
+func workspaceDeltaPathViolation(workspaceRelativeRoot, changedPath string, limits harnessv2.WorkspaceDeltaLimits) string {
+	if limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath) {
+		return harnessv2.WorkspaceDeltaRepositoryControlPathMessage
+	}
+	if !workspaceDeltaPathAllowed(changedPath, limits.AllowedPaths) {
+		return harnessv2.WorkspaceDeltaDisallowedPathMessage
+	}
+	return ""
 }
 
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {
@@ -1893,6 +1973,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 
 	freezeCtx, cancel := context.WithTimeout(r.Context(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 	defer cancel()
+	// No operator operation may run, or start, while the workspace is frozen
+	// and its delta is captured.
+	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+		s.poisonSession(state, "operator operations could not be quiesced before the workspace freeze")
+		s.poisonPool("operator_quiesce_unproven")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced", nil, false)
+		return
+	}
 	if err := runtimeSession.Freeze(freezeCtx); err != nil {
 		s.poisonSession(state, "workspace freeze could not be proven")
 		s.poisonPool("workspace_freeze_unproven")
@@ -1965,14 +2053,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, changedPath := range changedPaths {
-		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
-			s.poisonSession(state, "workspace delta contains a disallowed path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
-			return
-		}
-		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
-			s.poisonSession(state, "workspace delta contains a protected repository-control path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+		if message := workspaceDeltaPathViolation(state.workspaceRelativeRoot, changedPath, request.Limits); message != "" {
+			s.poisonSession(state, message)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)
 			return
 		}
 	}
@@ -2137,6 +2220,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			prompt.sequence--
 			return nil, err
+		}
+		if update != nil && update.ToolCall != nil {
+			prompt.genai.observeTool(update.ToolCall, prompt.toolCallNames[update.ToolCall.ToolCallID], event.Timestamp)
 		}
 		if text != "" {
 			messageID := ""
@@ -2526,6 +2612,13 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	// A finisher can run before the stream handler records the agent's usage
+	// (remote-renewal compensation does), and telemetry ends only once, so
+	// keep any usage this result carries first.
+	prompt.genai.setUsage(result.Usage)
+	// Cancellation can settle the prompt first; telemetry follows the
+	// canonical settlement, not this finisher's result.
+	prompt.genai.finishSettlement(settlement)
 	next := state.descriptor.State
 	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
 	if sessionCleanup {

@@ -2558,7 +2558,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 		if err == nil {
 			session.finalized = true
 			d.rememberFinalizedSessionTurn(task.UID, session.Turn.Turn.ID)
-			d.retireRecoveredRuntimeSessionBinding(task, attempt, session.Binding)
+			d.retireRecoveredRuntimeSessionBinding(ctx, task, attempt, session.Binding)
 		}
 		return err
 	}
@@ -2628,7 +2628,7 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 	if finalizeErr == nil {
 		session.finalized = true
 		d.rememberFinalizedSessionTurn(task.UID, session.Turn.Turn.ID)
-		d.retireRecoveredRuntimeSessionBinding(task, attempt, session.Binding)
+		d.retireRecoveredRuntimeSessionBinding(ctx, task, attempt, session.Binding)
 	}
 	return finalizeErr
 }

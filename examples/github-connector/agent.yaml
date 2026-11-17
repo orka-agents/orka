@@ -7,7 +7,6 @@ spec:
     name: gpt-5.4
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 40
     defaultAllowBash: false
     # The GitHub tools are offered to the agent only when the person who

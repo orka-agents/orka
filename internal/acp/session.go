@@ -185,6 +185,8 @@ type PromptResult struct {
 	Err        error
 	Accepted   bool
 	SettledAt  time.Time
+	// Usage is the agent-reported turn token usage, for telemetry only.
+	Usage *PromptUsage
 }
 
 type PromptRun struct {
@@ -1062,6 +1064,9 @@ func (s *RuntimeSession) runPrompt(active *activePrompt, process *Process) {
 		s.mu.Unlock()
 	})
 	result := PromptResult{Accepted: written, SettledAt: time.Now().UTC()}
+	if err == nil {
+		result.Usage = ParsePromptUsage(response.Usage)
+	}
 	switch {
 	case err != nil:
 		result.Outcome = classifyPromptErrorOutcome(err, written)

@@ -27,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -114,13 +115,19 @@ func (f ACPMCPToolExecutorFunc) ExecuteACPMCPTool(ctx context.Context, request h
 }
 
 type RegistryACPMCPToolExecutor struct {
-	Registry            *tools.Registry
-	Reader              client.Reader
-	KubeClient          kubernetes.Interface
-	HTTPClient          *http.Client
-	OutboundAccess      outboundaccess.Resolver
-	TransactionExchange *workerexecutor.TransactionExchangeConfig
-	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	TaskProvenanceProtected bool
+	GatewayService          *gatewayruntime.Service
+	Registry                *tools.Registry
+	Reader                  client.Reader
+	KubeClient              kubernetes.Interface
+	HTTPClient              *http.Client
+	OutboundAccess          outboundaccess.Resolver
+	TransactionExchange     *workerexecutor.TransactionExchangeConfig
+	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	// SubstrateMCPRouter reaches Substrate MCP actors in-process with the
+	// manager's router identity, the same path the Orka API MCP proxy uses.
+	// Nil makes brokered Substrate MCP Tools fail closed.
+	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
 
 	// EnforceTransactionCredentialAuth mirrors the controller-wide context-token
 	// authorization enforcement mode. Custom-Tool executions always bind the
@@ -786,6 +793,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			return nil, matchErr
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
+		executor.SetSubstrateMCPRouter(e.SubstrateMCPRouter)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
 		if descriptor.Forward != nil {
 			executor.AllowForwarding()
@@ -796,7 +804,11 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
 			}
 		}
-		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
+		if tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+			if err := e.bindGatewayTaskGrant(ctx, request, tool, executor); err != nil {
+				return nil, err
+			}
+		} else if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
 		// The policy this call is classified under is the one it resolves
@@ -953,6 +965,8 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 }
 
 type ACPMCPBrokerDependencies struct {
+	TaskProvenanceProtected bool
+	GatewayService          *gatewayruntime.Service
 	// ConnectorReadScopes mirrors the API's connector-read scope list for
 	// list_connections on Tasks created by delegated context tokens.
 	ConnectorReadScopes     []string
@@ -968,6 +982,9 @@ type ACPMCPBrokerDependencies struct {
 	OutboundAccess          outboundaccess.Resolver
 	TransactionExchange     *workerexecutor.TransactionExchangeConfig
 	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	// SubstrateMCPRouter is the manager's in-process router client for
+	// Substrate MCP actor Tools; see RegistryACPMCPToolExecutor.
+	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
 	// Connections resolves linked-account credentials for catalog
 	// built-in tools; see RegistryACPMCPToolExecutor.Connections.
 	Connections outboundaccess.ConnectionCredentialSource
@@ -998,10 +1015,13 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		},
 		Prompts: DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore, PromptLeases: dependencies.PromptLeases},
 		Executor: RegistryACPMCPToolExecutor{
+			TaskProvenanceProtected: dependencies.TaskProvenanceProtected,
+			GatewayService:          dependencies.GatewayService,
 			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
 			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
+			SubstrateMCPRouter:               dependencies.SubstrateMCPRouter,
 			Connections:                      dependencies.Connections,
 			ConnectorReadScopes:              append([]string(nil), dependencies.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,

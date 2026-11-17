@@ -7,14 +7,17 @@ MIT License - see LICENSE file for details.
 package admission
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserveradmission "k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -319,8 +322,32 @@ func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.allowed, policy.admitsAs(t, kind, pods, tc.pod, apiserveradmission.Connect,
 				tc.requester, "exec", options, nil))
+			// Attaching reaches the same running process, so it is decided
+			// the same way.
+			attach := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "PodAttachOptions", "stdin": true}}
+			require.Equal(t, tc.allowed, policy.admitsAs(t, schema.GroupVersionKind{Version: "v1", Kind: "PodAttachOptions"}, pods, tc.pod,
+				apiserveradmission.Connect, tc.requester, "attach", attach, nil))
 		})
 	}
+}
+
+// TestControllerServiceAccountProtectionMatchesExecAndAttach covers the
+// policy's match rules, which the evaluator above does not apply: a CONNECT
+// rule that left out a subresource would never reach the validation.
+func TestControllerServiceAccountProtectionMatchesExecAndAttach(t *testing.T) {
+	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "admission", "controller_serviceaccount_protection.yaml"))
+	require.NoError(t, err)
+	var policy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.UnmarshalStrict(documents[0], &policy))
+	var connect []string
+	for _, rule := range policy.Spec.MatchConstraints.ResourceRules {
+		for _, operation := range rule.Operations {
+			if operation == admissionregistrationv1.Connect {
+				connect = append(connect, rule.Resources...)
+			}
+		}
+	}
+	require.ElementsMatch(t, []string{"pods/exec", "pods/attach"}, connect)
 }
 
 // TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName

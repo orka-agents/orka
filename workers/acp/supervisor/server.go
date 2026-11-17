@@ -29,6 +29,7 @@ type Server struct {
 	mux                    *http.ServeMux
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
+	genai                  *supervisorGenAI
 	azureAuthority         azureGatewayAuthority
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
@@ -46,7 +47,15 @@ type Server struct {
 	foundryIdentity    *harnessv2.FoundryBrokerIdentity
 	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
 	promptSlots        chan struct{}
+	operator           operatorAccessState
 }
+
+// Session-creation filesystem steps, replaceable in tests that check their
+// order.
+var (
+	recordSessionWorkspaceIdentity = acp.RecordWorkspaceIdentity
+	finalizeSessionOwnership       = acp.FinalizeSessionOwnership
+)
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
 
@@ -157,6 +166,9 @@ type sessionTombstone struct {
 	// Late cancellation records stay separate so explicit deletion replays
 	// continue to return the original immutable wire tombstone.
 	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
+	// drainCleaned marks a session retired by drain cleanup rather than by an
+	// authenticated delete, so a fresh prompt for it is provably unaccepted.
+	drainCleaned bool
 }
 
 // A retired prompt retains proof, never its input, output, or capabilities.
@@ -267,6 +279,13 @@ type sessionState struct {
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
+	// operators registers admitted operator processes (nil while starting).
+	// Leaving an operator-admitting state revokes and kills all of them.
+	operators   map[uint64]*operatorRegistration
+	operatorSeq uint64
+	// operatorsClosed is set by the freeze/deletion barrier and cleared when
+	// the session returns to an operator-admitting state.
+	operatorsClosed bool
 }
 
 type promptState struct {
@@ -297,6 +316,8 @@ type promptState struct {
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
+	// genai records the prompt's GenAI spans and metrics; nil when disabled.
+	genai *promptGenAI
 }
 
 type promptMutationExecutor interface {
@@ -458,6 +479,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		mux:                    http.NewServeMux(),
 		providerProxy:          proxy,
 		mcpProxy:               mcp,
+		genai:                  newSupervisorGenAI(cfg.GenAITracer, cfg.Meter, cfg.Provider.Kind, cfg.Provider.Model),
 		identityLock:           identityLock,
 		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
 		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,
@@ -495,6 +517,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}", s.handleResolvePermission)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", s.handleCancelPrompt)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
+	s.registerOperatorRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -520,7 +543,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	if r.Header.Get(OperatorAccessCapabilityHeader) != "1" {
+		capabilities.SupportsOperatorAccess = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
@@ -989,6 +1015,7 @@ func (s *Server) createSession(
 		if !cleanup {
 			return
 		}
+		paths.ReleaseWorkspaceIdentity()
 		if nativeJournalDir == "" {
 			_ = os.RemoveAll(paths.Root)
 			return
@@ -1236,6 +1263,11 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	// Skills land in the session tree before ownership is finalized, so each
+	// private copy belongs to this session's identity alone.
+	if err := materializeSessionSkills(s.cfg.Provider.Kind, s.cfg.Skills, skillMountRoot, paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("skill projection", err)
+	}
 	azureEnvironment, err := s.attachAzureGateway(mcpProxy, request.MCPConfiguration, paths.Home, uid, gid)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
@@ -1266,7 +1298,18 @@ func (s *Server) createSession(
 		}
 		resumeSessionID = snapshot.ProviderSessionID
 	}
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
+	// Operator file copies reopen the workspace by path once the child, which
+	// may own the session root, is running, so its identity is pinned here and
+	// the directory is held open until the session ends: a deleted workspace's
+	// inode number could otherwise be given to a directory the child creates.
+	// It must precede the ownership handoff: afterwards the 0700 child-owned
+	// session root is no longer traversable by a supervisor that runs without
+	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not
+	// change the directory's identity, and nothing later replaces it.
+	if err := recordSessionWorkspaceIdentity(&paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
+	}
+	if err := finalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
 	if projection.Instructions != nil {
@@ -1278,7 +1321,7 @@ func (s *Server) createSession(
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
 		// tree is re-assigned to exactly this session's UID.
-		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+		if err := finalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
@@ -1616,7 +1659,7 @@ func (s *Server) beginDrainLocked(reason string, now time.Time) []drainCleanupCa
 			RequestedAt:          now,
 			Reason:               reason,
 		}
-		s.lifecycle = harnessv2.SupervisorLifecycleDraining
+		s.lifecycle = drainingLifecycle(s.lifecycle)
 	}
 	cleanup := make([]drainCleanupCandidate, 0, len(s.sessions))
 	for id, state := range s.sessions {
@@ -1666,6 +1709,10 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.failDrainCleanup(sessionID, state, "operator_quiesce_unproven")
+		return
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
@@ -1691,7 +1738,9 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
-		s.tombstoneSessionLocked(state, deletedAt)
+		tombstone := s.tombstoneSessionLocked(state, deletedAt)
+		tombstone.drainCleaned = true
+		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()
 }
@@ -1772,6 +1821,13 @@ func (s *Server) Close(ctx context.Context) error {
 				continue
 			}
 		}
+		if state.runtime != nil {
+			if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+				// Keep the session's resources; the pool is replaced instead.
+				errs = append(errs, fmt.Errorf("runtime session operator quiesce: %w", err))
+				continue
+			}
+		}
 		if state.mcpProxy != nil {
 			state.mcpProxy.close()
 		}
@@ -1830,7 +1886,7 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
-	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}
@@ -1853,7 +1909,17 @@ func (s *Server) BeginDrain(reason string) {
 		RequestedAt:          time.Now().UTC(),
 		Reason:               reason,
 	}
-	s.lifecycle = harnessv2.SupervisorLifecycleDraining
+	s.lifecycle = drainingLifecycle(s.lifecycle)
+}
+
+// drainingLifecycle is the lifecycle after a drain request. Terminating is
+// final: Close does not record a drain, and a later request must not reopen
+// what teardown, including operator admission, has closed.
+func drainingLifecycle(current harnessv2.SupervisorLifecycle) harnessv2.SupervisorLifecycle {
+	if current == harnessv2.SupervisorLifecycleTerminating {
+		return current
+	}
+	return harnessv2.SupervisorLifecycleDraining
 }
 
 // durableResumeTransitionAuthorized reports whether a committed durable

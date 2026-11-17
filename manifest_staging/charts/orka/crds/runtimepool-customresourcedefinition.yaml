@@ -388,6 +388,43 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                         type: string
+                      skills:
+                        description: |-
+                          Skills lists the Agent Skills bound read-only into the runtime Pod and
+                          projected into each session's native skills folder, in declared order.
+                          It is part of Digest. Absent means no skills and leaves the digest of
+                          pre-existing pools unchanged.
+                        items:
+                          description: RuntimePoolSkill is the frozen projection of
+                            one Agent skill.
+                          properties:
+                            image:
+                              description: Image is the digest-pinned skill image.
+                              maxLength: 512
+                              minLength: 1
+                              pattern: ^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$
+                              type: string
+                            name:
+                              description: Name is the skill folder name in the runtime's
+                                native skills folder.
+                              maxLength: 64
+                              minLength: 1
+                              pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+                              type: string
+                            path:
+                              description: Path is the effective folder inside the
+                                image, after defaulting.
+                              maxLength: 256
+                              minLength: 9
+                              pattern: ^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$
+                              type: string
+                          required:
+                          - image
+                          - name
+                          - path
+                          type: object
+                        maxItems: 8
+                        type: array
                       toolPolicyDigest:
                         description: ToolPolicyDigest freezes the effective tool allow/deny
                           policy.

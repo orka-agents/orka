@@ -85,6 +85,39 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 	}
 }
 
+// Helm installs must enforce the same dedicated operator-access verb as the
+// Kustomize installer, or a class editor could opt a class into operator access.
+func TestOperatorAccessPolicyMatchesSharedAdmission(t *testing.T) {
+	shared, err := os.ReadFile(filepath.Join(
+		"..", "..", "..", "config", "policy", "workspace_class_operator_access_policy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "executionworkspaceclass-operator-access"
+	chart := requireHelmRender(t, "--show-only", "templates/workspace-class-operator-access-policy.yaml")
+	sharedDoc := requireRenderedDocument(t, string(shared), "kind: ValidatingAdmissionPolicy\n", "name: "+name+".orka.ai")
+	chartDoc := requireRenderedDocument(t, chart, "kind: ValidatingAdmissionPolicy\n", "name: test-orka-"+name)
+	var sharedPolicy, chartPolicy admissionv1.ValidatingAdmissionPolicy
+	if err := yaml.Unmarshal([]byte(sharedDoc), &sharedPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(chartDoc), &chartPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sharedPolicy.Spec, chartPolicy.Spec) {
+		t.Fatal("Helm and Kustomize enforce different operator-access authorization")
+	}
+	bindingDoc := requireRenderedDocument(t, chart, "kind: ValidatingAdmissionPolicyBinding\n", "name: test-orka-"+name)
+	var binding admissionv1.ValidatingAdmissionPolicyBinding
+	if err := yaml.Unmarshal([]byte(bindingDoc), &binding); err != nil {
+		t.Fatal(err)
+	}
+	if binding.Spec.PolicyName != chartPolicy.Name ||
+		!slices.Equal(binding.Spec.ValidationActions, []admissionv1.ValidationAction{admissionv1.Deny}) {
+		t.Fatal("Helm operator-access policy has no enforcing binding")
+	}
+}
+
 func TestStaticChartGrantsGenericWorkspaceCheckpointAndObservationRBAC(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
 	var role rbacv1.Role

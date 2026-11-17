@@ -33,7 +33,7 @@ func (c *SubstrateNativeClient) ListActorTemplates(ctx context.Context, atespace
 	var templates []*ateapipb.ActorTemplate
 	pages := substratePages{}
 	for {
-		page, err := c.Control.ListActorTemplates(ctx, &ateapipb.ListActorTemplatesRequest{Atespace: atespace, PageSize: 1000, PageToken: pages.token})
+		page, err := c.Control.ListActorTemplates(ctx, &ateapipb.ListActorTemplatesRequest{Atespace: atespace, Options: pages.options()})
 		if err != nil {
 			return nil, substrateControlError("list actor templates", err)
 		}
@@ -52,7 +52,7 @@ func (c *SubstrateNativeClient) ListTags(ctx context.Context, atespace string) (
 	var tags []*ateapipb.Tag
 	pages := substratePages{}
 	for {
-		page, err := c.Control.ListTags(ctx, &ateapipb.ListTagsRequest{Atespace: atespace, PageSize: 1000, PageToken: pages.token})
+		page, err := c.Control.ListTags(ctx, &ateapipb.ListTagsRequest{Atespace: atespace, Options: pages.options()})
 		if err != nil {
 			return nil, substrateControlError("list tags", err)
 		}

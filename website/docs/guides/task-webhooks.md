@@ -6,7 +6,8 @@ description: "Signed, durable completion webhooks for Orka Tasks, and how a rece
 # Task webhooks
 
 Set `spec.webhookURL` on a Task and the controller POSTs a JSON notice when the
-Task reaches a terminal phase (`Succeeded`, `Failed`, or `Cancelled`). Every
+Task reaches a terminal phase (`Succeeded`, `Failed`, or `Cancelled`). A
+[parked agent turn](#parked-agent-turns) reports when its work ends instead. Every
 notice is signed with an Ed25519 key. Delivery is durable across controller
 restarts, retried with bounded backoff, and limited to destinations that are
 safe for a controller to call.
@@ -72,6 +73,9 @@ X-Orka-Signature: eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiIsInR5cCI6IkpXVCJ9...
 `eventType` is `task.succeeded`, `task.failed`, or `task.cancelled`. Every
 attempt of one delivery sends a byte-identical body under the same delivery
 ID; only `X-Orka-Delivery-Attempt` and the signature change.
+
+For a parked agent turn, `eventType` reports the outcome of the work, which can differ
+from the Task's own `phase`; see [Parked agent turns](#parked-agent-turns).
 
 Any `2xx` response acknowledges the notice. Respond quickly; one attempt times
 out after 30 seconds.
@@ -171,6 +175,32 @@ status:
 - If signing is disabled (`--task-webhook-signing-secret=""`), nothing is sent
   and the delivery is marked `Failed` at once. Enabling signing later does not
   retry notices that already failed this way.
+
+## Parked agent turns
+
+An agent Task whose turn [parked](parking-agent-turns.md) ends with phase `Succeeded`
+for its own turn while the work continues in a continuation Task. Its notice is
+therefore not sent when it reaches that phase. It follows `status.wait` instead:
+
+| `status.wait.state` | Notice from the parked Task |
+| --- | --- |
+| `Requested`, `Waiting`, `Resuming` | None yet. Nothing is recorded in `status.webhookDelivery`, and the Task's cleanup and history pruning are not held up. |
+| `Resumed` | None. The continuation copies `spec.webhookURL` and sends the notice when it finishes. If it parks too, the rule repeats, so the newest Task of the chain reports the outcome. |
+| `Cancelled` | One `task.cancelled` notice. |
+| `Expired` | One `task.failed` notice, as for a Task that runs past its deadline. |
+| `Abandoned` | One notice for the Task's phase if the turn itself failed or was cancelled. If the turn succeeded but its continuation could not be created, one `task.failed` notice. |
+
+So a receiver sees exactly one notice per chain, and `task.succeeded` only when the
+work finished. In a notice decided by the wait, `phase` is still the parked Task's
+own phase (`Succeeded`) and `taskName` is the parked Task; read its `status.wait` for
+the reason. A wait left over from an earlier attempt that a later, unparked attempt
+replaced does not change the event. Notices from continuations name the continuation
+Task, whose UID differs from the Task you created.
+
+As with any Task, deleting the parked Task or its continuation drops its pending
+notice. A notice that an earlier controller version left pending for a parked Task is
+never sent as `task.succeeded`: it is superseded when the wait ends without resuming,
+and marked `Failed` without being sent when the wait resumed.
 
 ## Signing keys and rotation
 

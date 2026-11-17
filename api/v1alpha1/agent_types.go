@@ -101,9 +101,10 @@ func (in AgentSpec) MarshalJSON() ([]byte, error) {
 // Unknown fields reach admission so removed fields are rejected.
 // +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || !has(self.contractVersion) || self.contractVersion == oldSelf.contractVersion",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 // +kubebuilder:validation:XValidation:rule="!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)",message="runtime.toolboxes are supported only on built-in runtime types; external runtimeRef runtimes cannot mount toolboxes"
+// +kubebuilder:validation:XValidation:rule="!has(self.skills) || self.skills.size() == 0 || has(self.type)",message="runtime.skills are supported only on built-in runtime types; external runtimeRef runtimes cannot receive skills"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
@@ -111,7 +112,9 @@ type AgentCLIRuntime struct {
 
 	// ContractVersion is the harness protocol selector for built-in runtime
 	// types. Only orka.harness.v2 is supported, so an omitted selector means
-	// orka.harness.v2. Once written, the value never changes. runtime.type
+	// orka.harness.v2. A written value never changes to another contract;
+	// clearing it keeps orka.harness.v2, and the controller writes it back, so
+	// reapplying a manifest that dropped the selector succeeds. runtime.type
 	// alone is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
@@ -156,6 +159,48 @@ type AgentCLIRuntime struct {
 	// +kubebuilder:validation:MaxItems=4
 	// +optional
 	Toolboxes []AgentToolbox `json:"toolboxes,omitempty"`
+
+	// Skills lists Agent Skills for the codex, claude, and opencode runtimes;
+	// copilot can't be limited to Orka-provided skills and is rejected. Each
+	// skill folder is read from a digest-pinned image, bound read-only into the
+	// runtime Pod, validated, and copied into every session's native skills
+	// folder, owned by that session's identity. Skills are untrusted prompt input: nothing
+	// in them runs, and keys or constructs with side effects are rejected.
+	// The feature is off by default and the controller restricts images to
+	// the toolbox registry allowlist.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Skills []AgentRuntimeSkill `json:"skills,omitempty"`
+}
+
+// AgentRuntimeSkill is one Agent Skill folder (SKILL.md plus optional
+// supporting files) delivered from a container image.
+type AgentRuntimeSkill struct {
+	// Name identifies the skill. It must equal the name in the skill's
+	// SKILL.md frontmatter and becomes the skill's folder name in the
+	// runtime's native skills folder.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
+	Name string `json:"name"`
+
+	// Image must be a fully qualified reference pinned by digest:
+	// <registry>/<repository>@sha256:<64 hex>.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// Path is the absolute folder inside the image that holds SKILL.md. It
+	// must be under /skills. Defaults to /skills/<name>.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$`
+	// +optional
+	Path string `json:"path,omitempty"`
 }
 
 // AgentToolbox is a container image whose files are added, read-only, to the
@@ -252,6 +297,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
 		Ceiling                *AgentRuntimeCeiling         `json:"ceiling,omitempty"`
 		Toolboxes              []AgentToolbox               `json:"toolboxes,omitempty"`
+		Skills                 []AgentRuntimeSkill          `json:"skills,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -268,6 +314,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
 		Ceiling:                in.Ceiling,
 		Toolboxes:              in.Toolboxes,
+		Skills:                 in.Skills,
 	})
 }
 

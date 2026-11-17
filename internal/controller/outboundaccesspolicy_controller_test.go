@@ -818,7 +818,7 @@ func readyControllerPolicy(namespace, name string, spec corev1alpha1.OutboundAcc
 	}
 }
 
-func TestToolReconcilerDirectPolicyDefersMCPResolvedEndpointValidation(t *testing.T) {
+func TestToolReconcilerRejectsOutboundAccessPolicyOnSubstrateMCPTool(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	policy := readyControllerPolicy("tenant", "direct-mcp", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}})
@@ -831,16 +831,13 @@ func TestToolReconcilerDirectPolicyDefersMCPResolvedEndpointValidation(t *testin
 			MCP:  &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{}},
 		},
 	}
-	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err != nil {
-		t.Fatalf("unresolved endpoint error = %v", err)
-	}
-	tool.Status.Endpoint = "https://actor.example.test/mcp"
-	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err != nil {
-		t.Fatalf("HTTPS endpoint error = %v", err)
-	}
-	tool.Status.Endpoint = "http://actor.example.test/mcp"
-	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil {
-		t.Fatal("plaintext resolved endpoint accepted")
+	// Substrate MCP actors are reached only through the Orka MCP proxy, so a
+	// caller-resolved outbound credential or gateway route can never apply.
+	for _, endpoint := range []string{"", "https://actor.example.test/mcp", "/api/v1/tools/mcp/mcp?namespace=tenant"} {
+		tool.Status.Endpoint = endpoint
+		if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil || !strings.Contains(err.Error(), "do not support outboundAccessPolicyRef") {
+			t.Fatalf("endpoint %q error = %v, want outbound access policy rejection", endpoint, err)
+		}
 	}
 }
 

@@ -267,7 +267,6 @@ spec:
       agentIdentityID: "<agent identity appId>"
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     toolboxes:
       - image: registry.example.com/tools/azure-cli@sha256:<digest>
         mountPath: /opt/azure-cli

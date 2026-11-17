@@ -1384,8 +1384,7 @@ func executeAgentLoopWithEvents(
 		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
-			stepSpan.SetStatus(codes.Error, errType)
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			tracing.RecordSpanErrorType(stepSpan, errType)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
@@ -1424,9 +1423,7 @@ func executeAgentLoopWithEvents(
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
 		if completionErr != nil {
-			stepSpan.RecordError(completionErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(completionErr))
 			stepSpan.End()
 			return "", completionErr
 		}
@@ -1468,9 +1465,7 @@ func executeAgentLoopWithEvents(
 			baseToolCtx,
 		)
 		if approvalErr != nil {
-			stepSpan.RecordError(approvalErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(approvalErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(approvalErr))
 			stepSpan.End()
 			return "", approvalErr
 		}
@@ -1507,7 +1502,7 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
+				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled")
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
 					stepCtx,
@@ -1563,7 +1558,7 @@ func executeAgentLoopWithEvents(
 					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
 						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
 						if execErr != nil {
-							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments")
 						}
 					}
 				}
@@ -1642,7 +1637,7 @@ func aiWorkerErrorType(err error) string {
 	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
 		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }
 
 func startAgentStepSpan(
