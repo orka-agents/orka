@@ -95,15 +95,25 @@ func TestSensitiveTextRedactsCookieHeaders(t *testing.T) {
 func TestSensitiveTextRedactsSerializedAuthorizationHeaders(t *testing.T) {
 	value := "Vq7Rk2Lm" + "9Xw4Tz8Np3Hs"
 	for input, want := range map[string]string{
-		`{"Authorization":"Bearer ` + value + `"}`:           `{"Authorization":"[REDACTED]"}`,
-		`{'Authorization': 'Bearer ` + value + `'}`:          `{'Authorization': '[REDACTED]'}`,
-		`    Authorization: 'Bearer ` + value + `'`:          `    Authorization: '[REDACTED]'`,
-		`headers: { authorization: 'Bearer ` + value + `' }`: `headers: { authorization: '[REDACTED]' }`,
-		`map[Authorization:[Bearer ` + value + `]]`:          `map[Authorization:[[REDACTED]]]`,
-		`{"Authorization":"Basic ` + value + `="}`:           `{"Authorization":"[REDACTED]"}`,
-		`Authorization: token ` + value:                      `Authorization: [REDACTED]`,
-		`Authorization: Token ` + value:                      `Authorization: [REDACTED]`,
-		`Proxy-Authorization: Basic ` + value:                `Proxy-Authorization: [REDACTED]`,
+		`{"Authorization":"Bearer ` + value + `"}`:                                `{"Authorization":"[REDACTED]"}`,
+		`{'Authorization': 'Bearer ` + value + `'}`:                               `{'Authorization': '[REDACTED]'}`,
+		`    Authorization: 'Bearer ` + value + `'`:                               `    Authorization: '[REDACTED]'`,
+		`headers: { authorization: 'Bearer ` + value + `' }`:                      `headers: { authorization: '[REDACTED]' }`,
+		`map[Authorization:[Bearer ` + value + `]]`:                               `map[Authorization:[[REDACTED]]]`,
+		`{"Authorization":"Basic ` + value + `="}`:                                `{"Authorization":"[REDACTED]"}`,
+		`Authorization: token ` + value:                                           `Authorization: [REDACTED]`,
+		`Authorization: Token ` + value:                                           `Authorization: [REDACTED]`,
+		`Proxy-Authorization: Basic ` + value:                                     `Proxy-Authorization: [REDACTED]`,
+		`Authorization: Token token="` + value + `"`:                              `Authorization: [REDACTED]`,
+		`Authorization: Token token = "` + value + `"`:                            `Authorization: [REDACTED]`,
+		`Authorization: Token token='` + value + `' x`:                            `Authorization: [REDACTED] x`,
+		`Authorization: Token token="` + value:                                    `Authorization: [REDACTED]`,
+		`{"Authorization":"Token token=\"` + value + `\""}`:                       `{"Authorization":"[REDACTED]"}`,
+		`{"m":"{\"Authorization\":\"Basic ` + value + `\"}"}`:                     `{"m":"{\"Authorization\":\"[REDACTED]\"}"}`,
+		`Authorization: Digest username="ci", response="` + value + `", qop=auth`: `Authorization: [REDACTED]`,
+		// A quoted value may hold backslash-escaped quotes; the parameters
+		// after it are redacted too.
+		`Authorization: Digest username="ci\"bot", response="` + value + `"`: `Authorization: [REDACTED]`,
 	} {
 		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
 			t.Fatalf("SensitiveText(%q) = %q, want %q", input, got, want)

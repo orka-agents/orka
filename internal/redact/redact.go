@@ -15,11 +15,11 @@ const (
 	authorizationPrefix = `(?:proxy-)?authorization(?:\\?["'])?\s*[:=]\s*(?:\[\s*)?`
 	authorizationScheme = `(?:bearer|basic|token|digest|negotiate|ntlm|apikey|api-key|key|bot|sso-key)\s+`
 	// authParam is one name=value Authorization header parameter; a value
-	// may be quoted. A parameter stays on its header's line. authParamOpen
+	// may be quoted, with backslash-escaped quotes inside (RFC 9110). A parameter stays on its header's line. authParamOpen
 	// also takes a quoted value that runs to
 	// the end of the line unclosed, so no part of it is left behind.
-	authParam     = `[A-Za-z0-9._~+/-]+[ \t]*=[ \t]*(?:` + authParamEscapedValue + `|"[^"\r\n]*"|'[^'\r\n]*'|[A-Za-z0-9._~+/=-]*)`
-	authParamOpen = `[A-Za-z0-9._~+/-]+[ \t]*=[ \t]*(?:` + authParamEscapedValue + `|"[^"\r\n]*"|'[^'\r\n]*'|["'][^\r\n]*|[A-Za-z0-9._~+/=-]*)`
+	authParam     = `[A-Za-z0-9._~+/-]+[ \t]*=[ \t]*(?:` + authParamEscapedValue + `|"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[A-Za-z0-9._~+/=-]*)`
+	authParamOpen = `[A-Za-z0-9._~+/-]+[ \t]*=[ \t]*(?:` + authParamEscapedValue + `|"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|["'][^\r\n]*|[A-Za-z0-9._~+/=-]*)`
 	// authParamEscapedValue is a quoted value inside a JSON or other
 	// backslash-escaped string, as in "Token token=\"x\"". An unclosed one
 	// runs to the end of the line.
