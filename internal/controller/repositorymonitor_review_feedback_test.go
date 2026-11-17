@@ -868,3 +868,42 @@ func TestRepositoryMonitorFeedbackStripHTMLComments(t *testing.T) {
 		})
 	}
 }
+
+// Threads the snapshot budget leaves out are counted when they hold feedback
+// that could start a repair, or may hide it in their own omitted comments,
+// and not when they hold evidence only.
+func TestRepositoryMonitorReviewFeedbackCountsOmittedFeedbackWithAuthority(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"writer": "write", "outsider": ""})
+	body := strings.Repeat("Please reconsider this part. ", 120)
+	threads := func(login string, total int) []repositoryMonitorFeedbackThreadNode {
+		nodes := make([]repositoryMonitorFeedbackThreadNode, 0, 8)
+		for i := range 8 {
+			thread := repositoryMonitorFeedbackTestThread(fmt.Sprintf("T%d", i), 10+i, false,
+				repositoryMonitorFeedbackTestComment(100+2*i, login, "User", body, i), repositoryMonitorFeedbackTestComment(101+2*i, login, "User", body, i))
+			thread.Root.TotalCount = total
+			nodes = append(nodes, thread)
+		}
+		return nodes
+	}
+	policy := repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}
+	for _, tc := range []struct {
+		name  string
+		login string
+		total int
+		want  bool
+	}{
+		{name: "evidence only", login: "outsider", total: 2, want: false},
+		{name: "authorized feedback", login: "writer", total: 2, want: true},
+		{name: "omitted comments may hide authorized feedback", login: "outsider", total: 5, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := repositoryMonitorFeedbackTestNormalize(repositoryMonitorRawReviewFeedback{threads: threads(tc.login, tc.total)}, nil, policy, permissionOf)
+			if snapshot.OmittedThreads == 0 || snapshot.Availability != repositoryMonitorEvidenceTruncated {
+				t.Fatalf("omitted threads = %d availability %q, want the budget to leave threads out", snapshot.OmittedThreads, snapshot.Availability)
+			}
+			if got := snapshot.omittedFeedbackWithAuthority(); (got > 0) != tc.want || got > snapshot.OmittedThreads {
+				t.Fatalf("omitted feedback with authority = %d of %d omitted, want any=%t", got, snapshot.OmittedThreads, tc.want)
+			}
+		})
+	}
+}
