@@ -7,7 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestAgentProvidersResolvedInTaskNamespace(t *testing.T) {
+func TestProvidersFromAgentInAnotherNamespace(t *testing.T) {
 	task := func(namespace string, providerRef *ProviderReference) *Task {
 		return &Task{
 			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "work"},
@@ -22,17 +22,19 @@ func TestAgentProvidersResolvedInTaskNamespace(t *testing.T) {
 		},
 	}
 
-	require.Equal(t, []string{"primary", "backup"}, AgentProvidersResolvedInTaskNamespace(task("team-a", nil), agent))
-	require.Equal(t, []string{"backup"}, AgentProvidersResolvedInTaskNamespace(task("team-a", &ProviderReference{Name: "mine"}), agent),
+	require.Equal(t, []string{"primary", "backup"}, ProvidersFromAgentInAnotherNamespace(task("team-a", nil), agent))
+	require.Equal(t, []string{"backup"}, ProvidersFromAgentInAnotherNamespace(task("team-a", &ProviderReference{Name: "mine"}), agent),
 		"the Task's own Provider replaces the Agent's; its fallbacks still resolve in the Task namespace")
-	require.Nil(t, AgentProvidersResolvedInTaskNamespace(task("agents", nil), agent), "a same-namespace Agent resolves where it was checked")
+	require.Nil(t, ProvidersFromAgentInAnotherNamespace(task("agents", nil), agent), "a same-namespace Agent resolves where it was checked")
 
 	agentTask := task("team-a", nil)
 	agentTask.Spec.Type = TaskTypeAgent
-	require.Nil(t, AgentProvidersResolvedInTaskNamespace(agentTask, agent), "an agent Task does not run on a Provider")
+	require.Nil(t, ProvidersFromAgentInAnotherNamespace(agentTask, agent), "an agent Task does not run on a Provider")
 
 	pinned := agent.DeepCopy()
 	pinned.Spec.ProviderRef.Namespace = "models"
 	pinned.Spec.Model = nil
-	require.Nil(t, AgentProvidersResolvedInTaskNamespace(task("team-a", nil), pinned))
+	require.Equal(t, []string{"primary"}, ProvidersFromAgentInAnotherNamespace(task("team-a", nil), pinned),
+		"an explicit namespace does not help: the Agent's own namespace may be outside the policies that check it")
+	require.Nil(t, ProvidersFromAgentInAnotherNamespace(task("team-a", &ProviderReference{Name: "mine"}), pinned))
 }

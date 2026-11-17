@@ -16,10 +16,11 @@ Agents are not affected.
 
 A Task that runs its Agent's Provider needs only `use` on the Agent; see
 `config/agent-use-policy`. An Agent from another namespace is the exception:
-its fallbacks and a `providerRef` without a namespace resolve in the Task's
-namespace. Admission cannot read the Agent, so with the flag set the controller
-refuses such an `ai` Task each time it runs, and the API refuses it when it is
-created.
+it may be outside the namespaces these bindings cover, and its fallbacks and a
+`providerRef` without a namespace resolve in the Task's namespace. Admission
+cannot read the Agent, so with the flag set the controller refuses an `ai` Task
+that would take a Provider from such an Agent each time it runs, and the API
+refuses it when it is created.
 
 These bindings match every namespace. With more than one installation on a
 cluster, add a `matchResources.namespaceSelector` on

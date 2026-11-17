@@ -129,14 +129,14 @@ func TestTaskCreateRefusesACrossNamespaceAgentsTaskRelativeProviders(t *testing.
 		})
 	}
 
-	// The Task's own Provider replaces a relative primary, and a primary with
-	// its own namespace was checked when the Agent named it.
+	// The Task's own Provider replaces the Agent's primary, so with no
+	// fallbacks nothing is taken from the remote Agent.
 	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary"})), all, user,
 		providerUseTask(&corev1alpha1.ProviderReference{Name: "mine"}, agentRef)))
-	pinned, seen := providerUseClientset()
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(),
-		providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "models"})), pinned, user, providerUseTask(nil, agentRef)))
-	require.Empty(t, *seen)
+	// An explicit namespace does not help: the Agent's namespace may be
+	// outside the policies that checked it.
+	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(),
+		providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "team-a"})), all, user, providerUseTask(nil, agentRef)))
 
 	// Without a reader, or without the Agent, nothing can be checked.
 	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), nil, all, user, providerUseTask(nil, agentRef)))

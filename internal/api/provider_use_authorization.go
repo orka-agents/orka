@@ -93,11 +93,11 @@ func providerRefNamespace(ref corev1alpha1.ProviderReference, objectNamespace st
 // names were checked when the Agent named them, and running the Agent is
 // covered by Agent use.
 //
-// An Agent from another namespace is different: its namespace-less
-// providerRef and its fallbacks resolve in the Task's namespace, where nobody
-// decided they may be used, and the Agent can change after this check or
-// before admission could see it. So a Task that would resolve such Providers is
-// refused, here and again by the controller each time the Task runs.
+// An Agent from another namespace is different: it may sit outside the
+// namespaces whose admission checked its Providers, its namespace-less
+// providerRef and fallbacks resolve in the Task's namespace, and it can change
+// after this check. So a Task that would take a Provider from such an Agent
+// is refused, here and again by the controller each time the Task runs.
 func authorizeTaskProviderUse(ctx context.Context, reader client.Reader, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
 	if task == nil || !providerUseAuthorization.Load() {
 		return nil
@@ -130,10 +130,10 @@ func authorizeTaskProviderUse(ctx context.Context, reader client.Reader, clients
 		}
 		return fiber.NewError(fiber.StatusForbidden, "not authorized to create tasks")
 	}
-	if len(corev1alpha1.AgentProvidersResolvedInTaskNamespace(task, agent)) > 0 {
+	if len(corev1alpha1.ProvidersFromAgentInAnotherNamespace(task, agent)) > 0 {
 		return fiber.NewError(fiber.StatusForbidden,
-			"provider use authorization refuses an Agent from another namespace whose providerRef has no namespace or that has model fallbacks: "+
-				"set the Task's spec.ai.providerRef, give the Agent's providerRef a namespace, or use an Agent from the Task's namespace")
+			"provider use authorization refuses Providers taken from an Agent in another namespace: "+
+				"set the Task's spec.ai.providerRef and use an Agent without model fallbacks, or use an Agent from the Task's namespace")
 	}
 	return nil
 }

@@ -270,9 +270,8 @@ Provider's credential directly. The API checks its caller, and
 ValidatingAdmissionPolicies check direct writes to Tasks and Agents that newly
 name a Provider. The Helm value installs those policies; without Helm, also
 apply `config/provider-use-policy`. A Task that runs its Agent's own Provider
-needs only Agent `use`, except that an `ai` Task is refused when its Agent from
-another namespace would resolve Providers in the Task's namespace: its fallbacks,
-or a `providerRef` without a namespace. Without either check, anyone who may create Tasks,
+needs only Agent `use`, except that an `ai` Task is refused when it would take
+a Provider from an Agent in another namespace. Without either check, anyone who may create Tasks,
 Agents, or chats in a namespace may use any Provider there, and, unless
 namespace isolation is enforced, any Provider in another namespace. Orka's
 controller and workers hold `use` on every Provider, so delegated child Tasks
