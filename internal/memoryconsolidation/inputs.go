@@ -189,11 +189,12 @@ func collectProposals(ctx context.Context, src Source, namespace string, input *
 			input.Truncated = true
 			return nil
 		}
-		if utf8.RuneCountInString(proposal.Content) > MaxMemoryChars {
+		title := strings.Join(strings.Fields(proposal.Title), " ")
+		if utf8.RuneCountInString(proposal.Content) > MaxMemoryChars || utf8.RuneCountInString(title) > MaxTitleChars {
 			input.Truncated = true
 		}
 		read := InputProposal{ID: proposal.ID, Type: proposal.Type, Status: proposal.Status,
-			Title:   truncateRunes(strings.Join(strings.Fields(proposal.Title), " "), MaxTitleChars),
+			Title:   truncateRunes(title, MaxTitleChars),
 			Content: truncateRunes(proposal.Content, MaxMemoryChars),
 			Targets: append([]store.MemoryProposalTarget(nil), proposal.Targets...)}
 		if budget -= encodedSize(read); budget < 0 {

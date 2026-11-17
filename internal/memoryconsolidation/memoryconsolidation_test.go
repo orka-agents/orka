@@ -549,6 +549,12 @@ func TestCollectInputsReadsOpenMemoryProposals(t *testing.T) {
 	require.Len(t, input.Proposals, MaxInputProposals)
 	require.True(t, input.Truncated, "a list at the limit may have left proposals out")
 
+	longTitle := &fakeSource{proposals: []store.MemoryProposal{{ID: "titled", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Title: strings.Repeat("t", MaxTitleChars+1), Content: "fact"}}}
+	input, err = CollectInputs(context.Background(), longTitle, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.True(t, input.Truncated, "a title cut to its length marks the input truncated")
+
 	long := &fakeSource{proposals: []store.MemoryProposal{{ID: "long", Type: store.MemoryProposalTypeMemory,
 		Status: store.MemoryProposalStatusPending, Content: strings.Repeat("x", MaxMemoryChars+1)}}}
 	input, err = CollectInputs(context.Background(), long, "team", time.Time{}, time.Now())
