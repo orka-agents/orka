@@ -395,6 +395,28 @@ func TestScheduledRunHistoryHoldsAnOutstandingTerminalNotice(t *testing.T) {
 	}
 }
 
+// A continuation that is still running inherits the webhook URL but owes no
+// terminal notice yet, so it does not hold its chain's head.
+func TestScheduledRunHistoryIgnoresTheTerminalNoticeOfARunningContinuation(t *testing.T) {
+	head := approvalHistoryRun("parked-run", "uid-parked-run", 3*time.Hour)
+	head.Spec.WebhookURL = "https://receiver.example/hook"
+	head.Status.WebhookDelivered = true
+	head.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "parked-run-next", ContinuationTaskUID: "uid-parked-run-next",
+	}
+	next := approvalHistoryRun("parked-run-next", "uid-parked-run-next", time.Hour)
+	next.Spec.WebhookURL = head.Spec.WebhookURL
+	next.Status.Phase = corev1alpha1.TaskPhaseRunning
+	next.Annotations = map[string]string{
+		labels.AnnotationContinuationOfName: "parked-run", labels.AnnotationContinuationOfUID: "uid-parked-run",
+	}
+	r := newUnitReconciler(newTestScheme(), head.DeepCopy(), next.DeepCopy())
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	if r.approvalNoticesHoldRun(context.Background(), head) {
+		t.Fatal("a running continuation's future terminal notice must not hold the run")
+	}
+}
+
 // A failed event store read keeps a recently settled run, since it cannot
 // tell whether a decision is still to be notified, but not past the approval
 // notice window: a store that stays unavailable holds no run indefinitely.

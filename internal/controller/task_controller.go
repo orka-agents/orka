@@ -5382,9 +5382,12 @@ func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev
 		}
 		// The terminal notice is sent asynchronously, after the run's own
 		// reconcile queued it, so the parent can see a finished run whose
-		// notice is still waiting for a delivery worker.
-		if outstanding, _ := terminalNoticeOutstanding(current, now); outstanding {
-			return true
+		// notice is still waiting for a delivery worker. A continuation that
+		// has not finished inherits the webhook URL but owes no notice yet.
+		if current.Status.Phase.IsTerminal() {
+			if outstanding, _ := terminalNoticeOutstanding(current, now); outstanding {
+				return true
+			}
 		}
 		unprojected, err := r.approvalEventsAwaitProjection(ctx, current)
 		if err != nil {
