@@ -3599,6 +3599,29 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T)
 	require.JSONEq(t, string(input), string(turn.tools["read-3"].input))
 	require.Empty(t, turn.heldTools)
 
+	// A call described with its input, then run by updates that do not
+	// repeat it, is ready with the input it started with.
+	// Its path is shown relative to the session's working directory.
+	turn.tool(&harnessv2.ToolCallUpdate{
+		ToolCallID: "read-4", Name: "read", Kind: "read", Title: "Viewing go.mod", Status: harnessv2.ToolCallStatusPending,
+		RawInput: json.RawMessage(`{"path":"/sessions/session-1/workspace/go.mod","view_range":[1,5]}`),
+	})
+	path := json.RawMessage(`{"path":"go.mod","view_range":[1,5]}`)
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-4", Status: harnessv2.ToolCallStatusCompleted})
+	require.Equal(t, "read", startOf("read-4").ToolName)
+	var ready *ahptypes.ChatToolCallReadyAction
+	emitter.mu.Lock()
+	for _, action := range emitter.actions {
+		if r, ok := action.Value.(*ahptypes.ChatToolCallReadyAction); ok && r.ToolCallId == "read-4" {
+			ready = r
+		}
+	}
+	emitter.mu.Unlock()
+	require.NotNil(t, ready)
+	require.NotNil(t, ready.ToolInput)
+	require.NotNil(t, ready.ToolInput.Inline)
+	require.JSONEq(t, string(path), *ready.ToolInput.Inline)
+
 	// Other names and kinds pass through.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-1", Name: "bash", Kind: "execute", Title: "Run tests", Status: harnessv2.ToolCallStatusInProgress})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "exec-1", Name: "execute", Kind: "execute", Title: "List files", Status: harnessv2.ToolCallStatusInProgress})

@@ -837,7 +837,7 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 		held.Kind = update.Kind
 	}
 	if len(update.RawInput) > 0 {
-		held.RawInput = update.RawInput
+		held.RawInput = ahpRelativeInput(update.RawInput)
 	}
 	input := held.RawInput
 	title := ahpRelativeTitle(update.Title)
@@ -858,6 +858,10 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 		// Kept for a confirmation: a runtime that does not describe the call
 		// in its permission request may have reported it here first.
 		call.input = input
+	} else {
+		// The input a call started with is what clients draw it from, even
+		// when the update that makes it ready does not repeat it.
+		input = call.input
 	}
 	// Later updates usually carry no title; keep the one the call started with.
 	if title == "" {
@@ -1023,6 +1027,34 @@ var ahpRuntimeWorkspacePath = regexp.MustCompile(`(^|\s)(?:\.\.\.|…|/)\S*?/wor
 
 func ahpRelativeTitle(title string) string {
 	return ahpRuntimeWorkspacePath.ReplaceAllString(title, "$1")
+}
+
+// ahpRelativeInput shows the file paths a call's input names relative to the
+// session's working directory, as its title does. Other input is unchanged.
+func ahpRelativeInput(input json.RawMessage) json.RawMessage {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(input, &values) != nil {
+		return input
+	}
+	changed := false
+	for _, field := range []string{"file_path", "path"} {
+		var value string
+		if json.Unmarshal(values[field], &value) != nil {
+			continue
+		}
+		if relative := ahpRelativeTitle(value); relative != value && relative != "" {
+			values[field], _ = json.Marshal(relative)
+			changed = true
+		}
+	}
+	if !changed {
+		return input
+	}
+	out, err := json.Marshal(values)
+	if err != nil {
+		return input
+	}
+	return out
 }
 
 func (t *ahpTurn) completeTool(id string, call *ahpToolCall, success bool, title string, content []harnessv2.ContentBlock) {
