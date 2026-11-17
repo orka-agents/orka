@@ -693,7 +693,8 @@ func repositoryMonitorFeedbackBody(raw string) (body string, hidden bool, trunca
 // repositoryMonitorFeedbackStripHTMLComments removes the HTML comments
 // GitHub's Markdown does not render, so a reviewer never saw the text they
 // hide. Comment syntax inside a fenced code block or an inline code span is
-// visible text and stays. An inline comment ends at "-->"; one that is never
+// visible text and stays, as is a backslash-escaped "<" or backtick, which
+// opens neither. An inline comment ends at "-->"; one that is never
 // closed is shown as written, except at the start of a line, where it opens
 // an HTML block that hides the rest of the text.
 func repositoryMonitorFeedbackStripHTMLComments(text string) string {
@@ -730,6 +731,11 @@ func repositoryMonitorFeedbackStripHTMLComments(text string) string {
 			out.WriteByte(c)
 			i++
 			lineStart = true
+		case c == '\\' && i+1 < len(text) && repositoryMonitorASCIIPunctuation(text[i+1]):
+			// A backslash escape is literal text: an escaped backtick opens
+			// no code span, and an escaped "<" opens no comment.
+			out.WriteString(text[i : i+2])
+			i += 2
 		case c == '`':
 			run := len(text[i:]) - len(strings.TrimLeft(text[i:], "`"))
 			delimiter := text[i : i+run]
@@ -758,6 +764,12 @@ func repositoryMonitorFeedbackStripHTMLComments(text string) string {
 		}
 	}
 	return out.String()
+}
+
+// repositoryMonitorASCIIPunctuation reports whether c is ASCII punctuation,
+// which CommonMark lets a backslash escape.
+func repositoryMonitorASCIIPunctuation(c byte) bool {
+	return c >= '!' && c <= '/' || c >= ':' && c <= '@' || c >= '[' && c <= '`' || c >= '{' && c <= '~'
 }
 
 // repositoryMonitorFeedbackFenceMarker returns the backtick or tilde run
