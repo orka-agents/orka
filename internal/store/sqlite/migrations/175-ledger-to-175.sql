@@ -6,6 +6,9 @@
 --   recovers succeeded, no_change (succeeded without a push), or failed, and
 --   charges every admitted ID, since the targets its Task froze were not
 --   recorded;
+-- - a finished command whose job is still queued and was not left by a
+--   failed Task create may have run its Task, as when a cancellation settled
+--   the command first, so it recovers failed and keeps every charge;
 -- - otherwise a finished command whose work action was blocked as withdrawn
 --   recovers withdrawn, and any other finished command failed, neither of
 --   which ran a Task or charges anything;
@@ -47,7 +50,8 @@ WITH commands AS (
 	         SELECT feedback_id FROM monitor_feedback_attempts AS attempts
 	         WHERE attempts.monitor_namespace = commands.monitor_namespace AND attempts.command_event_id = commands.command_event_id
 	         ORDER BY feedback_id)) AS admitted_ids,
-	       COALESCE(job.phase IS NOT NULL AND job.phase NOT IN ('', 'queued'), 0) AS ran,
+	       COALESCE(job.phase IS NOT NULL AND job.phase NOT IN ('', 'queued'), 0) AS settled,
+	       COALESCE(job.phase IN ('', 'queued') AND job.task_name <> '' AND job.last_error <> 'repair_task_create_failed', 0) AS may_have_run,
 	       job.phase AS job_phase,
 	       COALESCE(job.pushed_sha, '') AS pushed_sha,
 	       COALESCE(job.task_name, '') AS task_name,
@@ -68,10 +72,11 @@ WITH commands AS (
 	LEFT JOIN repair_jobs AS job ON job.monitor_namespace = commands.monitor_namespace AND job.id = commands.repair_job_id
 ), classified AS (
 	SELECT recovered.*,
+	       settled OR (finished AND may_have_run) AS ran,
 	       CASE
-	         WHEN ran AND job_phase = 'succeeded' AND pushed_sha = '' THEN 'no_change'
-	         WHEN ran AND job_phase = 'succeeded' THEN 'succeeded'
-	         WHEN ran THEN 'failed'
+	         WHEN settled AND job_phase = 'succeeded' AND pushed_sha = '' THEN 'no_change'
+	         WHEN settled AND job_phase = 'succeeded' THEN 'succeeded'
+	         WHEN settled OR (finished AND may_have_run) THEN 'failed'
 	         WHEN finished AND withdrawn_reason IS NOT NULL THEN 'withdrawn'
 	         WHEN finished THEN 'failed'
 	         ELSE 'reserved'

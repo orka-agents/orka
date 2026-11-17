@@ -224,7 +224,7 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 	identity, err := readDataset(db)
 	require.NoError(t, err)
 	at := "2026-11-01 12:00:00+00:00"
-	for _, command := range []struct{ id, status, jobPhase, pushed, blocked string }{
+	for _, command := range []struct{ id, status, jobPhase, pushed, blocked, jobError string }{
 		{id: "queued", status: "accepted"},
 		{id: "queued-with-task", status: "accepted", jobPhase: "queued"},
 		{id: "ran", status: "processed", jobPhase: "succeeded", pushed: "pushed-1"},
@@ -233,14 +233,15 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		{id: "ran-and-failed", status: "processed", jobPhase: "failed"},
 		{id: "never-ran", status: "processed", blocked: "repair_pr_budget_exhausted"},
 		{id: "withdrawn", status: "processed", blocked: "review_feedback_withdrawn"},
-		{id: "create-failed", status: "processed", jobPhase: "queued"},
+		{id: "create-failed", status: "processed", jobPhase: "queued", jobError: "repair_task_create_failed"},
+		{id: "cancelled-before-ingestion", status: "processed", jobPhase: "queued"},
 	} {
 		_, err := db.Exec(`INSERT INTO command_events (id, monitor_namespace, monitor_name, kind, number, comment_id, status, created_at, processed_at)
 			VALUES (?, 'ns', 'monitor', 'pull_request', 7, ?, ?, ?, ?)`, command.id, command.id, command.status, at, at)
 		require.NoError(t, err)
 		if command.jobPhase != "" {
-			_, err := db.Exec(`INSERT INTO repair_jobs (id, monitor_namespace, monitor_name, pr_number, phase, task_name, pushed_sha, created_at)
-				VALUES (?, 'ns', 'monitor', 7, ?, ?, ?, ?)`, "repair-"+command.id, command.jobPhase, "task-"+command.id, command.pushed, at)
+			_, err := db.Exec(`INSERT INTO repair_jobs (id, monitor_namespace, monitor_name, pr_number, phase, task_name, pushed_sha, last_error, created_at)
+				VALUES (?, 'ns', 'monitor', 7, ?, ?, ?, ?, ?)`, "repair-"+command.id, command.jobPhase, "task-"+command.id, command.pushed, command.jobError, at)
 			require.NoError(t, err)
 		}
 		if command.blocked != "" {
@@ -283,6 +284,8 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		{"never-ran", "failed", false},
 		{"withdrawn", "withdrawn", false},
 		{"create-failed", "failed", false},
+		// Its Task may have run before a cancellation settled the command.
+		{"cancelled-before-ingestion", "failed", true},
 	} {
 		outcome, err := s.GetMonitorFeedbackOutcome(t.Context(), "ns", want.id)
 		require.NoError(t, err, want.id)

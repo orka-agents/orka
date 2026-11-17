@@ -35,6 +35,8 @@ func TestRepositoryMonitorReviewFeedbackVerdict(t *testing.T) {
 	}()
 	incompleteThread := repositoryMonitorFeedbackTestThread("T2", 10, false, repositoryMonitorFeedbackTestComment(201, "outsider", "User", "Nit.", 0))
 	incompleteThread.Root.TotalCount = 30
+	incompleteAuthorizedThread := repositoryMonitorFeedbackTestThread("T3", 10, false, repositoryMonitorFeedbackTestComment(202, "writer", "User", "Please fix.", 0))
+	incompleteAuthorizedThread.Root.TotalCount = 30
 	for _, tc := range []struct {
 		name    string
 		raw     repositoryMonitorRawReviewFeedback
@@ -50,6 +52,7 @@ func TestRepositoryMonitorReviewFeedbackVerdict(t *testing.T) {
 		{name: "page limit and byte budget", raw: repositoryMonitorRawReviewFeedback{threads: bigThreads("writer", 2), partial: true}, want: repositoryMonitorFeedbackNeedsPerson},
 		{name: "more reviewers than one snapshot looks up", raw: repositoryMonitorRawReviewFeedback{threads: manyReviewers}, want: repositoryMonitorFeedbackNeedsPerson},
 		{name: "thread with omitted replies", raw: repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{incompleteThread}}, want: repositoryMonitorFeedbackNeedsPerson},
+		{name: "authorized thread with omitted replies", raw: repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{incompleteAuthorizedThread}}, want: repositoryMonitorFeedbackNeedsPerson},
 		{name: "authorized thread left out of the budget", raw: repositoryMonitorRawReviewFeedback{threads: bigThreads("writer", 2)}, want: repositoryMonitorFeedbackNeedsPerson},
 		{name: "thread with omitted replies left out of the budget", raw: repositoryMonitorRawReviewFeedback{threads: bigThreads("outsider", 5)}, want: repositoryMonitorFeedbackNeedsPerson},
 	} {

@@ -148,23 +148,15 @@ func (s repositoryMonitorReviewFeedbackSnapshot) verdict() (repositoryMonitorFee
 	return repositoryMonitorFeedbackComplete, ""
 }
 
-// incompleteThreads counts the included threads that may hide feedback
-// readiness cannot see: unresolved threads that Orka's findings did not
-// open, with comments omitted because they were not read or did not fit the
-// thread's budget, and no authorized feedback shown. An omitted comment's
-// author is unknown. A thread that shows authorized feedback is already held
-// back by it.
+// incompleteThreads counts the included threads that may hide feedback the
+// snapshot cannot show: unresolved threads that Orka's findings did not open,
+// with comments omitted because they were not read or did not fit the
+// thread's budget. An omitted comment's author and text are unknown, even in
+// a thread that shows authorized feedback, so a person must look.
 func (s repositoryMonitorReviewFeedbackSnapshot) incompleteThreads() int {
-	authorized := map[string]bool{}
-	for _, entry := range s.authorized {
-		authorized[entry.ID] = true
-	}
 	incomplete := 0
 	for _, thread := range s.Threads {
-		if thread.OmittedComments == 0 || thread.OrkaFindingThread {
-			continue
-		}
-		if !slices.ContainsFunc(thread.Comments, func(comment repositoryMonitorFeedbackComment) bool { return authorized[comment.ID] }) {
+		if thread.OmittedComments > 0 && !thread.OrkaFindingThread {
 			incomplete++
 		}
 	}
