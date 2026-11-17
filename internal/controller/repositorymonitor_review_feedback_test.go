@@ -943,8 +943,36 @@ func TestRepositoryMonitorFeedbackStripHTMLComments(t *testing.T) {
 }
 
 // Threads the snapshot budget leaves out are counted when they hold feedback
-// that could start a repair, or may hide it in their own omitted comments,
-// and not when they hold evidence only.
+// that could start a repair, threads shown or not are counted when their own
+// omitted comments may hide it, and evidence-only threads are not counted.
+// A thread that its own budget fits by dropping its only authorized reply is
+// still shown, but it counts as hiding authorized feedback, and the dropped
+// reply cannot start a repair.
+func TestRepositoryMonitorReviewFeedbackThreadFitKeepsDroppedAuthority(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"writer": "write", "outsider": ""})
+	body := strings.Repeat("Please reconsider this part. ", 120)
+	raw := repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{repositoryMonitorFeedbackTestThread("T1", 10, false,
+		repositoryMonitorFeedbackTestComment(101, "outsider", "User", body, 0),
+		repositoryMonitorFeedbackTestComment(102, "writer", "User", body, 1),
+		repositoryMonitorFeedbackTestComment(103, "outsider", "User", body, 2),
+	)}}
+	snapshot := repositoryMonitorFeedbackTestNormalize(raw, nil, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+	if len(snapshot.Threads) != 1 || snapshot.Threads[0].OmittedComments == 0 {
+		t.Fatalf("threads = %+v, want the thread shown with its middle reply dropped", snapshot.Threads)
+	}
+	for _, comment := range snapshot.Threads[0].Comments {
+		if comment.ID == "review_comment:102" {
+			t.Fatal("the authorized middle reply was not dropped; the fixture no longer exercises the budget")
+		}
+	}
+	if got := repositoryMonitorFeedbackStartableIDs(snapshot); len(got) != 0 {
+		t.Fatalf("startable = %v, want the dropped reply never to start a repair", got)
+	}
+	if snapshot.omittedFeedbackWithAuthority() == 0 {
+		t.Fatal("a shown thread that dropped an authorized reply must count as hiding authorized feedback")
+	}
+}
+
 func TestRepositoryMonitorReviewFeedbackCountsOmittedFeedbackWithAuthority(t *testing.T) {
 	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"writer": "write", "outsider": ""})
 	body := strings.Repeat("Please reconsider this part. ", 120)
@@ -974,8 +1002,10 @@ func TestRepositoryMonitorReviewFeedbackCountsOmittedFeedbackWithAuthority(t *te
 			if snapshot.OmittedThreads == 0 || snapshot.Availability != repositoryMonitorEvidenceTruncated {
 				t.Fatalf("omitted threads = %d availability %q, want the budget to leave threads out", snapshot.OmittedThreads, snapshot.Availability)
 			}
-			if got := snapshot.omittedFeedbackWithAuthority(); (got > 0) != tc.want || got > snapshot.OmittedThreads {
-				t.Fatalf("omitted feedback with authority = %d of %d omitted, want any=%t", got, snapshot.OmittedThreads, tc.want)
+			// Shown threads whose own omitted comments may hide authorized
+			// feedback count too, so the count is bounded by all threads.
+			if got := snapshot.omittedFeedbackWithAuthority(); (got > 0) != tc.want || got > 8 {
+				t.Fatalf("omitted feedback with authority = %d (%d threads omitted), want any=%t", got, snapshot.OmittedThreads, tc.want)
 			}
 		})
 	}

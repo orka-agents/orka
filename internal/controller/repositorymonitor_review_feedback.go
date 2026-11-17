@@ -146,7 +146,8 @@ type repositoryMonitorReviewFeedbackSnapshot struct {
 	// omittedWithAuthority counts the threads and reviews left out of the
 	// snapshot, by its budget or because nothing in them could be shown,
 	// that hold feedback by an author with the authority to start a repair,
-	// or a thread whose own omitted comments may hide such feedback.
+	// and the threads, shown or not, whose own omitted comments may hide
+	// such feedback.
 	omittedWithAuthority int
 }
 
@@ -874,6 +875,10 @@ func repositoryMonitorFeedbackNodeID(id string) string {
 type repositoryMonitorFeedbackPendingThread struct {
 	thread     repositoryMonitorFeedbackThread
 	authorized []repositoryMonitorFeedbackAuthorized
+	// hidesAuthority reports that comments the thread does not show, its
+	// unread replies or replies dropped to fit its budget, hold or may hold
+	// feedback that could start a repair.
+	hidesAuthority bool
 }
 
 type repositoryMonitorFeedbackPendingReview struct {
@@ -981,20 +986,33 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 			if place.review.authorized != nil {
 				snapshot.authorized = append(snapshot.authorized, *place.review.authorized)
 			}
-		case !fits(place.thread.thread):
-			snapshot.OmittedThreads++
-			if thread := place.thread; len(thread.authorized) > 0 || thread.thread.OmittedComments > 0 && !thread.thread.OrkaFindingThread {
-				snapshot.omittedWithAuthority++
-			}
 		default:
-			snapshot.Threads = append(snapshot.Threads, place.thread.thread)
-			snapshot.authorized = append(snapshot.authorized, place.thread.authorized...)
+			snapshot.placeThread(place.thread, fits(place.thread.thread))
 		}
 	}
 	if (snapshot.OmittedThreads > 0 || snapshot.OmittedReviews > 0) && snapshot.Availability == repositoryMonitorEvidenceAvailable {
 		snapshot.Availability, snapshot.Reason = repositoryMonitorEvidenceTruncated, repositoryMonitorEvidenceReasonEvidenceBudget
 	}
 	return snapshot
+}
+
+// placeThread adds a normalized thread to the snapshot when it fits the
+// snapshot budget, or counts it as omitted.
+func (s *repositoryMonitorReviewFeedbackSnapshot) placeThread(thread *repositoryMonitorFeedbackPendingThread, fits bool) {
+	if !fits {
+		s.OmittedThreads++
+		if len(thread.authorized) > 0 || thread.thread.OmittedComments > 0 && !thread.thread.OrkaFindingThread {
+			s.omittedWithAuthority++
+		}
+		return
+	}
+	s.Threads = append(s.Threads, thread.thread)
+	s.authorized = append(s.authorized, thread.authorized...)
+	if thread.hidesAuthority {
+		// The thread is shown, but comments it leaves out may hold feedback
+		// no one can address or check.
+		s.omittedWithAuthority++
+	}
 }
 
 // omittedFeedbackWithAuthority counts the threads and reviews the snapshot
@@ -1102,24 +1120,28 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 	if len(thread.Comments) == 0 {
 		return repositoryMonitorFeedbackPendingThread{}, false, unread
 	}
-	authorized, fits := fitRepositoryMonitorFeedbackThread(&thread, authorized)
+	authorized, droppedAuthorized, fits := fitRepositoryMonitorFeedbackThread(&thread, authorized)
 	if !fits {
-		return repositoryMonitorFeedbackPendingThread{}, false, unread || len(authorized) > 0
+		return repositoryMonitorFeedbackPendingThread{}, false, unread || droppedAuthorized || len(authorized) > 0
 	}
-	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized}, true, false
+	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized, hidesAuthority: unread || droppedAuthorized}, true, false
 }
 
 // fitRepositoryMonitorFeedbackThread keeps thread within its own budget by
 // dropping the oldest replies, never the root or the newest comment, then by
 // shortening the longest remaining body. Bodies are already sanitized, so a
 // cut only removes text. It returns authorized without the dropped replies,
-// and false when only metadata is left to cut.
-func fitRepositoryMonitorFeedbackThread(thread *repositoryMonitorFeedbackThread, authorized []repositoryMonitorFeedbackAuthorized) ([]repositoryMonitorFeedbackAuthorized, bool) {
+// whether a dropped reply was authorized, and false when only metadata is
+// left to cut.
+func fitRepositoryMonitorFeedbackThread(thread *repositoryMonitorFeedbackThread, authorized []repositoryMonitorFeedbackAuthorized) ([]repositoryMonitorFeedbackAuthorized, bool, bool) {
+	droppedAuthorized := false
 	for len(thread.Comments) > 2 && repositoryMonitorEvidenceEncodedSize(thread) > repositoryMonitorFeedbackThreadEncodedBytes {
 		dropped := thread.Comments[1]
 		thread.Comments = slices.Delete(thread.Comments, 1, 2)
 		thread.OmittedComments++
+		kept := len(authorized)
 		authorized = slices.DeleteFunc(authorized, func(entry repositoryMonitorFeedbackAuthorized) bool { return entry.ID == dropped.ID })
+		droppedAuthorized = droppedAuthorized || len(authorized) < kept
 	}
 	for repositoryMonitorEvidenceEncodedSize(thread) > repositoryMonitorFeedbackThreadEncodedBytes {
 		longest := 0
@@ -1131,14 +1153,14 @@ func fitRepositoryMonitorFeedbackThread(thread *repositoryMonitorFeedbackThread,
 		comment := &thread.Comments[longest]
 		if len(comment.Body) <= repositoryMonitorFeedbackMinCutBody {
 			// Only metadata is left to cut; such a thread is malformed.
-			return authorized, false
+			return authorized, droppedAuthorized, false
 		}
 		comment.Body = repositoryMonitorEvidenceCutRunes(comment.Body, len(comment.Body)/2)
 		if !slices.Contains(comment.Truncated, repositoryMonitorFeedbackTruncatedBody) {
 			comment.Truncated = append(comment.Truncated, repositoryMonitorFeedbackTruncatedBody)
 		}
 	}
-	return authorized, true
+	return authorized, droppedAuthorized, true
 }
 
 // review normalizes one current changes-requested review, or reports false
