@@ -14,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // repositoryMonitorRepairSkipLabelActorNotPermitted records that the account
@@ -333,6 +334,80 @@ type repositoryMonitorPermissionMemory struct {
 	results map[string]repositoryMonitorRememberedPermission
 	waiting map[string]*repositoryMonitorPermissionWaiting
 	polls   int
+	// used is when a poll last started.
+	used time.Time
+}
+
+// repositoryMonitorPermissionMemoryIdleExpiry evicts the permission memory
+// of a monitor no poll has used for this long, and
+// repositoryMonitorPermissionMemoryLimit bounds how many monitors' memories
+// the controller keeps, evicting the least recently used. Both back up the
+// eviction of a deleted monitor's memory.
+const (
+	repositoryMonitorPermissionMemoryIdleExpiry = time.Hour
+	repositoryMonitorPermissionMemoryLimit      = 1024
+	repositoryMonitorPermissionSweepInterval    = time.Minute
+)
+
+// trackRepositoryMonitorUID records the UID that monitor's in-memory state
+// belongs to. A monitor recreated under the same name has a new UID, so the
+// state of the one it replaced is evicted.
+func (r *RepositoryMonitorReconciler) trackRepositoryMonitorUID(monitor *corev1alpha1.RepositoryMonitor) {
+	previous, loaded := r.monitorUIDs.Swap(monitor.Namespace+"/"+monitor.Name, monitor.UID)
+	if loaded && previous != monitor.UID {
+		r.evictRepositoryMonitorMemory(previous.(types.UID))
+	}
+}
+
+// forgetRepositoryMonitor evicts the in-memory state of the deleted monitor
+// with key namespace/name.
+func (r *RepositoryMonitorReconciler) forgetRepositoryMonitor(key string) {
+	if uid, loaded := r.monitorUIDs.LoadAndDelete(key); loaded {
+		r.evictRepositoryMonitorMemory(uid.(types.UID))
+	}
+}
+
+func (r *RepositoryMonitorReconciler) evictRepositoryMonitorMemory(uid types.UID) {
+	r.permissionMemory.Delete(uid)
+	r.feedbackVerifyCursors.Delete(uid)
+}
+
+// sweepRepositoryMonitorPermissionMemories evicts, at most once per sweep
+// interval, the permission memories no poll used within the idle expiry, and
+// then the least recently used ones beyond the limit.
+func (r *RepositoryMonitorReconciler) sweepRepositoryMonitorPermissionMemories() {
+	now := time.Now()
+	r.permissionSweepMu.Lock()
+	if now.Sub(r.permissionSweptAt) < repositoryMonitorPermissionSweepInterval {
+		r.permissionSweepMu.Unlock()
+		return
+	}
+	r.permissionSweptAt = now
+	r.permissionSweepMu.Unlock()
+	type entry struct {
+		uid  types.UID
+		used time.Time
+	}
+	var kept []entry
+	r.permissionMemory.Range(func(key, value any) bool {
+		memory := value.(*repositoryMonitorPermissionMemory)
+		memory.mu.Lock()
+		used := memory.used
+		memory.mu.Unlock()
+		if now.Sub(used) >= repositoryMonitorPermissionMemoryIdleExpiry {
+			r.evictRepositoryMonitorMemory(key.(types.UID))
+			return true
+		}
+		kept = append(kept, entry{uid: key.(types.UID), used: used})
+		return true
+	})
+	if len(kept) <= repositoryMonitorPermissionMemoryLimit {
+		return
+	}
+	slices.SortFunc(kept, func(a, b entry) int { return a.used.Compare(b.used) })
+	for _, stale := range kept[:len(kept)-repositoryMonitorPermissionMemoryLimit] {
+		r.evictRepositoryMonitorMemory(stale.uid)
+	}
 }
 
 type repositoryMonitorRememberedPermission struct {
@@ -369,16 +444,20 @@ func withRepositoryMonitorPermissionScope(ctx context.Context, scope string) con
 // withRepositoryMonitorPermissionPoll returns ctx with the permission cache
 // of one poll of monitor, and a function that ends the poll. Ending it
 // merges what the poll saw into the waiting scopes: a scope it cut short
-// waits, keeping when it first waited, one it completed stops waiting, and
+// waits with the accounts it needs now, keeping when it first waited, one it
+// completed stops waiting, and
 // one it did not reach is left as it was, so a reconcile that looks nothing
 // up changes nothing.
 func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (context.Context, func()) {
+	r.trackRepositoryMonitorUID(monitor)
+	r.sweepRepositoryMonitorPermissionMemories()
 	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{
 		results: map[string]repositoryMonitorRememberedPermission{}, waiting: map[string]*repositoryMonitorPermissionWaiting{},
 	})
 	memory := value.(*repositoryMonitorPermissionMemory)
 	memory.mu.Lock()
 	memory.polls++
+	memory.used = time.Now()
 	poll := memory.polls
 	waiting := slices.Collect(maps.Keys(memory.waiting))
 	slices.SortFunc(waiting, func(a, b string) int {
@@ -387,6 +466,10 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 		}
 		return strings.Compare(a, b)
 	})
+	// A scope that does not fit what is left of the reservation is passed
+	// over for this poll, so it cannot keep later scopes from being served.
+	// It is still served when the poll's budget allows, and a snapshot never
+	// needs more lookups than its own limit, which fits the reservation.
 	reserved := map[string]bool{}
 	for _, scope := range waiting {
 		keys := memory.waiting[scope].keys
@@ -397,7 +480,7 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 			}
 		}
 		if len(reserved)+added > repositoryMonitorPermissionLookupBudget/2 {
-			break
+			continue
 		}
 		maps.Copy(reserved, keys)
 	}
@@ -416,12 +499,14 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 				delete(memory.waiting, scope)
 				continue
 			}
+			// The scope now needs the accounts this poll saw, its snapshot's
+			// current reviewers, not ones it needed before.
 			entry := memory.waiting[scope]
 			if entry == nil {
-				entry = &repositoryMonitorPermissionWaiting{since: poll, keys: map[string]bool{}}
+				entry = &repositoryMonitorPermissionWaiting{since: poll}
 				memory.waiting[scope] = entry
 			}
-			maps.Copy(entry.keys, seen.keys)
+			entry.keys = maps.Clone(seen.keys)
 			entry.seen = now
 		}
 		for scope, entry := range memory.waiting {

@@ -1942,12 +1942,17 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		ingested = true
 	}
 	// Terminal feedback outcomes whose projections lag, including ones this
-	// pass just recorded, are projected again.
+	// pass just recorded, are projected again, and a window of projected
+	// ones is checked for projections a later writer contradicted.
 	settled, err := r.settleRepositoryMonitorFeedbackOutcomes(ctx, monitor)
 	if err != nil {
 		return ingested, err
 	}
-	return ingested || settled, nil
+	corrected, err := r.verifyProjectedRepositoryMonitorFeedbackOutcomes(ctx, monitor)
+	if err != nil {
+		return ingested, err
+	}
+	return ingested || settled || corrected, nil
 }
 
 // repositoryMonitorResetItemAfterRepairPush clears the review state that a

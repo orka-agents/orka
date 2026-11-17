@@ -406,6 +406,7 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 	if !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
 		return nil
 	}
+	ctx = context.WithValue(ctx, repositoryMonitorFeedbackProjectingKey{}, true)
 	want := repositoryMonitorFeedbackProjectionFor(outcome)
 	if err := r.projectRepositoryMonitorFeedbackJob(ctx, monitor, outcome, want); err != nil {
 		return err
@@ -415,13 +416,7 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	// A cancelled action is final and records a stop, which every outcome
-	// that is not a success agrees with; a coalesced one belongs to another
-	// action.
-	settled := err == nil && (action.Status == want.actionStatus ||
-		action.Status == repositoryMonitorWorkActionStatusCompleted ||
-		action.Status == repositoryMonitorWorkActionStatusCancelled && want.actionStatus != repositoryMonitorWorkActionStatusSucceeded)
-	if !settled {
+	if err != nil || !repositoryMonitorFeedbackActionAgrees(action, want) {
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, repositoryMonitorPullRequestKind, outcome.PRNumber, outcome.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), want.actionStatus, want.actionPhase, outcome.TaskName, outcome.Reason); err != nil {
 			return err
 		}
@@ -453,6 +448,122 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 	return err
 }
 
+type repositoryMonitorFeedbackProjectingKey struct{}
+
+// repositoryMonitorFeedbackActionAgrees reports whether a work action
+// records what want says. A cancelled action is final and records a stop,
+// which every outcome that is not a success agrees with; a coalesced one
+// belongs to another action.
+func repositoryMonitorFeedbackActionAgrees(action *store.WorkAction, want repositoryMonitorFeedbackProjection) bool {
+	return action.Status == want.actionStatus ||
+		action.Status == repositoryMonitorWorkActionStatusCompleted ||
+		action.Status == repositoryMonitorWorkActionStatusCancelled && want.actionStatus != repositoryMonitorWorkActionStatusSucceeded
+}
+
+// repositoryMonitorFeedbackJobAgrees reports whether a repair job records
+// the outcome's end. Its error is not compared: validation records its own on
+// a succeeded repair's job.
+func repositoryMonitorFeedbackJobAgrees(job *store.RepairJob, outcome store.MonitorFeedbackOutcome, want repositoryMonitorFeedbackProjection) bool {
+	return job.Phase == want.jobPhase && job.PushedSHA == outcome.ResultSHA && job.CompletedAt != nil
+}
+
+// repositoryMonitorFeedbackMutationAgrees reports whether a push mutation
+// records the outcome's end.
+func repositoryMonitorFeedbackMutationAgrees(mutation *store.GitHubMutationRecord, outcome store.MonitorFeedbackOutcome, want repositoryMonitorFeedbackProjection) bool {
+	return mutation.Status == want.mutationStatus && mutation.ExternalID == outcome.ResultSHA
+}
+
+// projectTerminalRepositoryMonitorFeedbackAction reports whether a work
+// action write for a repair command belongs to a feedback repair whose
+// outcome has ended, and if so projects the stored outcome instead of the
+// write: no path but projection writes such a repair's action.
+func (r *RepositoryMonitorReconciler) projectTerminalRepositoryMonitorFeedbackAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, actionKind string) (bool, error) {
+	if ctx.Value(repositoryMonitorFeedbackProjectingKey{}) != nil || actionKind != repositoryMonitorRepairWorkflowActionKind(repositoryMonitorCommandIntentFix) {
+		return false, nil
+	}
+	outcome, err := r.repositoryMonitorFeedbackOutcome(ctx, monitor, command.ID)
+	if err != nil || outcome == nil || !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
+		return false, err
+	}
+	return true, r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, *outcome)
+}
+
+// repositoryMonitorFeedbackVerifyBatch bounds the projected outcomes one
+// reconcile checks again.
+const repositoryMonitorFeedbackVerifyBatch = 20
+
+// verifyProjectedRepositoryMonitorFeedbackOutcomes checks a rotating window
+// of the monitor's projected terminal outcomes against their repair job,
+// push mutation, and work action, and projects again any that one of them
+// contradicts, as a writer outside projection could. Each reconcile checks
+// at most repositoryMonitorFeedbackVerifyBatch outcomes and resumes where the
+// last stopped, so every outcome is checked again within a bounded number of
+// reconciles.
+func (r *RepositoryMonitorReconciler) verifyProjectedRepositoryMonitorFeedbackOutcomes(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
+	cursor := ""
+	if value, ok := r.feedbackVerifyCursors.Load(monitor.UID); ok {
+		cursor = value.(string)
+	}
+	outcomes, next, err := r.Store.ListMonitorFeedbackOutcomes(ctx, store.MonitorFeedbackOutcomeFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: repositoryMonitorFeedbackVerifyBatch, Cursor: cursor})
+	if err != nil {
+		// A cursor the store no longer accepts starts over.
+		r.feedbackVerifyCursors.Delete(monitor.UID)
+		return false, err
+	}
+	r.feedbackVerifyCursors.Store(monitor.UID, next)
+	corrected := false
+	for _, outcome := range outcomes {
+		if outcome.ProjectedAt == nil || !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
+			continue
+		}
+		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+		if err != nil {
+			return corrected, err
+		}
+		if contradicted {
+			if err := r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome); err != nil {
+				return corrected, err
+			}
+			corrected = true
+		}
+	}
+	return corrected, nil
+}
+
+// repositoryMonitorFeedbackProjectionContradicted reports whether the repair
+// job, push mutation, or work action of a terminal outcome records anything
+// other than the outcome's end.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackProjectionContradicted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome store.MonitorFeedbackOutcome) (bool, error) {
+	want := repositoryMonitorFeedbackProjectionFor(outcome)
+	jobID := "repair-" + repositoryMonitorShortHash(outcome.CommandEventID)
+	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, jobID)
+	switch {
+	case err == nil:
+		if !repositoryMonitorFeedbackJobAgrees(job, outcome, want) {
+			return true, nil
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		return false, err
+	}
+	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, "ghmut-"+repositoryMonitorShortHash(jobID+"-push"))
+	switch {
+	case err == nil:
+		if !repositoryMonitorFeedbackMutationAgrees(mutation, outcome, want) {
+			return true, nil
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		return false, err
+	}
+	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(outcome.CommandEventID, store.RepositoryMonitorDesiredActionForIntent(repositoryMonitorCommandIntentFix)))
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return !repositoryMonitorFeedbackActionAgrees(action, want), nil
+}
+
 // projectRepositoryMonitorFeedbackJob makes the repair job and its push
 // mutation, when they exist, record want, whether or not a Task ran. Each is
 // corrected on its own whenever it records anything else, so a replay after
@@ -470,7 +581,7 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackJob(ctx co
 		return nil
 	case err != nil:
 		return err
-	case job.Phase != want.jobPhase || job.PushedSHA != outcome.ResultSHA || job.LastError != lastError || job.CompletedAt == nil:
+	case !repositoryMonitorFeedbackJobAgrees(job, outcome, want):
 		job.Phase, job.LastError, job.PushedSHA = want.jobPhase, lastError, outcome.ResultSHA
 		if job.CompletedAt == nil {
 			job.CompletedAt = outcome.CompletedAt
@@ -483,7 +594,7 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackJob(ctx co
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
-	if err != nil || mutation.Status == want.mutationStatus && mutation.ExternalID == outcome.ResultSHA {
+	if err != nil || repositoryMonitorFeedbackMutationAgrees(mutation, outcome, want) {
 		return err
 	}
 	mutation.CommandEventID, mutation.ExternalID, mutation.Error, mutation.Status = outcome.CommandEventID, outcome.ResultSHA, lastError, want.mutationStatus

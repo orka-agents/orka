@@ -216,7 +216,12 @@ resumes from the record:
   repair job, push mutation, and work action are made to record its end,
   whether they had not ended or ended differently, and the item's repair
   state is derived again. Each write is idempotent, and the outcome is marked
-  projected only once no projection contradicts it.
+  projected only once no projection contradicts it. No other path writes the
+  work action of a feedback repair whose outcome has ended: a retry, stale
+  head, or policy block that would projects the stored outcome instead. Each
+  repair ingestion also checks a rotating window of 20 projected outcomes and
+  projects again any whose job, push mutation, or work action a later writer
+  contradicted.
 - A withdrawn repair's job, even one whose Task create the API server
   refused, ends in the `withdrawn` phase, which readiness ignores, and its push
   mutation ends too. Ingestion visits every queued job, so jobs that never
@@ -281,7 +286,13 @@ all of a reserved snapshot's reviewers are looked up in the same poll and the
 snapshot completes even when remembered permissions expire between polls.
 Pull requests that inventory reaches late are therefore not starved by early
 ones. A reconcile that looks nothing up leaves the waiting snapshots as they
-were. A repair
+were. A waiting snapshot needs its current reviewers only, so reviewer churn
+cannot grow it, and one that does not fit what is left of a poll's
+reservation is passed over for that poll rather than holding up later ones.
+The memory is kept per monitor UID: a deleted monitor's is evicted when its
+reconcile finds it gone, a monitor recreated under the same name drops the
+one it replaced, and memories unused for an hour, or beyond 1,024 monitors,
+are swept. A repair
 handoff, which creates a Task, never uses a remembered permission. The memory
 is the controller's; a restart starts afresh.
 
