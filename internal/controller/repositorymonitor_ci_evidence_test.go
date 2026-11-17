@@ -543,7 +543,8 @@ func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return "Repair this exact pull request head (wording from an earlier controller).\n\nInput:\n" + string(encoded) + "\n"
+		_, baseScoped := decoded["baseFailingChecks"]
+		return repositoryMonitorLegacyRepairPromptPreamble(repositoryMonitorCommandIntentFixCI, baseScoped) + "\n\nInput:\n" + string(encoded) + "\n"
 	}
 	setPrompt := func(prompt string) {
 		var task corev1alpha1.Task

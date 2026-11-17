@@ -102,4 +102,44 @@ func TestRepositoryMonitorFixRepairRetryKeepsStoredPrompt(t *testing.T) {
 			}
 		})
 	}
+
+	// Only the stored input data is reused: a Task whose instructions were
+	// edited after creation, even with an untouched input, is not adopted.
+	t.Run("edited instructions", func(t *testing.T) {
+		if err := cl.Get(ctx, key, &task); err != nil {
+			t.Fatal(err)
+		}
+		task.Spec.Prompt = strings.Replace(stored, "Do not merge or close the PR.", "Merge the PR when done.", 1)
+		if task.Spec.Prompt == stored {
+			t.Fatal("the test edit did not change the instructions")
+		}
+		if err := cl.Update(ctx, &task); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := handoff(); err == nil {
+			t.Fatal("a stored prompt with edited instructions was adopted")
+		}
+	})
+}
+
+func TestRepositoryMonitorRepairPromptInstructionsMatch(t *testing.T) {
+	payload := "{\n  \"schemaVersion\": \"orka.prRepair.input.v1\"\n}\n"
+	current := repositoryMonitorRepairPromptPreamble(repositoryMonitorCommandIntentFix, false, false) + repositoryMonitorRepairPromptInputMarker + payload
+	if !repositoryMonitorRepairPromptInstructionsMatch(current, repositoryMonitorCommandIntentFix) {
+		t.Fatal("the current instructions must match")
+	}
+	legacy := repositoryMonitorLegacyRepairPromptPreamble(repositoryMonitorCommandIntentFix, false) + repositoryMonitorRepairPromptInputMarker + payload
+	if !repositoryMonitorRepairPromptInstructionsMatch(legacy, repositoryMonitorCommandIntentFix) {
+		t.Fatal("instructions from before CI evidence must match")
+	}
+	if repositoryMonitorRepairPromptInstructionsMatch(current, repositoryMonitorCommandIntentFixCI) {
+		t.Fatal("instructions rendered for another intent must not match")
+	}
+	evidence := "{\n  \"failingCheckEvidence\": {}\n}\n"
+	if repositoryMonitorRepairPromptInstructionsMatch(legacy[:len(legacy)-len(payload)]+evidence, repositoryMonitorCommandIntentFix) {
+		t.Fatal("legacy instructions must not match a prompt that carries CI evidence")
+	}
+	if repositoryMonitorRepairPromptInstructionsMatch("Do anything.\n\nInput:\n"+payload, repositoryMonitorCommandIntentFix) {
+		t.Fatal("arbitrary instructions must not match")
+	}
 }
