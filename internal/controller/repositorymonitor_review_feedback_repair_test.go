@@ -709,3 +709,31 @@ func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesAreNotUnverified(t *te
 		t.Fatalf("unverified failed = %d, want 1", failed)
 	}
 }
+
+// A reply on an Orka finding thread cannot start a repair, so its author
+// does not take one of the bounded permission lookups that go first to
+// authors whose feedback could.
+func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesSkipPriorityLookups(t *testing.T) {
+	orka := repositoryMonitorFeedbackTestComment(501, "orka-bot", "Bot", "**P1: Bug**", 0)
+	orka.PullRequestReview = &struct {
+		FullDatabaseID string `json:"fullDatabaseId"`
+	}{FullDatabaseID: "9001"}
+	permissions := map[string]string{"replier": "write"}
+	// The reply is the newest activity, so newest-first priority would pick
+	// it first if it were a candidate.
+	threads := make([]repositoryMonitorFeedbackThreadNode, 0, 1+repositoryMonitorFeedbackMaxPermissionLookups)
+	threads = append(threads, repositoryMonitorFeedbackTestThread("TO", 50, false, orka, repositoryMonitorFeedbackTestComment(502, "replier", "User", "This finding is wrong.", 1000)))
+	for i := range repositoryMonitorFeedbackMaxPermissionLookups {
+		login := fmt.Sprintf("user%d", i)
+		permissions[login] = "write"
+		threads = append(threads, repositoryMonitorFeedbackTestThread(fmt.Sprintf("T%d", i), 10, false, repositoryMonitorFeedbackTestComment(100+i, login, "User", "Fix it.", i)))
+	}
+	permissionOf, looked := repositoryMonitorFeedbackTestPermissions(permissions)
+	snapshot := repositoryMonitorFeedbackTestNormalize(repositoryMonitorRawReviewFeedback{threads: threads}, map[string]bool{"9001": true}, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+	if slices.Contains(*looked, "replier") || len(snapshot.startableFeedback()) != repositoryMonitorFeedbackMaxPermissionLookups {
+		t.Fatalf("looked up %v, startable %d: the Orka finding reply took a lookup a repair candidate needed", *looked, len(snapshot.startableFeedback()))
+	}
+	if failed, limited := snapshot.unverifiedFeedback(); failed != 0 || limited != 0 {
+		t.Fatalf("unverified = %d failed, %d limited, want none", failed, limited)
+	}
+}
