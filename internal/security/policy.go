@@ -673,6 +673,13 @@ func SensitiveYAMLBlockHeader(line string) bool {
 	return policySensitiveYAMLBlockHeaderPattern.MatchString(line)
 }
 
+// SensitiveYAMLEmptyValueKey reports whether line is a credential-bearing
+// YAML key with no value on the line, whose plain or quoted scalar value may
+// continue on the following lines indented deeper than line.
+func SensitiveYAMLEmptyValueKey(line string) bool {
+	return policySensitiveYAMLEmptyValuePattern.MatchString(line)
+}
+
 func looksLikeSecret(scan *secretScan) bool {
 	if scan.matchAny(policySensitivePrefixPattern, sensitivePrefixKeywords, 0) {
 		return true
