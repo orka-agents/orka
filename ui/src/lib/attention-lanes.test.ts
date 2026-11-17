@@ -26,6 +26,12 @@ describe('attention lanes', () => {
     expect(isAgentWorking(task('t', undefined))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Failed', conditions: [{ type: 'WaitingForCapacity', status: 'True' }] }))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Tasks', state: 'Waiting' } }))).toBe(true)
+    expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Requested' } }))).toBe(true)
+    // A requested wait after a failed or cancelled turn is never armed.
+    for (const phase of ['Failed', 'Cancelled']) {
+      expect(isAgentWorking(task('t', { phase, wait: { kind: 'Timer', state: 'Requested' } }))).toBe(false)
+      expect(isAgentWorking(task('t', { phase, wait: { kind: 'Tasks', state: 'Requested' } }))).toBe(false)
+    }
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Resuming' } }))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Resumed' } }))).toBe(false)
     // A parked approval is the person's move, never the agent's.

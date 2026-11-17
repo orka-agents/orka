@@ -19,7 +19,10 @@ export function isAgentWorking(task: Task): boolean {
   if (workingPhases.has(task.status?.phase ?? '')) return true
   if (task.status?.conditions?.some((c) => c.type === 'WaitingForCapacity' && c.status === 'True')) return true
   const wait = task.status?.wait
-  return (wait?.kind === 'Tasks' || wait?.kind === 'Timer') && activeWaitStates.has(wait.state ?? '')
+  if ((wait?.kind !== 'Tasks' && wait?.kind !== 'Timer') || !activeWaitStates.has(wait.state ?? '')) return false
+  // A requested wait arms only after its turn succeeds; after a failed or
+  // cancelled turn it is abandoned and the agent is no longer working.
+  return wait.state !== 'Requested' || task.status?.phase === 'Succeeded'
 }
 
 /** Task UIDs (falling back to names) that have an attention item. */
