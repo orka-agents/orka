@@ -2326,14 +2326,16 @@ func (s *Server) mapRuntimeUpdateLocked(state *sessionState, prompt *promptState
 		return nil, nil
 	}
 	if stream, streamed := prompt.textRedaction(update); streamed {
-		return s.textUpdateEventsLocked(state, prompt, update.Kind, stream.write(updateText(update)), event.Timestamp), nil
+		events := s.releaseHeldTextLocked(state, prompt, stream, event.Timestamp)
+		return append(events, s.textUpdateEventsLocked(state, prompt, update.Kind, stream.write(updateText(update)), event.Timestamp)...), nil
 	}
 	prompt.redactUpdate(update)
+	events := s.releaseHeldTextLocked(state, prompt, nil, event.Timestamp)
 	mapped := s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{Type: harnessv2.EventUpdate, Update: update})
 	if err := boundACPToolContentToEventLine(&mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
 		return nil, err
 	}
-	return []harnessv2.Event{mapped}, nil
+	return append(events, mapped), nil
 }
 
 func (s *Server) terminalEvent(
