@@ -10,11 +10,13 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -117,17 +119,36 @@ func externalRuntimeStartPhases(pool *corev1alpha1.RuntimePool, w *workspacev1al
 	if request.Sequence == 1 && !pool.CreationTimestamp.IsZero() && !published.Before(pool.CreationTimestamp.Time) {
 		phases = append(phases, externalRuntimePhase{externalRuntimePhaseProvision, published.Sub(pool.CreationTimestamp.Time)})
 	}
-	ready := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
-	if ready != nil && ready.Status == metav1.ConditionTrue && !ready.LastTransitionTime.Time.Before(published) && !accepted.Before(ready.LastTransitionTime.Time) {
+	if ready, ok := externalRuntimeReadyAt(w, published); ok && !accepted.Before(ready) {
 		phases = append(phases,
-			externalRuntimePhase{externalRuntimePhaseProviderMaterialization, ready.LastTransitionTime.Sub(published)},
-			externalRuntimePhase{externalRuntimePhaseBootstrapAndProbe, accepted.Sub(ready.LastTransitionTime.Time)},
+			externalRuntimePhase{externalRuntimePhaseProviderMaterialization, ready.Sub(published)},
+			externalRuntimePhase{externalRuntimePhaseBootstrapAndProbe, accepted.Sub(ready)},
 		)
 	}
 	if !accepted.Before(published) {
 		phases = append(phases, externalRuntimePhase{externalRuntimePhaseStartTotal, accepted.Sub(published)})
 	}
 	return phases
+}
+
+// externalRuntimeReadyAt returns when the provider reported DataPlaneReady
+// for the published sequence. A condition time keeps whole seconds only, so a
+// report in the publication's own second can read as slightly before it; that
+// report counts as ready at publication. Readiness from an earlier second
+// predates this sequence and is ignored.
+func externalRuntimeReadyAt(w *workspacev1alpha1.ExecutionWorkspace, published time.Time) (time.Time, bool) {
+	ready := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return time.Time{}, false
+	}
+	at := ready.LastTransitionTime.Time
+	if at.Before(published.Truncate(time.Second)) {
+		return time.Time{}, false
+	}
+	if at.Before(published) {
+		at = published
+	}
+	return at, true
 }
 
 // externalRuntimeStopPhases breaks a runtime stop into Core's drain, from the
@@ -171,44 +192,162 @@ func phaseLogKey(phase string) string {
 	return strings.Join(parts, "") + "Ms"
 }
 
-// observeExternalRuntimeTransition logs and records how long an
-// execution-workspace runtime took to start or stop. It runs only after a
-// status write persisted the transition, so each start is reported once, when
-// a new runtime instance first admits work, and each stop once, when the pool
-// first records Stopped.
-func (r *RuntimePoolReconciler) observeExternalRuntimeTransition(ctx context.Context, pool *corev1alpha1.RuntimePool, previous, current corev1alpha1.RuntimePoolStatus) {
-	started := current.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting && current.ActiveInstance != nil &&
-		(previous.ActiveInstance == nil || previous.ActiveInstance.RuntimeInstanceID != current.ActiveInstance.RuntimeInstanceID)
-	stopped := current.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped && previous.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped
-	if !started && !stopped {
-		return
+// externalRuntimeTimingReports remembers, per RuntimePool, the runtime
+// instance whose start and the retirement whose stop this controller process
+// already reported, and when it first proved that retirement's termination.
+// A readmission or a repeated Stopped write after a transient failure is then
+// not reported again. It lives in memory only, so it costs no write: after a
+// controller restart one already-reported transition can be reported again.
+type externalRuntimeTimingReports struct {
+	mu    sync.Mutex
+	pools map[types.UID]*externalRuntimeTimingReport
+}
+
+type externalRuntimeTimingReport struct {
+	startedInstance string
+	stoppedKey      string
+	provenKey       string
+	provenAt        time.Time
+}
+
+func (t *externalRuntimeTimingReports) poolLocked(uid types.UID) *externalRuntimeTimingReport {
+	if t.pools == nil {
+		t.pools = map[types.UID]*externalRuntimeTimingReport{}
+	}
+	report := t.pools[uid]
+	if report == nil {
+		report = &externalRuntimeTimingReport{}
+		t.pools[uid] = report
+	}
+	return report
+}
+
+// claimStart reports whether the instance's start is not yet reported, and
+// marks it reported.
+func (t *externalRuntimeTimingReports) claimStart(uid types.UID, instance string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	report := t.poolLocked(uid)
+	if report.startedInstance == instance {
+		return false
+	}
+	report.startedInstance = instance
+	return true
+}
+
+// claimStop reports whether the retirement's stop is not yet reported, marks
+// it reported, and returns when its termination was first proven, if known.
+func (t *externalRuntimeTimingReports) claimStop(uid types.UID, key string) (time.Time, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	report := t.poolLocked(uid)
+	if report.stoppedKey == key {
+		return time.Time{}, false
+	}
+	report.stoppedKey = key
+	if report.provenKey == key {
+		return report.provenAt, true
+	}
+	return time.Time{}, true
+}
+
+// noteStopProven keeps the first time Core proved the retirement's
+// termination, so cleanup that follows the proof is not counted as the
+// provider's retirement.
+func (t *externalRuntimeTimingReports) noteStopProven(uid types.UID, key string, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	report := t.poolLocked(uid)
+	if report.provenKey != key {
+		report.provenKey, report.provenAt = key, at
+	}
+}
+
+func (t *externalRuntimeTimingReports) forget(uid types.UID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.pools, uid)
+}
+
+func externalRuntimeStopKey(retirement *workspacev1alpha1.WorkloadRetirement) string {
+	return strconv.FormatInt(retirement.Sequence, 10) + "/" + string(retirement.Action)
+}
+
+type externalRuntimeTimingWorkspaceKey struct{}
+
+// withExternalRuntimeTimingWorkspace carries the workspace this reconcile
+// already read and patches in place, so a persisted transition is reported
+// from it rather than lost to a failed second read.
+func withExternalRuntimeTimingWorkspace(ctx context.Context, w *workspacev1alpha1.ExecutionWorkspace) context.Context {
+	return context.WithValue(ctx, externalRuntimeTimingWorkspaceKey{}, w)
+}
+
+func (r *RuntimePoolReconciler) externalRuntimeTimingWorkspace(ctx context.Context, pool *corev1alpha1.RuntimePool) *workspacev1alpha1.ExecutionWorkspace {
+	if w, ok := ctx.Value(externalRuntimeTimingWorkspaceKey{}).(*workspacev1alpha1.ExecutionWorkspace); ok && w != nil {
+		return w
 	}
 	w, err := r.externalPoolWorkspace(ctx, pool)
-	if err != nil || w.Spec.Workload == nil {
+	if err != nil {
+		return nil
+	}
+	return w
+}
+
+// observeExternalRuntimeTransition logs and records how long an
+// execution-workspace runtime took to start or stop. It runs only after a
+// status write persisted the transition. A start is reported the first time
+// an instance admits work, even when an earlier probe already recorded it
+// while it booted; a stop when the pool first records Stopped for a
+// retirement.
+func (r *RuntimePoolReconciler) observeExternalRuntimeTransition(ctx context.Context, pool *corev1alpha1.RuntimePool, previous, current corev1alpha1.RuntimePoolStatus) {
+	if current.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting && current.ActiveInstance != nil &&
+		(previous.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting || previous.ActiveInstance == nil ||
+			previous.ActiveInstance.RuntimeInstanceID != current.ActiveInstance.RuntimeInstanceID) {
+		r.observeExternalRuntimeStart(ctx, pool, current.ActiveInstance.RuntimeInstanceID)
 		return
 	}
-	now := r.now()
-	logger := log.FromContext(ctx)
-	if started {
-		path := externalRuntimeStartPath(w.Spec.Workload)
-		phases := externalRuntimeStartPhases(pool, w, now)
-		for _, phase := range phases {
-			orkametrics.RecordACPWorkspaceRuntimePhase(path, phase.name, phase.duration)
-		}
-		logger.Info(externalRuntimeStartedLogMessage, append([]any{
-			"runtimePool", pool.Name, "path", path, "sequence", w.Spec.Workload.Sequence,
-		}, externalRuntimePhaseKeysAndValues(phases)...)...)
+	if current.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped && previous.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		r.observeExternalRuntimeStop(ctx, pool)
+	}
+}
+
+func (r *RuntimePoolReconciler) observeExternalRuntimeStart(ctx context.Context, pool *corev1alpha1.RuntimePool, instance string) {
+	w := r.externalRuntimeTimingWorkspace(ctx, pool)
+	if w == nil || w.Spec.Workload == nil || !r.externalTimings.claimStart(pool.UID, instance) {
 		return
 	}
-	if w.Spec.Retirement == nil {
+	path := externalRuntimeStartPath(w.Spec.Workload)
+	phases := externalRuntimeStartPhases(pool, w, r.now())
+	for _, phase := range phases {
+		orkametrics.RecordACPWorkspaceRuntimePhase(path, phase.name, phase.duration)
+	}
+	log.FromContext(ctx).Info(externalRuntimeStartedLogMessage, append([]any{
+		"runtimePool", pool.Name, "path", path, "sequence", w.Spec.Workload.Sequence,
+	}, externalRuntimePhaseKeysAndValues(phases)...)...)
+}
+
+// observeExternalRuntimeStop reports a stop whose termination Core proved,
+// either through a Stopped status write or, for a deleted RuntimePool,
+// through the release of its finalizer.
+func (r *RuntimePoolReconciler) observeExternalRuntimeStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
+	w := r.externalRuntimeTimingWorkspace(ctx, pool)
+	if w == nil || w.Spec.Retirement == nil {
 		return
+	}
+	proven, ok := r.externalTimings.claimStop(pool.UID, externalRuntimeStopKey(w.Spec.Retirement))
+	if !ok {
+		return
+	}
+	stopped := r.now()
+	if !proven.IsZero() && proven.Before(stopped) {
+		stopped = proven
 	}
 	action := strings.ToLower(string(w.Spec.Retirement.Action))
-	phases := externalRuntimeStopPhases(w, now)
+	phases := externalRuntimeStopPhases(w, stopped)
 	for _, phase := range phases {
 		orkametrics.RecordACPWorkspaceRuntimePhase(action, phase.name, phase.duration)
 	}
-	logger.Info(externalRuntimeStoppedLogMessage, append([]any{
+	log.FromContext(ctx).Info(externalRuntimeStoppedLogMessage, append([]any{
 		"runtimePool", pool.Name, "action", action, "sequence", w.Spec.Retirement.Sequence,
 	}, externalRuntimePhaseKeysAndValues(phases)...)...)
 }

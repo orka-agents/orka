@@ -17,7 +17,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -94,6 +97,32 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 	got = phaseDurations(externalRuntimeStartPhases(pool, w, published.Add(time.Minute+4*time.Second)))
 	if len(got) != 1 || got[externalRuntimePhaseStartTotal] != 4*time.Second {
 		t.Fatalf("later sequence phases = %v", got)
+	}
+
+	// A condition time keeps whole seconds, so readiness in the publication's
+	// own second still splits the start, while readiness from an earlier second
+	// predates the sequence.
+	subsecond := published.Add(time.Minute + 700*time.Millisecond)
+	w.Annotations[externalWorkloadPublishedAnnotation] = formatExternalRuntimeMilestone(2, subsecond)
+	w.Status.Conditions[0].LastTransitionTime = metav1.NewTime(subsecond.Add(200 * time.Millisecond))
+	raw, err := json.Marshal(w.Status.Conditions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored metav1.Condition
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Conditions[0] = stored
+	got = phaseDurations(externalRuntimeStartPhases(pool, w, subsecond.Add(3*time.Second)))
+	if len(got) != 3 || got[externalRuntimePhaseProviderMaterialization] != 0 || got[externalRuntimePhaseBootstrapAndProbe] != 3*time.Second ||
+		got[externalRuntimePhaseStartTotal] != 3*time.Second {
+		t.Fatalf("second-precision readiness phases = %v", got)
+	}
+	w.Status.Conditions[0].LastTransitionTime = metav1.NewTime(subsecond.Truncate(time.Second).Add(-time.Second))
+	got = phaseDurations(externalRuntimeStartPhases(pool, w, subsecond.Add(3*time.Second)))
+	if len(got) != 1 || got[externalRuntimePhaseStartTotal] != 3*time.Second {
+		t.Fatalf("earlier-second readiness phases = %v", got)
 	}
 
 	// A milestone from another sequence reports nothing.
@@ -267,5 +296,138 @@ func TestObserveExternalRuntimeTransitionLogsOncePerTransition(t *testing.T) {
 		default:
 			t.Fatalf("start line carries unexpected field %q: %v", key, line)
 		}
+	}
+}
+
+func captureRuntimeTimingLines(t *testing.T) (context.Context, *[]map[string]any) {
+	t.Helper()
+	var lines []map[string]any
+	ctx := logf.IntoContext(context.Background(), funcr.NewJSON(func(obj string) {
+		values := map[string]any{}
+		if err := json.Unmarshal([]byte(obj), &values); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, values)
+	}, funcr.Options{}))
+	return ctx, &lines
+}
+
+// A probe can record an instance while its supervisor still boots. Its first
+// admission is its start; a later readmission of the same instance is not.
+func TestObserveExternalRuntimeTransitionReportsBootedInstanceOnFirstAdmission(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.materialize(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	ctx, lines := captureRuntimeTimingLines(t)
+	instance := &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1"}
+	booting := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStarting, AdmissionState: corev1alpha1.RuntimePoolAdmissionClosed, ActiveInstance: instance}
+	accepting := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting, ActiveInstance: instance}
+	atCapacity := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionClosed, ActiveInstance: instance}
+	f.r.observeExternalRuntimeTransition(ctx, &pool, booting, accepting)
+	f.r.observeExternalRuntimeTransition(ctx, &pool, accepting, atCapacity)
+	f.r.observeExternalRuntimeTransition(ctx, &pool, atCapacity, accepting)
+	if len(*lines) != 1 || (*lines)[0]["msg"] != externalRuntimeStartedLogMessage {
+		t.Fatalf("lines = %v, want one start", *lines)
+	}
+}
+
+// The reconcile's own workspace is reported even when a second read would
+// fail after the transition persisted.
+func TestObserveExternalRuntimeTransitionUsesReconciledWorkspace(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	workspace, _ := f.materialize(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if err := f.r.Delete(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	ctx, lines := captureRuntimeTimingLines(t)
+	accepting := corev1alpha1.RuntimePoolStatus{AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+		ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1"}}
+	f.r.observeExternalRuntimeTransition(ctx, &pool, corev1alpha1.RuntimePoolStatus{}, accepting)
+	if len(*lines) != 0 {
+		t.Fatalf("lines without a workspace = %v", *lines)
+	}
+	f.r.observeExternalRuntimeTransition(withExternalRuntimeTimingWorkspace(ctx, workspace), &pool, corev1alpha1.RuntimePoolStatus{}, accepting)
+	if len(*lines) != 1 || (*lines)[0]["msg"] != externalRuntimeStartedLogMessage {
+		t.Fatalf("lines = %v, want one start", *lines)
+	}
+}
+
+// A pool that leaves Stopped after a transient failure and records Stopped
+// again for the same retirement does not report that stop twice.
+func TestObserveExternalRuntimeTransitionReportsEachRetirementOnce(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	clock := &runtimeTimingClock{now: time.Now().UTC()}
+	f.r.Now = clock.Now
+	workspace, _ := f.materialize(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	workspace.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: workspace.Spec.Workload.Sequence, Action: workspacev1alpha1.WorkloadRetirementStop}
+	setExternalRuntimeMilestone(workspace, externalRetirementAuthorizedAnnotation, workspace.Spec.Retirement.Sequence, clock.now)
+	clock.now = clock.now.Add(4 * time.Second)
+	ctx, lines := captureRuntimeTimingLines(t)
+	ctx = withExternalRuntimeTimingWorkspace(ctx, workspace)
+	stopping := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStopping}
+	degraded := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleDegraded}
+	stopped := corev1alpha1.RuntimePoolStatus{Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped}
+	f.r.observeExternalRuntimeTransition(ctx, &pool, stopping, stopped)
+	f.r.observeExternalRuntimeTransition(ctx, &pool, degraded, stopped)
+	if len(*lines) != 1 || (*lines)[0]["msg"] != externalRuntimeStoppedLogMessage || (*lines)[0]["providerRetirementMs"] != float64(4000) {
+		t.Fatalf("lines = %v, want one stop", *lines)
+	}
+	// A different retirement of the same sequence is a new stop.
+	workspace.Spec.Retirement.Action = workspacev1alpha1.WorkloadRetirementDelete
+	f.r.observeExternalRuntimeTransition(ctx, &pool, degraded, stopped)
+	if len(*lines) != 2 || (*lines)[1]["action"] != "delete" {
+		t.Fatalf("lines = %v, want a delete stop", *lines)
+	}
+}
+
+// Deleting a running pool never records Stopped; releasing its finalizer
+// after the proven termination reports the stop.
+func TestExternalRuntimePoolDeletionRecordsStop(t *testing.T) {
+	ctx := context.Background()
+	f := newExternalRuntimePoolFixture(t)
+	clock := &runtimeTimingClock{now: time.Now().UTC()}
+	f.r.Now = clock.Now
+	retirement := runtimePhaseSamples(t, "delete", externalRuntimePhaseProviderRetirement)
+	_, pod := f.serve(t)
+	current := runtimePoolTestGetPool(t, f.r, f.pool)
+	if err := f.r.Delete(ctx, &current); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, f.r, f.pool)
+	runtimePoolReconcile(t, f.r, f.pool)
+	f.supervisor.probe = runtimePoolValidProbe(f.pool, &pod, "external-boot", true)
+	runtimePoolReconcile(t, f.r, f.pool)
+	workspace := f.currentWorkspace(t)
+	if workspace.Spec.Retirement == nil || workspace.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementDelete {
+		t.Fatalf("deleted pool did not authorize deletion: %#v", workspace.Spec.Retirement)
+	}
+	workspace.Status.Allocation.Startup = nil
+	workspace.Status.Allocation.State = workspacev1alpha1.AllocationDeleted
+	workspace.Status.Allocation.Disposition = &workspacev1alpha1.ExecutionWorkspaceDisposition{Compute: workspacev1alpha1.DispositionDeleted, AccessCredentials: workspacev1alpha1.DispositionRevoked,
+		EphemeralSecrets: workspacev1alpha1.DispositionDeleted, WorkspaceData: workspacev1alpha1.DispositionDeleted, PersistentVolumes: workspacev1alpha1.DispositionDeleted,
+		Checkpoints: workspacev1alpha1.DispositionDeleted, ProviderResources: workspacev1alpha1.DispositionDeleted}
+	workspace.Status.ObservedGeneration = workspace.Generation
+	if err := f.r.Status().Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.Delete(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	clock.now = clock.now.Add(5 * time.Second)
+	for range 6 {
+		if _, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.r.Get(ctx, client.ObjectKeyFromObject(f.pool), &corev1alpha1.RuntimePool{}); apierrors.IsNotFound(err) {
+			break
+		}
+	}
+	if err := f.r.Get(ctx, client.ObjectKeyFromObject(f.pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("deleted pool was not finalized: %v", err)
+	}
+	if got := runtimePhaseSamples(t, "delete", externalRuntimePhaseProviderRetirement) - retirement; got != 1 {
+		t.Fatalf("delete provider_retirement samples = %d, want one", got)
 	}
 }
