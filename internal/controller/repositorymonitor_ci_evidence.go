@@ -656,7 +656,8 @@ func repositoryMonitorEvidenceCutRaw(value string, limit int) string {
 
 // repositoryMonitorEvidenceWithholdJoinedSecrets withholds each sanitized
 // line that still looks like a credential, every line of a PEM block or of a
-// credential's YAML block scalar, and the lines a credential wrapped across
+// credential's multi-line value, each line carrying a credential in a shape
+// only CI text has, and the lines a credential wrapped across
 // line breaks spans, such as a JWT or an Authorization header value split
 // over lines.
 //
@@ -684,7 +685,7 @@ func repositoryMonitorEvidenceWithholdJoinedSecrets(original, lines []string) {
 		}
 	}
 	repositoryMonitorEvidenceWithholdPEMBlocks(original, lines)
-	repositoryMonitorEvidenceWithholdYAMLBlocks(original, lines)
+	repositoryMonitorEvidenceWithholdMultilineValues(original, lines)
 	words, escaped := repositoryMonitorEvidenceLineWords(original)
 	// chainEnd[i] is the last line the chain from line i's last word reaches.
 	chainEnd := make([]int, len(original))
@@ -809,25 +810,14 @@ func repositoryMonitorEvidenceWithholdPEMBlocks(original, lines []string) {
 	}
 }
 
-// repositoryMonitorEvidenceWithholdYAMLBlocks withholds every non-blank line
-// of a YAML block scalar (| or >, with any chomping or indentation indicator)
-// whose key names a credential, from its header through its last line. The
-// block ends at the first non-blank line indented no deeper than the header
-// line. The value's lines are each too short or too plain for any check to
-// recognize, and a block of literal lines forms no continuation chain. The
-// scan is linear and independent of the check budget.
-func repositoryMonitorEvidenceWithholdYAMLBlocks(original, lines []string) {
-	for i := 0; i < len(original); i++ {
-		if !security.SensitiveYAMLBlockHeader(original[i]) {
-			continue
-		}
-		indent := repositoryMonitorEvidenceIndent(original[i])
-		lines[i] = repositoryMonitorEvidenceRedactedLine
-		for i+1 < len(original) && (strings.TrimSpace(original[i+1]) == "" || repositoryMonitorEvidenceIndent(original[i+1]) > indent) {
-			i++
-			if strings.TrimSpace(original[i]) != "" {
-				lines[i] = repositoryMonitorEvidenceRedactedLine
-			}
+// repositoryMonitorEvidenceWithholdMultilineValues withholds each line a
+// credential's multi-line value spans, as repositoryMonitorEvidenceMultilineTracker
+// follows them, and each line repositoryMonitorEvidenceCredentialLine flags.
+func repositoryMonitorEvidenceWithholdMultilineValues(original, lines []string) {
+	tracker := newRepositoryMonitorEvidenceMultilineTracker()
+	for i, line := range original {
+		if tracker.withhold(line) || repositoryMonitorEvidenceCredentialLine(line) {
+			lines[i] = repositoryMonitorEvidenceRedactedLine
 		}
 	}
 }
