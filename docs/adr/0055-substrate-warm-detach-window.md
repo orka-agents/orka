@@ -51,29 +51,36 @@ which the mid-Task bearer rotation already applies to a running Actor.
   execution snapshot (omitted when unset), the binding digest (a field only when set),
   and the immutable workspace annotation `acp.workspace.orka.ai/suspend-after-detach`.
   Changing the profile affects only new workspaces.
-- **Substrate only, since only the Substrate profile carries the field.** Agent Sandbox
+- **Substrate only in practice.** Core reads the field from any external profile,
+  but only the Substrate profile CRD defines it. Agent Sandbox
   resume reattaches a PVC and stays immediate (ADR 0028).
 
 ### Settlement
 
-- **When the window applies.** It applies when the settling Task's effective detach
-  action is `Suspend` and the workspace:
-  - is not Failed, quarantined, or operator-tainted;
+- **When the window applies.** It applies when the settling Task executed a turn
+  that did not park (ADR 0041: parking promises to release runtime capacity), its
+  effective detach action is `Suspend`, and the session-reused workspace:
+  - is Ready, and not Failed, quarantined, or operator-tainted;
   - carries the durable-session commit stamp.
-
-  It does not apply when the settling turn parked (ADR 0041), because parking promises
-  to release runtime capacity.
-- **What settlement does instead.** Settlement still revokes the attachment and waits
-  for the adapter to release the epoch, exactly as today. Then, in one optimistic patch,
-  it records:
-  - the Task's settlement receipt;
-  - `last-detached-at` set to now;
-  - an absolute `acp.workspace.orka.ai/suspend-at` deadline.
-
-  It clears the revocation stamp and any resume demand, and marks the Task settled.
-  The workspace stays `DesiredState: Ready`, unattached.
-- **The deadline is never extended.** A restart recomputes nothing: the receipt check
-  completes the Task marker, and the stored deadline stands.
+- **The deadline is stamped when revocation begins.** Revocation clears the
+  attachment before the adapter releases the epoch, and an unattached workspace
+  without a window would scale its pool to zero at once, starting a drain that
+  cannot be undone. So the same patch that records the revocation stamp and
+  `last-detached-at` also writes the absolute `acp.workspace.orka.ai/suspend-at`
+  deadline, measured from the start of revocation. Every revocation path stamps
+  it, including Task finalization.
+  - Each detach gets its own window: a deadline left by an earlier epoch is
+    replaced, never carried forward.
+  - An ineligible detach removes any deadline in the same patch.
+- **What settlement does instead of suspending.** Once the adapter releases the
+  epoch, and if the deadline has not passed, one optimistic patch records the
+  Task's settlement receipt and `last-detached-at`. It clears the revocation stamp
+  and any resume demand, so a continuation can attach the Ready workspace
+  directly. The Task is then marked settled.
+  - The deadline is never rewritten or extended.
+  - A settlement that finds the deadline already passed takes today's cold path.
+  - Paths that do not keep the workspace warm remove the deadline: a Failed
+    workspace kept for recovery, and a cold Suspend blocked by the cap.
 
 ### Pool demand
 
@@ -97,10 +104,12 @@ which the mid-Task bearer rotation already applies to a running Actor.
 
   This is evaluated before, and independently of, `idleTimeout`. Suspension restamps
   `last-detached-at`, so a suspended workspace keeps its full `idleTimeout` afterward.
-- **If the suspended-workspace cap is exhausted,** retention removes `suspend-at` and
-  leaves the workspace Ready. The pool then scales to zero with data-preserving
-  retirement, which is today's quota-exhausted state. Without this, Actors would keep
-  running until `maxLifetime`.
+- **If the suspended-workspace cap is exhausted,** retention replaces `suspend-at`
+  with `acp.workspace.orka.ai/suspend-pending` and leaves the workspace Ready. The
+  pool then scales to zero with data-preserving retirement, so Actors never keep
+  running until `maxLifetime`. Because no settlement is still pending to retry the
+  frozen `Suspend`, retention retries it on each pass and otherwise applies ordinary
+  idle retention. Attaching, suspending, or a new detach clears the marker.
 - **Warm Ready workspaces do not count against `maxSuspendedWorkspaces`.**
 - **Operator access cuts the window short.** A workspace tainted during the window
   expires immediately instead of waiting for its deadline.
@@ -113,7 +122,9 @@ which the mid-Task bearer rotation already applies to a running Actor.
   transcript, because write-intent RuntimeSessions are still retired after every turn.
 - **Races.**
   - Attach and the delayed suspension both write the workspace under its
-    resourceVersion, so exactly one wins.
+    resourceVersion, so exactly one wins. A direct attach is refused once desired
+    state is no longer Ready, so a retried attach can never undo a suspension that
+    landed after its first read.
   - If the suspension wins, the continuation takes today's cold-resume path.
   - A continuation still planning when the deadline passes resumes cold.
 
