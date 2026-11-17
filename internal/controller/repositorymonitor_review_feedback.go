@@ -360,6 +360,13 @@ type repositoryMonitorFeedbackPageInfo struct {
 	EndCursor   string `json:"endCursor"`
 }
 
+// repositoryMonitorFeedbackBackwardPageInfo is the page info of a connection
+// read backward, from its newest page.
+type repositoryMonitorFeedbackBackwardPageInfo struct {
+	HasPreviousPage bool   `json:"hasPreviousPage"`
+	StartCursor     string `json:"startCursor"`
+}
+
 // repositoryMonitorRawReviewFeedback is what the GitHub reads returned.
 type repositoryMonitorRawReviewFeedback struct {
 	headSHA        string
@@ -388,11 +395,14 @@ const repositoryMonitorFeedbackThreadsQuery = `query($owner:String!,$name:String
  } }
 }`
 
-const repositoryMonitorFeedbackReviewsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String) {
+// repositoryMonitorFeedbackReviewsQuery reads reviews newest page first, so
+// a read cut at its page limit still holds the latest verdict of every
+// reviewer it holds. Each page lists its own reviews oldest first.
+const repositoryMonitorFeedbackReviewsQuery = `query($owner:String!,$name:String!,$number:Int!,$before:String) {
  repository(owner:$owner,name:$name) { pullRequest(number:$number) {
   headRefOid
-  reviews(first:50, after:$after) {
-   pageInfo { hasNextPage endCursor }
+  reviews(last:50, before:$before) {
+   pageInfo { hasPreviousPage startCursor }
    nodes { fullDatabaseId state body url submittedAt lastEditedAt isMinimized author { login __typename } commit { oid } }
   }
  } }
@@ -470,20 +480,28 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 		}
 		after = info.EndCursor
 	}
-	after = nil
+	// Reviews are read newest page first and kept oldest first, so the
+	// reviews read are always the newest ones: a reviewer whose latest
+	// review is older than the pages read is absent, never shown with an
+	// earlier verdict.
+	var before any
 	for page := 1; ; page++ {
 		var response struct {
 			Repository *struct {
 				PullRequest *struct {
 					HeadRefOID string `json:"headRefOid"`
 					Reviews    struct {
-						PageInfo repositoryMonitorFeedbackPageInfo     `json:"pageInfo"`
-						Nodes    []repositoryMonitorFeedbackReviewNode `json:"nodes"`
+						PageInfo repositoryMonitorFeedbackBackwardPageInfo `json:"pageInfo"`
+						Nodes    []repositoryMonitorFeedbackReviewNode     `json:"nodes"`
 					} `json:"reviews"`
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackReviewsQuery, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
+		// The reviews query declares before, not after.
+		variables := repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, nil)
+		delete(variables, "after")
+		variables["before"] = before
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackReviewsQuery, variables, &response); err != nil {
 			stop(err)
 			return raw
 		}
@@ -495,19 +513,19 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 		if !checkHead(pr.HeadRefOID) {
 			return raw
 		}
-		raw.reviews = append(raw.reviews, pr.Reviews.Nodes...)
+		raw.reviews = append(slices.Clone(pr.Reviews.Nodes), raw.reviews...)
 		info := pr.Reviews.PageInfo
-		if !info.HasNextPage {
+		if !info.HasPreviousPage {
 			break
 		}
-		if page == repositoryMonitorFeedbackReviewPages || info.EndCursor == "" {
+		if page == repositoryMonitorFeedbackReviewPages || info.StartCursor == "" {
 			raw.partial = true
 			if raw.reason == "" {
 				raw.reason = repositoryMonitorFeedbackReasonReviewPageLimit
 			}
 			break
 		}
-		after = info.EndCursor
+		before = info.StartCursor
 	}
 	return raw
 }
@@ -543,6 +561,13 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx c
 // repositoryMonitorPublishedReviewIDs returns the GitHub review IDs Orka
 // published on the pull request. A comment is Orka's own only when it
 // belongs to one of them; a copied hidden marker does not make it so.
+//
+// Every monitor in the namespace counts, not only this one: another monitor
+// of the same repository, or a deleted or renamed one, publishes Orka's
+// reviews too, and its reviews must not read as human feedback. Publish
+// records do not name the repository, so records of the same pull request
+// number in other repositories are included as well; GitHub review IDs are
+// unique across repositories, so those never match a review here.
 func (r *RepositoryMonitorReconciler) repositoryMonitorPublishedReviewIDs(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64) (map[string]bool, error) {
 	ids := map[string]bool{}
 	if r.Store == nil {
@@ -550,7 +575,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPublishedReviewIDs(ctx co
 	}
 	for cursor := ""; ; {
 		page, next, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
-			Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: number, Limit: 100, Cursor: cursor,
+			Namespace: monitor.Namespace, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: number, Limit: 100, Cursor: cursor,
 		})
 		if err != nil {
 			return nil, err
@@ -633,11 +658,8 @@ func (n *repositoryMonitorFeedbackNormalizer) author(actor *repositoryMonitorFee
 			authority: repositoryMonitorFeedbackAuthority{reason: repositoryMonitorFeedbackAuthorityAuthorUnavailable}, evidence: true}
 	}
 	login := strings.TrimSpace(actor.Login)
-	// The pull request author's own comments never start a repair of their
-	// pull request, so a repair cannot loop on itself. Bots are matched
-	// with and without the "[bot]" suffix REST uses.
-	prAuthor := n.prAuthor != "" && (strings.EqualFold(login, n.prAuthor) || repositoryMonitorFeedbackBotKey(login) == repositoryMonitorFeedbackBotKey(n.prAuthor))
-	if strings.EqualFold(actor.TypeName, "Bot") || strings.HasSuffix(strings.ToLower(login), "[bot]") {
+	prAuthor := n.isPRAuthor(login)
+	if repositoryMonitorFeedbackIsBot(actor) {
 		// The collaborator API cannot describe a GitHub App bot; the
 		// allowlist alone authorizes one.
 		if !n.policy.botAllowlisted(login) {
@@ -662,6 +684,96 @@ func (n *repositoryMonitorFeedbackNormalizer) author(actor *repositoryMonitorFee
 		author.authority.reason = shortfall
 	}
 	return author
+}
+
+// isPRAuthor reports whether login is the pull request author, whose own
+// comments never start a repair of their pull request, so a repair cannot
+// loop on itself. Bots are matched with and without the "[bot]" suffix REST
+// uses.
+func (n *repositoryMonitorFeedbackNormalizer) isPRAuthor(login string) bool {
+	return n.prAuthor != "" && (strings.EqualFold(login, n.prAuthor) || repositoryMonitorFeedbackBotKey(login) == repositoryMonitorFeedbackBotKey(n.prAuthor))
+}
+
+func repositoryMonitorFeedbackIsBot(actor *repositoryMonitorFeedbackActor) bool {
+	return strings.EqualFold(actor.TypeName, "Bot") || strings.HasSuffix(strings.ToLower(strings.TrimSpace(actor.Login)), "[bot]")
+}
+
+// lookUpStartCandidates spends the bounded permission lookups on the human
+// authors whose feedback could start a repair before any other author, so
+// evidence-only commenters cannot use them up. Candidates are the authors of
+// comments on unresolved, current threads that Orka's findings did not open,
+// and, when changes-requested reviews may start repairs, reviewers whose
+// current changes-requested review has a body. They are looked up newest
+// activity first, then by login; any lookups left go to the other authors
+// in the order normalization reaches them.
+func (n *repositoryMonitorFeedbackNormalizer) lookUpStartCandidates(threads []repositoryMonitorFeedbackThreadNode, reviews []repositoryMonitorFeedbackReviewNode, orkaReviews map[string]bool) {
+	latest := map[string]time.Time{}
+	logins := map[string]string{}
+	see := func(actor *repositoryMonitorFeedbackActor, body string, at time.Time) {
+		if actor == nil || !repositoryMonitorFeedbackLoginPattern.MatchString(strings.TrimSpace(actor.Login)) || repositoryMonitorFeedbackIsBot(actor) {
+			return
+		}
+		login := strings.TrimSpace(actor.Login)
+		if n.isPRAuthor(login) {
+			return
+		}
+		if text, _, _ := repositoryMonitorFeedbackBody(body); strings.TrimSpace(text) == "" {
+			return
+		}
+		key := strings.ToLower(login)
+		if seen, ok := latest[key]; !ok || at.After(seen) {
+			latest[key], logins[key] = at, login
+		}
+	}
+	for _, node := range threads {
+		if node.IsResolved || node.IsOutdated || repositoryMonitorFeedbackNodeID(node.ID) == "" ||
+			len(node.Root.Nodes) > 0 && repositoryMonitorFeedbackOrkaComment(node.Root.Nodes[0], orkaReviews) {
+			continue
+		}
+		for _, comment := range repositoryMonitorFeedbackThreadComments(node) {
+			if comment.IsMinimized || repositoryMonitorFeedbackOrkaComment(comment, orkaReviews) || repositoryMonitorFeedbackID(repositoryMonitorFeedbackKindComment, comment.FullDatabaseID) == "" {
+				continue
+			}
+			see(comment.Author, comment.Body, repositoryMonitorFeedbackActivity(comment.CreatedAt, comment.LastEditedAt))
+		}
+	}
+	if n.policy.ChangesRequestedReviews {
+		for _, review := range reviews {
+			if review.IsMinimized || review.SubmittedAt == nil || orkaReviews[strings.TrimSpace(review.FullDatabaseID)] || repositoryMonitorFeedbackID(repositoryMonitorFeedbackKindReview, review.FullDatabaseID) == "" {
+				continue
+			}
+			see(review.Author, review.Body, repositoryMonitorFeedbackActivity(review.SubmittedAt.UTC(), review.LastEditedAt))
+		}
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b string) int {
+		if c := latest[b].Compare(latest[a]); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	for _, key := range keys {
+		if n.permissions.lookups >= repositoryMonitorFeedbackMaxPermissionLookups {
+			return
+		}
+		n.permissions.permission(logins[key])
+	}
+}
+
+// repositoryMonitorFeedbackThreadComments returns a thread's root comment
+// and its newest comments, without duplicates, oldest first. Comments in
+// between are counted, not read.
+func repositoryMonitorFeedbackThreadComments(node repositoryMonitorFeedbackThreadNode) []repositoryMonitorFeedbackCommentNode {
+	comments := slices.Clone(node.Root.Nodes)
+	for _, comment := range node.Recent.Nodes {
+		if !slices.ContainsFunc(comments, func(c repositoryMonitorFeedbackCommentNode) bool { return c.FullDatabaseID == comment.FullDatabaseID }) {
+			comments = append(comments, comment)
+		}
+	}
+	return comments
 }
 
 // repositoryMonitorFeedbackBody removes hidden HTML comments, then sanitizes
@@ -761,6 +873,8 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		prAuthor:    strings.TrimSpace(raw.prAuthor),
 		permissions: &repositoryMonitorFeedbackPermissions{lookup: permissionOf, known: map[string]string{}, failed: map[string]bool{}},
 	}
+	currentReviews := repositoryMonitorCurrentChangesRequestedReviews(raw.reviews)
+	normalizer.lookUpStartCandidates(raw.threads, currentReviews, orkaReviews)
 	var threads []repositoryMonitorFeedbackPendingThread
 	for _, node := range raw.threads {
 		if pending, ok := normalizer.thread(node, orkaReviews); ok {
@@ -768,7 +882,7 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		}
 	}
 	var reviews []repositoryMonitorFeedbackPendingReview
-	for _, node := range repositoryMonitorCurrentChangesRequestedReviews(raw.reviews) {
+	for _, node := range currentReviews {
 		if pending, ok := normalizer.review(node, pr.HeadSHA, orkaReviews); ok {
 			reviews = append(reviews, pending)
 		}
@@ -885,14 +999,7 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 	if node.Line != nil && !node.IsOutdated {
 		thread.Line = max(*node.Line, 0)
 	}
-	// The root comment and the newest ones, without duplicates, oldest
-	// first. Comments in between are counted, not read.
-	comments := slices.Clone(node.Root.Nodes)
-	for _, comment := range node.Recent.Nodes {
-		if !slices.ContainsFunc(comments, func(c repositoryMonitorFeedbackCommentNode) bool { return c.FullDatabaseID == comment.FullDatabaseID }) {
-			comments = append(comments, comment)
-		}
-	}
+	comments := repositoryMonitorFeedbackThreadComments(node)
 	thread.OmittedComments = max(node.Root.TotalCount-len(comments), 0)
 	if len(node.Root.Nodes) > 0 && repositoryMonitorFeedbackOrkaComment(node.Root.Nodes[0], orkaReviews) {
 		thread.OrkaFindingThread = true

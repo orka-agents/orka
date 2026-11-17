@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -404,8 +405,96 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupLimit(t *testing.T) {
 	if len(*looked) != repositoryMonitorFeedbackMaxPermissionLookups || len(snapshot.startableFeedback()) != repositoryMonitorFeedbackMaxPermissionLookups || len(snapshot.Threads) != len(threads) {
 		t.Fatalf("lookups %d startable %d threads %d", len(*looked), len(snapshot.startableFeedback()), len(snapshot.Threads))
 	}
-	if last := snapshot.Threads[len(snapshot.Threads)-1].Comments[0]; last.Permission != "unknown" {
-		t.Fatalf("unlooked-up author = %+v", last)
+	// Lookups go to the newest activity first, so the two oldest authors
+	// are the ones left unknown.
+	unknown := map[string]bool{}
+	for _, thread := range snapshot.Threads {
+		if comment := thread.Comments[0]; comment.Permission == "unknown" {
+			unknown[comment.Author] = true
+		}
+	}
+	if !maps.Equal(unknown, map[string]bool{"user0": true, "user1": true}) {
+		t.Fatalf("unlooked-up authors = %v", unknown)
+	}
+}
+
+func TestRepositoryMonitorReviewFeedbackLookupsPreferStartCandidates(t *testing.T) {
+	// More outside commenters than there are lookups come first in GitHub's
+	// order, on outdated threads, a thread Orka's finding opened, and a
+	// resolved thread, all newer than the maintainers' feedback. None of
+	// them can start a repair, so the maintainers are looked up first.
+	permissions := map[string]string{"maintainer": "write", "approver": "maintain"}
+	threads := make([]repositoryMonitorFeedbackThreadNode, 0, repositoryMonitorFeedbackMaxPermissionLookups+8)
+	for i := range repositoryMonitorFeedbackMaxPermissionLookups + 5 {
+		login := fmt.Sprintf("outsider%d", i)
+		permissions[login] = "read"
+		threads = append(threads, repositoryMonitorFeedbackTestThread(fmt.Sprintf("TO%d", i), 10, true, repositoryMonitorFeedbackTestComment(100+i, login, "User", "Old note.", 60+i)))
+	}
+	orkaRoot := repositoryMonitorFeedbackTestComment(900, "orka-user", "User", "**P1: Bug**", 0)
+	orkaRoot.PullRequestReview = &struct {
+		FullDatabaseID string `json:"fullDatabaseId"`
+	}{FullDatabaseID: "77"}
+	threads = append(threads, repositoryMonitorFeedbackTestThread("TF", 12, false, orkaRoot, repositoryMonitorFeedbackTestComment(901, "finding-replier", "User", "Agreed.", 200)))
+	resolved := repositoryMonitorFeedbackTestThread("TR", 13, false, repositoryMonitorFeedbackTestComment(902, "resolved-replier", "User", "Done.", 201))
+	resolved.IsResolved = true
+	threads = append(threads, resolved,
+		repositoryMonitorFeedbackTestThread("TM", 20, false, repositoryMonitorFeedbackTestComment(500, "maintainer", "User", "Please fix this.", 1)))
+	raw := repositoryMonitorRawReviewFeedback{
+		prAuthor: "author",
+		threads:  threads,
+		reviews:  []repositoryMonitorFeedbackReviewNode{repositoryMonitorFeedbackTestReview(600, "approver", "CHANGES_REQUESTED", "Split this up.", repositoryMonitorFeedbackTestHead, 2)},
+	}
+	policy := repositoryMonitorReviewFeedbackPolicy{MinPermission: "write", ChangesRequestedReviews: true}
+	// Every re-read of the same feedback spends its lookups the same way.
+	for range 2 {
+		permissionOf, looked := repositoryMonitorFeedbackTestPermissions(permissions)
+		snapshot := repositoryMonitorFeedbackTestNormalize(raw, map[string]bool{"77": true}, policy, permissionOf)
+		if len(*looked) != repositoryMonitorFeedbackMaxPermissionLookups || !slices.Equal((*looked)[:2], []string{"approver", "maintainer"}) {
+			t.Fatalf("lookups = %v", *looked)
+		}
+		if got, want := repositoryMonitorFeedbackStartableIDs(snapshot), []string{"review:600", "review_comment:500"}; !slices.Equal(got, want) {
+			t.Fatalf("startable = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRepositoryMonitorReviewFeedbackReadsNewestReviewsFirst(t *testing.T) {
+	ctx := context.Background()
+	review := func(id int, login, state string, minutes int) string {
+		submitted := repositoryMonitorFeedbackTestTime.Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339)
+		return fmt.Sprintf(`{"fullDatabaseId":"%d","state":%q,"body":"Review %d.","url":"https://github.com/orka-agents/orka/pull/1#pullrequestreview-%d","submittedAt":%q,"lastEditedAt":null,"isMinimized":false,"author":{"login":%q,"__typename":"User"},"commit":{"oid":"head1111"}}`, id, state, id, id, submitted, login)
+	}
+	// Pages oldest first. The writer's changes request on the first page is
+	// superseded by their approval on the last, more than four pages later.
+	// The absent reviewer's only verdict is older than the pages read.
+	pages := []string{
+		"[" + review(1, "writer", "CHANGES_REQUESTED", 1) + "," + review(2, "absent", "CHANGES_REQUESTED", 2) + "]",
+		"[" + review(3, "commenter", "COMMENTED", 3) + "]",
+		"[" + review(4, "other", "CHANGES_REQUESTED", 4) + "]",
+		"[" + review(5, "commenter", "COMMENTED", 5) + "]",
+		"[" + review(6, "commenter", "COMMENTED", 6) + "]",
+		"[" + review(7, "writer", "APPROVED", 7) + "]",
+	}
+	github := &repositoryMonitorFeedbackGitHub{t: t, reviewPages: pages, permissions: map[string]string{"writer": "write", "other": "write"}}
+	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"threads:1", "reviews:6", "reviews:5", "reviews:4", "reviews:3"}; !slices.Equal(slices.DeleteFunc(slices.Clone(github.requests), func(s string) bool { return strings.HasPrefix(s, "permission:") }), want) {
+		t.Fatalf("requests = %v", github.requests)
+	}
+	if !snapshot.Partial || snapshot.Reason != repositoryMonitorFeedbackReasonReviewPageLimit {
+		t.Fatalf("snapshot partial %t reason %q", snapshot.Partial, snapshot.Reason)
+	}
+	// Only the other reviewer's request is current; the writer's stale
+	// request is not evidence, and the absent reviewer is left out.
+	if len(snapshot.Reviews) != 1 || snapshot.Reviews[0].ID != "review:4" {
+		t.Fatalf("reviews = %+v", snapshot.Reviews)
+	}
+	if snapshot.canStartRepair() || len(snapshot.startableFeedback()) != 0 {
+		t.Fatalf("partial snapshot can start a repair: %+v", snapshot.startableFeedback())
 	}
 }
 
@@ -480,24 +569,39 @@ func (g *repositoryMonitorFeedbackGitHub) ServeHTTP(w http.ResponseWriter, req *
 	if override, ok := g.heads[page]; ok {
 		head = override
 	}
-	connection, pages := "reviews", g.reviewPages
-	if strings.Contains(request.Query, "reviewThreads") {
-		connection, pages = "reviewThreads", g.threadPages
-		g.requests = append(g.requests, fmt.Sprintf("threads:%d", page))
-		if page == g.failThreadPage {
-			_, _ = w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
-			return
+	if !strings.Contains(request.Query, "reviewThreads") {
+		// Reviews are read backward: the first read is the newest page,
+		// and each before cursor names the page after the one wanted.
+		// reviewPages lists pages oldest first.
+		if !strings.Contains(request.Query, "reviews(last:50, before:$before)") || request.Variables["after"] != nil {
+			g.t.Errorf("reviews are not read newest first: %s %v", request.Query, request.Variables)
 		}
-	} else {
+		page = max(len(g.reviewPages), 1)
+		if before, _ := request.Variables["before"].(string); before != "" {
+			_, _ = fmt.Sscanf(before, "cursor%d", &page)
+			page--
+		}
 		g.requests = append(g.requests, fmt.Sprintf("reviews:%d", page))
+		nodes := "[]"
+		if page >= 1 && page <= len(g.reviewPages) {
+			nodes = g.reviewPages[page-1]
+		}
+		_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"headRefOid":%q,"reviews":{"pageInfo":{"hasPreviousPage":%t,"startCursor":"cursor%d"},"nodes":%s}}}}}`,
+			head, page > 1, page, nodes)
+		return
+	}
+	g.requests = append(g.requests, fmt.Sprintf("threads:%d", page))
+	if page == g.failThreadPage {
+		_, _ = w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+		return
 	}
 	nodes := "[]"
-	if page <= len(pages) {
-		nodes = pages[page-1]
+	if page <= len(g.threadPages) {
+		nodes = g.threadPages[page-1]
 	}
-	hasNext := page < len(pages)
-	_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"headRefOid":%q,"reviewDecision":"CHANGES_REQUESTED","author":{"login":"author","__typename":"User"},%q:{"pageInfo":{"hasNextPage":%t,"endCursor":"cursor%d"},"nodes":%s}}}}}`,
-		head, connection, hasNext, page, nodes)
+	hasNext := page < len(g.threadPages)
+	_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"headRefOid":%q,"reviewDecision":"CHANGES_REQUESTED","author":{"login":"author","__typename":"User"},"reviewThreads":{"pageInfo":{"hasNextPage":%t,"endCursor":"cursor%d"},"nodes":%s}}}}}`,
+		head, hasNext, page, nodes)
 }
 
 func repositoryMonitorFeedbackTestThreadJSON(threadID string, commentID int, login, body string) string {
@@ -640,6 +744,46 @@ func TestRepositoryMonitorReviewFeedbackExcludesPublishedOrkaReviews(t *testing.
 	}
 	if len(snapshot.Threads) != 0 || len(snapshot.Reviews) != 0 || len(snapshot.evidenceIDs()) != 0 {
 		t.Fatalf("Orka's own review is evidence: %+v", snapshot)
+	}
+}
+
+func TestRepositoryMonitorReviewFeedbackExcludesOtherMonitorsOrkaReviews(t *testing.T) {
+	ctx := context.Background()
+	github := &repositoryMonitorFeedbackGitHub{
+		threadPages: []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T1", 11, "orka-user", "**P1: Bug**") + "]"},
+		reviewPages: []string{`[{"fullDatabaseId":"77","state":"CHANGES_REQUESTED","body":"Orka review body","submittedAt":"2026-11-01T12:05:00Z","author":{"login":"orka-user","__typename":"User"},"commit":{"oid":"head1111"}}]`},
+		permissions: map[string]string{"orka-user": "admin"},
+	}
+	github.t = t
+	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
+	// A second monitor of the same repository in the same namespace.
+	second := monitor.DeepCopy()
+	second.Name = monitor.Name + "-second"
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
+	policy := repositoryMonitorDefaultReviewFeedbackPolicy(second.Spec)
+	// A record in another namespace is not this namespace's: review 77
+	// still reads as human feedback.
+	if err := r.Store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-elsewhere", MonitorNamespace: "elsewhere", MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: repositoryMonitorFeedbackTestHead, Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "77"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, second, pr, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Threads) != 1 || len(snapshot.Reviews) != 1 {
+		t.Fatalf("review published in another namespace = %+v", snapshot)
+	}
+	// The first monitor publishes review 77; the second never treats it,
+	// or its comments, as human feedback.
+	if err := r.Store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: repositoryMonitorFeedbackTestHead, Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "77"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, second, pr, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Threads) != 0 || len(snapshot.Reviews) != 0 || len(snapshot.evidenceIDs()) != 0 || len(snapshot.startableFeedback()) != 0 {
+		t.Fatalf("another monitor's Orka review is evidence: %+v", snapshot)
 	}
 }
 
