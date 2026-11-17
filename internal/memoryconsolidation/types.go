@@ -54,6 +54,9 @@ const (
 	// MaxProposalInputChars bounds the open proposals a run reads, apart
 	// from its memories and transcripts.
 	MaxProposalInputChars = 20_000
+	// MaxCoveredIDChars bounds each proposal ID an operation covers; a
+	// longer ID is dropped, so covers cannot grow a report past its limit.
+	MaxCoveredIDChars = 128
 
 	MaxContentChars   = 1200
 	MaxTitleChars     = 120
@@ -157,6 +160,11 @@ type Input struct {
 	// Proposals are the namespace's open memory proposals: pending, or
 	// accepted and not yet applied.
 	Proposals []InputProposal `json:"proposals,omitempty"`
+	// LaterProposals are open proposals created after the run read its
+	// input, which a completion reloads. They are never part of what the
+	// model read, so an operation may not cover them, but it may not repeat
+	// them either.
+	LaterProposals []InputProposal `json:"-"`
 	// EligibleSessions counts every Session that changed in the window,
 	// including those beyond MaxInputSessions.
 	EligibleSessions int `json:"eligibleSessions"`

@@ -151,11 +151,26 @@ func encodedSize(value any) int {
 	return utf8.RuneCount(data) + 1
 }
 
+// ProposalLister lists a namespace's memory proposals.
+type ProposalLister interface {
+	ListMemoryProposals(ctx context.Context, filter store.MemoryProposalFilter) ([]store.MemoryProposal, error)
+}
+
+// OpenProposals reads the namespace's open memory proposals as CollectInputs
+// does. A completion uses it to see proposals created while the run ran.
+func OpenProposals(ctx context.Context, src ProposalLister, namespace string) ([]InputProposal, error) {
+	var input Input
+	if err := collectProposals(ctx, src, namespace, &input); err != nil {
+		return nil, err
+	}
+	return input.Proposals, nil
+}
+
 // collectProposals reads the namespace's open memory proposals, the newest
 // first across both statuses: pending ones, and accepted ones not yet
 // applied. Proposals of other kinds, such as skills, are not memory changes
 // and are never listed.
-func collectProposals(ctx context.Context, src Source, namespace string, input *Input) error {
+func collectProposals(ctx context.Context, src ProposalLister, namespace string, input *Input) error {
 	var open []store.MemoryProposal
 	// Each kind and status is listed on its own, so proposals of other
 	// kinds, such as skills, cannot crowd memory changes out of a list.

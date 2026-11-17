@@ -63,7 +63,7 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 	removalBudget := RemovalBudget(len(input.Memories))
 	removed := 0
 	targeted := map[string]bool{}
-	open := newOpenProposals(input.Proposals)
+	open := newOpenProposals(input.Proposals, input.LaterProposals)
 
 	var kept []Operation
 	var rejected []Rejection
@@ -153,10 +153,12 @@ type openProposals struct {
 	changes map[string]bool
 }
 
-func newOpenProposals(proposals []InputProposal) openProposals {
+func newOpenProposals(read, later []InputProposal) openProposals {
 	open := openProposals{ids: map[string]bool{}, targets: map[string][]string{}, contents: map[string][]string{}, changes: map[string]bool{}}
-	for _, proposal := range proposals {
+	for _, proposal := range read {
 		open.ids[proposal.ID] = true
+	}
+	for _, proposal := range append(append([]InputProposal(nil), read...), later...) {
 		for _, target := range proposal.Targets {
 			open.targets[target.MemoryID] = append(open.targets[target.MemoryID], proposal.ID)
 		}
@@ -179,7 +181,8 @@ func (o openProposals) known(covers []string) []string {
 		id = strings.TrimSpace(id)
 		// IDs are named in the proposal's description, so one that could
 		// break a line, or spell a tag line, is never kept.
-		if strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		if len([]rune(id)) > MaxCoveredIDChars ||
+			strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 			continue
 		}
 		if o.ids[id] && !seen[id] && len(kept) < store.MaxMemoryProposalTargets {
@@ -425,8 +428,8 @@ func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string)
 		// validated tags are ever applied.
 		description := op.Reason
 		if len(op.Covers) > 0 {
-			description = "Covers open proposals " + strings.Join(op.Covers, ", ") +
-				": reject or archive them if you apply this one.\n\n" + description
+			description = "The run judged these open proposals redundant with this one: " + strings.Join(op.Covers, ", ") +
+				". Check them; if they are, reject or archive them when you apply this one.\n\n" + description
 		}
 		// Proposal IDs, like the model's reason, are quoted wherever a line
 		// reads as a tag line.
@@ -491,9 +494,10 @@ func (r *Report) Redact() {
 // Encode redacts the report and encodes it in at most limit bytes. Every
 // field is bounded, but text that is mostly multibyte or escaped can still
 // encode larger than a run's report may be. Encode then drops, in order, the
-// rejected operations, the conflicts, the summary, and the kept operations'
-// text, and marks the report Abridged: the kept operations' proposals keep
-// their full text, so the report loses nothing that a review needs.
+// rejected operations, the conflicts, the summary, the kept operations' text
+// and their covered proposal IDs, and marks the report Abridged: the kept
+// operations' proposals keep their full text and name what they cover, so the
+// report loses nothing that a review needs.
 func (r *Report) Encode(limit int) ([]byte, error) {
 	r.Redact()
 	steps := []func(){
@@ -503,6 +507,11 @@ func (r *Report) Encode(limit int) ([]byte, error) {
 		func() {
 			for i := range r.Operations {
 				r.Operations[i].Title, r.Operations[i].Content, r.Operations[i].Reason, r.Operations[i].Tags = "", "", "", nil
+			}
+		},
+		func() {
+			for i := range r.Operations {
+				r.Operations[i].Covers = nil
 			}
 		},
 	}

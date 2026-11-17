@@ -598,7 +598,7 @@ func TestValidateDoesNotRepeatAnOpenProposal(t *testing.T) {
 	require.Contains(t, rejected[1].Reason, "already has an open proposal")
 
 	proposals := Proposals(kept, "team", "run", "uid", "curator")
-	require.Contains(t, proposals[0].Description, "Covers open proposals pending-add: reject or archive them if you apply this one.")
+	require.Contains(t, proposals[0].Description, "The run judged these open proposals redundant with this one: pending-add. Check them; if they are, reject or archive them when you apply this one.")
 	require.Equal(t, []string{"pending-add"}, Report{Operations: kept}.Structure().Operations[0].Covers,
 		"covered IDs are structure, not text")
 
@@ -715,4 +715,36 @@ func TestProposalsNeverTakeTagsFromACoveredProposalID(t *testing.T) {
 		key, _, found := strings.Cut(line, ":")
 		require.False(t, found && strings.EqualFold(strings.TrimSpace(key), "tags"), "no line reads as a tag line: %q", description)
 	}
+}
+
+func TestValidateDoesNotRepeatAProposalCreatedWhileTheRunRan(t *testing.T) {
+	input := validationInput()
+	input.LaterProposals = []InputProposal{{ID: "created-later", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusPending,
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}}}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		{Type: OperationRetire, Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}, Covers: []string{"created-later"}},
+	}}, input, nil, 10)
+	require.Empty(t, kept)
+	require.Len(t, rejected, 1, "a proposal created after the run read its input is not repeated, and cannot be covered")
+}
+
+func TestCoversDropLongIDsAndGoWhenAReportIsAbridged(t *testing.T) {
+	long := strings.Repeat("p", MaxCoveredIDChars+1)
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: long, Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "a"},
+		{ID: "short", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "b"},
+	}
+	kept, _, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "new",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}, Covers: []string{long, "short"}}}}, input, nil, 10)
+	require.Equal(t, []string{"short"}, kept[0].Covers, "an ID past MaxCoveredIDChars is dropped")
+
+	bare, err := json.Marshal(Report{Status: StatusCompleted, Operations: []Operation{{Type: OperationSupersede}}, Abridged: true})
+	require.NoError(t, err)
+	report := Report{Status: StatusCompleted, Operations: []Operation{{Type: OperationSupersede, Content: strings.Repeat("x", 2000),
+		Covers: []string{"short"}}}}
+	encoded, err := report.Encode(len(bare))
+	require.NoError(t, err)
+	require.True(t, report.Abridged)
+	require.NotContains(t, string(encoded), "short", "covers go last when a report must shrink")
 }

@@ -414,5 +414,5 @@ func TestMemoryConsolidationDoesNotRepeatAnOpenProposal(t *testing.T) {
 	require.Len(t, report.ProposalIDs, 1)
 	proposal, err := f.store.GetMemoryProposal(t.Context(), "default", report.ProposalIDs[0])
 	require.NoError(t, err)
-	require.Contains(t, proposal.Description, "Covers open proposals remembered")
+	require.Contains(t, proposal.Description, "redundant with this one: remembered.")
 }
