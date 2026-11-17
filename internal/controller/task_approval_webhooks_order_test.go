@@ -21,6 +21,7 @@ import (
 	"github.com/orka-agents/orka/internal/taskwebhook"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -257,5 +258,91 @@ func TestTaskReconcilerDeliversParkedSignOffNoticesAfterThePhaseWork(t *testing.
 	}
 	if stored.Status.ApprovalWebhooks.Notices[0].State != corev1alpha1.TaskWebhookDeliveryDelivered {
 		t.Fatalf("notice = %+v, want Delivered", stored.Status.ApprovalWebhooks.Notices[0].TaskWebhookDelivery)
+	}
+}
+
+// The reconcile itself retires deselected approval notices when it observes
+// an opt-out, before anything is handed to the delivery runnable, so a notice
+// waiting out its retry backoff is never sent after the event is selected
+// again.
+func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.T) {
+	task := newApprovalWebhookTask(corev1alpha1.TaskPhasePending, bothApprovalEvents...)
+	task.Spec.Type = corev1alpha1.TaskTypeContainer
+	task.Finalizers = []string{labels.TaskFinalizer}
+	task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
+		Phase: corev1alpha1.TaskPhaseFailed, Message: "recorded outcome",
+	}
+	h := newApprovalWebhookHarness(t, task, http.StatusServiceUnavailable)
+	h.request(approvalWebhookTestUID, "approval-1")
+	reconciler := &TaskReconciler{
+		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
+		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
+	}
+	startTestWebhookDispatcher(t, reconciler, 1)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
+	// The delivery runnable writes status concurrently, so a reconcile can
+	// lose an optimistic-concurrency race and is retried, as the controller
+	// would.
+	reconcile := func() {
+		t.Helper()
+		for range 20 {
+			_, err := reconciler.Reconcile(context.Background(), request)
+			if err == nil {
+				return
+			}
+			if !apierrors.IsConflict(err) {
+				t.Fatal(err)
+			}
+		}
+		t.Fatal("reconcile kept conflicting with the delivery runnable")
+	}
+
+	selectEvents := func(selected ...corev1alpha1.TaskWebhookEvent) {
+		t.Helper()
+		for range 20 {
+			stored := h.task()
+			stored.Spec.WebhookEvents = selected
+			err := h.client.Update(context.Background(), stored)
+			if err == nil {
+				return
+			}
+			if !apierrors.IsConflict(err) {
+				t.Fatal(err)
+			}
+		}
+		t.Fatal("updating webhookEvents kept conflicting with the delivery runnable")
+	}
+
+	reconcile()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if notices := h.task().Status.ApprovalWebhooks; notices != nil && len(notices.Notices) > 0 && notices.Notices[0].LastError != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first approval attempt was never recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryPending || head.NextAttemptTime == nil {
+		t.Fatalf("head notice = %+v, want pending in its retry backoff", head.TaskWebhookDelivery)
+	}
+
+	// Opt out of requests while the head waits out its backoff.
+	selectEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
+	reconcile()
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
+		t.Fatalf("head notice = %s after the reconcile observed the opt-out, want retired", head.State)
+	}
+	selectEvents(bothApprovalEvents...)
+	reconcile()
+	time.Sleep(200 * time.Millisecond)
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
+		t.Fatalf("head notice = %s after re-selecting, want it to stay retired", head.State)
+	}
+	// The terminal notice goes to the same receiver; count approval notices.
+	requested := slices.DeleteFunc(eventTypes(h.receipts()), func(eventType string) bool { return eventType != "task.approval_requested" })
+	if len(requested) != 1 {
+		t.Fatalf("approval request notices = %d, want only the attempt from before the opt-out", len(requested))
 	}
 }
