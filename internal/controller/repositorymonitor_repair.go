@@ -383,6 +383,11 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return true, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_blocked", fmt.Sprintf("Pull request #%d repair blocked: %s", pr.Number, reason), map[string]any{intentField: command.Intent, eventReasonField: reason})
 		}
 		created, inputs, err := r.createRepositoryMonitorRepairTaskWithInputs(ctx, monitor, run, command, owner, repository, pr, item, repairCountPR+1, repairCountHead+1)
+		if errors.Is(err, errRepositoryMonitorFeedbackWithdrawn) {
+			// The feedback was withdrawn after the recheck above, when the
+			// Task's input was read and before the Task existed.
+			return true, 0, r.blockRepositoryMonitorWithdrawnPolicyRepair(ctx, monitor, run, command, pr, item, repositoryMonitorRepairSkipFeedbackWithdrawn)
+		}
 		if err != nil {
 			return true, created, err
 		}
@@ -1755,7 +1760,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 					job.Phase = repositoryMonitorRepairPhaseSucceeded
 					job.LastError = ""
 				}
-			} else if repositoryMonitorACPNoChangeReceipt(&task, job.HeadSHA) && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
+			} else if noChange := repositoryMonitorACPNoChangeReceipt(&task, job.HeadSHA); noChange && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
 				containsBase, verifyErr := r.repositoryMonitorHeadContainsBase(ctx, monitor, &job)
 				if verifyErr != nil {
 					return ingested, verifyErr
@@ -1767,6 +1772,15 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 				} else {
 					job.LastError = "PR head does not contain the requested base revision"
 				}
+			} else if feedback, feedbackErr := r.repositoryMonitorFeedbackRepairJob(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID]); feedbackErr != nil {
+				return ingested, feedbackErr
+			} else if noChange && feedback {
+				// Feedback can already be addressed at this head. The repair
+				// pushed nothing, so the head is unchanged, its attempt stays
+				// charged, and open-feedback readiness decides whether a
+				// person is needed.
+				job.Phase = repositoryMonitorRepairPhaseSucceeded
+				job.LastError = ""
 			} else {
 				job.LastError = "repair delivery " + repositoryMonitorACPDeliveryFailureReason(&task)
 			}
@@ -1812,7 +1826,9 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if err == nil {
 			if item.HeadSHA == job.HeadSHA || (job.PushedSHA != "" && item.HeadSHA == job.PushedSHA) {
 				item.RepairState = job.Phase
-				if job.Phase == repositoryMonitorRepairPhaseSucceeded {
+				// A repair that pushed nothing left the head and its review
+				// as they were.
+				if job.Phase == repositoryMonitorRepairPhaseSucceeded && job.PushedSHA != "" {
 					repositoryMonitorResetItemAfterRepairPush(item)
 				}
 			} else {

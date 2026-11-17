@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -41,6 +43,9 @@ type repositoryMonitorFeedbackRepairFixture struct {
 	// labelEvents is the pull request's issue event log, which names the
 	// account behind each repair label.
 	labelEvents *string
+	// onThreadRead, when set, runs before the nth review-thread read is
+	// answered, numbered from 1.
+	onThreadRead func(n int)
 }
 
 func newRepositoryMonitorFeedbackRepairFixture(t *testing.T, configure func(*corev1alpha1.RepositoryMonitor)) *repositoryMonitorFeedbackRepairFixture {
@@ -56,9 +61,21 @@ func newRepositoryMonitorFeedbackRepairFixture(t *testing.T, configure func(*cor
 	original := pr.Config.Handler
 	labelEvents := new(string)
 	*labelEvents = "[]"
+	fixture := &repositoryMonitorFeedbackRepairFixture{}
+	threadReads := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
-		case req.URL.Path == "/graphql" || strings.HasPrefix(req.URL.Path, "/repos/orka-agents/orka/collaborators/"):
+		case req.URL.Path == "/graphql":
+			body, _ := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			if bytes.Contains(body, []byte("reviewThreads")) {
+				threadReads++
+				if fixture.onThreadRead != nil {
+					fixture.onThreadRead(threadReads)
+				}
+			}
+			feedback.ServeHTTP(w, req)
+		case strings.HasPrefix(req.URL.Path, "/repos/orka-agents/orka/collaborators/"):
 			feedback.ServeHTTP(w, req)
 		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/issues/1/events":
 			w.Header().Set("Content-Type", "application/json")
@@ -99,10 +116,11 @@ func newRepositoryMonitorFeedbackRepairFixture(t *testing.T, configure func(*cor
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
-	return &repositoryMonitorFeedbackRepairFixture{
+	*fixture = repositoryMonitorFeedbackRepairFixture{
 		reconciler: &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db, GitHubAPIBaseURL: server.URL},
 		monitor:    monitor, store: db, github: feedback, labelEvents: labelEvents,
 	}
+	return fixture
 }
 
 func (f *repositoryMonitorFeedbackRepairFixture) reconcile(t *testing.T) {
@@ -735,5 +753,290 @@ func TestRepositoryMonitorReviewFeedbackOrkaFindingRepliesSkipPriorityLookups(t 
 	}
 	if failed, limited := snapshot.unverifiedFeedback(); failed != 0 || limited != 0 {
 		t.Fatalf("unverified = %d failed, %d limited, want none", failed, limited)
+	}
+}
+
+// commandRun returns a command run for command on the fixture's pull request.
+func (f *repositoryMonitorFeedbackRepairFixture) commandRun(command store.CommandEvent) *store.MonitorRun {
+	return &store.MonitorRun{ID: "command-run-" + command.ID, MonitorNamespace: "default", MonitorName: f.monitor.Name, Trigger: "command", CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, StartedAt: time.Now()}
+}
+
+func (f *repositoryMonitorFeedbackRepairFixture) ledger(t *testing.T) repositoryMonitorFeedbackLedger {
+	t.Helper()
+	ledger, err := f.reconciler.repositoryMonitorFeedbackAttemptCounts(context.Background(), f.monitor, "orka-agents/orka", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ledger
+}
+
+// finishCommand marks the command processed, as its terminal action does.
+func (f *repositoryMonitorFeedbackRepairFixture) finishCommand(t *testing.T, id string) {
+	t.Helper()
+	command, err := f.store.GetCommandEvent(context.Background(), "default", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	command.Status, command.ProcessedAt = repositoryMonitorCommandProcessed, &now
+	if err := f.store.UpdateCommandEvent(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Feedback resolved after the withdrawal recheck but before the Task's input
+// is read withdraws the repair rather than failing it.
+func TestRepositoryMonitorReviewFeedbackWithdrawnBetweenReads(t *testing.T) {
+	ctx := context.Background()
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.github.reviewPages = nil
+	pr := repositoryMonitorFeedbackRepairTestPR()
+	item := repositoryMonitorItemFromPullRequest(f.monitor, pr, nil)
+	if started, err := f.reconciler.tryRepositoryMonitorFeedbackRepair(ctx, f.monitor, &store.MonitorRun{ID: "poll"}, "orka-agents", "orka", pr, item, false); err != nil || !started {
+		t.Fatalf("started=%t err=%v", started, err)
+	}
+	command := f.feedbackCommands(t)[0]
+	resolved := strings.Replace(f.github.threadPages[0], `"isResolved":false`, `"isResolved":true`, 1)
+	// The recheck is the first read of this handoff; the Task's input the
+	// second.
+	reads := 0
+	f.onThreadRead = func(int) {
+		reads++
+		if reads == 2 {
+			f.github.threadPages = []string{resolved}
+		}
+	}
+	handled, created, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item)
+	if err != nil || !handled || created != 0 || len(f.repairTasks(t)) != 0 || reads != 2 {
+		t.Fatalf("handoff = handled %t created %d err %v tasks %d reads %d, want a withdrawal after two reads", handled, created, err, len(f.repairTasks(t)), reads)
+	}
+	action, err := f.store.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != repositoryMonitorRepairSkipFeedbackWithdrawn {
+		t.Fatalf("action = %+v err=%v, want withdrawn", action, err)
+	}
+	if state, err := f.reconciler.repositoryMonitorRepairStateForHead(ctx, f.monitor, 1, "head1111"); err != nil || state != "" {
+		t.Fatalf("repair state = %q err=%v, want none", state, err)
+	}
+	if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 1 {
+		t.Fatalf("queued attempt was not reserved: %+v", ledger)
+	}
+	f.finishCommand(t, command.ID)
+	if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 0 {
+		t.Fatalf("withdrawn attempt was charged: %+v", ledger)
+	}
+}
+
+// While the command is queued, every admitted feedback ID is reserved. Once
+// its Task ran, only the targets its prompt froze are charged, and that
+// survives the Task's deletion.
+func TestRepositoryMonitorReviewFeedbackChargesOnlyFrozenTargets(t *testing.T) {
+	ctx := context.Background()
+	f := newRepositoryMonitorFeedbackRepairFixture(t, func(monitor *corev1alpha1.RepositoryMonitor) {
+		monitor.Spec.Repair.HumanFeedback.MaxAttemptsPerComment = new(int32(1))
+	})
+	pr := repositoryMonitorFeedbackRepairTestPR()
+	item := repositoryMonitorItemFromPullRequest(f.monitor, pr, nil)
+	if started, err := f.reconciler.tryRepositoryMonitorFeedbackRepair(ctx, f.monitor, &store.MonitorRun{ID: "poll"}, "orka-agents", "orka", pr, item, false); err != nil || !started {
+		t.Fatalf("started=%t err=%v", started, err)
+	}
+	command := f.feedbackCommands(t)[0]
+	if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 1 || ledger.spent["review:5"] != 1 {
+		t.Fatalf("queued ledger = %+v, want both reserved", ledger)
+	}
+	// A person resolved the thread before the Task was created; the review
+	// is still a target.
+	f.github.threadPages = []string{strings.Replace(f.github.threadPages[0], `"isResolved":false`, `"isResolved":true`, 1)}
+	if handled, created, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item); err != nil || !handled || created != 1 {
+		t.Fatalf("handoff = handled %t created %d err %v", handled, created, err)
+	}
+	tasks := f.repairTasks(t)
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d, want 1", len(tasks))
+	}
+	if frozen, ok := repositoryMonitorRepairFeedbackInputFromPrompt(tasks[0].Spec.Prompt, "head1111"); !ok || !slices.Equal(frozen.Targets, []string{"review:5"}) {
+		t.Fatalf("frozen targets = %+v ok=%t", frozen.Targets, ok)
+	}
+	f.finishCommand(t, command.ID)
+	check := func(when string) {
+		t.Helper()
+		if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 0 || ledger.spent["review:5"] != 1 || ledger.recorded["review_comment:11"] != 1 {
+			t.Fatalf("%s: ledger = %+v, want only the frozen target charged", when, ledger)
+		}
+	}
+	check("with the Task")
+	if err := f.reconciler.Delete(ctx, &tasks[0]); err != nil {
+		t.Fatal(err)
+	}
+	check("after the Task was deleted")
+}
+
+// A feedback repair whose Task made no change, because the feedback was
+// already addressed, is not a failed repair: it keeps its charge and leaves
+// the head and its review alone. A findings fix that makes no change still
+// fails.
+func TestRepositoryMonitorReviewFeedbackNoChangeRepairSucceeds(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		feedback  bool
+		wantPhase string
+	}{
+		{name: "feedback repair", feedback: true, wantPhase: repositoryMonitorRepairPhaseSucceeded},
+		{name: "findings fix", feedback: false, wantPhase: repositoryMonitorRepairPhaseFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+			f.github.reviewPages = nil
+			pr := repositoryMonitorFeedbackRepairTestPR()
+			item := repositoryMonitorItemFromPullRequest(f.monitor, pr, nil)
+			if started, err := f.reconciler.tryRepositoryMonitorFeedbackRepair(ctx, f.monitor, &store.MonitorRun{ID: "poll"}, "orka-agents", "orka", pr, item, false); err != nil || !started {
+				t.Fatalf("started=%t err=%v", started, err)
+			}
+			command := f.feedbackCommands(t)[0]
+			if _, _, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.feedback {
+				// The same repair, admitted as an ordinary findings fix.
+				stored, err := f.store.GetCommandEvent(ctx, "default", command.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stored.Permission = "repository_repair_policy"
+				if err := f.store.UpdateCommandEvent(ctx, stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stored, err := f.store.GetMonitorItem(ctx, "default", f.monitor.Name, repositoryMonitorPullRequestKind, "1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored.LastReviewedHeadSHA, stored.LastVerdict = "head1111", repositoryMonitorReviewVerdictPassed
+			if err := f.store.UpsertMonitorItem(ctx, stored); err != nil {
+				t.Fatal(err)
+			}
+			task := f.repairTasks(t)[0]
+			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateNoChange, Outcome: corev1alpha1.TaskDeliveryOutcomeNoChange, StartingSHA: "head1111"}
+			if err := f.reconciler.Status().Update(ctx, &task); err != nil {
+				t.Fatal(err)
+			}
+			if !repositoryMonitorACPNoChangeReceipt(&task, "head1111") {
+				t.Fatalf("task %+v does not carry a valid no-change receipt", task.Spec.Workspace)
+			}
+			if _, err := f.reconciler.ingestCompletedRepositoryMonitorRepairTasks(ctx, f.monitor); err != nil {
+				t.Fatal(err)
+			}
+			job, err := f.store.GetRepairJob(ctx, "default", "repair-"+repositoryMonitorShortHash(command.ID))
+			if err != nil || job.Phase != tc.wantPhase || job.PushedSHA != "" {
+				t.Fatalf("job = %+v err=%v, want phase %s and nothing pushed", job, err, tc.wantPhase)
+			}
+			after, err := f.store.GetMonitorItem(ctx, "default", f.monitor.Name, repositoryMonitorPullRequestKind, "1")
+			if err != nil || after.RepairState != tc.wantPhase || after.LastReviewedHeadSHA != "head1111" {
+				t.Fatalf("item = %+v err=%v, want repair state %s and the review kept", after, err, tc.wantPhase)
+			}
+			if !tc.feedback {
+				return
+			}
+			f.finishCommand(t, command.ID)
+			if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 1 {
+				t.Fatalf("no-change repair was not charged: %+v", ledger)
+			}
+			if state, err := f.reconciler.repositoryMonitorRepairStateForHead(ctx, f.monitor, 1, "head1111"); err != nil || state != repositoryMonitorRepairPhaseSucceeded {
+				t.Fatalf("repair state = %q err=%v", state, err)
+			}
+		})
+	}
+}
+
+// Feedback cut by both the page limit and the byte budget is truncated as
+// well as partial. It is still more than one read holds, so readiness asks
+// for a person and a queued repair is withdrawn rather than deferred.
+func TestRepositoryMonitorReviewFeedbackTruncatedPartialNeedsPerson(t *testing.T) {
+	ctx := context.Background()
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.github.reviewPages = nil
+	pr := repositoryMonitorFeedbackRepairTestPR()
+	item := repositoryMonitorItemFromPullRequest(f.monitor, pr, nil)
+	if started, err := f.reconciler.tryRepositoryMonitorFeedbackRepair(ctx, f.monitor, &store.MonitorRun{ID: "poll"}, "orka-agents", "orka", pr, item, false); err != nil || !started {
+		t.Fatalf("started=%t err=%v", started, err)
+	}
+	command := f.feedbackCommands(t)[0]
+	long := strings.Repeat("Please handle this case carefully. ", 110)
+	pages := make([]string, 0, repositoryMonitorFeedbackThreadPages+1)
+	for page := range repositoryMonitorFeedbackThreadPages + 1 {
+		threads := make([]string, 0, 3)
+		for i := range 3 {
+			id := 100 + page*3 + i
+			threads = append(threads, repositoryMonitorFeedbackTestThreadJSON(fmt.Sprintf("T%d", id), id, "writer", long))
+		}
+		pages = append(pages, "["+strings.Join(threads, ",")+"]")
+	}
+	f.github.threadPages = pages
+	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	if err != nil || !snapshot.Partial || snapshot.Availability != repositoryMonitorEvidenceTruncated {
+		t.Fatalf("snapshot partial=%t availability=%q err=%v, want partial and truncated", snapshot.Partial, snapshot.Availability, err)
+	}
+	state, description, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr)
+	if err != nil || !held || state != repositoryMonitorStatusFailure || !strings.Contains(description, "too large") {
+		t.Fatalf("readiness = %q %q held=%t err=%v, want a person asked to review", state, description, held, err)
+	}
+	if reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
+		t.Fatalf("withdrawn reason = %q err=%v, want withdrawn", reason, err)
+	}
+}
+
+// repositoryMonitorFeedbackRepairThreadJSON is a GraphQL review thread with
+// comments by the given logins, oldest first, each with body. Comments by
+// orka-bot belong to GitHub review 77; the others to no review.
+func repositoryMonitorFeedbackRepairThreadJSON(threadID string, firstID int, body string, logins ...string) string {
+	comments := make([]string, 0, len(logins))
+	for i, login := range logins {
+		id := firstID + i
+		review := "null"
+		if login == "orka-bot" {
+			review = `{"fullDatabaseId":"77"}`
+		}
+		comments = append(comments, fmt.Sprintf(`{"fullDatabaseId":"%d","author":{"login":%q,"__typename":"User"},"body":%q,"url":"https://github.com/orka-agents/orka/pull/1#discussion_r%d","createdAt":"2026-11-01T12:0%d:00Z","lastEditedAt":null,"isMinimized":false,"pullRequestReview":%s}`, id, login, body, id, i, review))
+	}
+	return fmt.Sprintf(`{"id":%q,"isResolved":false,"isOutdated":false,"path":"main.go","line":3,"originalLine":3,"diffSide":"RIGHT","root":{"totalCount":%d,"nodes":[%s]},"recent":{"nodes":[%s]}}`,
+		threadID, len(comments), comments[0], strings.Join(comments, ","))
+}
+
+// A thread over its budget drops middle replies, and with them an
+// authorized reviewer's feedback. Readiness cannot see what was dropped, so
+// it asks for a person rather than reporting the head ready.
+func TestRepositoryMonitorReviewFeedbackReadinessCountsIncompleteThreads(t *testing.T) {
+	ctx := context.Background()
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.github.reviewPages = nil
+	pr := repositoryMonitorFeedbackRepairTestPR()
+	long := strings.Repeat("Please look at this again. ", 150)
+	// The writer's middle reply is the only authorized feedback.
+	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackRepairThreadJSON("T1", 11, long, "outsider", "writer", "outsider") + "]"}
+	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	if err != nil || len(snapshot.Threads) != 1 || snapshot.Threads[0].OmittedComments != 1 || len(snapshot.authorizedFeedback()) != 0 {
+		t.Fatalf("snapshot threads = %+v authorized = %+v err=%v, want the authorized reply dropped", snapshot.Threads, snapshot.authorizedFeedback(), err)
+	}
+	state, description, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr)
+	if err != nil || !held || state != repositoryMonitorStatusFailure || description != "1 reviewer comment needs a person: automatic repair cannot address it." {
+		t.Fatalf("readiness = %q %q held=%t err=%v, want a person asked to look", state, description, held, err)
+	}
+	// A thread that fits is not held back by its outside comments.
+	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackRepairThreadJSON("T1", 11, "Nit.", "outsider", "outsider", "outsider") + "]"}
+	if _, _, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr); err != nil || held {
+		t.Fatalf("complete outside thread held readiness: held=%t err=%v", held, err)
+	}
+	// Omitted replies on an Orka finding thread are context only.
+	if err := f.store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "publish-1", MonitorNamespace: "default", MonitorName: f.monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "head1111", GitHubReviewID: "77"}); err != nil {
+		t.Fatal(err)
+	}
+	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackRepairThreadJSON("T1", 11, long, "orka-bot", "writer", "outsider", "outsider") + "]"}
+	snapshot, err = f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	if err != nil || len(snapshot.Threads) != 1 || !snapshot.Threads[0].OrkaFindingThread || snapshot.Threads[0].OmittedComments == 0 {
+		t.Fatalf("Orka finding thread = %+v err=%v, want it shown with omitted replies", snapshot.Threads, err)
+	}
+	if _, _, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr); err != nil || held {
+		t.Fatalf("Orka finding thread with omitted replies held readiness: held=%t err=%v", held, err)
 	}
 }

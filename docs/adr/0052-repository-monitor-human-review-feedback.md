@@ -154,10 +154,16 @@ queued feedback repair is rechecked before its Task starts. Feedback that was
 resolved, turned outdated, or was deleted withdraws it. A withdrawal is not
 a failed repair: it leaves the head as if no repair had been requested. A
 snapshot that could not be read, was read for a moved head, or could not check
-a target author's permission defers it. An attempt charges its feedback's budget once its repair
-Task exists, or while its command is still queued. An attempt whose command
-ended before any Task ran addressed nothing, so it is not charged, though the
-pull request's repair budget still counts its command. A transient GitHub
+a target author's permission defers it. An attempt charges its feedback's budget while its command is still queued,
+and once its repair Task exists if the Task's prompt froze its feedback as a
+target. The work action records the frozen targets when the Task is created,
+so the charge outlives the Task. An attempt whose command ended before any
+Task ran, or whose feedback was no longer a target when the Task was
+created, addressed nothing, so it is not charged, though the pull request's
+repair budget still counts its command. A feedback repair that makes no
+change, because its feedback was already addressed, keeps its charge and is
+not a failed repair; open-feedback readiness decides whether a person is
+needed. A transient GitHub
 failure therefore never spends a comment's attempts. The command's budget
 slot ignores the monitor generation, because repair budgets outlive spec
 changes. Editing a comment keeps its ID, so the edit does not reset

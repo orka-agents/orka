@@ -14,6 +14,8 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Feedback repairs turn authorized reviewer feedback into ordinary fix
@@ -100,23 +102,68 @@ func repositoryMonitorFeedbackRepairWithdrawn(command *store.CommandEvent, actio
 	return repositoryMonitorFeedbackCommand(command) && action != nil && action.Status == repositoryMonitorWorkActionStatusBlocked && action.BlockedReason == repositoryMonitorRepairSkipFeedbackWithdrawn
 }
 
+// tooLargeToRead reports whether the snapshot stopped at a read limit rather
+// than a failure: more feedback than one read holds, which a person must
+// review. The page limit leaves it available, or truncated when the byte
+// budget also cut it.
+func (s repositoryMonitorReviewFeedbackSnapshot) tooLargeToRead() bool {
+	return s.Partial && (s.Availability == repositoryMonitorEvidenceAvailable || s.Availability == repositoryMonitorEvidenceTruncated)
+}
+
+// incompleteThreads counts the included threads that may hide feedback
+// readiness cannot see: unresolved threads that Orka's findings did not
+// open, with comments omitted because they were not read or did not fit the
+// thread's budget, and no authorized feedback shown. An omitted comment's
+// author is unknown, so a person must look at such a thread. A thread that
+// shows authorized feedback is already held back by it.
+func (s repositoryMonitorReviewFeedbackSnapshot) incompleteThreads() int {
+	authorized := map[string]bool{}
+	for _, entry := range s.authorized {
+		authorized[entry.ID] = true
+	}
+	incomplete := 0
+	for _, thread := range s.Threads {
+		if thread.OmittedComments == 0 || thread.OrkaFindingThread {
+			continue
+		}
+		if !slices.ContainsFunc(thread.Comments, func(comment repositoryMonitorFeedbackComment) bool { return authorized[comment.ID] }) {
+			incomplete++
+		}
+	}
+	return incomplete
+}
+
 // repositoryMonitorFeedbackLedger summarizes the attempt ledger of one pull
 // request per feedback ID. recorded counts the ledger rows, which number the
 // next attempt. spent counts the attempts that charge the feedback's budget:
-// those whose repair Task was created, and those whose command is still
-// queued. An attempt whose command ended before any Task ran, because it was
-// withdrawn or kept deferring, addressed nothing and is not charged; the
-// pull request's repair budget still counts that command.
+// every attempt whose command is still queued, which reserves it, and, once
+// the command's repair Task ran, the attempts for the feedback the Task was
+// given to address. An attempt whose command ended before any Task ran, or
+// whose feedback was no longer a target when the Task was created, addressed
+// nothing and is not charged; the pull request's repair budget still counts
+// that command.
 type repositoryMonitorFeedbackLedger struct {
 	recorded map[string]int
 	spent    map[string]int
+}
+
+// repositoryMonitorFeedbackCommandCharge is which of a command's attempts
+// charge their feedback's budget: all of them, or those whose feedback IDs
+// are in targets.
+type repositoryMonitorFeedbackCommandCharge struct {
+	all     bool
+	targets map[string]bool
+}
+
+func (c repositoryMonitorFeedbackCommandCharge) charges(feedbackID string) bool {
+	return c.all || c.targets[feedbackID]
 }
 
 // repositoryMonitorFeedbackAttemptCounts reads the pull request's attempt
 // ledger.
 func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCounts(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repo string, number int64) (repositoryMonitorFeedbackLedger, error) {
 	ledger := repositoryMonitorFeedbackLedger{recorded: map[string]int{}, spent: map[string]int{}}
-	charged := map[string]bool{}
+	charges := map[string]repositoryMonitorFeedbackCommandCharge{}
 	for cursor := ""; ; {
 		attempts, next, err := r.Store.ListMonitorFeedbackAttempts(ctx, store.MonitorFeedbackAttemptFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Repo: repo, PRNumber: number, Limit: 200, Cursor: cursor})
 		if err != nil {
@@ -124,15 +171,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCounts(ctx
 		}
 		for _, attempt := range attempts {
 			ledger.recorded[attempt.FeedbackID]++
-			spent, known := charged[attempt.CommandEventID]
+			charge, known := charges[attempt.CommandEventID]
 			if !known {
-				spent, err = r.repositoryMonitorFeedbackAttemptCharged(ctx, monitor, attempt)
+				charge, err = r.repositoryMonitorFeedbackCommandCharge(ctx, monitor, attempt)
 				if err != nil {
 					return ledger, err
 				}
-				charged[attempt.CommandEventID] = spent
+				charges[attempt.CommandEventID] = charge
 			}
-			if spent {
+			if charge.charges(attempt.FeedbackID) {
 				ledger.spent[attempt.FeedbackID]++
 			}
 		}
@@ -143,33 +190,106 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCounts(ctx
 	}
 }
 
-// repositoryMonitorFeedbackAttemptCharged reports whether an attempt charges
-// its feedback's budget: its command has not finished, or its repair Task
-// was created. The repair job is written before its Task, so the job alone
-// does not show a Task ran: a job that left the queued phase was settled
-// from its Task, and a queued job's Task must still exist. A finished command
-// whose Task was never created, because creating it failed or the repair
-// was withdrawn first, addressed nothing and is not charged. A missing
-// command charges the attempt too, so the budget fails closed.
-func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackAttemptCharged(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, attempt store.MonitorFeedbackAttempt) (bool, error) {
+// repositoryMonitorFeedbackCommandCharge reports which attempts of the
+// command that admitted attempt charge their feedback's budget. While the
+// command has not finished, every attempt is reserved. Once it finished,
+// only a repair Task that was created charges, and only for the targets its
+// prompt froze. The work action records those targets once the Task exists,
+// so they prove the Task ran and outlive it. Without that record, the repair
+// job alone does not show a Task ran, since it is written first: a job that
+// left the queued phase was settled from its Task, and a queued job's Task
+// must still exist, whose prompt then names the targets. A missing command,
+// or a Task whose targets cannot be read, charges every attempt, so the
+// budget fails closed.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackCommandCharge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, attempt store.MonitorFeedbackAttempt) (repositoryMonitorFeedbackCommandCharge, error) {
+	all := repositoryMonitorFeedbackCommandCharge{all: true}
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, attempt.CommandEventID)
 	if errors.Is(err, store.ErrNotFound) {
-		return true, nil
+		return all, nil
 	}
 	if err != nil {
-		return false, err
+		return repositoryMonitorFeedbackCommandCharge{}, err
 	}
 	if command.Status != repositoryMonitorCommandProcessed {
-		return true, nil
+		return all, nil
 	}
-	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, attempt.RepairJobID)
+	targets, err := r.repositoryMonitorFeedbackRecordedTargets(ctx, monitor, command)
+	if err != nil {
+		return repositoryMonitorFeedbackCommandCharge{}, err
+	}
+	if len(targets) == 0 {
+		job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, attempt.RepairJobID)
+		if errors.Is(err, store.ErrNotFound) {
+			return repositoryMonitorFeedbackCommandCharge{}, nil
+		}
+		if err != nil {
+			return repositoryMonitorFeedbackCommandCharge{}, err
+		}
+		ran, err := r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, job)
+		if err != nil || !ran {
+			return repositoryMonitorFeedbackCommandCharge{}, err
+		}
+		if targets, err = r.repositoryMonitorFeedbackTaskTargets(ctx, monitor, job); err != nil || len(targets) == 0 {
+			return all, err
+		}
+	}
+	charge := repositoryMonitorFeedbackCommandCharge{targets: map[string]bool{}}
+	for _, target := range targets {
+		charge.targets[target] = true
+	}
+	return charge, nil
+}
+
+// repositoryMonitorFeedbackRecordedTargets returns the feedback targets the
+// command's work action recorded when its repair Task was created, or none.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackRecordedTargets(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) ([]string, error) {
+	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil || strings.TrimSpace(action.MetadataJSON) == "" {
+		return nil, err
+	}
+	var metadata struct {
+		Targets []string `json:"reviewFeedbackTargets"`
+	}
+	if json.Unmarshal([]byte(action.MetadataJSON), &metadata) != nil {
+		return nil, nil
+	}
+	return metadata.Targets, nil
+}
+
+// repositoryMonitorFeedbackTaskTargets returns the feedback targets the
+// job's repair Task prompt froze, or none when the Task or its targets
+// cannot be read.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackTaskTargets(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, job *store.RepairJob) ([]string, error) {
+	if r.Client == nil || strings.TrimSpace(job.TaskName) == "" {
+		return nil, nil
+	}
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if input, ok := repositoryMonitorRepairFeedbackInputFromPrompt(task.Spec.Prompt, job.HeadSHA); ok {
+		return input.Targets, nil
+	}
+	return nil, nil
+}
+
+// repositoryMonitorFeedbackRepairJob reports whether the repair job of
+// commandID is a feedback repair.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackRepairJob(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID string) (bool, error) {
+	if strings.TrimSpace(commandID) == "" {
+		return false, nil
+	}
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, commandID)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, job)
+	return repositoryMonitorFeedbackCommand(command), nil
 }
 
 // repositoryMonitorFeedbackTargets picks the startable feedback with
@@ -361,7 +481,7 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairFeedbackInput(
 		return input, nil
 	}
 	switch {
-	case snapshot.Partial && snapshot.Availability == repositoryMonitorEvidenceAvailable:
+	case snapshot.tooLargeToRead():
 		// More feedback than one read holds is not transient; a person
 		// must look, as readiness says.
 		return nil, errRepositoryMonitorFeedbackWithdrawn
@@ -500,14 +620,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 		return "", "", false, err
 	}
 	switch {
-	case snapshot.Partial && snapshot.Availability == repositoryMonitorEvidenceAvailable:
+	case snapshot.tooLargeToRead():
 		return repositoryMonitorStatusFailure, "Reviewer feedback is too large to read in full; a person must review it.", true, nil
 	case !snapshot.canStartRepair():
 		return repositoryMonitorStatusPending, "Waiting to read reviewer feedback for this commit.", true, nil
 	}
 	authorized := snapshot.authorizedFeedback()
 	failedLookups, limitedLookups := snapshot.unverifiedFeedback()
-	if len(authorized) == 0 && failedLookups == 0 && limitedLookups == 0 {
+	incomplete := snapshot.incompleteThreads()
+	if len(authorized) == 0 && failedLookups == 0 && limitedLookups == 0 && incomplete == 0 {
 		return "", "", false, nil
 	}
 	ledger, err := r.repositoryMonitorFeedbackAttemptCounts(ctx, monitor, snapshot.Repo, pr.Number)
@@ -540,12 +661,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 		return repositoryMonitorStatusPending, fmt.Sprintf("Addressing %s.", repositoryMonitorReviewerComments(addressing)), true, nil
 	}
 	// A failed permission lookup does not show the reviewer has no
-	// authority; wait for one that answers. Reviewers past the lookup limit
-	// stay unknown, so a person must look.
+	// authority; wait for one that answers.
 	if failedLookups > 0 {
 		return repositoryMonitorStatusPending, "Waiting to check reviewers' repository permissions.", true, nil
 	}
-	needsPerson += limitedLookups
+	// Reviewers past the lookup limit, and threads with comments Orka could
+	// not show, stay unknown, so a person must look.
+	needsPerson += limitedLookups + incomplete
 	if needsPerson == 1 {
 		return repositoryMonitorStatusFailure, "1 reviewer comment needs a person: automatic repair cannot address it.", true, nil
 	}
