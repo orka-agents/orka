@@ -325,6 +325,25 @@ func currentSchemaStatements() []string {
 			ON memory_proposals(namespace, status, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_task
 			ON memory_proposals(namespace, task_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
+			namespace    TEXT NOT NULL,
+			task_uid     TEXT NOT NULL,
+			task_name    TEXT NOT NULL,
+			mode         TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL,
+			window_start TIMESTAMP NOT NULL,
+			window_end   TIMESTAMP NOT NULL,
+			input        BLOB,
+			report       BLOB,
+			created_at   TIMESTAMP NOT NULL,
+			completed_at TIMESTAMP,
+			task_deleted INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, task_uid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_consolidation_runs_cursor
+			ON memory_consolidation_runs(namespace, status, window_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_updated
+			ON sessions(namespace, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace   TEXT NOT NULL,

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"maps"
+	"slices"
 	"sort"
 	"testing"
 
@@ -89,14 +90,14 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			binding, err := readDatasetBinding(t.Context(), db)
 			require.NoError(t, err)
-			rows := consolidatedApplicationRows(t, applicationRows(t, db))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, applicationRows(t, db)))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema174,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -151,9 +152,11 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	steps := versionUpgrades()
-	require.Equal(t, 5, steps[len(steps)-1].from)
+	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 5 })
+	require.GreaterOrEqual(t, first, 0)
+	// The final step fails, so every step from version 5 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 5, schema172, steps[len(steps)-1:]), "no_such_function",
+	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 5, schema172, steps[first:]), "no_such_function",
 		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
@@ -172,7 +175,7 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

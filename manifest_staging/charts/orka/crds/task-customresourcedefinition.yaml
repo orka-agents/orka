@@ -101,6 +101,52 @@ spec:
                     description: MaxTokens limits the response length
                     format: int32
                     type: integer
+                  memoryConsolidation:
+                    description: |-
+                      MemoryConsolidation makes this Task a memory consolidation run: it reads
+                      the namespace's current memories and recently changed Sessions and
+                      reports, or proposes, merges, supersessions and retirements for review
+                      (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+                      Prompt, when set, steers what it focuses on. Creating such a Task, or
+                      changing its spec, requires list and get on sessions and list on
+                      memories in the namespace, and in Propose mode create on
+                      memoryproposals.
+                    properties:
+                      lookback:
+                        description: |-
+                          Lookback is how far back the first run of its mode in a namespace
+                          reads. Later runs start where the latest completed run ended. Defaults
+                          to 168h; at most 720h.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: lookback must be between 1h and 720h
+                          rule: duration(self) >= duration('1h') && duration(self)
+                            <= duration('720h')
+                      maxOperations:
+                        description: |-
+                          MaxOperations is the most operations one run reports or proposes.
+                          Defaults to 10.
+                        format: int32
+                        maximum: 20
+                        minimum: 1
+                        type: integer
+                      minNewSessions:
+                        description: |-
+                          MinNewSessions is the fewest Sessions that must have changed since the
+                          last completed run for this run to call the model. Fewer skips the run.
+                          Defaults to 5.
+                        format: int32
+                        maximum: 50
+                        minimum: 1
+                        type: integer
+                      mode:
+                        default: DryRun
+                        description: Mode is DryRun, the default, or Propose.
+                        enum:
+                        - DryRun
+                        - Propose
+                        type: string
+                    type: object
                   model:
                     description: Model is the model identifier - required if providerRef
                       not set
@@ -2054,6 +2100,13 @@ spec:
             - message: webhookEvents requires webhookURL
               rule: '!has(self.webhookEvents) || size(self.webhookEvents) == 0 ||
                 (has(self.webhookURL) && size(self.webhookURL) > 0)'
+            - message: ai.memoryConsolidation requires an ai Task without sessionRef
+              rule: '!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type
+                == ''ai'' && !has(self.sessionRef))'
+            - message: ai.memoryConsolidation is immutable
+              rule: (has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai)
+                && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation)
+                || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)
           status:
             description: |-
               TaskStatus defines the observed state of Task

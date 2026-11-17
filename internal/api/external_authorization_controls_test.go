@@ -569,3 +569,102 @@ func TestMemoryCreateRefusesACallerSuppliedSourceProposal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
+
+func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	grant := func(verb, resource string) authorizationv1.ResourceAttributes {
+		return authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Version: "v1alpha1", Resource: resource, Verb: verb}
+	}
+	body := func(name, mode string) string {
+		return `{"name":"` + name + `","namespace":"default","type":"ai","ai":{"provider":"anthropic","model":"model",` +
+			`"memoryConsolidation":{"mode":"` + mode + `"}}}`
+	}
+	created := func(name string) bool {
+		err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: name}, &corev1alpha1.Task{})
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	createTasks := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "create"}
+	sessionsOnly := []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions"), grant("get", "sessions")}
+	readSessions := append(append([]authorizationv1.ResourceAttributes{}, sessionsOnly...), grant("list", "memories"))
+
+	for name, tc := range map[string]struct {
+		mode    string
+		grants  []authorizationv1.ResourceAttributes
+		allowed bool
+	}{
+		"a dry run with only list on sessions": {mode: "DryRun", grants: []authorizationv1.ResourceAttributes{createTasks, grant("list", "sessions")}},
+		"a dry run that cannot list memories":  {mode: "DryRun", grants: sessionsOnly},
+		"a dry run that can read sessions":     {mode: "DryRun", grants: readSessions, allowed: true},
+		"a proposing run that cannot propose":  {mode: "Propose", grants: readSessions},
+		"a proposing run": {mode: "Propose", allowed: true,
+			grants: append(append([]authorizationv1.ResourceAttributes{}, readSessions...), grant("create", "memoryproposals"))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			taskName := strings.ReplaceAll(name, " ", "-")
+			f.allowOnly(t, tc.grants...)
+			status, response := f.request(t, http.MethodPost, "/api/v1/tasks", body(taskName, tc.mode))
+			if !tc.allowed {
+				require.Equal(t, http.StatusForbidden, status, response)
+				require.Contains(t, response, "memory consolidation")
+				require.False(t, created(taskName), "the API checks the caller, not its own identity")
+				return
+			}
+			require.Equal(t, http.StatusCreated, status, response)
+			require.True(t, created(taskName))
+		})
+	}
+}
+
+// A consolidation run's Task result is only its structure; its full report
+// quotes the Sessions and memories it read, so reading it needs what
+// reading those needs.
+func TestExternalAPIMemoryConsolidationReportRequiresTheRunsInputs(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default", UID: "consolidate-uid"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "model",
+			MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	require.NoError(t, f.kube.Create(t.Context(), task))
+	at := time.Now().UTC()
+	require.NoError(t, f.store.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+		TaskUID: string(task.UID), TaskName: task.Name, Mode: "DryRun", Status: store.MemoryConsolidationRunning,
+		WindowStart: at.Add(-time.Hour), WindowEnd: at, CreatedAt: at}))
+	_, err := f.store.CompleteMemoryConsolidationRun(t.Context(), store.MemoryConsolidationCompletion{Namespace: "default",
+		TaskUID: string(task.UID), Status: store.MemoryConsolidationCompleted, CompletedAt: at,
+		Report: []byte(`{"status":"completed","summary":"transcript-derived-text"}`)})
+	require.NoError(t, err)
+
+	readTask := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "tasks", Verb: "get", Name: "consolidate"}
+	inputs := []authorizationv1.ResourceAttributes{
+		{Namespace: "default", Group: "core.orka.ai", Resource: "sessions", Verb: "list"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "sessions", Verb: "get"},
+		{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "list"},
+	}
+	const path = "/api/v1/tasks/consolidate/memory-consolidation-report?namespace=default"
+	f.allowOnly(t, readTask)
+	status, body := f.request(t, http.MethodGet, path, "")
+	require.Equal(t, http.StatusForbidden, status, body)
+	require.NotContains(t, body, "transcript-derived-text")
+	for skipped := range inputs {
+		grants := []authorizationv1.ResourceAttributes{readTask}
+		for i, input := range inputs {
+			if i != skipped {
+				grants = append(grants, input)
+			}
+		}
+		f.allowOnly(t, grants...)
+		status, body = f.request(t, http.MethodGet, path, "")
+		require.Equal(t, http.StatusForbidden, status, "without %s %s: %s", inputs[skipped].Verb, inputs[skipped].Resource, body)
+	}
+	f.allowOnly(t, append([]authorizationv1.ResourceAttributes{readTask}, inputs...)...)
+	status, body = f.request(t, http.MethodGet, path, "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "transcript-derived-text")
+
+	f.allowAll()
+	status, body = f.request(t, http.MethodGet, "/api/v1/tasks/protected/memory-consolidation-report?namespace=default", "")
+	require.Equal(t, http.StatusNotFound, status, "a Task that is not a run has no report: %s", body)
+}

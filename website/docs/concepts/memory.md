@@ -73,6 +73,77 @@ Applying a consolidation proposal changes its targets in one transaction, and on
 
 A merge or supersede marks each target deleted and disabled, and sets its `supersededBy` to the new memory, so the replaced record and its provenance stay readable: list with `includeDeleted=true&includeDisabled=true`, since deleted memories are disabled too. A retire only disables its targets, which you can enable again. The apply response is the memory created, or for a retire the first target.
 
+## Consolidation runs
+
+A consolidation run is a scheduled native `type: ai` Task that reads the namespace's current memories and its recently changed Sessions, and finds [consolidation proposals](#consolidation-proposals) and new memories worth adding. It never changes memory itself. In `DryRun` mode, the default, it only reports what it found. In `Propose` mode it also creates a pending proposal for each finding, for a person to review and apply as usual. Start with `DryRun`, read a few reports, and switch to `Propose` once the findings are worth reviewing.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: memory-consolidation
+  namespace: orka-system
+spec:
+  type: ai
+  schedule: "0 3 * * *"
+  agentRef:
+    name: memory-curator
+  ai:
+    prompt: Focus on release and testing conventions.
+    memoryConsolidation:
+      mode: DryRun          # or Propose
+      minNewSessions: 5     # skip the run when fewer Sessions changed
+      maxOperations: 10     # 1 to 20
+      lookback: 168h        # how far back the first run reads; at most 720h
+```
+
+`spec.ai.prompt` steers what the run focuses on. The run uses a fixed Orka system prompt, no tools, no skills, no soul, and no injected memory, whatever the Agent or Task configure. The field requires an `ai` Task without `sessionRef`, and cannot be added, removed or changed after the Task is created.
+
+### Who can create a run
+
+A run reads the transcripts of everyone's Sessions in the namespace, which no ordinary Task can. Creating a Task with `memoryConsolidation`, or changing the spec of one, therefore requires `list` and `get` on `sessions` and `list` on `memories` in the namespace, since the run sends memories to the model and its report quotes them, and in `Propose` mode also `create` on `memoryproposals`. A `ValidatingAdmissionPolicy` checks the person making the change, so nobody without those permissions can edit a run's prompt, Agent or provider to steer it or send the transcripts elsewhere. The Orka API, which creates Tasks with its own identity, checks the same permissions for the person calling it, and a transaction token also needs the session-read and memory-read scopes, and in `Propose` mode the memory-write scope. The scheduled runs the controller creates from a Task are covered by the check on that Task.
+
+A run sends transcripts to the model of its Agent or Provider. Whoever can edit that Agent or Provider can change where they go, for every Task that uses it, so restrict who can edit the Agent and Provider a consolidation run uses as you restrict who can read Sessions.
+
+Memory and proposals are namespace-wide. Enabling consolidation means what one person's Session taught can reach everyone's prompts, after review.
+
+### What a run reads
+
+Each run reads the Sessions that changed since the last completed run of its mode in the namespace, or within `lookback` for the first one:
+
+- chat and task Sessions only, never gateway conversations;
+- the 50 most recently changed of them, however long ago they were created, and the newest 40 user and assistant messages of each, found among its newest 200 records and each cut to 2,000 characters. Tool messages are dropped, so memory an agent recalled cannot come back as new evidence;
+- every active memory, up to 200, with its `generation` and [recall counts](#recall-counts), each cut to 2,000 characters and at most 10 tags of 40 characters;
+- at most 60,000 characters of memories and, separately, 60,000 characters of transcripts, counted as they are encoded for the model with every field name, ID and timestamp, so memories never crowd out what the run learns from. Within a Session the limit keeps the newest turns, which the model still reads in order. A report whose input reached any limit says `inputTruncated`: a memory, tag or message cut to its length, these character budgets, 200 memories (a namespace with more has its least recently updated memories left out), 50 changed Sessions, or a Session's 40 messages. Sessions left out are read again only if they change again. A model that still cannot take the input fails the run, which leaves its Sessions for the next one.
+
+`DryRun` and `Propose` keep separate places, so dry runs never use up the Sessions a proposing run has yet to read. When fewer than `minNewSessions` Sessions changed, the run is skipped without calling the model. A skipped or failed run does not move its mode's place: the next run reads the same Sessions again, from where the first run started, up to 720 hours back. A mode's first run that fails before it records its window leaves no place, so the next run reads its own `lookback`. A run's window ends 15.5 minutes before the run begins, the longest a stamped Session write can still take to commit, so a change still being written is read by the next run rather than missed. After a gap longer than 720 hours, such as a suspended schedule, the window starts 720 hours back, and the report's `windowCutFrom` says where its mode had last stopped.
+
+A run records its input when it begins: a retried Pod reads the same input, and its result is checked against exactly what the model saw. The recorded input is deleted when the run finishes, or when its Task fails, is cancelled or is deleted first, and no other copy of it is kept. A run whose Task ended without finishing it is marked abandoned, and the next run in its mode reads its Sessions again. Once a run's Task is deleted, its stored report is cleared too, and Orka keeps only the few finished runs that mark where each mode's next run starts, so a recurring run's history does not grow the store. Only the worker of the run's own active Task can begin or complete it, and once its Job is revoked it can do neither, even before Kubernetes shows the revocation.
+
+Only one run at a time reads a namespace's memory. A run that begins while another is running fails with a conflict. A run that read its inputs while another run in its mode completed reads them again from where that run ended, so the two never read the same Sessions. A run that is still running after two hours stops blocking, whether or not its Task is still active; the run that takes over marks it abandoned, so it can neither resume nor create proposals.
+
+Orka cannot yet tell which Task wrote a Session, so turns of scheduled Tasks and parked continuations are read like any other.
+
+### What a run keeps
+
+The model's result is untrusted. A response the model did not finish fails the run at once. A finished response without an `operations` list is not accepted either: the worker asks once more, and otherwise the run fails. Either way, the run's Sessions are read again. A run that finds nothing to change submits an empty list. Orka then checks every operation against what the run read and drops one that fails, recording why:
+
+- every target is a memory the run read, at the generation it read, still active at that generation, and no two operations change the same memory;
+- every source is a Session the run read, and an `add` cites at least one;
+- new memory content is non-empty and at most 1,200 characters;
+- at most `maxOperations` operations;
+- the run removes at most `max(1, ⌊memories read ÷ 4⌋)` memories. A merge of k memories removes k−1, a supersede removes none, and a retire of k removes k, so a run can always merge two duplicates.
+
+Contradictions the model could not settle are reported as conflicts, not proposed.
+
+### The report
+
+A run's report holds its mode and status (`completed` or `skipped`), the window it read, how many memories and Sessions it read, each kept operation, each dropped one with its reason, the conflicts, the IDs of the proposals it created, and a short summary.
+
+The Task result is only the report's structure, marked `structural`: each operation's type, targets and sources, each dropped operation's index and reason, the memories each conflict names, the proposal IDs and the counts. It has no titles, content, reasons the model wrote, tags, conflict notes or summary, since anyone who can read the Task can read its result, and that text comes from everyone's Sessions and from memories. The full report is at `GET /api/v1/tasks/<run>/memory-consolidation-report`, which also requires `list` and `get` on `sessions` and `list` on `memories` (for a transaction token, the session-read and memory-read scopes as well as Task read), while the Task exists. A dropped operation's reason never repeats what the model named, only memories the run read.
+
+A report that would be larger than 256 KiB is marked `abridged`, dropping, in order, the dropped operations, the conflicts, the summary and the kept operations' text until it fits. The proposals keep their full text. A run that finds nothing to change is a normal, reported outcome. Proposals a `Propose` run creates are attributed to the run's Task, so `orka memory proposal list --task-name <run>` lists them.
+
 ## Worker behavior
 
 When an AI worker can reach the controller internal API, it loads reviewed durable memories before invoking the model. The durable memory section is appended to the system prompt as background project context, separate from the current session transcript.

@@ -68,6 +68,12 @@ func observeMemories(t *testing.T, p storagev1.StateProvider) any {
 	return memories
 }
 
+func observeMemoryConsolidationRun(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	run, err := p.GetMemoryConsolidationRun(t.Context(), memoryTenant, "uid-catalog")
+	return observed(t, run, err)
+}
+
 func observeMemoryProposals(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	proposals, err := p.ListMemoryProposals(t.Context(), storagev1.MemoryProposalFilter{Namespace: memoryTenant})
@@ -166,6 +172,43 @@ func init() {
 			args: fixed(storagev1.MemoryRecall{Namespace: memoryTenant, IDs: []string{"mem-1"},
 				RecalledAt: writeCaseCreated.Add(time.Minute)}),
 			observe: observeMemories,
+		},
+		usageCase{
+			method: "BeginMemoryConsolidationRun",
+			args: rebuiltArgs(func() []any {
+				return []any{&storagev1.MemoryConsolidationRun{Namespace: memoryTenant, TaskUID: "uid-catalog", TaskName: "run", Mode: "DryRun",
+					Status: storagev1.MemoryConsolidationRunning, WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour),
+					CreatedAt: writeCaseCreated}}
+			}),
+			observe: observeMemoryConsolidationRun,
+		},
+		usageCase{
+			method: "ReleaseMemoryConsolidationRun",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.BeginMemoryConsolidationRun(t.Context(), &storagev1.MemoryConsolidationRun{Namespace: memoryTenant,
+					TaskUID: "uid-catalog", TaskName: "run", Mode: "DryRun", Status: storagev1.MemoryConsolidationRunning,
+					WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour), Input: []byte(`{}`), CreatedAt: writeCaseCreated}))
+			},
+			args:    fixed(memoryTenant, "uid-catalog", true),
+			observe: observeMemoryConsolidationRun,
+		},
+		usageCase{
+			method: "CompleteMemoryConsolidationRun",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				require.NoError(t, p.BeginMemoryConsolidationRun(t.Context(), &storagev1.MemoryConsolidationRun{Namespace: memoryTenant,
+					TaskUID: "uid-catalog", TaskName: "run", Mode: "Propose", Status: storagev1.MemoryConsolidationRunning,
+					WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour), CreatedAt: writeCaseCreated}))
+			},
+			args: rebuiltArgs(func() []any {
+				return []any{storagev1.MemoryConsolidationCompletion{Namespace: memoryTenant, TaskUID: "uid-catalog",
+					Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{"status":"completed"}`),
+					CompletedAt: writeCaseCreated.Add(2 * time.Hour),
+					Proposals: []storagev1.MemoryProposal{{ID: "mprop-1", Namespace: memoryTenant, Type: storagev1.MemoryProposalTypeMemory,
+						Title: "Fact", Content: "The cache is warm", CreatedAt: writeCaseCreated, UpdatedAt: writeCaseCreated}}}}
+			}),
+			observe: func(t *testing.T, p storagev1.StateProvider) any {
+				return []any{observeMemoryConsolidationRun(t, p), observeMemoryProposals(t, p)}
+			},
 		},
 		usageCase{
 			method: "CreateMemoryProposal",

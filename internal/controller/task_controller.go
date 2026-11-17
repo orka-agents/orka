@@ -205,6 +205,12 @@ type TaskReconciler struct {
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
+// The controller creates the scheduled runs of a memory consolidation Task,
+// which the memory consolidation admission policy checks for list on memories
+// and, in Propose mode, create on memoryproposals, as it checked the parent's
+// creator.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -848,6 +854,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+		if err := r.releaseMemoryConsolidationRun(ctx, task, true); err != nil {
+			return ctrl.Result{}, err
+		}
 		if r.ResultStore != nil {
 			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
 			if !ok {
@@ -1385,8 +1394,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+// isMemoryConsolidationTask reports a memory consolidation run (ADR 0051).
+// A run is one model call that submits one result, so it never iterates
+// autonomously or parks on an approval, whatever its Agent configures.
+func isMemoryConsolidationTask(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
+}
+
 func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	return task != nil &&
+		!isMemoryConsolidationTask(task) &&
 		task.Spec.Type == corev1alpha1.TaskTypeAI &&
 		agent != nil &&
 		agent.Spec.Coordination != nil &&
@@ -2944,12 +2961,34 @@ func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1al
 // Job cleanup included, then cancels what it delegated, and requeues it soon
 // while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	if err := r.releaseMemoryConsolidationRun(ctx, task, false); err != nil {
+		return ctrl.Result{}, err
+	}
 	result, err := r.handleCompleted(ctx, task)
 	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
 		result.RequeueAfter = 2 * time.Second
 	}
 	return result, err
+}
+
+// releaseMemoryConsolidationRun releases the run of a memory consolidation
+// Task that ended, abandoning a run it did not finish and clearing the
+// transcripts the run recorded. For a Task being deleted it also clears the
+// run's report and lets the store remove runs no cursor needs, so a recurring
+// run's history does not grow the store. Releasing again is a no-op.
+func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task, deleted bool) error {
+	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
+		return nil
+	}
+	runs, ok := r.ResultStore.(store.MemoryConsolidationStore)
+	if !ok {
+		return nil
+	}
+	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID), deleted); err != nil {
+		return fmt.Errorf("release memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return nil
 }
 
 // cascadeTaskCancellation cancels what a Task delegated once the Task's
@@ -5191,7 +5230,7 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 // taskAutonomousMode preserves lookup errors when the mode affects a terminal
 // decision. Other callers retain the existing best-effort boolean behavior.
 func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if task.Spec.AgentRef == nil {
+	if task.Spec.AgentRef == nil || isMemoryConsolidationTask(task) {
 		return false, nil
 	}
 

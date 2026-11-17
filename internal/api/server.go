@@ -88,20 +88,22 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
-	TaskProvenanceProtected   bool
-	ControllerEpochs          ControllerEpochFenceSource
-	E2EPromptFaultEnabled     bool
-	Connectors                ConnectorConfig
-	ConnectorTools            ConnectorToolExecutionConfig
+	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	HealthChecker            store.HealthChecker
+	Clientset                kubernetes.Interface
+	APIReader                client.Reader
+	TaskProvenanceProtected  bool
+	ControllerEpochs         ControllerEpochFenceSource
+	E2EPromptFaultEnabled    bool
+	Connectors               ConnectorConfig
+	ConnectorTools           ConnectorToolExecutionConfig
 	// OperatorAccess configures `orka task exec` / `orka task cp`.
 	OperatorAccess OperatorAccessConfig
 	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
@@ -149,6 +151,8 @@ type Server struct {
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
 
+	memoryConsolidationStore store.MemoryConsolidationStore
+
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }
@@ -181,6 +185,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore: config.MemoryProposalStore,
 		ExecutionEventStore: config.ExecutionEventStore,
 		GatewayEventStore:   config.GatewayEventStore,
+
+		memoryConsolidationStore: config.MemoryConsolidationStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -200,6 +206,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -447,6 +454,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.GetTaskMemoryConsolidationReport)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
@@ -658,15 +666,16 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:                  s.client,
-				APIReader:               s.config.APIReader,
-				MemoryStore:             s.MemoryStore,
-				MemoryProposalStore:     s.MemoryProposalStore,
-				ExecutionEventStore:     s.ExecutionEventStore,
-				GatewayEventStore:       s.GatewayEventStore,
-				GatewayService:          s.config.GatewayService,
-				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
-				ConnectorTools:          s.config.ConnectorTools,
+				Client:                   s.client,
+				APIReader:                s.config.APIReader,
+				MemoryStore:              s.MemoryStore,
+				MemoryProposalStore:      s.MemoryProposalStore,
+				MemoryConsolidationStore: s.memoryConsolidationStore,
+				ExecutionEventStore:      s.ExecutionEventStore,
+				GatewayEventStore:        s.GatewayEventStore,
+				GatewayService:           s.config.GatewayService,
+				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
+				ConnectorTools:           s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -707,6 +716,8 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
+		internal.Post("/memory-consolidation/:namespace/begin", s.internalHandlers.BeginMemoryConsolidation)
+		internal.Post("/memory-consolidation/:namespace/complete", s.internalHandlers.CompleteMemoryConsolidation)
 	}
 }
 

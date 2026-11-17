@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 159 authenticated external route registrations, including 64
+The table covers all 160 authenticated external route registrations, including 64
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -222,7 +222,7 @@ otherwise. In the additional-checks column:
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories`, and in `Propose` mode `create` on `memoryproposals` |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
@@ -240,6 +240,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories`; a transaction token also needs the session-read and memory-read scopes |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |

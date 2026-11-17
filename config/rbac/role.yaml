@@ -246,6 +246,18 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryproposals
+  verbs:
+  - create
+- apiGroups:
+  - core.orka.ai
+  resources:
   - sessions
   verbs:
   - delete

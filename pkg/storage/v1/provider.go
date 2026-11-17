@@ -143,8 +143,9 @@ const (
 	// [ProviderLimits.MaxResultBytes]. Revision 9 adds
 	// [MemoryStore.RecordMemoryRecall]. Revision 10 adds memory generations
 	// and the consolidation proposal types, whose application changes the
-	// memories they target only at the generations they name.
-	ContractRevision = 10
+	// memories they target only at the generations they name. Revision 11
+	// adds [MemoryConsolidationStore].
+	ContractRevision = 11
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -217,6 +218,7 @@ type StateProvider interface {
 
 	MemoryStore
 	MemoryProposalStore
+	MemoryConsolidationStore
 
 	SecurityStore
 	RepositoryMonitorStore

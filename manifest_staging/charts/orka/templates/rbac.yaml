@@ -40,6 +40,13 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
+  # Scheduled memory consolidation runs: see memory-consolidation-policy.yaml.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memories"]
+    verbs: ["list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memoryproposals"]
+    verbs: ["create"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status"]
     verbs: ["get", "update", "patch"]

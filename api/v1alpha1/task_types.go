@@ -169,6 +169,8 @@ const (
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.webhookEvents) || size(self.webhookEvents) == 0 || (has(self.webhookURL) && size(self.webhookURL) > 0)",message="webhookEvents requires webhookURL"
+// +kubebuilder:validation:XValidation:rule="!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type == 'ai' && !has(self.sessionRef))",message="ai.memoryConsolidation requires an ai Task without sessionRef"
+// +kubebuilder:validation:XValidation:rule="(has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai) && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation) || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)",message="ai.memoryConsolidation is immutable"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -450,6 +452,61 @@ type AISpec struct {
 	// Tools lists the tools available for this task
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// MemoryConsolidation makes this Task a memory consolidation run: it reads
+	// the namespace's current memories and recently changed Sessions and
+	// reports, or proposes, merges, supersessions and retirements for review
+	// (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+	// Prompt, when set, steers what it focuses on. Creating such a Task, or
+	// changing its spec, requires list and get on sessions and list on
+	// memories in the namespace, and in Propose mode create on
+	// memoryproposals.
+	// +optional
+	MemoryConsolidation *MemoryConsolidationSpec `json:"memoryConsolidation,omitempty"`
+}
+
+// MemoryConsolidationMode selects what a memory consolidation run does with
+// the operations it finds.
+// +kubebuilder:validation:Enum=DryRun;Propose
+type MemoryConsolidationMode string
+
+const (
+	// MemoryConsolidationDryRun reports the operations without creating
+	// proposals.
+	MemoryConsolidationDryRun MemoryConsolidationMode = "DryRun"
+	// MemoryConsolidationPropose also creates a memory proposal for each
+	// accepted operation.
+	MemoryConsolidationPropose MemoryConsolidationMode = "Propose"
+)
+
+// MemoryConsolidationSpec configures a memory consolidation run.
+type MemoryConsolidationSpec struct {
+	// Mode is DryRun, the default, or Propose.
+	// +kubebuilder:default=DryRun
+	// +optional
+	Mode MemoryConsolidationMode `json:"mode,omitempty"`
+
+	// MinNewSessions is the fewest Sessions that must have changed since the
+	// last completed run for this run to call the model. Fewer skips the run.
+	// Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MinNewSessions *int32 `json:"minNewSessions,omitempty"`
+
+	// MaxOperations is the most operations one run reports or proposes.
+	// Defaults to 10.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxOperations *int32 `json:"maxOperations,omitempty"`
+
+	// Lookback is how far back the first run of its mode in a namespace
+	// reads. Later runs start where the latest completed run ended. Defaults
+	// to 168h; at most 720h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h') && duration(self) <= duration('720h')",message="lookback must be between 1h and 720h"
+	// +optional
+	Lookback *metav1.Duration `json:"lookback,omitempty"`
 }
 
 // MarshalJSON preserves an explicitly empty native tool policy instead of

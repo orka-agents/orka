@@ -2447,6 +2447,7 @@ func main() {
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               appStorage,
 		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
