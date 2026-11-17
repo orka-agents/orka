@@ -1566,3 +1566,47 @@ func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestInternalRoutesRefuseToReviewOrApplyConsolidationProposals(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/review", h.ReviewMemoryProposal)
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+	ctx := context.Background()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "content of " + id}))
+	}
+	pending := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeRetire, Title: "Retire",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}}
+	require.NoError(t, ss.CreateMemoryProposal(ctx, pending))
+	accepted := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "Merge", Content: "merged",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}}}
+	require.NoError(t, ss.CreateMemoryProposal(ctx, accepted))
+	require.NoError(t, ss.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: "default", ID: accepted.ID, Status: "accepted", Reviewer: "reviewer"}))
+
+	post := func(path, body string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		return resp.StatusCode
+	}
+	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+pending.ID+"/review", `{"status":"accepted"}`))
+	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+accepted.ID+"/apply", `{}`))
+	// However a client pads the ID, the request is refused and changes nothing.
+	for _, path := range []string{"/internal/v1/memory-proposals/default/%20" + accepted.ID + "%20/apply",
+		"/internal/v1/memory-proposals/default/%20" + pending.ID + "/review"} {
+		status := post(path, `{"status":"accepted"}`)
+		require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, status, path)
+	}
+
+	reviewed, err := ss.GetMemoryProposal(ctx, "default", pending.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", reviewed.Status, "the internal route records no review")
+	memories, err := ss.ListMemories(ctx, store.MemoryFilter{Namespace: "default", IncludeDisabled: true})
+	require.NoError(t, err)
+	require.Len(t, memories, 2)
+	for _, memory := range memories {
+		require.False(t, memory.Disabled, "the internal route changes no memory")
+	}
+}

@@ -19,7 +19,7 @@ The current model has three related concepts:
 | **Memory proposal** | A worker- or user-submitted suggestion for memory, policy, workflow, or skill changes | Stored in SQLite as `memory_proposals` for review |
 | **Transcript search** | Compact search over prior session messages | Stored in SQLite session transcript tables |
 
-Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
+Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` or a [consolidation type](#consolidation-proposals) can then be applied explicitly. A `memory` apply creates (or idempotently returns) durable memory linked back to the proposal; a consolidation apply changes the memories it targets.
 
 Both steps record who took them: `reviewer` on the review and `appliedBy` on the apply. The server takes these names from the signed-in identity of the request. A client cannot set them: a request body with a non-empty `reviewer` or `appliedBy` is rejected with `400 Bad Request`, and a request without an identity is refused.
 
@@ -33,7 +33,7 @@ Memory proposals follow an explicit review/apply lifecycle:
 
 - New proposals start with `status: "pending"`.
 - Review decisions only apply to pending proposals and record either `status: "accepted"` or `status: "rejected"`; review does not create durable memory.
-- Accepted proposals with `type: "memory"` require an explicit apply request before they become durable memory.
+- Accepted proposals with `type: "memory"`, or one of the [consolidation types](#consolidation-proposals), require an explicit apply request before they change durable memory.
 - Rejected or archived proposals cannot be applied.
 
 Accepted memory proposals can suggest durable memory tags by including a `Tags:` line in the proposal `description`. The apply step reads tags from the first `Tags:` line only, normalizes them, and ignores later `Tags:` lines. Example:
@@ -42,6 +42,36 @@ Accepted memory proposals can suggest durable memory tags by including a `Tags:`
 Reusable release procedure discovered during task execution.
 Tags: release, testing
 ```
+
+## Consolidation proposals
+
+Over many Tasks, memory collects duplicates, entries that later work contradicted, and stale facts. Three proposal types consolidate existing memories. Like every proposal, each is reviewed and applied by a person; nothing changes until it is applied.
+
+| Type | Targets | Applying it |
+|------|---------|-------------|
+| `memory_merge` | two or more memories | creates one memory from the proposal's `content` and retires every target into it |
+| `memory_supersede` | one memory | creates one memory from the proposal's `content` and retires the target into it |
+| `memory_retire` | one or more memories | disables every target |
+
+A consolidation proposal names each memory it changes in `targets`, with the `generation` of the memory it read. Every memory has a `generation`: `1` when it is created, and one more each time its content, tags, provenance, `disabled` or `deleted` state changes. A recall does not change it. Any proposal may also cite the Sessions it drew on in `sources`, each with a `sessionName` and an optional `messageId`. A proposal names at most 20 targets and 20 sources.
+
+```json
+{
+  "namespace": "orka-system",
+  "type": "memory_merge",
+  "title": "One release checklist",
+  "content": "Release PRs run make lint-fix and make test, then the e2e suite.",
+  "targets": [
+    {"memoryId": "mem-release-1", "generation": 1},
+    {"memoryId": "mem-release-2", "generation": 3}
+  ],
+  "sources": [{"sessionName": "release-review"}]
+}
+```
+
+Applying a consolidation proposal changes its targets in one transaction, and only while every target is still at the generation the proposal names and is not deleted. If any target changed, the apply returns `409 Conflict` and changes nothing: the proposal was written against content nobody reviewed since. It stays `accepted`, so archive it. Applying one also requires `update` permission on every target memory, besides the usual permission to apply proposals and create memories; see [API authorization](../reference/api-authorization.md). Consolidation proposals are reviewed and applied only through `/api/v1`: the worker-facing internal routes check only the namespace, so they refuse to review or apply one with `403 Forbidden`.
+
+A merge or supersede marks each target deleted and disabled, and sets its `supersededBy` to the new memory, so the replaced record and its provenance stay readable: list with `includeDeleted=true&includeDisabled=true`, since deleted memories are disabled too. A retire only disables its targets, which you can enable again. The apply response is the memory created, or for a retire the first target.
 
 ## Worker behavior
 
@@ -143,6 +173,8 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
   }'
 ```
 
+Only applying a proposal links a memory to it, so a create request with a `sourceProposalId` is rejected with `400 Bad Request`.
+
 ## Memory proposal API
 
 | Endpoint | Method | Description |
@@ -151,7 +183,7 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
 | `/api/v1/memory-proposals` | POST | Create a memory proposal |
 | `/api/v1/memory-proposals/:id` | GET | Get a memory proposal |
 | `/api/v1/memory-proposals/:id/review` | POST | Record a review decision without applying it |
-| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
+| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` or consolidation proposal to durable memory |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
 Supported list query parameters:
@@ -161,7 +193,7 @@ Supported list query parameters:
 | `namespace` | Namespace to query |
 | `taskName` | Filter by task provenance |
 | `agentName` | Filter by agent provenance |
-| `type` | Filter by proposal type, for example `memory`, `skill`, `policy`, or `workflow` |
+| `type` | Filter by proposal type, for example `memory`, `memory_merge`, `memory_supersede`, `memory_retire`, `skill`, `policy`, or `workflow` |
 | `status` | Filter by status such as `pending`, `accepted`, `rejected`, `applied`, or `archived` |
 | `query` or `q` | Text search over title, description, content, and skill name |
 | `limit` | Maximum rows to return |
@@ -204,7 +236,7 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/ap
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` or a consolidation type can be applied; rejected and archived proposals cannot be applied. A consolidation apply returns the memory a merge or supersede created, or a retire's first target, and returns `409 Conflict` when a target changed since the proposal was written; see [Consolidation proposals](#consolidation-proposals).
 
 ## Safety model
 
@@ -218,7 +250,7 @@ Apply returns the durable memory as JSON. The created memory has `source: "memor
 ## Current limitations
 
 - Accepted proposals are not automatically converted to durable memories; they require the explicit apply endpoint.
-- Only accepted proposals with `type: "memory"` can be applied into durable memory.
+- Only accepted proposals with `type: "memory"` or a consolidation type can be applied to durable memory.
 - Durable memory search currently uses store-level filters and substring matching rather than semantic ranking.
 - Transcript search returns snippets, not model-generated summaries.
 - External memory backends are not part of the default implementation.

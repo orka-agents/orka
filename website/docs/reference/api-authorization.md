@@ -277,7 +277,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `create` | empty | `B` | none |
 | `GET` | `/api/v1/memory-proposals/:id` | `core.orka.ai` | `memoryproposals` | `get` | `:id` | `Q` | none |
 | `POST` | `/api/v1/memory-proposals/:id/review` | `core.orka.ai` | `memoryproposals` | `review` | `:id`, trimmed | `BQ` | none |
-| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID |
+| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID; for a `memory_merge`, `memory_supersede` or `memory_retire` proposal not yet applied, also `update core.orka.ai/memories` on every target memory ID, and for a retire `get` on its first target |
 | `POST` | `/api/v1/memory-proposals/:id/archive` | `core.orka.ai` | `memoryproposals` | `update` | `:id`, trimmed | `Q` | none |
 | `GET` | `/api/v1/providers` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/providers` | `core.orka.ai` | `providers` | `create` | empty | `C` | none |

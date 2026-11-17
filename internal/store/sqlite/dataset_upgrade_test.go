@@ -38,7 +38,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			}
 			// The upgrade gives existing results and artifacts the write stamp
 			// (0, 0) and changes no other value.
-			before := stampedApplicationRows(t, applicationRows(t, db))
+			before := consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db)))
 			require.NoError(t, db.Close())
 			s, err := OpenLockedStore(path)
 			require.NoError(t, err)

@@ -141,8 +141,10 @@ const (
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
 	// [ProviderLimits.MaxResultBytes]. Revision 9 adds
-	// [MemoryStore.RecordMemoryRecall].
-	ContractRevision = 9
+	// [MemoryStore.RecordMemoryRecall]. Revision 10 adds memory generations
+	// and the consolidation proposal types, whose application changes the
+	// memories they target only at the generations they name.
+	ContractRevision = 10
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
