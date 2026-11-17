@@ -671,3 +671,22 @@ func TestCollectInputsDoesNotLetOtherProposalsCrowdOutMemoryChanges(t *testing.T
 	require.Equal(t, "older-memory", input.Proposals[0].ID, "newer skill proposals do not hide an open memory change")
 	require.False(t, input.Truncated)
 }
+
+func TestValidateRepeatsARetirementWhateverItsOpenProposalSays(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{{ID: "pending-retire", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusPending,
+		Content: "Stale: nobody uses this anymore", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}}}
+	source := []store.MemoryProposalSource{{SessionName: "session-a"}}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		{Type: OperationRetire, Content: "anything", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}},
+			Covers: []string{"pending-retire"}},
+		// A retirement's text is not proposed content.
+		{Type: OperationAdd, Content: "Stale: nobody uses this anymore", Sources: source},
+	}}, input, nil, 10)
+	require.Len(t, rejected, 1)
+	require.Equal(t, 0, rejected[0].Index)
+	require.Equal(t, "an open proposal already proposes this change", rejected[0].Reason,
+		"an identical retirement is a repeat even when its open proposal carries text")
+	require.Len(t, kept, 1)
+	require.Equal(t, OperationAdd, kept[0].Type)
+}

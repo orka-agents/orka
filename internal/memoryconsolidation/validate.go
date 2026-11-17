@@ -159,7 +159,9 @@ func newOpenProposals(proposals []InputProposal) openProposals {
 		for _, target := range proposal.Targets {
 			open.targets[target.MemoryID] = append(open.targets[target.MemoryID], proposal.ID)
 		}
-		if key := contentKey(proposal.Content); key != "" {
+		// A retire creates no memory, so whatever content it carries is not
+		// proposed content.
+		if key := contentKey(proposal.Content); key != "" && proposal.Type != store.MemoryProposalTypeRetire {
 			open.contents[key] = append(open.contents[key], proposal.ID)
 		}
 		open.changes[changeKey(proposal.Type, proposal.Targets, proposal.Content)] = true
@@ -214,8 +216,13 @@ func (o openProposals) check(op Operation) string {
 }
 
 // changeKey identifies a change by its proposal type, its targets at their
-// generations in any order, and its normalized content.
+// generations in any order, and its normalized content. A retire's content is
+// ignored: it creates no memory, and validation clears a submitted retire's
+// content.
 func changeKey(proposalType string, targets []store.MemoryProposalTarget, content string) string {
+	if proposalType == store.MemoryProposalTypeRetire {
+		content = ""
+	}
 	keys := make([]string, 0, len(targets))
 	for _, target := range targets {
 		keys = append(keys, fmt.Sprintf("%s@%d", target.MemoryID, target.Generation))
