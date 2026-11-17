@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,28 @@ func TestParseCPUStatReadsCgroupV2AndV1(t *testing.T) {
 	}
 	if _, ok := parseCPUStat([]byte("usage_usec 100\nnr_periods 40\n")); ok {
 		t.Fatal("cpu.stat without throttling counters was accepted")
+	}
+}
+
+// Throttled times always fit a Duration: a count whose Duration would overflow
+// saturates, and one beyond a signed 64-bit count is not reported.
+func TestParseCPUStatBoundsThrottledTime(t *testing.T) {
+	saturated, ok := parseCPUStat([]byte("nr_throttled 18446744073709551615\nthrottled_usec 9223372036854775807\n"))
+	if !ok || saturated.throttledPeriods != math.MaxUint64 || saturated.throttled != time.Duration(math.MaxInt64) {
+		t.Fatalf("saturated sample = %+v, %v", saturated, ok)
+	}
+	exact, ok := parseCPUStat([]byte("nr_throttled 1\nthrottled_time 9223372036854775807\n"))
+	if !ok || exact.throttled != time.Duration(math.MaxInt64) {
+		t.Fatalf("largest v1 sample = %+v, %v", exact, ok)
+	}
+	for _, stat := range []string{
+		"nr_throttled 1\nthrottled_time 9223372036854775808\n",
+		"nr_throttled 1\nthrottled_usec 18446744073709551615\n",
+		"nr_throttled 1\nthrottled_usec -5\n",
+	} {
+		if sample, ok := parseCPUStat([]byte(stat)); ok {
+			t.Fatalf("parseCPUStat(%q) = %+v, want no sample", stat, sample)
+		}
 	}
 }
 
@@ -124,6 +147,43 @@ func TestSessionStartTimingsOmitUnknownThrottling(t *testing.T) {
 	}
 }
 
+// A creation that fails partway reports its total through finish, so a slow
+// failing stage that never reached its mark still counts, with or without
+// readable throttling counters.
+func TestSessionStartTimingsTotalCoversFailedStage(t *testing.T) {
+	for _, readable := range []bool{true, false} {
+		clock := &fakeClock{now: time.Unix(1000, 0)}
+		timings := newSessionStartTimingsWith(clock.Now, func() (cpuThrottleSample, bool) {
+			return cpuThrottleSample{}, readable
+		})
+		clock.now = clock.now.Add(40 * time.Millisecond)
+		timings.mark("sessionPaths")
+		// Workspace materialization runs for five seconds and fails.
+		clock.now = clock.now.Add(5 * time.Second)
+		timings.finish()
+		// Anything after finish is outside the window.
+		clock.now = clock.now.Add(time.Hour)
+
+		var buffer bytes.Buffer
+		slog.New(slog.NewJSONHandler(&buffer, nil)).Info("failed", timings.logAttrs()...)
+		var line struct {
+			TotalMs int64            `json:"totalMs"`
+			Stages  map[string]int64 `json:"stagesMs"`
+		}
+		if err := json.Unmarshal(buffer.Bytes(), &line); err != nil {
+			t.Fatal(err)
+		}
+		if line.TotalMs != 5040 || line.Stages["sessionPaths"] != 40 || len(line.Stages) != 1 {
+			t.Fatalf("readable=%v log line = %s", readable, buffer.String())
+		}
+		for _, attr := range timings.spanAttributes() {
+			if attr.Key == "orka.acp.session_start.total_ms" && attr.Value.AsInt64() != 5040 {
+				t.Fatalf("readable=%v span total = %d, want 5040", readable, attr.Value.AsInt64())
+			}
+		}
+	}
+}
+
 func TestSessionStartTimingsNilReceiverIsSafe(t *testing.T) {
 	var timings *sessionStartTimings
 	timings.mark("stage")
@@ -178,5 +238,49 @@ func TestSupervisorCreateLogsSessionStartTimings(t *testing.T) {
 	}
 	if _, ok := line.Adapter["initialize"]; !ok {
 		t.Fatalf("adapter breakdown = %v", line.Adapter)
+	}
+}
+
+// A create whose adapter handshake fails still logs the adapter stage and the
+// handshake steps it completed, so a slow failed startup is diagnosable.
+func TestSupervisorCreateFailureLogsAdapterTimings(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	server, cfg, profile := newTestServer(t, adapterSessionNewFailureMode)
+	create := testCreateSessionRequest(t, cfg, profile)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if response.Code == http.StatusCreated {
+		t.Fatalf("create succeeded although session/new was rejected: %s", response.Body.String())
+	}
+	var line struct {
+		Msg     string           `json:"msg"`
+		Stage   string           `json:"stage"`
+		TotalMs *int64           `json:"totalMs"`
+		Stages  map[string]int64 `json:"stagesMs"`
+		Adapter map[string]int64 `json:"adapterMs"`
+	}
+	found := false
+	for raw := range bytes.SplitSeq(logs.Bytes(), []byte("\n")) {
+		if json.Unmarshal(raw, &line) == nil && line.Msg == "ACP runtime session creation failed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no session-creation-failed line in logs:\n%s", logs.String())
+	}
+	if line.Stage != "provider adapter initialization" || line.TotalMs == nil {
+		t.Fatalf("failure line = %+v", line)
+	}
+	if _, ok := line.Stages["adapterStartup"]; !ok {
+		t.Fatalf("stages = %v, missing adapterStartup", line.Stages)
+	}
+	for _, step := range []string{"processStart", "initialize", "providerSession"} {
+		if _, ok := line.Adapter[step]; !ok {
+			t.Fatalf("adapter breakdown = %v, missing %s", line.Adapter, step)
+		}
 	}
 }

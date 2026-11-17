@@ -55,6 +55,30 @@ func (t *acpTurnTimings) mark(step string) {
 	}
 }
 
+// markPromptAccepted records the promptAccepted step the first time the
+// runtime is seen to accept the prompt, before any fallible persistence of that
+// acceptance, so a later failure still logs the turn at info verbosity. Later
+// calls record nothing. A nil receiver records nothing.
+func (t *acpTurnTimings) markPromptAccepted() {
+	if t == nil || t.prompted {
+		return
+	}
+	t.mark(acpTurnStepPromptAccepted)
+}
+
+// markFailedPromptStream records the promptStream step for a prompt stream
+// that ended in an error after the runtime accepted the prompt, as the
+// successful path does, so a long stream that later fails still reports its
+// duration. An unaccepted prompt, such as a rejected admission that is retried,
+// records nothing. A nil receiver records nothing.
+func (t *acpTurnTimings) markFailedPromptStream(accepted bool) {
+	if t == nil || !accepted {
+		return
+	}
+	t.markPromptAccepted()
+	t.mark(acpTurnStepPromptStream)
+}
+
 const (
 	acpTurnStepRuntimeCapabilities  = "runtimeCapabilities"
 	acpTurnStepSessionPlan          = "sessionPlan"

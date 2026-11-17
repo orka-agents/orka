@@ -1933,6 +1933,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			case harnessv2.EventAccepted:
 				admitOnce.Do(func() { close(admitted) })
 				runtimeSessionSettlementRequired = true
+				turnTimings.markPromptAccepted()
 				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
 					return acpUpdatePersistenceError(err, nil)
 				}
@@ -1944,7 +1945,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
-					turnTimings.mark(acpTurnStepPromptAccepted)
 					if sessionExecution != nil {
 						sessionExecution.Binding.PromptDelivered = true
 						if nativeSessionsSupported {
@@ -2126,6 +2126,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			continue
 		}
+		turnTimings.markFailedPromptStream(accepted || summary.Accepted)
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpInterruptedOutputFlushTimeout)
 		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
 			streamErr = acpUpdatePersistenceError(persistErr, nil)

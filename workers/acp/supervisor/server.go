@@ -1391,14 +1391,20 @@ func (s *Server) createSession(
 		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
 	})
+	// The adapter stage is timed whether or not it succeeds, so a slow failed
+	// handshake still reports where its time went.
+	timings.mark("adapterStartup")
 	if err != nil {
-		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
+		initialization, failed := errors.AsType[*acp.InitializationError](err)
+		if failed && initialization.RuntimeSession() != nil {
+			timings.recordAdapter(initialization.RuntimeSession().StartupTimings())
+		}
+		if failed && !initialization.Cleanup.Proven {
 			cleanup = false
 			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &createCleanupUnprovenError{Err: err})
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
-	timings.mark("adapterStartup")
 	timings.recordAdapter(runtimeSession.StartupTimings())
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a

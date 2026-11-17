@@ -115,9 +115,68 @@ func TestACPTurnTimingsLogUnpromptedExecutionsAtDebug(t *testing.T) {
 	}
 }
 
+// Acceptance is recorded once, when first observed, and an accepted prompt
+// whose stream later fails still reports how long it streamed, at info
+// verbosity.
+func TestACPTurnTimingsRecordAcceptedPromptWhoseStreamFails(t *testing.T) {
+	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "stream-failed"}}
+	timings := newACPTurnTimings(task, clock.Now)
+	clock.now = clock.now.Add(time.Second)
+	timings.mark(acpTurnStepSessionCreate)
+	clock.now = clock.now.Add(300 * time.Millisecond)
+	timings.markPromptAccepted()
+	// A repeated accepted event, or the failure path, does not re-record it.
+	clock.now = clock.now.Add(50 * time.Millisecond)
+	timings.markPromptAccepted()
+	clock.now = clock.now.Add(30 * time.Second)
+	timings.markFailedPromptStream(true)
+
+	ctx, lines := captureTurnTimingsLogger(t)
+	timings.log(ctx, task, errors.New("stream transport failed"))
+	if len(*lines) != 1 || (*lines)[0].level != 0 {
+		t.Fatalf("lines = %v, want one info line", *lines)
+	}
+	values := (*lines)[0].values
+	if values["promptAccepted"] != true || values["failed"] != true ||
+		values["promptAcceptedMs"] != float64(300) || values["promptStreamMs"] != float64(30050) {
+		t.Fatalf("line = %v", values)
+	}
+	if len(timings.steps) != 3 {
+		t.Fatalf("steps = %v, want sessionCreate, promptAccepted, promptStream", timings.steps)
+	}
+}
+
+// A failed stream whose summary shows an acceptance the event handler never
+// recorded still counts as prompted.
+func TestACPTurnTimingsFailedStreamAcceptedOnlyBySummary(t *testing.T) {
+	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "summary-accepted"}}
+	timings := newACPTurnTimings(task, clock.Now)
+	clock.now = clock.now.Add(2 * time.Second)
+	timings.markFailedPromptStream(true)
+	if !timings.prompted || len(timings.steps) != 2 ||
+		timings.steps[0].name != acpTurnStepPromptAccepted || timings.steps[1].name != acpTurnStepPromptStream {
+		t.Fatalf("steps = %v, prompted = %v", timings.steps, timings.prompted)
+	}
+}
+
+// A rejected, unaccepted prompt records no stream step and stays at debug.
+func TestACPTurnTimingsFailedUnacceptedStreamRecordsNothing(t *testing.T) {
+	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rejected"}}
+	timings := newACPTurnTimings(task, clock.Now)
+	timings.markFailedPromptStream(false)
+	if timings.prompted || len(timings.steps) != 0 {
+		t.Fatalf("steps = %v, prompted = %v", timings.steps, timings.prompted)
+	}
+}
+
 func TestACPTurnTimingsNilReceiverIsSafe(t *testing.T) {
 	var timings *acpTurnTimings
 	timings.mark(acpTurnStepSessionCreate)
+	timings.markPromptAccepted()
+	timings.markFailedPromptStream(true)
 	timings.log(context.Background(), &corev1alpha1.Task{}, nil)
 	if timings.keysAndValues(time.Now()) != nil {
 		t.Fatal("nil timings produced values")

@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -62,20 +63,37 @@ func parseCPUStat(data []byte) (cpuThrottleSample, bool) {
 		if !found {
 			continue
 		}
-		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
-		if err != nil {
-			continue
-		}
+		value = strings.TrimSpace(value)
 		switch key {
 		case "nr_throttled":
-			sample.throttledPeriods, periods = parsed, true
+			if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
+				sample.throttledPeriods, periods = parsed, true
+			}
 		case "throttled_usec":
-			sample.throttled, throttled = time.Duration(parsed)*time.Microsecond, true
+			if parsed, ok := parseThrottledTime(value, time.Microsecond); ok {
+				sample.throttled, throttled = parsed, true
+			}
 		case "throttled_time":
-			sample.throttled, throttled = time.Duration(parsed), true
+			if parsed, ok := parseThrottledTime(value, time.Nanosecond); ok {
+				sample.throttled, throttled = parsed, true
+			}
 		}
 	}
 	return sample, periods && throttled
+}
+
+// parseThrottledTime parses a cumulative throttled time counted in unit. It
+// parses as a signed 64-bit count so the value always fits a Duration, rejects
+// negative counts, and saturates a count whose Duration would overflow.
+func parseThrottledTime(value string, unit time.Duration) (time.Duration, bool) {
+	count, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	if count > int64(math.MaxInt64/unit) {
+		return time.Duration(math.MaxInt64), true
+	}
+	return time.Duration(count) * unit, true
 }
 
 // sessionStartStage is one completed stage of a RuntimeSession creation.
@@ -94,6 +112,7 @@ type sessionStartTimings struct {
 
 	started      time.Time
 	last         time.Time
+	ended        time.Time
 	stages       []sessionStartStage
 	adapter      acp.StartupTimings
 	adapterKnown bool
@@ -137,13 +156,28 @@ func (t *sessionStartTimings) recordAdapter(timings acp.StartupTimings) {
 	t.adapter, t.adapterKnown = timings, true
 }
 
-// finish reads the throttling counters once more, so the log line and the
-// span report the same window. A nil receiver records nothing.
+// finish ends the measured window: it records when the creation attempt
+// returned, so the total includes a stage that failed before its mark, and
+// reads the throttling counters once more, so the log line and the span report
+// the same window. A nil receiver records nothing.
 func (t *sessionStartTimings) finish() {
-	if t == nil || !t.throttleStarted {
+	if t == nil {
 		return
 	}
-	t.throttleEnd, t.throttleEnded = t.readThrottle()
+	t.ended = t.now()
+	if t.throttleStarted {
+		t.throttleEnd, t.throttleEnded = t.readThrottle()
+	}
+}
+
+// total returns the time from the start to finish, or to the last stage mark
+// when finish has not run.
+func (t *sessionStartTimings) total() time.Duration {
+	end := t.ended
+	if end.IsZero() {
+		end = t.last
+	}
+	return end.Sub(t.started)
 }
 
 func milliseconds(duration time.Duration) int64 { return duration.Milliseconds() }
@@ -155,7 +189,7 @@ func (t *sessionStartTimings) logAttrs() []any {
 	if t == nil {
 		return nil
 	}
-	attrs := []any{slog.Int64("totalMs", milliseconds(t.last.Sub(t.started)))}
+	attrs := []any{slog.Int64("totalMs", milliseconds(t.total()))}
 	stages := make([]any, 0, len(t.stages))
 	for _, stage := range t.stages {
 		stages = append(stages, slog.Int64(stage.name, milliseconds(stage.duration)))
@@ -180,7 +214,7 @@ func (t *sessionStartTimings) spanAttributes() []attribute.KeyValue {
 	if t == nil {
 		return nil
 	}
-	attrs := []attribute.KeyValue{attribute.Int64("orka.acp.session_start.total_ms", milliseconds(t.last.Sub(t.started)))}
+	attrs := []attribute.KeyValue{attribute.Int64("orka.acp.session_start.total_ms", milliseconds(t.total()))}
 	for _, stage := range t.stages {
 		attrs = append(attrs, attribute.Int64("orka.acp.session_start."+snakeCase(stage.name)+"_ms", milliseconds(stage.duration)))
 	}
