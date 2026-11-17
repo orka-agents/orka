@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -522,9 +523,13 @@ type repositoryMonitorFeedbackGitHub struct {
 	// failThreadPage answers that thread page (1-based) with a GraphQL
 	// rate-limit error.
 	failThreadPage int
-	permissions    map[string]string
-	failPermission map[string]int
-	requests       []string
+	// maxThreadPageSize, when non-zero, answers a thread page asking for
+	// more threads with a response over the GitHub response limit; -1
+	// makes every thread page too large.
+	maxThreadPageSize int
+	permissions       map[string]string
+	failPermission    map[string]int
+	requests          []string
 }
 
 func (g *repositoryMonitorFeedbackGitHub) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -588,6 +593,11 @@ func (g *repositoryMonitorFeedbackGitHub) ServeHTTP(w http.ResponseWriter, req *
 		}
 		_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"headRefOid":%q,"reviews":{"pageInfo":{"hasPreviousPage":%t,"startCursor":"cursor%d"},"nodes":%s}}}}}`,
 			head, page > 1, page, nodes)
+		return
+	}
+	if first, _ := request.Variables["first"].(float64); g.maxThreadPageSize != 0 && int(first) > g.maxThreadPageSize {
+		g.requests = append(g.requests, fmt.Sprintf("threads:%d:too-large:%d", page, int(first)))
+		_, _ = w.Write(bytes.Repeat([]byte(" "), repositoryMonitorGitHubResponseLimit+1))
 		return
 	}
 	g.requests = append(g.requests, fmt.Sprintf("threads:%d", page))
@@ -660,6 +670,47 @@ func TestRepositoryMonitorReviewFeedbackPaginatesAndLooksUpPermissions(t *testin
 	}
 	if want := []string{"threads:1", "threads:2", "reviews:1"}; !slices.Equal(slices.DeleteFunc(slices.Clone(github.requests), func(s string) bool { return strings.HasPrefix(s, "permission:") }), want) {
 		t.Fatalf("requests = %v", github.requests)
+	}
+}
+
+// A thread page whose comments push the response over the GitHub response
+// limit is asked for again at half the size until it fits, so a PR with very
+// long comments still yields a complete snapshot.
+func TestRepositoryMonitorReviewFeedbackShrinksOversizedThreadPages(t *testing.T) {
+	ctx := context.Background()
+	github := &repositoryMonitorFeedbackGitHub{
+		t:                 t,
+		threadPages:       []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T1", 11, "writer", "Fix one.") + "]"},
+		permissions:       map[string]string{"writer": "write"},
+		maxThreadPageSize: 12,
+	}
+	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Partial || snapshot.Availability != repositoryMonitorEvidenceAvailable || len(snapshot.Threads) != 1 {
+		t.Fatalf("snapshot = availability %q reason %q partial %t threads %d", snapshot.Availability, snapshot.Reason, snapshot.Partial, len(snapshot.Threads))
+	}
+	threads := slices.DeleteFunc(slices.Clone(github.requests), func(s string) bool { return !strings.HasPrefix(s, "threads:") })
+	if want := []string{"threads:1:too-large:50", "threads:1:too-large:25", "threads:1"}; !slices.Equal(threads, want) {
+		t.Fatalf("thread requests = %v, want %v", threads, want)
+	}
+
+	// When even a single thread does not fit, the read stops as for any
+	// other read failure.
+	tooLarge := &repositoryMonitorFeedbackGitHub{t: t, threadPages: github.threadPages, permissions: github.permissions, maxThreadPageSize: -1}
+	r, monitor = repositoryMonitorFeedbackTestReconciler(t, tooLarge)
+	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Partial || len(snapshot.Threads) != 0 || snapshot.canStartRepair() {
+		t.Fatalf("snapshot = availability %q reason %q partial %t threads %d", snapshot.Availability, snapshot.Reason, snapshot.Partial, len(snapshot.Threads))
+	}
+	if got := len(slices.DeleteFunc(slices.Clone(tooLarge.requests), func(s string) bool { return !strings.HasPrefix(s, "threads:") })); got != 6 {
+		t.Fatalf("thread requests = %v, want 50, 25, 12, 6, 3, 1 then stop", tooLarge.requests)
 	}
 }
 
