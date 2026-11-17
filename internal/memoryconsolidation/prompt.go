@@ -127,7 +127,7 @@ func UserMessage(input Input, focus string, settings Settings) (string, error) {
 	if focus = strings.TrimSpace(focus); focus != "" {
 		fmt.Fprintf(&b, "Operator focus (guidance from the person who scheduled this run):\n%s\n\n", truncateRunes(focus, MaxSummaryChars))
 	}
-	fmt.Fprintf(&b, "Limits: at most %d operations, removing at most %d of the %d memories (a merge of k memories removes k-1, a retire of k removes k).\n\n",
+	fmt.Fprintf(&b, "Limits: at most %d operations, removing at most %d of the %d memories (a merge of k memories removes k-1, a retire of k removes k, a supersede and an add remove none).\n\n",
 		settings.MaxOperations, RemovalBudget(len(input.Memories)), len(input.Memories))
 	b.WriteString("<orka-consolidation-data>\n")
 	b.Write(data)

@@ -494,3 +494,11 @@ func TestValidateKeepsAnOperationThatRepeatsItsCitations(t *testing.T) {
 	require.Len(t, kept, 1)
 	require.Equal(t, []store.MemoryProposalSource{{SessionName: "session-a"}, {SessionName: "session-a", MessageID: "m1"}}, kept[0].Sources)
 }
+
+// The limits line says which operations use the removal budget, so a model
+// does not hold back a supersede, which removes nothing.
+func TestUserMessageSaysASupersedeRemovesNothing(t *testing.T) {
+	message, err := UserMessage(validationInput(), "", Settings{MaxOperations: 3})
+	require.NoError(t, err)
+	require.Contains(t, message, "a supersede and an add remove none")
+}
