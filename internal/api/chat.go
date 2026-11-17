@@ -504,13 +504,13 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		if err := authorizeContextTokenToolAgentCreate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent); err != nil {
 			return err
 		}
-		return authorizeToolAgentProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
+		return authorizeToolAgentCreateProviderUse(ctx, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentUpdateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		if err := authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent); err != nil {
 			return err
 		}
-		return authorizeToolAgentProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
+		return authorizeToolAgentUpdateProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentDeleteAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		return authorizeContextTokenToolAgentDelete(contextToken, ch.contextTokenAuthorization, "chatToolDeleteAgent", agent)

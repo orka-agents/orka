@@ -9,6 +9,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -289,16 +290,28 @@ func TestToolAgentWritesRequireProviderUse(t *testing.T) {
 
 	// A caller who may read the Provider but not use it cannot bind an Agent
 	// to it through a chat tool, which writes with Orka's identity.
-	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), providerUseReader(t), denied, user, named("protected")))
+	requireForbidden(t, authorizeToolAgentCreateProviderUse(context.Background(), denied, user, named("protected")))
 	allowed, _ := providerUseClientset("team-a/protected")
-	require.NoError(t, authorizeToolAgentProviderUse(context.Background(), providerUseReader(t), allowed, user, named("protected")))
+	require.NoError(t, authorizeToolAgentCreateProviderUse(context.Background(), allowed, user, named("protected")))
 
-	// An update that keeps the stored Agent's Provider needs no grant; one
-	// that switches it does.
-	stored := providerUseReader(t, named("protected"))
-	require.NoError(t, authorizeToolAgentProviderUse(context.Background(), stored, denied, user, named("protected")))
-	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), stored, denied, user, named("other")))
-	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), nil, allowed, user, named("protected")))
+	// A create is checked in full even when a same-named Agent is stored: it
+	// could be deleted before the create lands.
+	stored := named("protected")
+	stored.UID, stored.ResourceVersion = "uid-1", "7"
+	reader := providerUseReader(t, stored)
+	requireForbidden(t, authorizeToolAgentCreateProviderUse(context.Background(), denied, user, named("protected")))
+
+	// An update of the stored version that keeps its Provider needs no grant;
+	// one that switches it, or that edits another version, does.
+	update := func(provider, uid, version string) *corev1alpha1.Agent {
+		a := named(provider)
+		a.UID, a.ResourceVersion = types.UID(uid), version
+		return a
+	}
+	require.NoError(t, authorizeToolAgentUpdateProviderUse(context.Background(), reader, denied, user, update("protected", "uid-1", "7")))
+	requireForbidden(t, authorizeToolAgentUpdateProviderUse(context.Background(), reader, denied, user, update("other", "uid-1", "7")))
+	requireForbidden(t, authorizeToolAgentUpdateProviderUse(context.Background(), reader, denied, user, update("protected", "uid-2", "1")))
+	requireForbidden(t, authorizeToolAgentUpdateProviderUse(context.Background(), nil, allowed, user, update("protected", "uid-1", "7")))
 
 	// Each compatibility profile checks the Agent tools it exposes. The
 	// Anthropic proxy exposes create_agent but not update_agent.

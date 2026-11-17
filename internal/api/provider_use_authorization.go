@@ -201,11 +201,19 @@ func authorizeChatProviderUse(c fiber.Ctx, clientset kubernetes.Interface, objec
 	return authorizeKubernetesProviderUse(c.Context(), clientset, GetUserInfo(c), provider.Namespace, provider.Name, objectKind, "")
 }
 
-// authorizeToolAgentProviderUse checks an Agent a chat or compatibility tool
-// creates or updates. The tool writes with Orka's identity, which admission
-// trusts, so the caller's use of every Provider the Agent newly names is
-// checked here. The stored Agent, if any, is the previous version.
-func authorizeToolAgentProviderUse(ctx context.Context, reader client.Reader, clientset kubernetes.Interface, userInfo *UserInfo, agent *corev1alpha1.Agent) error {
+// authorizeToolAgentCreateProviderUse checks an Agent a chat or compatibility
+// tool creates. The tool writes with Orka's identity, which admission trusts,
+// so the caller's use of every Provider the Agent names is checked here. A
+// same-named stored Agent is not treated as a previous version: it could be
+// deleted before the create, which would then add Providers nobody checked.
+func authorizeToolAgentCreateProviderUse(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, agent *corev1alpha1.Agent) error {
+	return authorizeAgentProviderRefsUse(ctx, clientset, userInfo, agent, nil)
+}
+
+// authorizeToolAgentUpdateProviderUse checks an Agent a chat or compatibility
+// tool updates, against the stored version it replaces. The tool's update
+// carries the resourceVersion it read, so it fails if that version changed.
+func authorizeToolAgentUpdateProviderUse(ctx context.Context, reader client.Reader, clientset kubernetes.Interface, userInfo *UserInfo, agent *corev1alpha1.Agent) error {
 	if agent == nil || !providerUseAuthorization.Load() {
 		return nil
 	}
@@ -216,7 +224,10 @@ func authorizeToolAgentProviderUse(ctx context.Context, reader client.Reader, cl
 	stored := &corev1alpha1.Agent{}
 	switch err := reader.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: agent.Name}, stored); {
 	case err == nil:
-		previous = stored
+		// Only the version this update replaces counts as previous.
+		if stored.UID == agent.UID && stored.ResourceVersion == agent.ResourceVersion {
+			previous = stored
+		}
 	case !apierrors.IsNotFound(err):
 		log.Error(err, "provider use authorization could not read the stored Agent", "namespace", agent.Namespace, "agent", agent.Name)
 		return fiber.NewError(fiber.StatusForbidden, "not authorized to write agents")

@@ -131,7 +131,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 				if err := authorizeContextTokenToolAgentCreate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentCreateAction, agent); err != nil {
 					return err
 				}
-				return authorizeToolAgentProviderUse(ctx, authorizationReader, cfg.KubeClient, cfg.UserInfo, agent)
+				return authorizeToolAgentCreateProviderUse(ctx, cfg.KubeClient, cfg.UserInfo, agent)
 			}
 			return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
 		}
@@ -142,7 +142,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 				if err := authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentUpdateAction, agent); err != nil {
 					return err
 				}
-				return authorizeToolAgentProviderUse(ctx, authorizationReader, cfg.KubeClient, cfg.UserInfo, agent)
+				return authorizeToolAgentUpdateProviderUse(ctx, authorizationReader, cfg.KubeClient, cfg.UserInfo, agent)
 			}
 			return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
 		}
