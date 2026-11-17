@@ -59,10 +59,10 @@ not do with a running agent's memory. See
 | --- | --- | --- |
 | [0024](0024-acp-execution-workspace-runtime-pools.md) | Workspace-provider-backed ACP RuntimePools | Accepted |
 | [0025](0025-substrate-backed-runtime-pools.md) | Substrate-backed pools, without suspension | Accepted |
-| [0026](0026-acp-class-backed-execution-workspaces.md) | Class-backed execution workspaces | Accepted |
-| [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted |
+| [0026](0026-acp-class-backed-execution-workspaces.md) | Class-backed execution workspaces | Accepted, amended by 0055 |
+| [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted, amended by 0055 |
 | [0028](0028-agent-sandbox-pvc-cold-resume.md) | Agent Sandbox PVC-backed cold suspension and resume | Accepted |
-| [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted |
+| [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted, amended by 0055 |
 | [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted, partly superseded by 0049 |
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
 | [0049](0049-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
@@ -70,6 +70,7 @@ not do with a running agent's memory. See
 | [0044](0044-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
 | [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
 | [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
+| [0055](0055-substrate-warm-detach-window.md) | Keep a detached Substrate workspace warm before suspending it | Accepted |
 
 ### The Substrate control plane
 
