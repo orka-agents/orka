@@ -108,6 +108,8 @@ type RepositoryMonitorReconciler struct {
 // Reconcile keeps monitor metadata durable and publishes basic status.
 func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
+	// One poll looks each account's repository permission up at most once.
+	ctx = withRepositoryMonitorPermissionCache(ctx)
 
 	monitor, found, err := r.getRepositoryMonitor(ctx, req)
 	if err != nil {

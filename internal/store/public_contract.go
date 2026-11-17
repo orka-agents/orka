@@ -93,6 +93,10 @@ type (
 	MonitorFeedbackAttempt                    = storagev1.MonitorFeedbackAttempt
 	MonitorFeedbackAttemptFilter              = storagev1.MonitorFeedbackAttemptFilter
 	MonitorFeedbackAdmission                  = storagev1.MonitorFeedbackAdmission
+	MonitorFeedbackOutcome                    = storagev1.MonitorFeedbackOutcome
+	MonitorFeedbackOutcomeFilter              = storagev1.MonitorFeedbackOutcomeFilter
+	StartMonitorFeedbackRepairRequest         = storagev1.StartMonitorFeedbackRepairRequest
+	FinishMonitorFeedbackRepairRequest        = storagev1.FinishMonitorFeedbackRepairRequest
 	OutboxPersistenceStore                    = storagev1.OutboxPersistenceStore
 	ScanTaskIdentity                          = storagev1.ScanTaskIdentity
 	ScanTaskIngestion                         = storagev1.ScanTaskIngestion
@@ -198,6 +202,12 @@ type (
 )
 
 const (
+	MonitorFeedbackOutcomeReserved    = storagev1.MonitorFeedbackOutcomeReserved
+	MonitorFeedbackOutcomeStarted     = storagev1.MonitorFeedbackOutcomeStarted
+	MonitorFeedbackOutcomeWithdrawn   = storagev1.MonitorFeedbackOutcomeWithdrawn
+	MonitorFeedbackOutcomeNoChange    = storagev1.MonitorFeedbackOutcomeNoChange
+	MonitorFeedbackOutcomeFailed      = storagev1.MonitorFeedbackOutcomeFailed
+	MonitorFeedbackOutcomeSucceeded   = storagev1.MonitorFeedbackOutcomeSucceeded
 	SessionTurnOpen                   = storagev1.SessionTurnOpen
 	SessionTurnFinalized              = storagev1.SessionTurnFinalized
 	SessionTurnAssistantResult        = storagev1.SessionTurnAssistantResult
@@ -292,6 +302,12 @@ var (
 	ErrGatewaySessionCleanupPending = storagev1.ErrGatewaySessionCleanupPending
 	ErrPreconditionFailed           = storagev1.ErrPreconditionFailed
 )
+
+// IsMonitorFeedbackOutcomeTerminal reports whether state is a terminal
+// feedback outcome state.
+func IsMonitorFeedbackOutcomeTerminal(state string) bool {
+	return storagev1.IsMonitorFeedbackOutcomeTerminal(state)
+}
 
 func FencedErrorf(format string, args ...any) error {
 	return storagev1.FencedErrorf(format, args...)

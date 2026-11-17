@@ -898,6 +898,19 @@ func (p *stateProvider) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 	return r0, r1, err
 }
 
+func (p *stateProvider) FinishMonitorFeedbackRepair(ctx context.Context, a1 storagev1.FinishMonitorFeedbackRepairRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	injected, err := p.injector.call(ctx, p.contract, "FinishMonitorFeedbackRepair", func(ctx context.Context) (err error) {
+		r0, err = p.inner.FinishMonitorFeedbackRepair(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.MonitorFeedbackOutcome
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, a1 string, a2 string, a3 string, a4 []string, a5 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "FreezeGatewayEventTaskRuntimeAllowedTools", func(ctx context.Context) (err error) {
@@ -1175,6 +1188,19 @@ func (p *stateProvider) GetMemoryProposal(ctx context.Context, a1 string, a2 str
 	})
 	if injected {
 		var z0 *storagev1.MemoryProposal
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetMonitorFeedbackOutcome(ctx context.Context, a1 string, a2 string) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	injected, err := p.injector.call(ctx, p.contract, "GetMonitorFeedbackOutcome", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetMonitorFeedbackOutcome(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.MonitorFeedbackOutcome
 		return z0, err
 	}
 	return r0, err
@@ -1843,6 +1869,21 @@ func (p *stateProvider) ListMonitorFeedbackAttempts(ctx context.Context, a1 stor
 	})
 	if injected {
 		var z0 []storagev1.MonitorFeedbackAttempt
+		var z1 string
+		return z0, z1, err
+	}
+	return r0, r1, err
+}
+
+func (p *stateProvider) ListMonitorFeedbackOutcomes(ctx context.Context, a1 storagev1.MonitorFeedbackOutcomeFilter) ([]storagev1.MonitorFeedbackOutcome, string, error) {
+	var r0 []storagev1.MonitorFeedbackOutcome
+	var r1 string
+	injected, err := p.injector.call(ctx, p.contract, "ListMonitorFeedbackOutcomes", func(ctx context.Context) (err error) {
+		r0, r1, err = p.inner.ListMonitorFeedbackOutcomes(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.MonitorFeedbackOutcome
 		var z1 string
 		return z0, z1, err
 	}
@@ -2769,6 +2810,22 @@ func (p *stateProvider) StageSealedNativeSessionImport(ctx context.Context, a1 s
 	})
 	if injected {
 		var z0 *storagev1.NativeSessionImportReceipt
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) StartMonitorFeedbackRepair(ctx context.Context, a1 storagev1.StartMonitorFeedbackRepairRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	injected, err := p.injector.call(ctx, p.contract, "StartMonitorFeedbackRepair", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.StartMonitorFeedbackRepair(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.MonitorFeedbackOutcome
 		return z0, err
 	}
 	return r0, err

@@ -46,7 +46,7 @@ with `fullDatabaseId`, author login and type, body, URL, creation and last-edit
 times, minimized flag, and the review it belongs to. Each review keeps its
 `fullDatabaseId`, state, body, author, commit, and times. Reads are bounded
 (four pages of 50 threads, four pages of 50 reviews, 20 permission lookups, 20
-seconds), and a read that stops early sets an explicit `partial` flag with a
+seconds; permission lookups are also cached and bounded per monitor poll), and a read that stops early sets an explicit `partial` flag with a
 reason. Reviews are read newest page first (`reviews(last:, before:)`), so a
 read cut at its page limit holds the newest reviews: every reviewer it holds
 has their true latest verdict, and a reviewer whose latest review is older than
@@ -149,30 +149,88 @@ The command's dedupe key names the budget slot it takes: the pull request, its
 head, and the repair counts the budget check saw. Admission is therefore atomic
 with the existing repair admission. Two reconciles that pick different targets
 cannot both schedule a repair, or both fit into one remaining slot. Replaying
-the same command for the same monitor and pull request is idempotent. A
-queued feedback repair is rechecked before its Task starts. Feedback that was
-resolved, turned outdated, or was deleted withdraws it. A withdrawal is not
-a failed repair: it leaves the head as if no repair had been requested. A
-snapshot that could not be read, was read for a moved head, or could not check
-a target author's permission defers it. An attempt charges its feedback's budget while its command is still queued,
-and once its repair Task exists if the Task's prompt froze its feedback as a
-target. The work action records the frozen targets when the Task is created,
-so the charge outlives the Task. An attempt whose command ended before any
-Task ran, or whose feedback was no longer a target when the Task was
-created, addressed nothing, so it is not charged, though the pull request's
-repair budget still counts its command. A feedback repair that makes no
-change, because its feedback was already addressed, keeps its charge and is
-not a failed repair; open-feedback readiness decides whether a person is
-needed. A transient GitHub
-failure therefore never spends a comment's attempts. The command's budget
-slot ignores the monitor generation, because repair budgets outlive spec
-changes. Editing a comment keeps its ID, so the edit does not reset
-its lifetime budget of `maxAttemptsPerComment` (default 2). A new head
+the same command for the same monitor and pull request is idempotent. The
+command's budget slot ignores the monitor generation, because repair budgets
+outlive spec changes. Editing a comment keeps its ID, so the edit does not
+reset its lifetime budget of `maxAttemptsPerComment` (default 2). A new head
 re-triggers feedback only while attempts remain and the thread is still
-unresolved and current. The repair Task's prompt freezes the snapshot it
-received, using the CI evidence mechanism: a retried handoff reuses the
-prompt's input. The work action and the `repair_task_created` event record
-that snapshot's digest and IDs.
+unresolved and current.
+
+### One outcome per feedback repair
+
+Earlier designs inferred whether an attempt had run from the command's status,
+the repair job's phase, whether the repair Task still existed, and the work
+action's status and metadata. Each was written at a different moment, and the
+attempt charge, the readiness projection, and the repair budget each inferred
+differently, which repeatedly disagreed on edge cases. Instead, each feedback
+repair has one mutable outcome record beside its immutable attempts, in the
+store table `monitor_feedback_outcomes`, keyed by the command event:
+
+- `reserved`, written with the command and its attempts at admission, lists
+  the admitted feedback IDs. All of them are charged, so a queued repair holds
+  its attempts.
+- `started` is written only once the repair Task exists, with the
+  `humanFeedbackTargets` its prompt froze and the Task's name. From then on
+  only those targets are charged; admitted feedback that was resolved before
+  the Task was created is released.
+- One terminal state follows and never changes: `withdrawn` (only from
+  `reserved`: the feedback no longer needed a repair, or needs a person),
+  `failed` (from either), `no_change` or `succeeded` (only from `started`).
+
+The charge is a function of the record alone: `reserved` charges every
+admitted ID, anything else charges its targets, which are empty when no Task
+ever existed. An attempt without an outcome is charged, so the budget fails
+closed. Each transition is written where it becomes known, idempotently and
+under the controller's write fence: the handoff after creating or adopting
+the Task, the withdrawal and refusal paths before it, and repair ingestion,
+which records the Task's end before the job so a retried ingestion records the
+same end. A command that ends any other way, such as a cancellation or
+exhausted retries, ends its outcome as it is settled. A restart in any state
+resumes from the record. A `started` repair whose Task disappeared before its
+result was recorded fails with `repair_task_missing`, keeps its charge, and is
+not run again; an outcome that already ended records that end on the job, the
+action, and the item again.
+
+The readiness projection skips a `withdrawn` repair, so a withdrawal leaves
+the head as if no repair had been requested. The pull request's repair budget
+counts every feedback repair past `reserved`, including one withdrawn before
+its Task existed. A feedback repair whose Task verifiably changed nothing,
+because its feedback was already addressed, ends `no_change`: it keeps its
+charge, is not a failed repair, and leaves the head and its review alone;
+open-feedback readiness decides whether a person is needed.
+
+An unreleased build of this change wrote schema version 8 without the outcome
+table. Opening such a store repairs its layout in place at version 8 and
+recovers one outcome per admitted command: an unfinished command stays
+`reserved`, a finished one whose repair job settled from its Task charges
+every admitted ID, and any other finished one charges nothing.
+
+### One read per handoff and one completeness verdict
+
+A queued feedback repair reads feedback once per handoff. The same snapshot
+rechecks the repair before its Task exists and becomes the Task's input, so no
+change can fall between a recheck and the input. A retried handoff whose Task
+already exists adopts the Task's frozen input and reads nothing.
+
+Every decision about whether a snapshot is complete goes through one verdict:
+
+- `complete`: every piece of feedback that could start a repair is shown,
+  with its author's authority known. Only a complete snapshot admits a repair
+  or hands one off.
+- `incomplete_retry`: a transient failure: a failed or throttled GitHub read
+  or permission lookup, the poll's permission lookup budget, or a read for
+  another head. Readiness waits and a queued repair is deferred.
+- `needs_person`: a permanent limit: more feedback than the page limits hold,
+  an unresolved thread whose omitted replies may hide feedback, a thread or
+  review left out of the 32 KiB budget that holds or may hide feedback that
+  could start a repair, or more reviewers than one snapshot may look up.
+  Readiness asks for a person and a queued repair is withdrawn with
+  `review_feedback_needs_person`.
+
+Collaborator permissions are cached for one monitor poll, shared by every
+pull request, readiness, and repair label checks, and bounded to 60 lookups
+per poll in addition to the 20 per snapshot. A failed lookup is cached for the
+poll too, so a throttled account is not asked again until the next poll.
 
 ### Budgets and maxRounds
 
@@ -185,15 +243,15 @@ still bound the work. This is open for maintainer review.
 
 ### Readiness
 
-When `humanFeedback` is enabled, a head that would otherwise be ready stays
-`pending` ("Addressing N reviewer comments") while authorized current feedback
-has attempts left. It becomes a non-success status saying a person is needed
-once that feedback's attempts are exhausted, or when authorized feedback is
-open but automation will not act on it, such as an outdated thread. A
-reviewer whose permission lookup failed keeps the head `pending` until a
-lookup answers, and reviewers past the lookup limit need a person. An
-unreadable or partial snapshot never reports success. Readiness never resolves
-or replies to threads.
+When `humanFeedback` is enabled, a head that would otherwise be ready follows
+the snapshot's verdict first: `incomplete_retry` keeps it `pending`, and
+`needs_person` makes it a non-success status saying a person must review the
+feedback. A complete snapshot stays `pending` ("Addressing N reviewer
+comments") while authorized current feedback has attempts left. It becomes a
+non-success status saying a person is needed once that feedback's attempts are
+exhausted, or when authorized feedback is open but automation will not act on
+it, such as an outdated thread or a repair label added by an account that may
+not start repairs. Readiness never resolves or replies to threads.
 
 ### Why there is no thread resolution in v1
 
@@ -217,13 +275,15 @@ and the maintainer-edits rule also apply unchanged.
 
 - Reviewer comments can drive repairs, but only from authorized authors and
   only within the attempt and repair budgets.
-- Each feedback repair costs two GraphQL reads and up to 20 permission lookups.
+- Each feedback repair handoff costs one feedback read (two GraphQL
+  connections) and up to 20 permission lookups, cached across the poll.
   Readiness makes the same reads only for a head that would otherwise report
   success.
 - A comment the repairer addressed still counts against its budget until a
   person resolves the thread or the change makes it outdated. With the default
   of two attempts, a satisfied but unresolved comment can get one extra no-op
   repair before readiness asks for a person.
-- The schema gains one table and moves to schema version 8.
+- The schema gains the attempt ledger and outcome tables and moves to schema
+  version 8. The state provider contract gains the outcome methods in revision 9.
 - Reply and resolve actions, webhook-driven latency for review events, and the
   issue's resolved-thread evidence remain future work.

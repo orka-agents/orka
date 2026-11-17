@@ -560,3 +560,106 @@ type MonitorFeedbackAdmission struct {
 // MaxMonitorFeedbackAttemptsPerAdmission bounds the attempts one admission
 // records.
 const MaxMonitorFeedbackAttemptsPerAdmission = 50
+
+// Feedback outcome states. A feedback repair's outcome is reserved when the
+// repair is admitted, started once its repair Task exists, and then ends in
+// exactly one terminal state, which never changes.
+const (
+	// MonitorFeedbackOutcomeReserved is a queued feedback repair whose Task
+	// does not exist yet. Every admitted feedback ID is reserved.
+	MonitorFeedbackOutcomeReserved = "reserved"
+	// MonitorFeedbackOutcomeStarted is a feedback repair whose Task exists,
+	// with the feedback targets its prompt froze.
+	MonitorFeedbackOutcomeStarted = "started"
+	// MonitorFeedbackOutcomeWithdrawn ends a reserved repair whose feedback
+	// no longer needed a repair before its Task existed.
+	MonitorFeedbackOutcomeWithdrawn = "withdrawn"
+	// MonitorFeedbackOutcomeNoChange ends a started repair whose Task
+	// verifiably changed nothing.
+	MonitorFeedbackOutcomeNoChange = "no_change"
+	// MonitorFeedbackOutcomeFailed ends a reserved or started repair that
+	// did not succeed.
+	MonitorFeedbackOutcomeFailed = "failed"
+	// MonitorFeedbackOutcomeSucceeded ends a started repair whose Task
+	// delivered its change.
+	MonitorFeedbackOutcomeSucceeded = "succeeded"
+)
+
+// IsMonitorFeedbackOutcomeTerminal reports whether state is a terminal
+// feedback outcome state.
+func IsMonitorFeedbackOutcomeTerminal(state string) bool {
+	switch state {
+	case MonitorFeedbackOutcomeWithdrawn, MonitorFeedbackOutcomeNoChange, MonitorFeedbackOutcomeFailed, MonitorFeedbackOutcomeSucceeded:
+		return true
+	}
+	return false
+}
+
+// MonitorFeedbackOutcome is the one mutable record of a feedback repair,
+// kept beside its immutable attempts: what was admitted, what its repair
+// Task was given to address, and how it ended.
+type MonitorFeedbackOutcome struct {
+	MonitorNamespace string `json:"monitorNamespace"`
+	MonitorName      string `json:"monitorName"`
+	Repo             string `json:"repo"`
+	PRNumber         int64  `json:"prNumber"`
+	// CommandEventID names the feedback repair's command event and
+	// identifies the outcome within its namespace.
+	CommandEventID string `json:"commandEventID"`
+	HeadSHA        string `json:"headSHA"`
+	State          string `json:"state"`
+	// AdmittedIDs are the feedback IDs of the command's attempts, sorted.
+	AdmittedIDs []string `json:"admittedIDs"`
+	// Targets are the feedback IDs the repair Task's prompt froze, sorted, a
+	// subset of AdmittedIDs. Only a started outcome, or a terminal one that
+	// was started, has them.
+	Targets []string `json:"targets,omitempty"`
+	// TaskName is the repair Task's name, set when the outcome started.
+	TaskName string `json:"taskName,omitempty"`
+	// Reason says why a terminal outcome ended as it did.
+	Reason      string     `json:"reason,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+	StartedAt   *time.Time `json:"startedAt,omitempty"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+}
+
+// ChargedIDs returns the feedback IDs whose attempt budget the outcome
+// charges: every admitted ID while it is reserved, and afterwards only the
+// targets its repair Task was given, none when no Task ever existed.
+func (o MonitorFeedbackOutcome) ChargedIDs() []string {
+	if o.State == MonitorFeedbackOutcomeReserved {
+		return o.AdmittedIDs
+	}
+	return o.Targets
+}
+
+// MonitorFeedbackOutcomeFilter constrains feedback outcome list queries.
+type MonitorFeedbackOutcomeFilter struct {
+	Namespace   string
+	MonitorName string
+	Repo        string
+	PRNumber    int64
+	HeadSHA     string
+	State       string
+	Limit       int
+	Cursor      string
+}
+
+// StartMonitorFeedbackRepairRequest records that a feedback repair's Task
+// exists and which admitted feedback its prompt froze as targets.
+type StartMonitorFeedbackRepairRequest struct {
+	Namespace      string   `json:"namespace"`
+	CommandEventID string   `json:"commandEventID"`
+	Targets        []string `json:"targets"`
+	TaskName       string   `json:"taskName"`
+}
+
+// FinishMonitorFeedbackRepairRequest records how a feedback repair ended.
+type FinishMonitorFeedbackRepairRequest struct {
+	Namespace      string `json:"namespace"`
+	CommandEventID string `json:"commandEventID"`
+	// State is a terminal outcome state.
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}

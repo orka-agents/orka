@@ -265,7 +265,66 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 
 // repositoryMonitorCollaboratorPermission returns actor's repository role, or
 // "" when actor is not a collaborator.
+// repositoryMonitorPermissionLookupBudget bounds the collaborator
+// permission requests one monitor poll makes across every pull request,
+// readiness, and repair label check, so a busy repository cannot spend
+// GitHub's rate limit on permission lookups.
+const repositoryMonitorPermissionLookupBudget = 60
+
+// errRepositoryMonitorPermissionLookupBudget reports that this poll spent its
+// permission lookup budget. Like any failed lookup it leaves the reviewer's
+// authority unknown until a later poll checks it.
+var errRepositoryMonitorPermissionLookupBudget = errors.New("repository permission lookups for this poll are spent")
+
+// repositoryMonitorPermissionCache caches collaborator permissions for one
+// monitor poll, so every pull request, readiness, and repair label check
+// in it looks each account up at most once. A failed lookup is cached too,
+// so a throttled account is not asked again in the same poll. Permissions
+// can change, so the cache lives only as long as the poll's context.
+type repositoryMonitorPermissionCache struct {
+	mu      sync.Mutex
+	entries map[string]repositoryMonitorPermissionResult
+	lookups int
+}
+
+type repositoryMonitorPermissionResult struct {
+	permission string
+	err        error
+}
+
+type repositoryMonitorPermissionCacheKey struct{}
+
+// withRepositoryMonitorPermissionCache returns ctx with a new permission
+// cache for one monitor poll.
+func withRepositoryMonitorPermissionCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}})
+}
+
 func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ctx context.Context, baseURL, owner, repo, token, actor string) (string, error) {
+	cache, ok := ctx.Value(repositoryMonitorPermissionCacheKey{}).(*repositoryMonitorPermissionCache)
+	if !ok {
+		return r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
+	}
+	key := strings.ToLower(baseURL + "|" + owner + "/" + repo + "|" + actor)
+	cache.mu.Lock()
+	if cached, ok := cache.entries[key]; ok {
+		cache.mu.Unlock()
+		return cached.permission, cached.err
+	}
+	if cache.lookups >= repositoryMonitorPermissionLookupBudget {
+		cache.mu.Unlock()
+		return "", errRepositoryMonitorPermissionLookupBudget
+	}
+	cache.lookups++
+	cache.mu.Unlock()
+	permission, err := r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
+	cache.mu.Lock()
+	cache.entries[key] = repositoryMonitorPermissionResult{permission: permission, err: err}
+	cache.mu.Unlock()
+	return permission, err
+}
+
+func (r *RepositoryMonitorReconciler) lookUpRepositoryMonitorCollaboratorPermission(ctx context.Context, baseURL, owner, repo, token, actor string) (string, error) {
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/collaborators/%s/permission", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(actor))
 	var response struct {
 		Permission string `json:"permission"`

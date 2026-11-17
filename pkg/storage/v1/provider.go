@@ -141,8 +141,13 @@ const (
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
 	// [ProviderLimits.MaxResultBytes]. Revision 9 adds the reviewer
-	// feedback attempt ledger, [RepositoryMonitorStore.AdmitMonitorFeedbackRepair]
-	// and [RepositoryMonitorStore.ListMonitorFeedbackAttempts].
+	// feedback attempt ledger and outcomes:
+	// [RepositoryMonitorStore.AdmitMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.ListMonitorFeedbackAttempts],
+	// [RepositoryMonitorStore.StartMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.FinishMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.GetMonitorFeedbackOutcome] and
+	// [RepositoryMonitorStore.ListMonitorFeedbackOutcomes].
 	ContractRevision = 9
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"

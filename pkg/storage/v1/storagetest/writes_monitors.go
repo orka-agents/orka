@@ -2,6 +2,7 @@ package storagetest
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -146,6 +147,16 @@ func observeFeedbackAdmission(t *testing.T, p storagev1.StateProvider) any {
 	attempts, _, listErr := p.ListMonitorFeedbackAttempts(t.Context(), storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace})
 	require.NoError(t, listErr)
 	return []any{observed(t, event, err), attempts}
+}
+
+func observeFeedbackOutcome(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	outcome, err := p.GetMonitorFeedbackOutcome(t.Context(), workflowNamespace, "feedback-1")
+	if err == nil {
+		// Transition times come from the provider's clock.
+		outcome.UpdatedAt, outcome.StartedAt, outcome.CompletedAt = time.Time{}, nil, nil
+	}
+	return observed(t, outcome, err)
 }
 
 func observeMonitorEvents(t *testing.T, p storagev1.StateProvider) any {
@@ -353,6 +364,26 @@ func init() {
 			method:  "AdmitMonitorFeedbackRepair",
 			args:    rebuiltArgs(func() []any { return []any{catalogFeedbackAdmission()} }),
 			observe: observeFeedbackAdmission,
+		},
+		monitorCase{
+			method: "StartMonitorFeedbackRepair",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args: fixed(storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1",
+				Targets: []string{"review_comment:1"}, TaskName: "task-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "FinishMonitorFeedbackRepair",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args: fixed(storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1",
+				State: storagev1.MonitorFeedbackOutcomeWithdrawn, Reason: "review_feedback_withdrawn"}),
+			observe: observeFeedbackOutcome,
 		},
 		monitorCase{
 			method: "CreateMonitorEvent",

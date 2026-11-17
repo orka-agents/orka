@@ -776,6 +776,16 @@ func (p envelopedState) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 	return r0, r1, err
 }
 
+func (p envelopedState) FinishMonitorFeedbackRepair(ctx context.Context, a1 storagev1.FinishMonitorFeedbackRepairRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	err := p.ops.run(ctx, writeCall{method: "FinishMonitorFeedbackRepair", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.FinishMonitorFeedbackRepair(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, a1 string, a2 string, a3 string, a4 []string, a5 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	err := p.ops.run(ctx, writeCall{method: "FreezeGatewayEventTaskRuntimeAllowedTools", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
@@ -1143,6 +1153,16 @@ func (p envelopedState) StageSealedNativeSessionImport(ctx context.Context, a1 s
 	err := p.ops.run(ctx, writeCall{method: "StageSealedNativeSessionImport", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
 		r0, err = p.StateProvider.StageSealedNativeSessionImport(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
+func (p envelopedState) StartMonitorFeedbackRepair(ctx context.Context, a1 storagev1.StartMonitorFeedbackRepairRequest) (*storagev1.MonitorFeedbackOutcome, error) {
+	var r0 *storagev1.MonitorFeedbackOutcome
+	err := p.ops.run(ctx, writeCall{method: "StartMonitorFeedbackRepair", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.StartMonitorFeedbackRepair(ctx, a1)
 		return err
 	})
 	return r0, err

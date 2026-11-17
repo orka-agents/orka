@@ -306,10 +306,13 @@ the observable parts.
   Revision 8 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
   artifact replacement order").
-  Revision 9 adds the reviewer feedback attempt ledger:
+  Revision 9 adds the reviewer feedback attempt ledger and outcomes:
   `AdmitMonitorFeedbackRepair`, which creates a feedback repair's command
-  event and its numbered attempts in one transaction, and
-  `ListMonitorFeedbackAttempts`.
+  event, its numbered attempts, and its `reserved` outcome in one
+  transaction; `ListMonitorFeedbackAttempts`; `StartMonitorFeedbackRepair`
+  and `FinishMonitorFeedbackRepair`, the outcome's only transitions; and
+  `GetMonitorFeedbackOutcome` and `ListMonitorFeedbackOutcomes` (see
+  "Feedback repair outcomes").
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
@@ -319,6 +322,20 @@ the observable parts.
   other call, committing nothing, until an operator replaces the provider or
   the dataset. One that cannot read the identity answers `Describe` with
   `ErrIncompatible`. Orka treats both as the same verdict.
+- **Feedback repair outcomes.** Each feedback repair has one outcome, keyed
+  by namespace and command event ID, beside its immutable attempts. It is
+  `reserved` with the sorted admitted feedback IDs at admission. Only
+  `StartMonitorFeedbackRepair` moves it to `started`, recording sorted
+  targets, a nonempty subset of the admitted IDs (otherwise `ErrValidation`),
+  and the Task name. Only `FinishMonitorFeedbackRepair` ends it: `withdrawn`
+  only from `reserved`, `no_change` and `succeeded` only from `started`,
+  `failed` from either; a state that is not terminal is `ErrValidation`.
+  Both are idempotent: repeating a start with the same targets and Task name,
+  even after the outcome ended, or a finish in the state already recorded,
+  returns the stored outcome unchanged. Any other transition fails with
+  `ErrConflict`, and a terminal outcome never changes. `ChargedIDs` derives
+  the attempt charge from the record alone. Deleting the monitor deletes its
+  outcomes with its attempts.
 - **Health checks.** `HealthCheck` reaches the dataset, not only the provider
   process, takes no write lock and is cheap: Orka probes every few seconds
   with a short deadline, so it should finish in tens of milliseconds. It

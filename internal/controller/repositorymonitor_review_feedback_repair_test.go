@@ -325,19 +325,19 @@ func TestRepositoryMonitorReviewFeedbackRepairWithdrawnWhenResolved(t *testing.T
 		t.Fatalf("started=%t err=%v", started, err)
 	}
 	command := f.feedbackCommands(t)[0]
-	if reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); err != nil || reason != "" {
+	if reason, err := f.handoffReason(&command, pr); err != nil || reason != "" {
 		t.Fatalf("withdrawn before resolution = %q err=%v", reason, err)
 	}
 	// A person resolved the thread before the repair started.
 	f.github.threadPages = []string{strings.Replace("["+repositoryMonitorFeedbackTestThreadJSON("T1", 11, "writer", "Please handle the nil case.")+"]", `"isResolved":false`, `"isResolved":true`, 1)}
-	if reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
+	if reason, err := f.handoffReason(&command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
 		t.Fatalf("withdrawn after resolution = %q err=%v", reason, err)
 	}
 	// An unreadable snapshot defers the repair, which keeps its attempt, and
 	// the run retries.
 	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T1", 11, "writer", "Please handle the nil case.") + "]"}
 	f.github.failThreadPage = 1
-	reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr)
+	reason, err := f.handoffReason(&command, pr)
 	if !errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) || reason != "" || repositoryMonitorRunFailureState(err) != repositoryMonitorRunRetryScheduled {
 		t.Fatalf("unreadable snapshot = %q err=%v, want a deferral", reason, err)
 	}
@@ -345,21 +345,21 @@ func TestRepositoryMonitorReviewFeedbackRepairWithdrawnWhenResolved(t *testing.T
 	// not a confirmed loss of authority.
 	f.github.failThreadPage = 0
 	f.github.failPermission = map[string]int{"writer": http.StatusBadGateway}
-	reason, err = f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr)
+	reason, err = f.handoffReason(&command, pr)
 	if !errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) || reason != "" {
 		t.Fatalf("failed permission lookup = %q err=%v, want a deferral", reason, err)
 	}
 	// A lookup that answers with less than write access withdraws it.
 	f.github.failPermission = nil
 	f.github.permissions["writer"] = "read"
-	if reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
+	if reason, err := f.handoffReason(&command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
 		t.Fatalf("lost permission = %q err=%v, want withdrawn", reason, err)
 	}
 	f.github.permissions["writer"] = "write"
 	// So does feedback read for a head that moved.
 	f.github.failThreadPage = 0
 	f.github.heads = map[int]string{1: "moved222"}
-	if _, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); !errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) {
+	if _, err := f.handoffReason(&command, pr); !errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) {
 		t.Fatalf("stale snapshot err=%v, want a deferral", err)
 	}
 }
@@ -379,7 +379,7 @@ func TestRepositoryMonitorReviewFeedbackRidesAlongOnRepairs(t *testing.T) {
 		{name: "branch update", command: store.CommandEvent{Intent: repositoryMonitorCommandIntentUpdateBranch, Source: "github_label"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			input, err := f.reconciler.buildRepositoryMonitorRepairFeedbackInput(ctx, f.monitor, &tc.command, pr)
+			input, err := f.reconciler.repositoryMonitorRepairTaskFeedbackInput(ctx, f.monitor, &tc.command, pr, "")
 			if err != nil || (input != nil) != tc.want {
 				t.Fatalf("feedback input = %+v err=%v, want carried=%t", input, err, tc.want)
 			}
@@ -397,7 +397,7 @@ func TestRepositoryMonitorReviewFeedbackRidesAlongOnRepairs(t *testing.T) {
 	}
 	// A monitor without human feedback carries none.
 	f.monitor.Spec.Repair.HumanFeedback.Enabled = false
-	if input, err := f.reconciler.buildRepositoryMonitorRepairFeedbackInput(ctx, f.monitor, &store.CommandEvent{Intent: repositoryMonitorCommandIntentFix}, pr); err != nil || input != nil {
+	if input, err := f.reconciler.repositoryMonitorRepairTaskFeedbackInput(ctx, f.monitor, &store.CommandEvent{Intent: repositoryMonitorCommandIntentFix}, pr, ""); err != nil || input != nil {
 		t.Fatalf("disabled feedback input = %+v err=%v", input, err)
 	}
 }
@@ -447,11 +447,10 @@ func TestRepositoryMonitorReviewFeedbackChargesOnlyAttemptsThatRan(t *testing.T)
 		t.Fatalf("queued attempt ledger = %+v err=%v", ledger, err)
 	}
 	// The command ended without a Task, as a withdrawn or exhausted one does.
-	now := time.Now()
-	first.Status, first.ProcessedAt = repositoryMonitorCommandProcessed, &now
-	if err := f.store.UpdateCommandEvent(ctx, &first); err != nil {
+	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, first.ID, store.MonitorFeedbackOutcomeFailed, "exhausted"); err != nil {
 		t.Fatal(err)
 	}
+	f.finishCommand(t, first.ID)
 	ledger, err = f.reconciler.repositoryMonitorFeedbackAttemptCounts(ctx, f.monitor, "orka-agents/orka", 1)
 	if err != nil || ledger.recorded["review_comment:11"] != 1 || ledger.spent["review_comment:11"] != 0 {
 		t.Fatalf("ended attempt ledger = %+v err=%v", ledger, err)
@@ -466,18 +465,16 @@ func TestRepositoryMonitorReviewFeedbackChargesOnlyAttemptsThatRan(t *testing.T)
 	if err != nil || len(attempts) != 2 {
 		t.Fatalf("attempts = %+v err=%v", attempts, err)
 	}
-	// Once a repair job exists for an attempt, it is charged for good.
-	if err := f.store.CreateRepairJob(ctx, &store.RepairJob{ID: attempts[0].RepairJobID, MonitorNamespace: "default", MonitorName: f.monitor.Name, Repo: "orka-agents/orka", PRNumber: 1, Intent: repositoryMonitorCommandIntentFix, HeadSHA: "head1111", Phase: repositoryMonitorRepairPhaseFailed}); err != nil {
+	// Once an attempt's repair Task started, it is charged for good, even
+	// when the repair fails.
+	second := attempts[0].CommandEventID
+	if _, err := f.reconciler.startRepositoryMonitorFeedbackOutcome(ctx, f.monitor, second, []string{"review_comment:11"}, "task-2"); err != nil {
 		t.Fatal(err)
 	}
-	second, err := f.store.GetCommandEvent(ctx, "default", attempts[0].CommandEventID)
-	if err != nil {
+	if err := f.reconciler.finishRepositoryMonitorFeedbackOutcome(ctx, f.monitor, second, store.MonitorFeedbackOutcomeFailed, "task failed"); err != nil {
 		t.Fatal(err)
 	}
-	second.Status, second.ProcessedAt = repositoryMonitorCommandProcessed, &now
-	if err := f.store.UpdateCommandEvent(ctx, second); err != nil {
-		t.Fatal(err)
-	}
+	f.finishCommand(t, second)
 	ledger, err = f.reconciler.repositoryMonitorFeedbackAttemptCounts(ctx, f.monitor, "orka-agents/orka", 1)
 	if err != nil || ledger.recorded["review_comment:11"] != 2 || ledger.spent["review_comment:11"] != 1 {
 		t.Fatalf("ran attempt ledger = %+v err=%v", ledger, err)
@@ -784,9 +781,11 @@ func (f *repositoryMonitorFeedbackRepairFixture) finishCommand(t *testing.T, id 
 	}
 }
 
-// Feedback resolved after the withdrawal recheck but before the Task's input
-// is read withdraws the repair rather than failing it.
-func TestRepositoryMonitorReviewFeedbackWithdrawnBetweenReads(t *testing.T) {
+// A handoff reads feedback once: the snapshot that rechecks the repair is the
+// Task's input, so no resolution can fall between two reads. Feedback
+// resolved after that read is left to the repair, which may find nothing to
+// change.
+func TestRepositoryMonitorReviewFeedbackHandoffReadsOnce(t *testing.T) {
 	ctx := context.Background()
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
 	f.github.reviewPages = nil
@@ -797,32 +796,29 @@ func TestRepositoryMonitorReviewFeedbackWithdrawnBetweenReads(t *testing.T) {
 	}
 	command := f.feedbackCommands(t)[0]
 	resolved := strings.Replace(f.github.threadPages[0], `"isResolved":false`, `"isResolved":true`, 1)
-	// The recheck is the first read of this handoff; the Task's input the
-	// second.
 	reads := 0
 	f.onThreadRead = func(int) {
 		reads++
-		if reads == 2 {
+		// Any read after the handoff's first would see the thread resolved.
+		if reads > 1 {
 			f.github.threadPages = []string{resolved}
 		}
 	}
 	handled, created, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item)
-	if err != nil || !handled || created != 0 || len(f.repairTasks(t)) != 0 || reads != 2 {
-		t.Fatalf("handoff = handled %t created %d err %v tasks %d reads %d, want a withdrawal after two reads", handled, created, err, len(f.repairTasks(t)), reads)
+	if err != nil || !handled || created != 1 || reads != 1 {
+		t.Fatalf("handoff = handled %t created %d err %v reads %d, want one read and the Task", handled, created, err, reads)
 	}
-	action, err := f.store.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
-	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != repositoryMonitorRepairSkipFeedbackWithdrawn {
-		t.Fatalf("action = %+v err=%v, want withdrawn", action, err)
+	tasks := f.repairTasks(t)
+	if frozen, ok := repositoryMonitorRepairFeedbackInputFromPrompt(tasks[0].Spec.Prompt, "head1111"); len(tasks) != 1 || !ok || !slices.Equal(frozen.Targets, []string{"review_comment:11"}) {
+		t.Fatalf("tasks = %d frozen = %+v ok=%t", len(tasks), frozen.Targets, ok)
 	}
-	if state, err := f.reconciler.repositoryMonitorRepairStateForHead(ctx, f.monitor, 1, "head1111"); err != nil || state != "" {
-		t.Fatalf("repair state = %q err=%v, want none", state, err)
+	outcome, err := f.store.GetMonitorFeedbackOutcome(ctx, "default", command.ID)
+	if err != nil || outcome.State != store.MonitorFeedbackOutcomeStarted || !slices.Equal(outcome.Targets, []string{"review_comment:11"}) || outcome.TaskName != tasks[0].Name {
+		t.Fatalf("outcome = %+v err=%v, want started with the frozen target", outcome, err)
 	}
-	if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 1 {
-		t.Fatalf("queued attempt was not reserved: %+v", ledger)
-	}
-	f.finishCommand(t, command.ID)
-	if ledger := f.ledger(t); ledger.spent["review_comment:11"] != 0 {
-		t.Fatalf("withdrawn attempt was charged: %+v", ledger)
+	// A retried handoff adopts the Task's frozen input and reads nothing.
+	if _, _, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item); err != nil || reads != 1 {
+		t.Fatalf("retried handoff err=%v reads=%d, want no further read", err, reads)
 	}
 }
 
@@ -893,19 +889,17 @@ func TestRepositoryMonitorReviewFeedbackNoChangeRepairSucceeds(t *testing.T) {
 				t.Fatalf("started=%t err=%v", started, err)
 			}
 			command := f.feedbackCommands(t)[0]
+			if !tc.feedback {
+				// An ordinary findings fix of the same head.
+				command = store.CommandEvent{ID: "policy-fix", CommentID: "policy-fix", DedupeKey: "policy-fix", MonitorNamespace: "default", MonitorName: f.monitor.Name,
+					Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 1, Source: repositoryMonitorControllerPolicySource, Author: repositoryMonitorControllerActor,
+					Permission: "repository_repair_policy", Intent: repositoryMonitorCommandIntentFix, Command: repositoryMonitorCommandIntentFix, HeadSHA: "head1111", Status: repositoryMonitorCommandAccepted}
+				if err := f.store.CreateCommandEvent(ctx, &command); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, _, err := f.reconciler.tryProcessPullRequestCommandRun(ctx, f.monitor, f.commandRun(command), "orka-agents", "orka", pr, item); err != nil {
 				t.Fatal(err)
-			}
-			if !tc.feedback {
-				// The same repair, admitted as an ordinary findings fix.
-				stored, err := f.store.GetCommandEvent(ctx, "default", command.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				stored.Permission = "repository_repair_policy"
-				if err := f.store.UpdateCommandEvent(ctx, stored); err != nil {
-					t.Fatal(err)
-				}
 			}
 			stored, err := f.store.GetMonitorItem(ctx, "default", f.monitor.Name, repositoryMonitorPullRequestKind, "1")
 			if err != nil {
@@ -915,7 +909,11 @@ func TestRepositoryMonitorReviewFeedbackNoChangeRepairSucceeds(t *testing.T) {
 			if err := f.store.UpsertMonitorItem(ctx, stored); err != nil {
 				t.Fatal(err)
 			}
-			task := f.repairTasks(t)[0]
+			tasks := f.repairTasks(t)
+			if len(tasks) != 1 {
+				t.Fatalf("tasks = %d, want 1", len(tasks))
+			}
+			task := tasks[0]
 			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 			task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateNoChange, Outcome: corev1alpha1.TaskDeliveryOutcomeNoChange, StartingSHA: "head1111"}
 			if err := f.reconciler.Status().Update(ctx, &task); err != nil {
@@ -944,6 +942,9 @@ func TestRepositoryMonitorReviewFeedbackNoChangeRepairSucceeds(t *testing.T) {
 			}
 			if state, err := f.reconciler.repositoryMonitorRepairStateForHead(ctx, f.monitor, 1, "head1111"); err != nil || state != repositoryMonitorRepairPhaseSucceeded {
 				t.Fatalf("repair state = %q err=%v", state, err)
+			}
+			if outcome, err := f.store.GetMonitorFeedbackOutcome(ctx, "default", command.ID); err != nil || outcome.State != store.MonitorFeedbackOutcomeNoChange {
+				t.Fatalf("outcome = %+v err=%v, want no_change", outcome, err)
 			}
 		})
 	}
@@ -981,8 +982,8 @@ func TestRepositoryMonitorReviewFeedbackTruncatedPartialNeedsPerson(t *testing.T
 	if err != nil || !held || state != repositoryMonitorStatusFailure || !strings.Contains(description, "too large") {
 		t.Fatalf("readiness = %q %q held=%t err=%v, want a person asked to review", state, description, held, err)
 	}
-	if reason, err := f.reconciler.repositoryMonitorFeedbackRepairWithdrawnReason(ctx, f.monitor, &command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackWithdrawn {
-		t.Fatalf("withdrawn reason = %q err=%v, want withdrawn", reason, err)
+	if reason, err := f.handoffReason(&command, pr); err != nil || reason != repositoryMonitorRepairSkipFeedbackNeedsPerson {
+		t.Fatalf("withdrawn reason = %q err=%v, want withdrawn for a person", reason, err)
 	}
 }
 
@@ -1019,7 +1020,10 @@ func TestRepositoryMonitorReviewFeedbackReadinessCountsIncompleteThreads(t *test
 		t.Fatalf("snapshot threads = %+v authorized = %+v err=%v, want the authorized reply dropped", snapshot.Threads, snapshot.authorizedFeedback(), err)
 	}
 	state, description, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr)
-	if err != nil || !held || state != repositoryMonitorStatusFailure || description != "1 reviewer comment needs a person: automatic repair cannot address it." {
+	if verdict, _ := snapshot.verdict(); verdict != repositoryMonitorFeedbackNeedsPerson {
+		t.Fatalf("verdict = %q, want needs_person", verdict)
+	}
+	if err != nil || !held || state != repositoryMonitorStatusFailure || !strings.Contains(description, "a person must review it") {
 		t.Fatalf("readiness = %q %q held=%t err=%v, want a person asked to look", state, description, held, err)
 	}
 	// A thread that fits is not held back by its outside comments.
@@ -1039,4 +1043,11 @@ func TestRepositoryMonitorReviewFeedbackReadinessCountsIncompleteThreads(t *test
 	if _, _, held, err := f.reconciler.repositoryMonitorFeedbackReadiness(ctx, f.monitor, pr); err != nil || held {
 		t.Fatalf("Orka finding thread with omitted replies held readiness: held=%t err=%v", held, err)
 	}
+}
+
+// handoffReason runs a repair handoff's feedback recheck and returns its
+// withdrawal reason.
+func (f *repositoryMonitorFeedbackRepairFixture) handoffReason(command *store.CommandEvent, pr repositoryMonitorPullRequest) (string, error) {
+	_, reason, err := f.reconciler.repositoryMonitorFeedbackHandoff(context.Background(), f.monitor, command, pr)
+	return reason, err
 }

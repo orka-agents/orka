@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +64,13 @@ func admitMonitorFeedbackRepair(ctx context.Context, s *Store, tx *sql.Tx, admis
 			return false, store.ConflictErrorf("command event %q was already admitted with other feedback attempts", command.ID)
 		}
 		return false, nil
+	}
+	admitted := make([]string, 0, len(admission.Attempts))
+	for _, attempt := range admission.Attempts {
+		admitted = append(admitted, attempt.FeedbackID)
+	}
+	if err := insertMonitorFeedbackOutcome(ctx, tx, command, admission.Attempts[0], admitted); err != nil {
+		return false, err
 	}
 	for _, attempt := range admission.Attempts {
 		var prior int
@@ -185,4 +194,205 @@ func scanMonitorFeedbackAttempt(r rowScanner) (store.MonitorFeedbackAttempt, err
 		&attempt.RepairJobID, &attempt.CreatedAt)
 	attempt.CreatedAt = attempt.CreatedAt.UTC()
 	return attempt, err
+}
+
+// insertMonitorFeedbackOutcome creates the reserved outcome of an admitted
+// feedback repair.
+func insertMonitorFeedbackOutcome(ctx context.Context, tx *sql.Tx, command store.CommandEvent, attempt store.MonitorFeedbackAttempt, admitted []string) error {
+	encoded, err := encodeMonitorFeedbackIDs(admitted)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO monitor_feedback_outcomes
+		 (monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha, state, admitted_ids, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		command.MonitorNamespace, command.ID, command.MonitorName, attempt.Repo, command.Number, attempt.HeadSHA,
+		store.MonitorFeedbackOutcomeReserved, encoded, command.CreatedAt, command.CreatedAt)
+	return uniqueConflict(err)
+}
+
+// encodeMonitorFeedbackIDs encodes feedback IDs, sorted and without
+// duplicates, as a JSON array.
+func encodeMonitorFeedbackIDs(ids []string) (string, error) {
+	sorted := slices.Clone(ids)
+	slices.Sort(sorted)
+	sorted = slices.Compact(sorted)
+	if sorted == nil {
+		sorted = []string{}
+	}
+	encoded, err := json.Marshal(sorted)
+	return string(encoded), err
+}
+
+// StartMonitorFeedbackRepair moves a reserved feedback outcome to started.
+func (s *Store) StartMonitorFeedbackRepair(ctx context.Context, request store.StartMonitorFeedbackRepairRequest) (*store.MonitorFeedbackOutcome, error) {
+	if strings.TrimSpace(request.Namespace) == "" || strings.TrimSpace(request.CommandEventID) == "" || strings.TrimSpace(request.TaskName) == "" {
+		return nil, store.ValidationErrorf("starting a feedback repair needs a namespace, command event, and Task name")
+	}
+	if len(request.Targets) == 0 || slices.ContainsFunc(request.Targets, func(id string) bool { return strings.TrimSpace(id) == "" }) {
+		return nil, store.ValidationErrorf("starting feedback repair %q needs at least one feedback target", request.CommandEventID)
+	}
+	targets := slices.Clone(request.Targets)
+	slices.Sort(targets)
+	targets = slices.Compact(targets)
+	return writeOperation(ctx, s, "StartMonitorFeedbackRepair", nil, func(ctx context.Context) (*store.MonitorFeedbackOutcome, error) {
+		var outcome *store.MonitorFeedbackOutcome
+		err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			current, err := getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
+			if err != nil {
+				return err
+			}
+			switch {
+			case current.State == store.MonitorFeedbackOutcomeReserved:
+				for _, target := range targets {
+					if !slices.Contains(current.AdmittedIDs, target) {
+						return store.ValidationErrorf("feedback %q was not admitted by command %q", target, request.CommandEventID)
+					}
+				}
+				encoded, err := encodeMonitorFeedbackIDs(targets)
+				if err != nil {
+					return err
+				}
+				now := time.Now().UTC()
+				if err := updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, targets = ?, task_name = ?, started_at = ?, updated_at = ?`,
+					store.MonitorFeedbackOutcomeStarted, encoded, request.TaskName, now, now); err != nil {
+					return err
+				}
+			case current.StartedAt != nil && slices.Equal(current.Targets, targets) && current.TaskName == request.TaskName:
+				// A repeat of the same start.
+			default:
+				return store.ConflictErrorf("feedback repair %q is %s and cannot start with these targets", request.CommandEventID, current.State)
+			}
+			outcome, err = getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
+			return err
+		})
+		return outcome, err
+	})
+}
+
+// FinishMonitorFeedbackRepair moves a feedback outcome to a terminal state.
+func (s *Store) FinishMonitorFeedbackRepair(ctx context.Context, request store.FinishMonitorFeedbackRepairRequest) (*store.MonitorFeedbackOutcome, error) {
+	if strings.TrimSpace(request.Namespace) == "" || strings.TrimSpace(request.CommandEventID) == "" {
+		return nil, store.ValidationErrorf("finishing a feedback repair needs a namespace and command event")
+	}
+	if !store.IsMonitorFeedbackOutcomeTerminal(request.State) {
+		return nil, store.ValidationErrorf("feedback outcome state %q is not terminal", request.State)
+	}
+	return writeOperation(ctx, s, "FinishMonitorFeedbackRepair", nil, func(ctx context.Context) (*store.MonitorFeedbackOutcome, error) {
+		var outcome *store.MonitorFeedbackOutcome
+		err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			current, err := getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
+			if err != nil {
+				return err
+			}
+			if current.State != request.State {
+				if !monitorFeedbackOutcomeCanFinish(current.State, request.State) {
+					return store.ConflictErrorf("feedback repair %q is %s and cannot end as %s", request.CommandEventID, current.State, request.State)
+				}
+				now := time.Now().UTC()
+				if err := updateMonitorFeedbackOutcome(ctx, tx, current, `state = ?, reason = ?, completed_at = ?, updated_at = ?`,
+					request.State, request.Reason, now, now); err != nil {
+					return err
+				}
+			}
+			outcome, err = getMonitorFeedbackOutcome(ctx, tx, request.Namespace, request.CommandEventID)
+			return err
+		})
+		return outcome, err
+	})
+}
+
+// monitorFeedbackOutcomeCanFinish reports whether an outcome in state from
+// may end in the terminal state to.
+func monitorFeedbackOutcomeCanFinish(from, to string) bool {
+	switch from {
+	case store.MonitorFeedbackOutcomeReserved:
+		return to == store.MonitorFeedbackOutcomeWithdrawn || to == store.MonitorFeedbackOutcomeFailed
+	case store.MonitorFeedbackOutcomeStarted:
+		return to == store.MonitorFeedbackOutcomeNoChange || to == store.MonitorFeedbackOutcomeFailed || to == store.MonitorFeedbackOutcomeSucceeded
+	}
+	return false
+}
+
+// updateMonitorFeedbackOutcome applies assignments to current, provided it
+// is still in the state it was read in.
+func updateMonitorFeedbackOutcome(ctx context.Context, tx *sql.Tx, current *store.MonitorFeedbackOutcome, assignments string, values ...any) error {
+	args := append(values, current.MonitorNamespace, current.CommandEventID, current.State)
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE monitor_feedback_outcomes SET %s WHERE monitor_namespace = ? AND command_event_id = ? AND state = ?`, assignments), args...)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return err
+	} else if rows != 1 {
+		return store.ConflictErrorf("feedback repair %q changed concurrently", current.CommandEventID)
+	}
+	return nil
+}
+
+// GetMonitorFeedbackOutcome returns one feedback repair's outcome.
+func (s *Store) GetMonitorFeedbackOutcome(ctx context.Context, namespace, commandEventID string) (*store.MonitorFeedbackOutcome, error) {
+	return getMonitorFeedbackOutcome(ctx, s.taskDataExecutor(ctx), namespace, commandEventID)
+}
+
+type monitorFeedbackQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func getMonitorFeedbackOutcome(ctx context.Context, q monitorFeedbackQueryer, namespace, commandEventID string) (*store.MonitorFeedbackOutcome, error) {
+	outcome, err := scanMonitorFeedbackOutcome(q.QueryRowContext(ctx, monitorFeedbackOutcomeSelectSQL()+` WHERE monitor_namespace = ? AND command_event_id = ?`, namespace, commandEventID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &outcome, nil
+}
+
+// ListMonitorFeedbackOutcomes lists feedback outcomes newest first.
+func (s *Store) ListMonitorFeedbackOutcomes(ctx context.Context, filter store.MonitorFeedbackOutcomeFilter) ([]store.MonitorFeedbackOutcome, string, error) {
+	q := newMonitorQuery(monitorFeedbackOutcomeSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "repo", filter.Repo)
+	monitorFilter(q, "pr_number", filter.PRNumber)
+	monitorFilter(q, "head_sha", filter.HeadSHA)
+	monitorFilter(q, "state", filter.State)
+	return queryPage(ctx, s.db, q, "created_at DESC, command_event_id DESC", filter.Cursor, filter.Limit, scanMonitorFeedbackOutcome)
+}
+
+func monitorFeedbackOutcomeSelectSQL() string {
+	return `SELECT monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha, state, admitted_ids, targets,
+	        task_name, reason, created_at, updated_at, started_at, completed_at FROM monitor_feedback_outcomes`
+}
+
+func scanMonitorFeedbackOutcome(r rowScanner) (store.MonitorFeedbackOutcome, error) {
+	var outcome store.MonitorFeedbackOutcome
+	var admitted, targets string
+	var started, completed sql.NullTime
+	if err := r.Scan(&outcome.MonitorNamespace, &outcome.CommandEventID, &outcome.MonitorName, &outcome.Repo, &outcome.PRNumber,
+		&outcome.HeadSHA, &outcome.State, &admitted, &targets, &outcome.TaskName, &outcome.Reason, &outcome.CreatedAt,
+		&outcome.UpdatedAt, &started, &completed); err != nil {
+		return outcome, err
+	}
+	if err := json.Unmarshal([]byte(admitted), &outcome.AdmittedIDs); err != nil {
+		return outcome, fmt.Errorf("decode feedback repair %q admitted IDs: %w", outcome.CommandEventID, err)
+	}
+	if err := json.Unmarshal([]byte(targets), &outcome.Targets); err != nil {
+		return outcome, fmt.Errorf("decode feedback repair %q targets: %w", outcome.CommandEventID, err)
+	}
+	if len(outcome.Targets) == 0 {
+		outcome.Targets = nil
+	}
+	outcome.CreatedAt, outcome.UpdatedAt = outcome.CreatedAt.UTC(), outcome.UpdatedAt.UTC()
+	if started.Valid {
+		at := started.Time.UTC()
+		outcome.StartedAt = &at
+	}
+	if completed.Valid {
+		at := completed.Time.UTC()
+		outcome.CompletedAt = &at
+	}
+	return outcome, nil
 }

@@ -907,6 +907,139 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		require.Empty(t, remaining)
 	})
 
+	t.Run("feedback outcomes move from reserved through started to one terminal state", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		admit := func(command string, feedback ...string) {
+			t.Helper()
+			attempts := make([]storagev1.MonitorFeedbackAttempt, 0, len(feedback))
+			for _, id := range feedback {
+				attempts = append(attempts, storagev1.MonitorFeedbackAttempt{ID: command + "|" + id, MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
+					Repo: "org/repo", PRNumber: 12, FeedbackID: id, Attempt: 1, HeadSHA: "head-1", SnapshotDigest: "sha256:aa", CommandEventID: command, RepairJobID: "repair-" + command})
+			}
+			created, err := p.AdmitMonitorFeedbackRepair(ctx, storagev1.MonitorFeedbackAdmission{Command: storagev1.CommandEvent{ID: command, MonitorNamespace: workflowNamespace,
+				MonitorName: workflowMonitor, Kind: "pull_request", Number: 12, DedupeKey: command, CommentID: command, Intent: "fix", Status: "accepted"}, Attempts: attempts})
+			require.NoError(t, err)
+			require.True(t, created)
+		}
+		start := func(command, task string, targets ...string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.StartMonitorFeedbackRepair(ctx, storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: command, Targets: targets, TaskName: task})
+		}
+		finish := func(command, state string) (*storagev1.MonitorFeedbackOutcome, error) {
+			return p.FinishMonitorFeedbackRepair(ctx, storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: command, State: state, Reason: "because"})
+		}
+
+		// Admission reserves every admitted ID.
+		admit("cmd-1", "review_comment:2", "review:1")
+		outcome, err := p.GetMonitorFeedbackOutcome(ctx, workflowNamespace, "cmd-1")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeReserved, outcome.State)
+		require.Equal(t, []string{"review:1", "review_comment:2"}, outcome.AdmittedIDs)
+		require.Equal(t, outcome.AdmittedIDs, outcome.ChargedIDs())
+		require.Equal(t, "org/repo", outcome.Repo)
+		require.Equal(t, int64(12), outcome.PRNumber)
+		require.Equal(t, "head-1", outcome.HeadSHA)
+		require.Nil(t, outcome.StartedAt)
+		require.Nil(t, outcome.CompletedAt)
+
+		// Only admitted feedback can be a target, and a start needs targets
+		// and a Task.
+		_, err = start("cmd-1", "task-1", "review:9")
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, err = start("cmd-1", "task-1")
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, err = start("cmd-1", "", "review:1")
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+		_, err = start("missing", "task-1", "review:1")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+		// A started outcome cannot be withdrawn and a reserved one cannot
+		// succeed.
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeSucceeded)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeNoChange)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+
+		// Starting freezes the targets; only they are charged from now on.
+		outcome, err = start("cmd-1", "task-1", "review:1")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeStarted, outcome.State)
+		require.Equal(t, []string{"review:1"}, outcome.Targets)
+		require.Equal(t, []string{"review:1"}, outcome.ChargedIDs())
+		require.Equal(t, "task-1", outcome.TaskName)
+		require.NotNil(t, outcome.StartedAt)
+		// The same start again is a repeat; other targets or another Task
+		// conflict.
+		again, err := start("cmd-1", "task-1", "review:1", "review:1")
+		require.NoError(t, err)
+		require.Equal(t, outcome.StartedAt, again.StartedAt)
+		_, err = start("cmd-1", "task-1", "review:1", "review_comment:2")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = start("cmd-1", "task-2", "review:1")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeWithdrawn)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeStarted)
+		require.ErrorIs(t, err, storagev1.ErrValidation)
+
+		// A terminal state never changes; finishing it again in the same
+		// state is a repeat, and a repeated start still answers.
+		outcome, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeNoChange)
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MonitorFeedbackOutcomeNoChange, outcome.State)
+		require.Equal(t, "because", outcome.Reason)
+		require.NotNil(t, outcome.CompletedAt)
+		require.Equal(t, []string{"review:1"}, outcome.ChargedIDs())
+		repeat, err := finish("cmd-1", storagev1.MonitorFeedbackOutcomeNoChange)
+		require.NoError(t, err)
+		require.Equal(t, outcome.CompletedAt, repeat.CompletedAt)
+		_, err = finish("cmd-1", storagev1.MonitorFeedbackOutcomeFailed)
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		_, err = start("cmd-1", "task-1", "review:1")
+		require.NoError(t, err)
+
+		// A repair that ends before its Task exists charges nothing and can
+		// no longer start.
+		admit("cmd-2", "review_comment:3")
+		outcome, err = finish("cmd-2", storagev1.MonitorFeedbackOutcomeWithdrawn)
+		require.NoError(t, err)
+		require.Empty(t, outcome.ChargedIDs())
+		_, err = start("cmd-2", "task-2", "review_comment:3")
+		require.ErrorIs(t, err, storagev1.ErrConflict)
+		admit("cmd-3", "review_comment:4")
+		outcome, err = finish("cmd-3", storagev1.MonitorFeedbackOutcomeFailed)
+		require.NoError(t, err)
+		require.Empty(t, outcome.ChargedIDs())
+		admit("cmd-4", "review_comment:5")
+		_, err = start("cmd-4", "task-4", "review_comment:5")
+		require.NoError(t, err)
+		outcome, err = finish("cmd-4", storagev1.MonitorFeedbackOutcomeSucceeded)
+		require.NoError(t, err)
+		require.Equal(t, []string{"review_comment:5"}, outcome.ChargedIDs())
+
+		// Outcomes list by pull request and state, newest first.
+		all, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowNamespace, MonitorName: workflowMonitor, Repo: "org/repo", PRNumber: 12})
+		require.NoError(t, err)
+		require.Len(t, all, 4)
+		withdrawn, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowNamespace, State: storagev1.MonitorFeedbackOutcomeWithdrawn})
+		require.NoError(t, err)
+		require.Len(t, withdrawn, 1)
+		require.Equal(t, "cmd-2", withdrawn[0].CommandEventID)
+		elsewhere, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowNamespace, PRNumber: 13})
+		require.NoError(t, err)
+		require.Empty(t, elsewhere)
+		other, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowOtherNamespace})
+		require.NoError(t, err)
+		require.Empty(t, other)
+
+		// Outcomes belong to the monitor's identity.
+		require.NoError(t, p.UpsertRepositoryMonitor(ctx, monitorRecord("uid-1", 1)))
+		require.NoError(t, p.DeleteRepositoryMonitor(ctx, workflowNamespace, workflowMonitor))
+		remaining, _, err := p.ListMonitorFeedbackOutcomes(ctx, storagev1.MonitorFeedbackOutcomeFilter{Namespace: workflowNamespace})
+		require.NoError(t, err)
+		require.Empty(t, remaining)
+		_, err = p.GetMonitorFeedbackOutcome(ctx, workflowNamespace, "cmd-1")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+	})
+
 	t.Run("monitor events page newest first", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		for i := range 5 {

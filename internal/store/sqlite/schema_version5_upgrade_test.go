@@ -10,12 +10,15 @@ import (
 
 // feedbackLedgerApplicationRows returns the application rows before, taken
 // from a store below schema version 8, as the version 8 step leaves them: it
-// adds the empty feedback attempt table and changes nothing else.
+// adds the empty feedback attempt and outcome tables and changes nothing
+// else.
 func feedbackLedgerApplicationRows(t *testing.T, before map[string][]string) map[string][]string {
 	t.Helper()
 	require.NotContains(t, before, "monitor_feedback_attempts")
+	require.NotContains(t, before, "monitor_feedback_outcomes")
 	after := maps.Clone(before)
 	after["monitor_feedback_attempts"] = nil
+	after["monitor_feedback_outcomes"] = nil
 	return after
 }
 
@@ -49,7 +52,7 @@ func TestSchemaVersion8LayoutIsVersion5PlusFeedbackLedger(t *testing.T) {
 	schema, err := readSchema(db)
 	require.NoError(t, err)
 	require.Equal(t, schema175, schemaFingerprint(schema))
-	require.Equal(t, "2e6f43005353439f2639c8c373868ce45f545f7c24893d690690e8d3951f6c17", schema175)
+	require.Equal(t, "f9f7ba42799651261f714b2b6426ba7f952b8845a7f356e9ebadc9cdc99d3d51", schema175)
 }
 
 // A version 5 store upgrades in place to the feedback ledger layout: it keeps
@@ -181,5 +184,114 @@ func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			require.Equal(t, before, after)
 			require.Equal(t, beforeRows, applicationRows(t, db))
 		})
+	}
+}
+
+// migration172To175Ledger is the 172-to-175.sql step an unreleased build
+// ran: the feedback attempt ledger without its outcome table. It is frozen
+// here so the layout repair keeps a fixture after the step changed.
+const migration172To175Ledger = `CREATE TABLE IF NOT EXISTS monitor_feedback_attempts (
+			id                TEXT PRIMARY KEY,
+			monitor_namespace TEXT NOT NULL,
+			monitor_name      TEXT NOT NULL,
+			repo              TEXT NOT NULL,
+			pr_number         INTEGER NOT NULL,
+			feedback_id       TEXT NOT NULL,
+			attempt           INTEGER NOT NULL CHECK(attempt >= 1),
+			head_sha          TEXT NOT NULL,
+			snapshot_digest   TEXT NOT NULL,
+			command_event_id  TEXT NOT NULL,
+			repair_job_id     TEXT NOT NULL,
+			created_at        TIMESTAMP NOT NULL,
+			UNIQUE(monitor_namespace, monitor_name, repo, pr_number, feedback_id, attempt)
+		);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_feedback_attempts_command
+			ON monitor_feedback_attempts(monitor_namespace, command_event_id);`
+
+// A store an unreleased build left at version 8 without the outcome table
+// is repaired in place, keeping version 8 and its identity, and recovers one
+// outcome per admitted command: unfinished commands stay reserved, finished
+// commands whose job settled from its Task charge every admitted ID, and
+// other finished commands charge nothing.
+func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
+	path, db := schemaVersion5StoreDB(t, datasetOriginNew, true, "", false)
+	_, err := db.Exec(migration172To175Ledger + `; PRAGMA user_version = 8`)
+	require.NoError(t, err)
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	require.Equal(t, schema175Ledger, schemaFingerprint(schema))
+	identity, err := readDataset(db)
+	require.NoError(t, err)
+	at := "2026-11-01 12:00:00+00:00"
+	for _, command := range []struct{ id, status, jobPhase string }{
+		{"queued", "accepted", ""},
+		{"queued-with-task", "accepted", "queued"},
+		{"ran", "processed", "succeeded"},
+		{"ran-and-failed", "processed", "failed"},
+		{"never-ran", "processed", ""},
+		{"create-failed", "processed", "queued"},
+	} {
+		_, err := db.Exec(`INSERT INTO command_events (id, monitor_namespace, monitor_name, kind, number, comment_id, status, created_at, processed_at)
+			VALUES (?, 'ns', 'monitor', 'pull_request', 7, ?, ?, ?, ?)`, command.id, command.id, command.status, at, at)
+		require.NoError(t, err)
+		if command.jobPhase != "" {
+			_, err := db.Exec(`INSERT INTO repair_jobs (id, monitor_namespace, monitor_name, pr_number, phase, task_name, created_at)
+				VALUES (?, 'ns', 'monitor', 7, ?, ?, ?)`, "repair-"+command.id, command.jobPhase, "task-"+command.id, at)
+			require.NoError(t, err)
+		}
+		for i, feedback := range []string{"review_comment:2", "review:1"} {
+			_, err := db.Exec(`INSERT INTO monitor_feedback_attempts (id, monitor_namespace, monitor_name, repo, pr_number, feedback_id, attempt,
+				head_sha, snapshot_digest, command_event_id, repair_job_id, created_at) VALUES (?, 'ns', 'monitor', 'org/repo', 7, ?, ?, 'head', 'sha256:aa', ?, ?, ?)`,
+				command.id+"-"+feedback, feedback+"#"+command.id, i+1, command.id, "repair-"+command.id, at)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, db.Close())
+
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, s.close()) }()
+	state := readVersion1StoreState(t, s.db, path)
+	require.Equal(t, schema175, state.fingerprint)
+	require.Equal(t, SchemaVersion, state.version)
+	upgraded, err := readDataset(s.db)
+	require.NoError(t, err)
+	require.Equal(t, identity, upgraded)
+	checkSQLiteIntegrity(t, s.db)
+
+	admitted := func(id string) []string { return []string{"review:1#" + id, "review_comment:2#" + id} }
+	for _, want := range []struct {
+		id, state string
+		ran       bool
+	}{
+		{"queued", "reserved", false},
+		{"queued-with-task", "reserved", false},
+		{"ran", "succeeded", true},
+		{"ran-and-failed", "failed", true},
+		{"never-ran", "failed", false},
+		{"create-failed", "failed", false},
+	} {
+		outcome, err := s.GetMonitorFeedbackOutcome(t.Context(), "ns", want.id)
+		require.NoError(t, err, want.id)
+		require.Equal(t, want.state, outcome.State, want.id)
+		require.Equal(t, admitted(want.id), outcome.AdmittedIDs, want.id)
+		require.Equal(t, "org/repo", outcome.Repo, want.id)
+		require.Equal(t, int64(7), outcome.PRNumber, want.id)
+		if want.ran {
+			require.Equal(t, admitted(want.id), outcome.Targets, want.id)
+			require.Equal(t, admitted(want.id), outcome.ChargedIDs(), want.id)
+			require.Equal(t, "task-"+want.id, outcome.TaskName, want.id)
+			require.NotNil(t, outcome.StartedAt, want.id)
+		} else {
+			require.Empty(t, outcome.Targets, want.id)
+			require.Nil(t, outcome.StartedAt, want.id)
+		}
+		if want.state == "reserved" {
+			require.Equal(t, admitted(want.id), outcome.ChargedIDs(), want.id)
+			require.Nil(t, outcome.CompletedAt, want.id)
+		} else {
+			require.NotNil(t, outcome.CompletedAt, want.id)
+		}
 	}
 }

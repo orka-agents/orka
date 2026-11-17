@@ -27,7 +27,11 @@ const (
 	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
 	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
-	schema175 = "2e6f43005353439f2639c8c373868ce45f545f7c24893d690690e8d3951f6c17" // schema version 8: monitor feedback attempt ledger
+	schema175 = "f9f7ba42799651261f714b2b6426ba7f952b8845a7f356e9ebadc9cdc99d3d51" // schema version 8: monitor feedback attempt ledger and outcomes
+	// schema175Ledger is the version 8 layout an unreleased build wrote: the
+	// feedback attempt ledger without its outcome table. Its layout repair
+	// recovers the outcomes and keeps version 8.
+	schema175Ledger = "2e6f43005353439f2639c8c373868ce45f545f7c24893d690690e8d3951f6c17"
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -63,6 +67,9 @@ var migration171To172 string
 
 //go:embed migrations/172-to-175.sql
 var migration172To175 string
+
+//go:embed migrations/175-ledger-to-175.sql
+var migration175LedgerTo175 string
 
 type schemaMigration struct {
 	from, to string
@@ -107,6 +114,17 @@ func versionUpgrades() []versionUpgrade {
 		// were claimed by concurrent changes, so a store marked with either
 		// is refused rather than read as this layout.
 		{from: 5, to: 8, fromLayout: schema172, sql: migration172To175, toLayout: schema175},
+	}
+}
+
+// layoutRepairs are steps that change the layout of a store already at
+// SchemaVersion, from a layout an unreleased build wrote at that version to
+// the current one, keeping the version. A repair keeps the identity row and
+// adds rows only derived from existing ones, so an empty store whose key
+// bootstrap is unfinished can still finish it.
+func layoutRepairs() []versionUpgrade {
+	return []versionUpgrade{
+		{from: 8, to: 8, fromLayout: schema175Ledger, sql: migration175LedgerTo175, toLayout: schema175},
 	}
 }
 
@@ -207,10 +225,19 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 // a layout rebuilt from historical DDL, which has no identity row and takes
 // the adoption path instead.
 func upgradeVersionedSchema(ctx context.Context, conn *sql.Conn, path string, from int, validationErr error) error {
+	schema, err := readSchema(conn)
+	if err != nil {
+		return err
+	}
+	source := schemaFingerprint(schema)
 	steps := versionUpgrades()
+	if from == SchemaVersion {
+		// A store at the current version can only need a layout repair.
+		steps = layoutRepairs()
+	}
 	first := -1
 	for i, step := range steps {
-		if step.from == from {
+		if step.from == from && step.fromLayout == source {
 			first = i
 			break
 		}
@@ -218,13 +245,8 @@ func upgradeVersionedSchema(ctx context.Context, conn *sql.Conn, path string, fr
 	if first < 0 {
 		return validationErr
 	}
-	schema, err := readSchema(conn)
-	if err != nil {
-		return err
-	}
-	source := schemaFingerprint(schema)
-	if source != steps[first].fromLayout {
-		return validationErr
+	if from == SchemaVersion {
+		steps = steps[:first+1]
 	}
 	backup, err := backupSchemaDatabase(ctx, conn, path)
 	if err != nil {
