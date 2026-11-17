@@ -318,16 +318,29 @@ type repositoryMonitorFeedbackActor struct {
 }
 
 type repositoryMonitorFeedbackCommentNode struct {
-	FullDatabaseID    string                          `json:"fullDatabaseId"`
-	Author            *repositoryMonitorFeedbackActor `json:"author"`
-	Body              string                          `json:"body"`
-	URL               string                          `json:"url"`
-	CreatedAt         time.Time                       `json:"createdAt"`
-	LastEditedAt      *time.Time                      `json:"lastEditedAt"`
-	IsMinimized       bool                            `json:"isMinimized"`
-	PullRequestReview *struct {
-		FullDatabaseID string `json:"fullDatabaseId"`
-	} `json:"pullRequestReview"`
+	FullDatabaseID    string                                  `json:"fullDatabaseId"`
+	Author            *repositoryMonitorFeedbackActor         `json:"author"`
+	Body              string                                  `json:"body"`
+	URL               string                                  `json:"url"`
+	CreatedAt         time.Time                               `json:"createdAt"`
+	LastEditedAt      *time.Time                              `json:"lastEditedAt"`
+	IsMinimized       bool                                    `json:"isMinimized"`
+	PullRequestReview *repositoryMonitorFeedbackCommentReview `json:"pullRequestReview"`
+}
+
+// repositoryMonitorFeedbackCommentReview is the review a thread comment
+// belongs to.
+type repositoryMonitorFeedbackCommentReview struct {
+	FullDatabaseID string `json:"fullDatabaseId"`
+	State          string `json:"state"`
+}
+
+// repositoryMonitorFeedbackPendingComment reports a comment in a review its
+// author has not submitted. GitHub shows such drafts only to their author,
+// which may be the account behind the monitor's token, so they are never
+// feedback.
+func repositoryMonitorFeedbackPendingComment(comment repositoryMonitorFeedbackCommentNode) bool {
+	return comment.PullRequestReview != nil && strings.EqualFold(strings.TrimSpace(comment.PullRequestReview.State), "PENDING")
 }
 
 type repositoryMonitorFeedbackThreadNode struct {
@@ -386,7 +399,7 @@ type repositoryMonitorRawReviewFeedback struct {
 	reason       string
 }
 
-const repositoryMonitorFeedbackCommentFields = `fullDatabaseId author { login __typename } body url createdAt lastEditedAt isMinimized pullRequestReview { fullDatabaseId }`
+const repositoryMonitorFeedbackCommentFields = `fullDatabaseId author { login __typename } body url createdAt lastEditedAt isMinimized pullRequestReview { fullDatabaseId state }`
 
 // repositoryMonitorFeedbackThreadPageSize is the review threads requested
 // per page. Each thread carries up to 21 comment bodies, so a page of very
@@ -753,7 +766,7 @@ func (n *repositoryMonitorFeedbackNormalizer) lookUpStartCandidates(threads []re
 			continue
 		}
 		for _, comment := range repositoryMonitorFeedbackThreadComments(node) {
-			if comment.IsMinimized || repositoryMonitorFeedbackOrkaComment(comment, orkaReviews) || repositoryMonitorFeedbackID(repositoryMonitorFeedbackKindComment, comment.FullDatabaseID) == "" {
+			if comment.IsMinimized || repositoryMonitorFeedbackPendingComment(comment) || repositoryMonitorFeedbackOrkaComment(comment, orkaReviews) || repositoryMonitorFeedbackID(repositoryMonitorFeedbackKindComment, comment.FullDatabaseID) == "" {
 				continue
 			}
 			see(comment.Author, comment.Body, repositoryMonitorFeedbackActivity(comment.CreatedAt, comment.LastEditedAt))
@@ -1051,7 +1064,7 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 	}
 	var authorized []repositoryMonitorFeedbackAuthorized
 	for _, raw := range comments {
-		if raw.IsMinimized || repositoryMonitorFeedbackOrkaComment(raw, orkaReviews) {
+		if raw.IsMinimized || repositoryMonitorFeedbackPendingComment(raw) || repositoryMonitorFeedbackOrkaComment(raw, orkaReviews) {
 			continue
 		}
 		commentID := repositoryMonitorFeedbackID(repositoryMonitorFeedbackKindComment, raw.FullDatabaseID)

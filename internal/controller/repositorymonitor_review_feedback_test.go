@@ -140,9 +140,7 @@ func TestRepositoryMonitorReviewFeedbackSeparatesEvidenceFromAuthority(t *testin
 			// a reply is evidence only.
 			func() repositoryMonitorFeedbackThreadNode {
 				orka := repositoryMonitorFeedbackTestComment(501, "orka-bot", "Bot", "**P1: Bug**\n\n<!-- orka:repo-monitor-inline review=r1 finding=f-aaaa -->", 8)
-				orka.PullRequestReview = &struct {
-					FullDatabaseID string `json:"fullDatabaseId"`
-				}{FullDatabaseID: "9001"}
+				orka.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "9001"}
 				return repositoryMonitorFeedbackTestThread("T5", 50, false, orka, repositoryMonitorFeedbackTestComment(502, "maintainer", "User", "This finding is wrong.", 9))
 			}(),
 			// A copied Orka marker on a human comment does not hide it.
@@ -432,9 +430,7 @@ func TestRepositoryMonitorReviewFeedbackLookupsPreferStartCandidates(t *testing.
 		threads = append(threads, repositoryMonitorFeedbackTestThread(fmt.Sprintf("TO%d", i), 10, true, repositoryMonitorFeedbackTestComment(100+i, login, "User", "Old note.", 60+i)))
 	}
 	orkaRoot := repositoryMonitorFeedbackTestComment(900, "orka-user", "User", "**P1: Bug**", 0)
-	orkaRoot.PullRequestReview = &struct {
-		FullDatabaseID string `json:"fullDatabaseId"`
-	}{FullDatabaseID: "77"}
+	orkaRoot.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "77"}
 	threads = append(threads, repositoryMonitorFeedbackTestThread("TF", 12, false, orkaRoot, repositoryMonitorFeedbackTestComment(901, "finding-replier", "User", "Agreed.", 200)))
 	resolved := repositoryMonitorFeedbackTestThread("TR", 13, false, repositoryMonitorFeedbackTestComment(902, "resolved-replier", "User", "Done.", 201))
 	resolved.IsResolved = true
@@ -835,6 +831,32 @@ func TestRepositoryMonitorReviewFeedbackExcludesOtherMonitorsOrkaReviews(t *test
 	}
 	if len(snapshot.Threads) != 0 || len(snapshot.Reviews) != 0 || len(snapshot.evidenceIDs()) != 0 || len(snapshot.startableFeedback()) != 0 {
 		t.Fatalf("another monitor's Orka review is evidence: %+v", snapshot)
+	}
+}
+
+// A comment in a review its author has not submitted is a private draft:
+// GitHub returns it only to its author, who may own the monitor's token. It
+// is never shown as feedback and never starts a repair.
+func TestRepositoryMonitorReviewFeedbackIgnoresPendingReviewComments(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"maintainer": "write"})
+	pending := repositoryMonitorFeedbackTestComment(101, "maintainer", "User", "Draft: rewrite this.", 0)
+	pending.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "900", State: "PENDING"}
+	submitted := repositoryMonitorFeedbackTestComment(102, "maintainer", "User", "Please rename this.", 1)
+	submitted.PullRequestReview = &repositoryMonitorFeedbackCommentReview{FullDatabaseID: "901", State: "COMMENTED"}
+	raw := repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{
+		repositoryMonitorFeedbackTestThread("T1", 10, false, pending),
+		repositoryMonitorFeedbackTestThread("T2", 20, false, submitted),
+	}}
+	snapshot := repositoryMonitorFeedbackTestNormalize(raw, nil, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+	if got := repositoryMonitorFeedbackStartableIDs(snapshot); !slices.Equal(got, []string{"review_comment:102"}) {
+		t.Fatalf("startable = %v, want only the submitted comment", got)
+	}
+	for _, thread := range snapshot.Threads {
+		for _, comment := range thread.Comments {
+			if strings.Contains(comment.Body, "Draft") {
+				t.Fatalf("a pending review comment is in the snapshot: %+v", comment)
+			}
+		}
 	}
 }
 
