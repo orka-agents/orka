@@ -80,7 +80,8 @@ func (t *acpTurnTimings) markFailedPromptStream(accepted bool) {
 }
 
 const (
-	acpTurnStepRuntimeCapabilities  = "runtimeCapabilities"
+	acpTurnStepDispatchPreflight    = "dispatchPreflight"
+	acpTurnStepRuntimeClient        = "runtimeClient"
 	acpTurnStepSessionPlan          = "sessionPlan"
 	acpTurnStepWorkspacePrepare     = "workspacePrepare"
 	acpTurnStepSessionCreate        = "sessionCreate"
@@ -123,7 +124,9 @@ func boundedMillis(duration time.Duration) int64 {
 
 // log writes the timings once. Executions that never reached prompt
 // acceptance (requeues, admission waits) log at debug verbosity so a waiting
-// queue does not flood the log.
+// queue does not flood the log. returnedError reports whether the execution
+// returned an error, not the turn's outcome: a turn whose failure was persisted
+// returns nil.
 func (t *acpTurnTimings) log(ctx context.Context, task *corev1alpha1.Task, err error) {
 	if t == nil {
 		return
@@ -132,6 +135,6 @@ func (t *acpTurnTimings) log(ctx context.Context, task *corev1alpha1.Task, err e
 	if !t.prompted {
 		logger = logger.V(acpTurnTimingsDebugVerbosity)
 	}
-	values := append([]any{"namespace", task.Namespace, "task", task.Name, "failed", err != nil}, t.keysAndValues(t.now())...)
+	values := append([]any{"namespace", task.Namespace, "task", task.Name, "returnedError", err != nil}, t.keysAndValues(t.now())...)
 	logger.Info(acpTurnTimingsLogMessage, values...)
 }

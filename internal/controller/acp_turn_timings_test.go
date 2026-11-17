@@ -88,7 +88,7 @@ func TestACPTurnTimingsLogStepsInOrderWithTaskAge(t *testing.T) {
 			t.Fatalf("%s = %v, want %v (line %v)", key, line.values[key], value, line.values)
 		}
 	}
-	if line.values["promptAccepted"] != true || line.values["failed"] != false || line.values["task"] != "turn" {
+	if line.values["promptAccepted"] != true || line.values["returnedError"] != false || line.values["task"] != "turn" {
 		t.Fatalf("line = %v", line.values)
 	}
 }
@@ -99,7 +99,7 @@ func TestACPTurnTimingsLogUnpromptedExecutionsAtDebug(t *testing.T) {
 	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "queued"}}
 	timings := newACPTurnTimings(task, clock.Now)
-	timings.mark(acpTurnStepRuntimeCapabilities)
+	timings.mark(acpTurnStepDispatchPreflight)
 
 	ctx, lines := captureTurnTimingsLogger(t)
 	timings.log(ctx, task, errors.New("requeued"))
@@ -107,7 +107,7 @@ func TestACPTurnTimingsLogUnpromptedExecutionsAtDebug(t *testing.T) {
 		t.Fatalf("lines = %v, want one debug line", *lines)
 	}
 	values := (*lines)[0].values
-	if values["failed"] != true || values["promptAccepted"] != false {
+	if values["returnedError"] != true || values["promptAccepted"] != false {
 		t.Fatalf("line = %v", values)
 	}
 	if _, ok := values["sinceTaskCreatedMs"]; ok {
@@ -138,7 +138,7 @@ func TestACPTurnTimingsRecordAcceptedPromptWhoseStreamFails(t *testing.T) {
 		t.Fatalf("lines = %v, want one info line", *lines)
 	}
 	values := (*lines)[0].values
-	if values["promptAccepted"] != true || values["failed"] != true ||
+	if values["promptAccepted"] != true || values["returnedError"] != true ||
 		values["promptAcceptedMs"] != float64(300) || values["promptStreamMs"] != float64(30050) {
 		t.Fatalf("line = %v", values)
 	}

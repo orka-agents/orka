@@ -1051,6 +1051,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if _, err := d.pullRequestPresentationCapability(runtimeCtx, task); err != nil {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
 	}
+	turnTimings.mark(acpTurnStepDispatchPreflight)
 	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
 		runtimeCtx, target, bound.mcpConfiguration, true,
 	)
@@ -1071,7 +1072,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
 	}
-	turnTimings.mark(acpTurnStepRuntimeCapabilities)
+	turnTimings.mark(acpTurnStepRuntimeClient)
 	runtimeProfileDigest, digestErr := harnessv2.CanonicalProfileDigest(profile)
 	if digestErr != nil || runtimeFence.RuntimeProfileDigest != bound.plan.Digest || runtimeProfileDigest != bound.plan.Digest {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
@@ -2317,6 +2318,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 		promptTrace.End(nil)
+		turnTimings.mark(acpTurnStepExecutionSettled)
 		validationMessage := acpWorkspaceValidationFailureMessage(err)
 		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", validationMessage); transitionErr != nil {
 			return transitionErr
