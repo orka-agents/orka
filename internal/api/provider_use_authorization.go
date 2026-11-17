@@ -89,25 +89,27 @@ func providerRefNamespace(ref corev1alpha1.ProviderReference, objectNamespace st
 }
 
 // authorizeTaskProviderUse checks the Providers a new Task chooses. A Task's
-// own spec.ai.providerRef is always checked. A Task that runs an Agent from
-// another namespace also resolves that Agent's namespace-less providerRef and
-// its fallbacks in the Task's namespace, Providers its Agent's author was
-// never checked for, so those are checked too. Providers a same-namespace
-// Agent names were checked when the Agent named them, and running the Agent is
+// own spec.ai.providerRef is always checked. Providers a same-namespace Agent
+// names were checked when the Agent named them, and running the Agent is
 // covered by Agent use.
+//
+// An Agent from another namespace is different: its namespace-less
+// providerRef and its fallbacks resolve in the Task's namespace, where nobody
+// decided they may be used, and the Agent can change after this check or
+// before admission could see it. So a Task that would resolve such Providers is
+// refused, here and again by the controller each time the Task runs.
 func authorizeTaskProviderUse(ctx context.Context, reader client.Reader, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
 	if task == nil || !providerUseAuthorization.Load() {
 		return nil
 	}
-	taskProvider := task.Spec.AI != nil && task.Spec.AI.ProviderRef != nil
-	if taskProvider {
+	if task.Spec.AI != nil && task.Spec.AI.ProviderRef != nil {
 		ref := *task.Spec.AI.ProviderRef
 		if err := authorizeKubernetesProviderUse(ctx, clientset, userInfo,
 			providerRefNamespace(ref, task.Namespace), ref.Name, "task", task.Name); err != nil {
 			return err
 		}
 	}
-	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
+	if task.Spec.Type != corev1alpha1.TaskTypeAI || task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
 		return nil
 	}
 	agentNamespace := agentRefNamespace(*task.Spec.AgentRef, task.Namespace)
@@ -121,26 +123,17 @@ func authorizeTaskProviderUse(ctx context.Context, reader client.Reader, clients
 	agent := &corev1alpha1.Agent{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: agentNamespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
 		// A missing Agent is refused too: one created before the Task runs
-		// could name Providers in the Task's namespace that nobody checked.
+		// could name Providers in the Task's namespace.
 		if !apierrors.IsNotFound(err) {
 			log.Error(err, "provider use authorization could not read the Task's Agent",
 				"task", task.Name, "namespace", task.Namespace, "agentNamespace", agentNamespace)
 		}
 		return fiber.NewError(fiber.StatusForbidden, "not authorized to create tasks")
 	}
-	if !taskProvider && agent.Spec.ProviderRef != nil && strings.TrimSpace(agent.Spec.ProviderRef.Namespace) == "" {
-		if err := authorizeKubernetesProviderUse(ctx, clientset, userInfo,
-			task.Namespace, agent.Spec.ProviderRef.Name, "task", task.Name); err != nil {
-			return err
-		}
-	}
-	if agent.Spec.Model != nil {
-		for _, fallback := range agent.Spec.Model.Fallbacks {
-			if err := authorizeKubernetesProviderUse(ctx, clientset, userInfo,
-				task.Namespace, fallback.ProviderRef, "task", task.Name); err != nil {
-				return err
-			}
-		}
+	if len(corev1alpha1.AgentProvidersResolvedInTaskNamespace(task, agent)) > 0 {
+		return fiber.NewError(fiber.StatusForbidden,
+			"provider use authorization refuses an Agent from another namespace whose providerRef has no namespace or that has model fallbacks: "+
+				"set the Task's spec.ai.providerRef, give the Agent's providerRef a namespace, or use an Agent from the Task's namespace")
 	}
 	return nil
 }

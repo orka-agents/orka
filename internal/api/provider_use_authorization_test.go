@@ -98,46 +98,49 @@ func TestTaskCreateRequiresUseOnItsProvider(t *testing.T) {
 	require.Empty(t, *seen)
 }
 
-func TestTaskCreateChecksACrossNamespaceAgentsTaskRelativeProviders(t *testing.T) {
+func TestTaskCreateRefusesACrossNamespaceAgentsTaskRelativeProviders(t *testing.T) {
 	enableProviderUseAuthorization(t)
 	user := &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "agents", Name: "reviewer"},
-		Spec: corev1alpha1.AgentSpec{
-			ProviderRef: &corev1alpha1.ProviderReference{Name: "primary"},
-			Model:       &corev1alpha1.ModelConfig{Fallbacks: []corev1alpha1.ModelFallback{{ProviderRef: "backup"}}},
-		},
-	}
-	reader := providerUseReader(t, agent)
 	agentRef := &corev1alpha1.AgentReference{Name: "reviewer", Namespace: "agents"}
+	agent := func(primary *corev1alpha1.ProviderReference, fallbacks ...string) *corev1alpha1.Agent {
+		a := &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "agents", Name: "reviewer"},
+			Spec:       corev1alpha1.AgentSpec{ProviderRef: primary},
+		}
+		for _, name := range fallbacks {
+			if a.Spec.Model == nil {
+				a.Spec.Model = &corev1alpha1.ModelConfig{}
+			}
+			a.Spec.Model.Fallbacks = append(a.Spec.Model.Fallbacks, corev1alpha1.ModelFallback{ProviderRef: name})
+		}
+		return a
+	}
+	all, _ := providerUseClientset("team-a/primary", "team-a/backup", "team-a/mine")
 
-	clientset, seen := providerUseClientset("team-a/primary", "team-a/backup")
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), reader, clientset, user, providerUseTask(nil, agentRef)))
-	require.Equal(t, []string{"team-a/primary", "team-a/backup"}, reviewedProviders(*seen),
-		"the Agent's namespace-less Provider and its fallbacks resolve in the Task's namespace")
+	// The Agent's namespace-less Provider and its fallbacks would resolve in
+	// the Task's namespace and may change after this check, so the Task is
+	// refused even when the caller may use those Providers.
+	for name, a := range map[string]*corev1alpha1.Agent{
+		"relative primary": agent(&corev1alpha1.ProviderReference{Name: "primary"}),
+		"fallback":         agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "models"}, "backup"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t, a), all, user, providerUseTask(nil, agentRef)))
+		})
+	}
 
-	missingBackup, _ := providerUseClientset("team-a/primary")
-	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), reader, missingBackup, user, providerUseTask(nil, agentRef)))
-
-	// The Task's own Provider replaces the Agent's; the fallbacks still run.
-	override, seen := providerUseClientset("team-a/mine", "team-a/backup")
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), reader, override, user,
+	// The Task's own Provider replaces a relative primary, and a primary with
+	// its own namespace was checked when the Agent named it.
+	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary"})), all, user,
 		providerUseTask(&corev1alpha1.ProviderReference{Name: "mine"}, agentRef)))
-	require.Equal(t, []string{"team-a/mine", "team-a/backup"}, reviewedProviders(*seen))
-
-	// An Agent Provider with its own namespace was checked when the Agent named it.
-	agent.Spec.ProviderRef.Namespace = "models"
-	agent.Spec.Model = nil
 	pinned, seen := providerUseClientset()
-	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t, agent), pinned, user, providerUseTask(nil, agentRef)))
+	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(),
+		providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "models"})), pinned, user, providerUseTask(nil, agentRef)))
 	require.Empty(t, *seen)
 
-	// Without a reader the Agent cannot be checked, so the request is refused.
-	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), nil, clientset, user, providerUseTask(nil, agentRef)))
-
-	// A missing Agent is refused: one created before the Task runs could name
-	// Providers in the Task's namespace that were never checked.
-	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t), clientset, user, providerUseTask(nil, agentRef)))
+	// Without a reader, or without the Agent, nothing can be checked.
+	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), nil, all, user, providerUseTask(nil, agentRef)))
+	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t), all, user, providerUseTask(nil, agentRef)))
 }
 
 func TestAgentProviderRefsUseChecksOnlyNewlyNamedProviders(t *testing.T) {

@@ -144,13 +144,15 @@ and the Provider's namespace, to:
   resolves is checked before its credential is read: one it names, its Agent's,
   a fallback, or the configured default.
 
-A Task that runs its Agent's own Provider needs only Agent `use`. A Task that
-runs an Agent from another namespace also needs `use` on that Agent's fallbacks,
-and on a `providerRef` without a namespace, in the Task's namespace, because
-they resolve there; naming a missing Agent from another namespace is refused.
-This runs when the Task is created, so a later edit to that Agent, which its
-own namespace's checks cover, can still change the Providers the Task resolves
-in its namespace; enforce namespace isolation to rule this out. Permission to read, create, or edit a Provider, or `create`
+A Task that runs its Agent's own Provider needs only Agent `use`. An Agent from
+another namespace is the exception: its fallbacks, and a `providerRef` without a
+namespace, resolve in the Task's namespace, where nobody checked them, and the
+Agent can change after the Task is created. So while the check is on, an `ai`
+Task whose Agent from another namespace has fallbacks, or a `providerRef`
+without a namespace and no `spec.ai.providerRef` on the Task, is refused: by the
+API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Give that Agent's `providerRef` a namespace,
+set the Task's own Provider, or use an Agent from the Task's namespace. Permission to read, create, or edit a Provider, or `create`
 on `chats`, does not grant `use`.
 
 Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource

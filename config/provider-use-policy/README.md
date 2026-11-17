@@ -15,13 +15,11 @@ worker ServiceAccounts hold `use` on every Provider, so Orka-created Tasks and
 Agents are not affected.
 
 A Task that runs its Agent's Provider needs only `use` on the Agent; see
-`config/agent-use-policy`. One case is checked by the API but not here: when a
-Task runs an Agent from another namespace, that Agent's fallbacks and a
-`providerRef` without a namespace resolve in the Task's namespace. Admission
-cannot read the Agent, so restrict direct Task writes that name another
-namespace's Agent, or enforce namespace isolation. Even through the API, the
-check runs when the Task is created, so a later edit to that Agent can change
-which of the Task namespace's Providers it resolves.
+`config/agent-use-policy`. An Agent from another namespace is the exception:
+its fallbacks and a `providerRef` without a namespace resolve in the Task's
+namespace. Admission cannot read the Agent, so with the flag set the controller
+refuses such an `ai` Task each time it runs, and the API refuses it when it is
+created.
 
 These bindings match every namespace. With more than one installation on a
 cluster, add a `matchResources.namespaceSelector` on

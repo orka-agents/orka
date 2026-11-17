@@ -152,9 +152,14 @@ type TaskReconciler struct {
 	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
 	ACPToolboxPolicy ACPToolboxPolicy
 	// Identity configures external Agent identities (ADR 0039).
-	Identity                    agentidentity.Config
-	ACPRuntimeNamespace         string
-	EnforceNamespaceIsolation   bool
+	Identity                  agentidentity.Config
+	ACPRuntimeNamespace       string
+	EnforceNamespaceIsolation bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled.
+	// The controller then refuses an ai Task whose Agent from another
+	// namespace would resolve Providers in the Task's namespace; see
+	// AgentProvidersResolvedInTaskNamespace.
+	ProviderUseAuthorization    bool
 	MaxTasksPerNamespace        int32
 	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
@@ -1347,6 +1352,14 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 // resolveProvider fetches the Provider referenced by the task or agent, if any.
 func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
+	if r.ProviderUseAuthorization {
+		if names := corev1alpha1.AgentProvidersResolvedInTaskNamespace(task, agent); len(names) > 0 {
+			return nil, fmt.Errorf("provider use authorization refuses Agent %s/%s from another namespace: "+
+				"its Providers %s would resolve in the Task's namespace %q; set the Task's spec.ai.providerRef, "+
+				"give the Agent's providerRef a namespace, or use an Agent from the Task's namespace",
+				agent.Namespace, agent.Name, strings.Join(names, ", "), task.Namespace)
+		}
+	}
 	providerRef := r.resolveProviderRef(task, agent)
 	if providerRef == nil {
 		return nil, nil

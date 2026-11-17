@@ -2006,6 +2006,7 @@ func main() {
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
