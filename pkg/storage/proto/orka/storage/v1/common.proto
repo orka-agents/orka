@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Wire rules
+//
+// Every record crosses the wire with every field, including fields the Go
+// contract tags json:"-". Strings are valid UTF-8. Times are UTC within the
+// google.protobuf.Timestamp range (0001-01-01 to 9999-12-31); the zero Go time
+// is an absent field. Nil and empty lists, maps and byte strings are
+// equivalent. A server refuses a request that carries a field it does not know.
+//
+// Request headers
+//
+// Every request names the contract (orka-storage-contract) and the client's
+// protocol revision (orka-storage-revision). Every request except Describe
+// and HealthCheck names the dataset it expects (orka-storage-dataset), and
+// the server refuses one that names none (VALIDATION) or another dataset
+// (DATASET_MISMATCH) before the provider runs. A write carries its
+// WriteEnvelope as the binary header orka-storage-envelope-bin; a read or an
+// administrative call carries none, and the server refuses one that does. A
+// call made under a Task data fence carries the TaskDataFence as the binary
+// header orka-storage-task-data-fence-bin. The server recomputes a write's
+// request digest from the decoded request and refuses a mismatch with
+// VALIDATION before the provider runs.
+//
+// Errors
+//
+// Every status the server library or a provider produces carries a
+// google.rpc.ErrorInfo with domain "storage.orka.ai". Its reason names the
+// contract error, and is authoritative; the status code is advisory. The
+// reasons are NOT_FOUND, CONFLICT, FENCED, PRECONDITION_FAILED,
+// BINDING_CONFLICT, SESSION_CONFIGURATION_MISMATCH, NOT_READY,
+// DATASET_DETACHED, DATASET_MISMATCH, CLOCK_SKEW, OPERATION_EXPIRED,
+// OPERATION_ABORTED, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
+// VALIDATION, GATEWAY_OWNED_SESSION, GATEWAY_SESSION_CLEANUP_PENDING,
+// TASK_JOB_REVOKED, TASK_DATA_CLEANUP_CHANGED, USAGE_SELECTION_TOO_LARGE,
+// CONNECTOR_CUSTODY_TOMBSTONED, CONNECTOR_CONSENT_SUPERSEDED,
+// CONNECTOR_RETIRED_LIMIT, TOO_LARGE, UNAVAILABLE, OUTCOME_UNKNOWN,
+// UNAUTHENTICATED, INCOMPATIBLE, CONTRACT_MISMATCH, UNSUPPORTED_FIELD and
+// PROVIDER_ERROR. VALIDATION, FENCED and PRECONDITION_FAILED carry the typed
+// error's client-safe "message" in the ErrorInfo metadata, and CONFLICT the
+// provider's error text; each is bounded and stripped of control characters.
+// TOO_LARGE carries "what", "size" and "limit". BINDING_CONFLICT carries a BindingConflictError message
+// as a second status detail.
+
+// NullableTime carries a Go *time.Time. An absent NullableTime is a nil
+// pointer; a present one with no value points to the zero time.
+message NullableTime {
+  option (wire_only) = true;
+
+  google.protobuf.Timestamp value = 1;
+}
+
+// JSONValue carries a dynamic Go value (any, map[string]any or
+// json.RawMessage) as its encoding/json bytes. A server decodes the numbers
+// in a request's dynamic values exactly, as json.Number, so its digest and
+// its stored form match the caller's.
+message JSONValue {
+  option (wire_only) = true;
+
+  bytes json = 1;
+}
+
+// ControllerEpochFence is the controller epoch a write was issued under.
+message ControllerEpochFence {
+  string name = 1;
+  int64 epoch = 2;
+  string holder_id = 3;
+}
+
+// WriteEnvelope carries the cross-cutting identity of one controller write.
+// It travels as the binary request header orka-storage-envelope-bin, never in
+// a request message.
+message WriteEnvelope {
+  string dataset_id = 1;
+  ControllerEpochFence fence = 2;
+  string operation_id = 3;
+  string request_digest = 4;
+  google.protobuf.Timestamp issued_at = 5;
+  uint64 sequence = 6;
+}
+
+// TaskJobIdentity names one Job authority.
+message TaskJobIdentity {
+  string namespace = 1;
+  string task_uid = 2;
+  string job_uid = 3;
+}
+
+// TaskDataFence binds task data access to the cleanup state it was
+// authorized against. It travels as the binary request header
+// orka-storage-task-data-fence-bin.
+message TaskDataFence {
+  string namespace = 1;
+  string task_name = 2;
+  int64 generation = 3;
+  repeated TaskJobIdentity jobs = 4;
+}
+
+// ProviderLimits states a provider's size limits.
+message ProviderLimits {
+  int64 max_artifact_bytes = 1;
+  int64 max_result_bytes = 2;
+  int64 max_value_bytes = 3;
+  google.protobuf.Duration receipt_retention = 4;
+  int64 max_receipt_result_bytes = 5;
+}
+
+// DatasetBootstrap reports how far a dataset is through its first start.
+message DatasetBootstrap {
+  bool complete = 1;
+  bool empty = 2;
+}
+
+// DatasetUsage reports how much storage a dataset uses.
+message DatasetUsage {
+  int64 dataset_bytes = 1;
+}
+
+// DatasetBinding is the installation a dataset is bound to.
+message DatasetBinding {
+  string installation_id = 1;
+  string record_uid = 2;
+  int64 switch_generation = 3;
+  string key_fingerprint = 4;
+  string state = 5;
+  google.protobuf.Timestamp bound_at = 6;
+}
+
+// BindingConflictError is the detail of a BINDING_CONFLICT status.
+message BindingConflictError {
+  string dataset_id = 1;
+  DatasetBinding binding = 2;
+  string reason = 3;
+}
+
+// ProviderInfo describes a provider and the dataset it serves.
+message ProviderInfo {
+  string contract_version = 1;
+  int64 contract_revision = 2;
+  repeated string contracts = 3;
+  string dataset_id = 4;
+  string dataset_origin = 5;
+  string schema_version = 6;
+  repeated string capabilities = 7;
+  ProviderLimits limits = 8;
+  string durability = 9;
+  string state = 10;
+  string incarnation = 11;
+  google.protobuf.Timestamp observed_at = 12;
+  DatasetBootstrap bootstrap = 13;
+  DatasetUsage usage = 14;
+  DatasetBinding binding = 15;
+}
+
+// ServerInfo describes the server library that serves a provider, rather
+// than the provider itself.
+message ServerInfo {
+  option (wire_only) = true;
+
+  // protocol_revision is the server library's protocol revision.
+  int64 protocol_revision = 1;
+  // library_version is the version of the server library's Go module.
+  string library_version = 2;
+  // adapter_name and adapter_version identify the adapter binary.
+  string adapter_name = 3;
+  string adapter_version = 4;
+}
