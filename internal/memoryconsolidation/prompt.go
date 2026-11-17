@@ -35,7 +35,7 @@ Rules:
 - Keep each memory short: one fact, at most 1200 characters.
 - When two memories contradict each other and the transcripts do not show which is current, report a conflict instead of choosing.
 - Never put secrets, credentials, tokens, raw transcript excerpts, personal data, or one-off task status into a memory.
-- The pendingProposals are changes someone already proposed that wait for review. Never propose a change one of them already makes: the same fact as a pending new memory, or a change to a memory a pending proposal already changes. When your change does a pending proposal's job better, such as superseding an outdated memory where a pending proposal would only add the new value beside it, propose yours and list that proposal's id in covers so the reviewer can reject it.
+- The pendingProposals are changes someone already proposed that wait for review. Never propose a change one of them already makes: the same fact as a pending new memory, or a change to a memory a pending proposal already changes. When your change does a pending proposal's job better, such as superseding an outdated memory where a pending proposal would only add the new value beside it, propose yours and list that proposal's id in covers so the reviewer can reject or archive it.
 - Prefer a few high-value changes over many small ones. Proposing nothing is a good answer when memory is already in good shape.
 
 Every change you submit is reviewed by a person before it takes effect. Call ` + SubmitToolName + ` exactly once with your result.`

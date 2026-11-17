@@ -413,7 +413,7 @@ func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string)
 		description := quoteTagLines(op.Reason)
 		if len(op.Covers) > 0 {
 			description = strings.TrimSpace("Covers open proposals " + strings.Join(op.Covers, ", ") +
-				": reject them if you apply this one.\n\n" + description)
+				": reject or archive them if you apply this one.\n\n" + description)
 		}
 		if len(op.Tags) > 0 {
 			tagLine := "Tags: " + strings.Join(op.Tags, ", ")

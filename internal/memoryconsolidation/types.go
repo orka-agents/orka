@@ -225,7 +225,7 @@ type Operation struct {
 	Targets []store.MemoryProposalTarget `json:"targets,omitempty"`
 	Sources []store.MemoryProposalSource `json:"sources,omitempty"`
 	// Covers names open proposals the run read that this operation makes
-	// redundant, so the reviewer can reject them in its favor.
+	// redundant, so the reviewer can reject or archive them in its favor.
 	Covers []string `json:"covers,omitempty"`
 }
 

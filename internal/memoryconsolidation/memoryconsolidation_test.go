@@ -592,7 +592,7 @@ func TestValidateDoesNotRepeatAnOpenProposal(t *testing.T) {
 	require.Contains(t, rejected[1].Reason, "already has an open proposal")
 
 	proposals := Proposals(kept, "team", "run", "uid", "curator")
-	require.Contains(t, proposals[0].Description, "Covers open proposals pending-add")
+	require.Contains(t, proposals[0].Description, "Covers open proposals pending-add: reject or archive them if you apply this one.")
 	require.Equal(t, []string{"pending-add"}, Report{Operations: kept}.Structure().Operations[0].Covers,
 		"covered IDs are structure, not text")
 
