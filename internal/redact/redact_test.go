@@ -91,3 +91,57 @@ func TestSensitiveTextRedactsCookieHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitiveTextRedactsSerializedAuthorizationHeaders(t *testing.T) {
+	value := "Vq7Rk2Lm" + "9Xw4Tz8Np3Hs"
+	for input, want := range map[string]string{
+		`{"Authorization":"Bearer ` + value + `"}`:           `{"Authorization":"[REDACTED]"}`,
+		`{'Authorization': 'Bearer ` + value + `'}`:          `{'Authorization': '[REDACTED]'}`,
+		`    Authorization: 'Bearer ` + value + `'`:          `    Authorization: '[REDACTED]'`,
+		`headers: { authorization: 'Bearer ` + value + `' }`: `headers: { authorization: '[REDACTED]' }`,
+		`map[Authorization:[Bearer ` + value + `]]`:          `map[Authorization:[[REDACTED]]]`,
+		`{"Authorization":"Basic ` + value + `="}`:           `{"Authorization":"[REDACTED]"}`,
+		`Authorization: token ` + value:                      `Authorization: [REDACTED]`,
+		`Authorization: Token ` + value:                      `Authorization: [REDACTED]`,
+		`Proxy-Authorization: Basic ` + value:                `Proxy-Authorization: [REDACTED]`,
+	} {
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Fatalf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// An auth-param stays on its header's line: a token68 value's padding must
+// not read the next line's key as a parameter value.
+func TestSensitiveTextAuthorizationStaysOnItsLine(t *testing.T) {
+	value := "Vq7Rk2Lm" + "9Xw4Tz8Np3Hs"
+	input := "Authorization: Basic " + value + "=\npassword: \"violet meadow copper kettle\""
+	want := "Authorization: [REDACTED]\npassword: \"[REDACTED]\""
+	if got := SensitiveText(input); got != want {
+		t.Fatalf("SensitiveText(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestSensitiveTextRedactsWellKnownTokenPrefixes(t *testing.T) {
+	body := "Ab3Cd5Ef" + strings.Repeat("7Gh9Jk2Lm4", 4)
+	for _, prefix := range []string{"ya29.", "AI" + "za", "sk_" + "live_", "sk_" + "test_", "rk_" + "live_", "gl" + "pat-", "npm" + "_", "hv" + "s.", "dckr" + "_pat_", "xo" + "xb-", "xo" + "xp-", "xo" + "xa-", "xo" + "xr-"} {
+		input := "failed with " + prefix + body + " (401)"
+		if got := SensitiveText(input); got != "failed with "+redactedValue+" (401)" {
+			t.Fatalf("SensitiveText(%q prefix) = %q", prefix, got)
+		}
+	}
+}
+
+func TestSensitiveTextRedactsWebhookPathsAndConnectionStringKeys(t *testing.T) {
+	body := "Ab3Cd5Ef" + strings.Repeat("7Gh9Jk2Lm4", 4)
+	for input, want := range map[string]string{
+		"POST https://hooks.slack.com/services/" + "T0" + "1ABCDEF/B0" + "1ABCDEF/" + body + " failed": "POST https://hooks.slack.com/services/" + redactedValue + " failed",
+		"https://discord.com/api/webhooks/1234567890/" + body:                                          "https://discord.com/api/webhooks/" + redactedValue,
+		"DefaultEndpointsProtocol=https;AccountName=ci;AccountKey=" + body + "==;EndpointSuffix=x":     "DefaultEndpointsProtocol=https;AccountName=ci;AccountKey=" + redactedValue + ";EndpointSuffix=x",
+		"Endpoint=sb://ns/;SharedAccessKeyName=Root;SharedAccessKey=" + body + "=":                     "Endpoint=sb://ns/;SharedAccessKeyName=Root;SharedAccessKey=" + redactedValue,
+	} {
+		if got := SensitiveText(input); got != want {
+			t.Fatalf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
