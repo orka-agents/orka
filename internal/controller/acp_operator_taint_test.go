@@ -13,9 +13,11 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -326,5 +328,333 @@ func TestPublicationRefusalPrefersUserCancellation(t *testing.T) {
 	refused, reason, err := d.taskPublicationRefused(context.Background(), task)
 	if err != nil || !refused || reason != "" {
 		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a plain cancellation", refused, reason, err)
+	}
+}
+
+// The cases below model an incarnation whose workspace marker was cleared (an
+// identity with broad admission rights can rewrite workspace annotations)
+// while the provenance-protected marker on a Task linked to that exact
+// incarnation remains. Every decision must still treat it as tainted.
+
+func operatorTaintedLinkedTask(name, uid string, workspace *workspacev1alpha1.ExecutionWorkspace) *corev1alpha1.Task {
+	return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: workspace.Namespace, Name: name, UID: types.UID(uid),
+		Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+		Annotations: map[string]string{
+			acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			operatoraccess.TaintAnnotation:     operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1", TaskUID: uid}),
+		},
+	}}
+}
+
+func failingTaskListClient(base client.WithWatch) client.WithWatch {
+	return interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1alpha1.TaskList); ok {
+				return errors.New("task list unavailable")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+}
+
+func TestWorkspaceOperatorTaintHonoursLinkedTaskMarkers(t *testing.T) {
+	ctx := context.Background()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "ws-uid"}}
+	for name, tc := range map[string]struct {
+		objects []client.Object
+		want    bool
+	}{
+		"no linked task":      {nil, false},
+		"clean linked task":   {[]client.Object{operatorTaintTestTask(nil)}, false},
+		"tainted linked task": {[]client.Object{operatorTaintedLinkedTask("holder", "holder-uid", workspace)}, true},
+		"tainted task of a replaced incarnation": {[]client.Object{operatorTaintedLinkedTask("holder", "holder-uid",
+			&workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "old-ws-uid"}})}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := operatorTaintTestClient(t, tc.objects...)
+			got, err := acpWorkspaceOperatorTainted(ctx, c, workspace)
+			if err != nil || got != tc.want {
+				t.Fatalf("acpWorkspaceOperatorTainted = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+	failing := failingTaskListClient(fake.NewClientBuilder().WithScheme(operatorTaintTestClient(t).Scheme()).Build())
+	if _, err := acpWorkspaceOperatorTainted(ctx, failing, workspace); err == nil {
+		t.Fatal("an unreadable linked Task must fail closed")
+	}
+}
+
+// A continuation that shares the tainted incarnation is itself refused
+// publication, while one on a fresh incarnation is not.
+func TestPublicationRefusedForContinuationSharingATaskTaintedIncarnation(t *testing.T) {
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "ws-uid"}}
+	predecessor := operatorTaintedLinkedTask("predecessor", "predecessor-uid", workspace)
+	continuation := operatorTaintTestTask(nil)
+	c := operatorTaintTestClient(t, workspace, predecessor, continuation)
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	refused, reason, err := d.taskPublicationRefused(context.Background(), continuation)
+	if err != nil || !refused || reason != operatorTaintedPublicationMessage {
+		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a taint refusal", refused, reason, err)
+	}
+
+	fresh := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "fresh-ws-uid"}}
+	staleLink := operatorTaintedLinkedTask("predecessor", "predecessor-uid", workspace)
+	freshContinuation := operatorTaintTestTask(map[string]string{acpExecutionWorkspaceUIDAnnotation: "fresh-ws-uid"})
+	c = operatorTaintTestClient(t, fresh, staleLink, freshContinuation)
+	d = &ACPDispatcher{Client: c, APIReader: c}
+	refused, _, err = d.taskPublicationRefused(context.Background(), freshContinuation)
+	if err != nil || refused {
+		t.Fatalf("a continuation on a fresh incarnation = %v, %v; want publishable", refused, err)
+	}
+}
+
+func TestTaskTaintedWorkspaceIsNeverReusedOrResumedWithoutWorkspaceMarker(t *testing.T) {
+	ctx := context.Background()
+	r, task, plan, workspace := externalACPSessionLifecycleFixture(t)
+	continuation := task.DeepCopy()
+	continuation.Name, continuation.UID, continuation.ResourceVersion = "continuation", "continuation-uid", ""
+	if err := r.Create(ctx, continuation); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	linked := operatorTaintedLinkedTask(task.Name, string(task.UID), workspace)
+	if task.Labels == nil {
+		task.Labels = map[string]string{}
+	}
+	maps.Copy(task.Labels, linked.Labels)
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	maps.Copy(task.Annotations, linked.Annotations)
+	if err := r.Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	// A suspended incarnation without its workspace marker is still not
+	// cold-resumed for the continuation.
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	delete(workspace.Annotations, operatoraccess.TaintAnnotation)
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	name, ready, err := r.ensureACPClassWorkspace(ctx, continuation, plan)
+	if !errors.Is(err, operatoraccess.ErrTainted) || !errors.Is(err, errACPWorkspaceTerminalFailure) || ready || name != "" {
+		t.Fatalf("continuation on a Task-tainted workspace = (%q, %v, %v), want terminal ErrTainted", name, ready, err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
+		strings.Contains(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(continuation.UID)) {
+		t.Fatalf("a Task-tainted workspace was flipped toward cold resume: %s %q", workspace.Spec.DesiredState, workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
+	}
+
+	// A detached Ready incarnation is not reused warm either.
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	if err := r.Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	name, ready, err = r.ensureACPClassWorkspace(ctx, continuation, plan)
+	if !errors.Is(err, operatoraccess.ErrTainted) || ready || name != "" {
+		t.Fatalf("warm reuse of a Task-tainted workspace = (%q, %v, %v), want ErrTainted", name, ready, err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Spec.Attachment != nil {
+		t.Fatal("the continuation attached a Task-tainted workspace")
+	}
+}
+
+func TestAttachmentHandoffRefusesATaskTaintedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "ws-uid"}}
+	holder := operatorTaintedLinkedTask("holder", "holder-uid", workspace)
+	continuation := operatorTaintTestTask(nil)
+	c := operatorTaintTestClient(t, holder, continuation)
+	if err := refuseOperatorTaintedACPWorkspaceHandoff(ctx, c, workspace, continuation); !errors.Is(err, operatoraccess.ErrTainted) {
+		t.Fatalf("handoff of a Task-tainted workspace = %v, want ErrTainted", err)
+	}
+	attached := workspace.DeepCopy()
+	attached.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: holder.Name, UID: holder.UID},
+	}
+	if err := refuseOperatorTaintedACPWorkspaceHandoff(ctx, c, attached, holder); err != nil {
+		t.Fatalf("the tainting holder's own attachment refresh was refused: %v", err)
+	}
+	failing := failingTaskListClient(fake.NewClientBuilder().WithScheme(c.Scheme()).Build())
+	if err := refuseOperatorTaintedACPWorkspaceHandoff(ctx, failing, workspace, continuation); err == nil {
+		t.Fatal("an unreadable linked Task must refuse the handoff")
+	}
+}
+
+func TestSuspensionRefusesTaskTaintedWorkspaceWithoutWorkspaceMarker(t *testing.T) {
+	ctx := context.Background()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "team", Name: "ws", UID: "ws-uid",
+	}, Spec: workspacev1alpha1.ExecutionWorkspaceSpec{DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady}}
+	c := operatorTaintTestClient(t, workspace, operatorTaintedLinkedTask("holder", "holder-uid", workspace))
+	err := suspendACPWorkspaceWithinQuota(ctx, c, c, workspace.DeepCopy(), time.Now(), false, "holder-uid", 1)
+	if !errors.Is(err, operatoraccess.ErrTainted) {
+		t.Fatalf("suspension of a Task-tainted workspace = %v, want ErrTainted", err)
+	}
+	failing := failingTaskListClient(fake.NewClientBuilder().WithScheme(c.Scheme()).WithObjects(workspace.DeepCopy()).Build())
+	if err := suspendACPWorkspaceWithinQuota(ctx, failing, failing, workspace.DeepCopy(), time.Now(), false, "holder-uid", 1); err == nil {
+		t.Fatal("an unreadable linked Task must refuse the suspension")
+	}
+	for _, reader := range []client.Client{c, failing} {
+		current := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			t.Fatal("a Task-tainted workspace was suspended into a data checkpoint")
+		}
+	}
+}
+
+func TestIdleRetentionDeletesTaskTaintedSuspendableWorkspace(t *testing.T) {
+	ctx := context.Background()
+	workspace := retentionTestWorkspace(t, "acp-ws-retention-task-tainted", func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
+			workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
+		}
+		w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+		w.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	})
+	c := acpAdapterTestClient(t, workspace, operatorTaintedLinkedTask("holder", "holder-uid", workspace))
+	reconcileRetention(t, c, workspace)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current)
+	if err == nil && current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatal("idle retention suspended a Task-tainted workspace into a data checkpoint")
+	}
+	if err == nil && current.DeletionTimestamp.IsZero() {
+		t.Fatalf("idle retention must delete a Task-tainted workspace, desired state %s", current.Spec.DesiredState)
+	}
+}
+
+func TestSettlementDeletesTaskTaintedSuspendWorkspaceWithoutWorkspaceMarker(t *testing.T) {
+	ctx := context.Background()
+	fixture := suspendableSubstrateFixture(t)
+	workspace := acpAdapterWorkspace(t, "")
+	workspace.Name = "acp-ws-task-tainted-suspend"
+	workspace.UID = "acp-ws-task-tainted-suspend-uid"
+	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{Name: acpTestSessionName, UID: suspendTestSessionUID}
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
+	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "1"
+	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	task := retentionSettlementTask("task-tainted-suspend-task", "task-tainted-suspend-task-uid", workspace, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	task.Annotations[operatoraccess.TaintAnnotation] = operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1", TaskUID: string(task.UID)})
+	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
+	task = bindSuspendableSessionTaskForSettlement(t, r, task)
+	if !operatoraccess.Tainted(task.Annotations) {
+		t.Fatal("fixture lost the Task taint")
+	}
+	done, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil || !done {
+		t.Fatalf("settlement = (%v, %v), want completed", done, err)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(workspace), current)
+	if err == nil && current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		t.Fatal("settlement suspended a Task-tainted workspace instead of deleting it")
+	}
+	if err == nil && current.DeletionTimestamp.IsZero() {
+		t.Fatal("settlement must delete a Task-tainted workspace")
+	}
+}
+
+func TestCheckpointRoutingRefusesTaskTaintedSourceWithoutWorkspaceMarker(t *testing.T) {
+	ctx := context.Background()
+	f := newExternalRuntimePoolFixture(t)
+	provider := f.provider.DeepCopy()
+	provider.Spec.ControllerName = f.workspace.Labels[workspacev1alpha1.ProviderControllerLabel]
+	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureCheckpoint)
+	if err := f.r.Update(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.Create(ctx, operatorTaintedLinkedTask("holder", "holder-uid", f.workspace)); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Namespace: f.workspace.Namespace, Name: "fork-export", UID: "checkpoint-uid"},
+		Spec:       workspacev1alpha1.ExecutionWorkspaceCheckpointSpec{WorkspaceRef: workspacev1alpha1.ObjectIdentityReference{Name: f.workspace.Name, UID: f.workspace.UID}},
+	}
+	if err := f.r.Create(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	r := &WorkspaceCheckpointRoutingReconciler{Client: f.r.Client, APIReader: f.r.Client}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(checkpoint)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.Get(ctx, client.ObjectKeyFromObject(checkpoint), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Labels[workspaceCheckpointProviderNameLabel] != "" || checkpoint.Labels[workspacev1alpha1.ProviderControllerLabel] != "" {
+		t.Fatal("a Task-tainted source was routed to a provider for export")
+	}
+	if checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation] != "SourceOperatorTainted" {
+		t.Fatalf("routing diagnostic = %q", checkpoint.Annotations[workspaceCheckpointRoutingFailureAnnotation])
+	}
+}
+
+// hideFirstTaskTaintReader reports no linked Tasks on the first Task list, as
+// if the Task marker committed just after the reconciler's initial taint check.
+type hideFirstTaskTaintReader struct {
+	client.Reader
+	lists int
+}
+
+func (r *hideFirstTaskTaintReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+		r.lists++
+		if r.lists == 1 {
+			tasks.Items = nil
+			return nil
+		}
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// The attachment manager rechecks the linked Task markers on every
+// optimistic-lock attempt, so a Task taint that lands after the initial read
+// still refuses to hand the incarnation to a continuation.
+func TestAttachmentAttemptRechecksLinkedTaskTaint(t *testing.T) {
+	ctx := context.Background()
+	r, task, plan, workspace := externalACPSessionLifecycleFixture(t)
+	continuation := task.DeepCopy()
+	continuation.Name, continuation.UID, continuation.ResourceVersion = "continuation", "continuation-uid", ""
+	if err := r.Create(ctx, continuation); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(ctx, operatorTaintedLinkedTask("holder", "holder-uid", workspace)); err != nil {
+		t.Fatal(err)
+	}
+	reader := &hideFirstTaskTaintReader{Reader: r.Client}
+	r.APIReader = reader
+	name, ready, err := r.ensureACPClassWorkspace(ctx, continuation, plan)
+	if !errors.Is(err, operatoraccess.ErrTainted) || ready || name != "" {
+		t.Fatalf("attachment of a workspace Task-tainted after the initial read = (%q, %v, %v), want ErrTainted", name, ready, err)
+	}
+	if reader.lists < 2 {
+		t.Fatalf("linked Task markers were read %d times, want a recheck in the attachment attempt", reader.lists)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Spec.Attachment != nil {
+		t.Fatal("the continuation attached a Task-tainted workspace")
 	}
 }

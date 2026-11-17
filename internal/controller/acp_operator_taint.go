@@ -46,7 +46,52 @@ func acpTaskOperatorTainted(ctx context.Context, reader client.Reader, task *cor
 		}
 		return false, fmt.Errorf("read ExecutionWorkspace operator taint: %w", err)
 	}
-	return string(workspace.UID) == uid && operatoraccess.Tainted(workspace.Annotations), nil
+	if string(workspace.UID) != uid {
+		return false, nil
+	}
+	return acpWorkspaceOperatorTainted(ctx, reader, workspace)
+}
+
+// acpWorkspaceOperatorTainted reports whether operator access tainted this
+// exact ExecutionWorkspace incarnation. orka-api marks both the workspace and
+// the Task whose RuntimeSession was tainted. The Task marker and the Task's
+// workspace link are reserved to Orka's controller identities by Task
+// provenance admission, while the workspace marker is protected by a separate
+// admission policy, so a missing workspace marker alone never proves the
+// incarnation clean: every decision that would publish, reuse, cold-resume,
+// suspend, or checkpoint the incarnation also honours the marker of any Task
+// linked to its exact UID. It reads through the given (authoritative) reader
+// and fails closed on any read error.
+func acpWorkspaceOperatorTainted(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	if workspace == nil {
+		return false, nil
+	}
+	if operatoraccess.Tainted(workspace.Annotations) {
+		return true, nil
+	}
+	if workspace.UID == "" {
+		// Only a persisted incarnation has a UID, and a Task links to an
+		// incarnation solely by that UID: no Task can have tainted an object
+		// the API server never stored.
+		return false, nil
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace),
+		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
+		return false, fmt.Errorf("read operator taint of Tasks linked to ExecutionWorkspace %s: %w", workspace.Name, err)
+	}
+	for i := range tasks.Items {
+		linked := &tasks.Items[i]
+		if strings.TrimSpace(linked.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID) &&
+			operatoraccess.Tainted(linked.Annotations) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // operatorTaintedPublicationMessage is the bounded terminal message recorded
