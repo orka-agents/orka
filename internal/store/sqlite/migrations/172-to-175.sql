@@ -1,4 +1,4 @@
--- SQLite transition: 172-to-173 (schema version 5 to 6).
+-- SQLite transition: 172-to-175 (schema version 5 to 8).
 -- Adds the RepositoryMonitor feedback attempt ledger: one immutable row per
 -- attempt to address one piece of reviewer feedback, numbered without gaps
 -- per feedback ID. It adds no rows, so a store whose key bootstrap is

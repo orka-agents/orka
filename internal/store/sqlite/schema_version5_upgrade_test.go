@@ -9,7 +9,7 @@ import (
 )
 
 // feedbackLedgerApplicationRows returns the application rows before, taken
-// from a store below schema version 6, as the version 6 step leaves them: it
+// from a store below schema version 8, as the version 8 step leaves them: it
 // adds the empty feedback attempt table and changes nothing else.
 func feedbackLedgerApplicationRows(t *testing.T, before map[string][]string) map[string][]string {
 	t.Helper()
@@ -40,16 +40,16 @@ func schemaVersion5StoreDB(t *testing.T, origin string, complete bool, installat
 	return path, db
 }
 
-// The current layout is version 5 plus exactly the immutable 172-to-173.sql
+// The current layout is version 5 plus exactly the immutable 172-to-175.sql
 // step, so the constant for it matches what the step builds.
-func TestSchemaVersion6LayoutIsVersion5PlusFeedbackLedger(t *testing.T) {
+func TestSchemaVersion8LayoutIsVersion5PlusFeedbackLedger(t *testing.T) {
 	_, db := schemaVersion5StoreDB(t, datasetOriginNew, true, "", false)
-	_, err := db.Exec(migration172To173)
+	_, err := db.Exec(migration172To175)
 	require.NoError(t, err)
 	schema, err := readSchema(db)
 	require.NoError(t, err)
-	require.Equal(t, schema173, schemaFingerprint(schema))
-	require.Equal(t, "2e6f43005353439f2639c8c373868ce45f545f7c24893d690690e8d3951f6c17", schema173)
+	require.Equal(t, schema175, schemaFingerprint(schema))
+	require.Equal(t, "2e6f43005353439f2639c8c373868ce45f545f7c24893d690690e8d3951f6c17", schema175)
 }
 
 // A version 5 store upgrades in place to the feedback ledger layout: it keeps
@@ -73,7 +73,7 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -142,7 +142,7 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

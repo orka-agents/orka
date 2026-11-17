@@ -202,6 +202,6 @@ and the maintainer-edits rule also apply unchanged.
   person resolves the thread or the change makes it outdated. With the default
   of two attempts, a satisfied but unresolved comment can get one extra no-op
   repair before readiness asks for a person.
-- The schema gains one table and moves to schema version 6.
+- The schema gains one table and moves to schema version 8.
 - Reply and resolve actions, webhook-driven latency for review events, and the
   issue's resolved-thread evidence remain future work.
