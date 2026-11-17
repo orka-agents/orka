@@ -286,22 +286,16 @@ func (s repositoryMonitorReviewFeedbackSnapshot) authorizedFeedback() []reposito
 	return slices.Clone(s.authorized)
 }
 
-// newestActivity is the latest creation or edit time of any included
-// comment or review, which a quiet period counts from.
+// newestActivity is the latest creation or edit time of the included current
+// authorized feedback, which a quiet period counts from. Other
+// comments never start a repair, so they do not delay one either: an
+// outside commenter cannot hold a maintainer's request back.
 func (s repositoryMonitorReviewFeedbackSnapshot) newestActivity() time.Time {
 	var newest time.Time
-	see := func(created time.Time, edited *time.Time) {
-		if activity := repositoryMonitorFeedbackActivity(created, edited); activity.After(newest) {
-			newest = activity
+	for _, entry := range s.authorized {
+		if entry.Current && entry.ActivityAt.After(newest) {
+			newest = entry.ActivityAt
 		}
-	}
-	for _, thread := range s.Threads {
-		for _, comment := range thread.Comments {
-			see(comment.CreatedAt, comment.LastEditedAt)
-		}
-	}
-	for _, review := range s.Reviews {
-		see(review.SubmittedAt, review.LastEditedAt)
 	}
 	return newest
 }

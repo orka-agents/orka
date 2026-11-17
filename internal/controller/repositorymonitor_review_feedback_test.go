@@ -860,6 +860,23 @@ func TestRepositoryMonitorReviewFeedbackIgnoresPendingReviewComments(t *testing.
 	}
 }
 
+// Only feedback that can start a repair counts toward the quiet period, so a
+// newer outside comment never delays a maintainer's request.
+func TestRepositoryMonitorReviewFeedbackQuietPeriodIgnoresOutsideComments(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"maintainer": "write", "outsider": ""})
+	raw := repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{
+		repositoryMonitorFeedbackTestThread("T1", 10, false,
+			repositoryMonitorFeedbackTestComment(101, "maintainer", "User", "Please rename this.", 0),
+			repositoryMonitorFeedbackTestComment(102, "outsider", "User", "+1, also this.", 30),
+		),
+		repositoryMonitorFeedbackTestThread("T2", 20, false, repositoryMonitorFeedbackTestComment(201, "outsider", "User", "Another nit.", 60)),
+	}}
+	snapshot := repositoryMonitorFeedbackTestNormalize(raw, nil, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+	if want := repositoryMonitorFeedbackTestTime; !snapshot.newestActivity().Equal(want) {
+		t.Fatalf("newest activity = %v, want the maintainer's comment at %v", snapshot.newestActivity(), want)
+	}
+}
+
 func TestRepositoryMonitorReviewFeedbackBotPullRequestAuthorNeverStarts(t *testing.T) {
 	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(nil)
 	// GraphQL names the bot without the suffix the allowlist and REST use.
