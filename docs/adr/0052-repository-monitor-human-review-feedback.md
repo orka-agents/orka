@@ -47,7 +47,10 @@ times, minimized flag, and the review it belongs to. Each review keeps its
 `fullDatabaseId`, state, body, author, commit, and times. Reads are bounded
 (four pages of 50 threads, four pages of 50 reviews, 20 permission lookups, 20
 seconds), and a read that stops early sets an explicit `partial` flag with a
-reason. Rate limits, including GraphQL's HTTP 200 `RATE_LIMITED` error, are
+reason. Reviews are read newest page first (`reviews(last:, before:)`), so a
+read cut at its page limit holds the newest reviews: every reviewer it holds
+has their true latest verdict, and a reviewer whose latest review is older than
+the pages read is absent rather than shown with an earlier verdict. Rate limits, including GraphQL's HTTP 200 `RATE_LIMITED` error, are
 classified with the same helper as CI evidence.
 
 The result is a snapshot bound to the repository, pull request, and head SHA,
@@ -80,13 +83,22 @@ permission lookup failed are all evidence, each marked with the permission
 GitHub reported (`admin` through `read`, `none`, `unknown`). Resolved threads,
 Orka's own comments and reviews, and bots outside the allowlist are not. Orka's
 own comments are recognized by the review IDs in Orka's stored publish records,
-not by the hidden marker alone, so a copied marker hides nothing.
+not by the hidden marker alone, so a copied marker hides nothing. The records
+of every monitor in the namespace count, so a review another monitor of the
+same repository published is never read as human feedback; records never cross
+namespaces.
 
 **Authority to start a repair** is narrower. The author's collaborator
 permission must meet `minPermission` (default:
 `spec.triggers.github.labels.requireActorPermission`), and the permission must
 also be in `spec.policy.allowedRepositoryPermissions` when that is set. A failed
-or skipped lookup never authorizes, though the comment stays evidence. The pull
+or skipped lookup never authorizes, though the comment stays evidence. The
+bounded lookups go first to authors whose feedback could start a repair:
+commenters on unresolved, current threads that no Orka finding opened, and
+reviewers with a current `CHANGES_REQUESTED` review that has a body, newest
+activity first. Any lookups left go to other authors in GitHub's order, so
+evidence-only commenters cannot use up the lookups an authorized reviewer
+needs. The pull
 request author never starts a repair of their own pull request, so a repair
 cannot loop on itself. Replies on a thread that one of Orka's findings opened
 are context for that finding and start nothing of their own. An outdated thread
