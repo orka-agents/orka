@@ -356,3 +356,29 @@ func TestRepositoryMonitorReviewFeedbackStartedRepairIsNotRecreated(t *testing.T
 		t.Fatalf("outcome = %+v, want the started repair failed and charged", outcome)
 	}
 }
+
+// A repair whose Task create was requested but never confirmed is not
+// created again either: when its cache still holds the Task after the Task
+// ran and was deleted, the retried handoff settles it as an uncertain
+// failure that keeps the charge.
+func TestRepositoryMonitorReviewFeedbackCreatingRepairIsNotRecreated(t *testing.T) {
+	ctx := context.Background()
+	l := newRepositoryMonitorFeedbackLifecycle(t)
+	l.lostCreate = true
+	if err := l.handoff(t); err == nil {
+		t.Fatal("expected the lost create to fail the handoff")
+	}
+	task := l.f.repairTasks(t)[0]
+	if err := l.f.reconciler.Delete(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	l.cachedTask = &task
+	l.mustHandoff(t)
+	l.cachedTask = nil
+	if got := len(l.f.repairTasks(t)); got != 0 {
+		t.Fatalf("created %d Task again for a repair whose Task create was requested", got)
+	}
+	if outcome := l.outcome(t); outcome.State != store.MonitorFeedbackOutcomeFailed || outcome.Reason != repositoryMonitorRepairTaskOutcomeUnknown || l.f.ledger(t).spent["review_comment:11"] != 1 {
+		t.Fatalf("outcome = %+v, want an uncertain failure that keeps the charge", outcome)
+	}
+}

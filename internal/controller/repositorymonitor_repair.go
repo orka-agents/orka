@@ -405,7 +405,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		created, err := r.createRepositoryMonitorRepairTaskFor(ctx, monitor, run, command, owner, repository, pr, item, repairCountPR+1, repairCountHead+1, &handoff)
 		inputs := handoff
 		if errors.Is(err, errRepositoryMonitorFeedbackRepairTaskGone) {
-			// The repair started and its Task is gone: it is settled, not
+			// The repair's requested Task is gone: it is settled, not
 			// created again.
 			_, err := r.settleRepositoryMonitorFeedbackRepair(ctx, monitor, command, false)
 			return true, 0, err
