@@ -279,6 +279,10 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 						deleteE2EObjects("agent", agent)
 					}
 				})
+				// Each case needs its own pool, and the earlier cases' idle
+				// pools would otherwise hold more runtime Pods than a small CI
+				// node can schedule.
+				soulEvalParkRuntimePools()
 				ref := fakeForgeState().Branches[fakeForgeRepository][fakeforge.RepositoryConfigBranch]
 				Expect(ref).To(MatchRegexp(`^[0-9a-f]{40}$`), "fake forge has no repository config branch")
 				testCase := runtimeEvalRepositoryConfigCase{
