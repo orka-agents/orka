@@ -1005,6 +1005,22 @@ func TestResolveDefaultProviderPrefersReadyDefault(t *testing.T) {
 	}
 }
 
+// Without a namespace the server lists its own, and the error says so rather
+// than naming an empty namespace.
+func TestResolveDefaultProviderNamesServerNamespace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["namespace"]; ok {
+			t.Errorf("query %q carries a namespace", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `{"items":[]}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	_, err := resolveDefaultProviderName(context.Background(), client.NewWithNamespace(srv.URL, "", ""))
+	if err == nil || !strings.Contains(err.Error(), "the server's namespace has no Providers") {
+		t.Fatalf("resolveDefaultProviderName() error = %v, want it to name the server's namespace", err)
+	}
+}
+
 // TestTaskCreateAgentTypeInference verifies --agent resolves the referenced
 // Agent before choosing the task type: a native AI Agent keeps the ai default
 // (the documented self-bootstrapping flow), a runtime Agent infers agent, and

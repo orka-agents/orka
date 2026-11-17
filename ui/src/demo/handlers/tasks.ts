@@ -1,6 +1,7 @@
 import { http, HttpResponse, type RequestHandler } from 'msw'
 import type { Task, TaskPhase } from '@/schemas/task'
 import type { Approval, ExecutionEvent, ForkTaskRequest, TaskTrace } from '@/schemas/execution-event'
+import type { AttentionItem, AttentionResponse } from '@/schemas/attention'
 import type { ArtifactMetadata } from '@/schemas/artifact'
 import type { TranscriptMessage } from '@/schemas/session'
 import {
@@ -1071,7 +1072,62 @@ interface CreateTaskBody {
 const agentKeyByName = (name?: string) => (Object.keys(AGENTS) as AgentKey[]).find((key) => AGENTS[key].name === name)
 const repoKeyByUrl = (url?: string) => (Object.keys(REPOS) as RepoKey[]).find((key) => url?.replace(/\.git$/, '') === REPOS[key].url)
 
+// ---- attention read models --------------------------------------------------------
+
+/** The demo's "Needs you" ranking: pending approvals first, then recent failures. */
+function attentionItems(includeFailures: boolean, now = Date.now()): AttentionItem[] {
+  const approvals: AttentionItem[] = []
+  const failures: AttentionItem[] = []
+  for (const rec of tasks.values()) {
+    const task = toTask(rec, now)
+    const ref = { namespace: DEMO_NAMESPACE, name: rec.name, uid: task.metadata.uid ?? rec.name, phase: task.status?.phase }
+    if (isWaiting(rec)) {
+      for (const approval of rec.approvals.filter((a) => a.status === 'pending')) {
+        const tool = approval.targetTool && /^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/.test(approval.targetTool) ? approval.targetTool : undefined
+        approvals.push({
+          id: `approval:${ref.uid}:${approval.id}`, kind: 'approval', rank: 1, since: approval.createdAt,
+          deadline: approval.expiresAt, summary: tool ? `Approval requested for ${tool}` : 'Approval requested', task: ref,
+          approval: { id: approval.id, source: 'worker', targetTool: tool, expiresAt: approval.expiresAt, canApprove: true, canDecline: true },
+        })
+      }
+    }
+    const completed = task.status?.completionTime ? Date.parse(task.status.completionTime) : 0
+    if (includeFailures && task.status?.phase === 'Failed' && now - completed <= 24 * 3600_000) {
+      failures.push({ id: `failed:${ref.uid}`, kind: 'failed', rank: 3, since: task.status.completionTime ?? iso(now), summary: 'Task failed', task: ref })
+    }
+  }
+  const byTime = (a: AttentionItem, b: AttentionItem) => (a.deadline ?? '~').localeCompare(b.deadline ?? '~') || a.since.localeCompare(b.since) || a.id.localeCompare(b.id)
+  return [...approvals.sort(byTime), ...failures.sort(byTime)]
+}
+
+function attentionResponse(items: AttentionItem[], limit: number, monitors: AttentionResponse['sources']['monitors']): AttentionResponse {
+  const counts: AttentionResponse['counts'] = {}
+  for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1
+  return {
+    namespace: DEMO_NAMESPACE, generatedAt: iso(Date.now()), items: items.slice(0, limit), total: items.length, counts,
+    incomplete: false, sources: { approvals: 'included', monitors }, metadata: {},
+  }
+}
+
+function attentionLimit(request: Request): number {
+  const limit = Number(new URL(request.url).searchParams.get('limit') ?? 50)
+  return Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 50
+}
+
 export const taskHandlers: RequestHandler[] = [
+  http.get(api('/attention'), ({ request }) => {
+    // Like the task list, another namespace is simply empty.
+    if (!inDemoNamespace(request)) return HttpResponse.json(attentionResponse([], 1, 'unavailable'))
+    advanceAll()
+    return HttpResponse.json(attentionResponse(attentionItems(true), attentionLimit(request), 'unavailable'))
+  }),
+
+  http.get(api('/approvals'), ({ request }) => {
+    if (!inDemoNamespace(request)) return HttpResponse.json(attentionResponse([], 1, 'notRequested'))
+    advanceAll()
+    return HttpResponse.json(attentionResponse(attentionItems(false), attentionLimit(request), 'notRequested'))
+  }),
+
   http.get(api('/tasks'), ({ request }) => {
     if (!inDemoNamespace(request)) return list([])
     advanceAll()

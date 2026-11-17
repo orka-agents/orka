@@ -296,6 +296,7 @@ const taskWaitStatusSchema = z.object({
   state: z.string().optional(),
   kind: z.string().optional(),
   references: z.array(z.string()).optional(),
+  deadline: z.string().optional(),
 })
 
 export const taskStatusSchema = z.preprocess((status, context) => {

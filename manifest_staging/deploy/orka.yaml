@@ -463,6 +463,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - providers
+  verbs:
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agentruntimes
   verbs:
   - get
@@ -1146,7 +1152,6 @@ rules:
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -1235,6 +1240,7 @@ rules:
   - core.orka.ai
   resources:
   - agents
+  - providers
   verbs:
   - create
   - delete
@@ -1851,6 +1857,12 @@ rules:
   - create
   - update
   - delete
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
   - use
 - apiGroups:
   - core.orka.ai

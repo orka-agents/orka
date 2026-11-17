@@ -117,6 +117,11 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -153,6 +158,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -435,6 +441,9 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
 	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
 	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	// Cross-Task attention read models, computed on read for one namespace.
+	api.Get("/attention", s.handlers.ListAttention)
+	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)

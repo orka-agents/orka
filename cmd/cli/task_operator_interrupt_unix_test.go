@@ -49,8 +49,8 @@ func installFakePortForward(t *testing.T, api *httptest.Server) *fakePortForward
 	forward := &fakePortForward{}
 	previousDiscover, previousStart := discoverServiceFn, startPortForwardFn
 	t.Cleanup(func() { discoverServiceFn, startPortForwardFn = previousDiscover, previousStart })
-	discoverServiceFn = func(string, string) (string, string) { return "orka-system", "orka" }
-	startPortForwardFn = func(_, _, _ string, isolateInterrupt bool) (int, int, func(), error) {
+	discoverServiceFn = func(kubeTarget) (string, string) { return "orka-system", "orka" }
+	startPortForwardFn = func(_ kubeconfigContext, _, _ string, isolateInterrupt bool) (int, int, func(), error) {
 		forward.isolated.Store(isolateInterrupt)
 		return port, 0, func() { forward.stopped.Add(1) }, nil
 	}

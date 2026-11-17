@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -21,6 +22,8 @@ import (
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/pruning"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -410,5 +413,192 @@ func TestExternalRuntimePoolAttestsOnlyFrozenMaterializationKind(t *testing.T) {
 				t.Fatal("mismatched materialization received runtime credentials or admission")
 			}
 		})
+	}
+}
+
+// A suspendable native runtime adds durable-workspace entries to the same
+// 32-entry budget. Telemetry must fit what remains, and the pool must say
+// when it cannot, instead of publishing a request the provider refuses.
+func TestExternalRuntimePoolSuspendableNativeEnvironmentFitsWithTelemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	for name, test := range map[string]struct {
+		marker    string
+		telemetry bool
+		status    metav1.ConditionStatus
+		reason    string
+	}{
+		"traces and metrics fit":         {telemetry: true, status: metav1.ConditionTrue, reason: corev1alpha1.RuntimePoolReasonTelemetryProjected},
+		"no room left for any telemetry": {marker: "ORKA_E2E_WS_LC_AMBIGUOUS_OK", status: metav1.ConditionFalse, reason: corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newExternalRuntimePoolFixture(t)
+			f.r.EnableTelemetry = true
+			f.r.E2EPromptWriteAmbiguityMarker = test.marker
+			f.advertiseNativeProcess(t)
+			w := f.currentWorkspace(t)
+			w.Spec.Lifecycle.AllowedOnDetach = append(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+			if err := f.r.Update(t.Context(), w); err != nil {
+				t.Fatal(err)
+			}
+			env := f.publish(t).Spec.Workload.Runtime.Template.Spec.Containers[0].Env
+			names := map[string]bool{}
+			for _, variable := range env {
+				names[variable.Name] = true
+			}
+			if len(env) > nativeRuntimeEnvironmentLimit || !names["ORKA_ACP_DURABLE_WORKSPACE_KEY"] {
+				t.Fatalf("suspendable native environment has %d entries (backend limit %d): %v", len(env), nativeRuntimeEnvironmentLimit, names)
+			}
+			if names["ORKA_ENABLE_TELEMETRY"] != test.telemetry {
+				t.Fatalf("telemetry projected = %t, want %t: %v", names["ORKA_ENABLE_TELEMETRY"], test.telemetry, names)
+			}
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
+			if condition == nil || condition.Status != test.status || condition.Reason != test.reason {
+				t.Fatalf("TelemetryReady = %+v, want %s/%s", condition, test.status, test.reason)
+			}
+		})
+	}
+}
+
+func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
+	// Separate OTLP/HTTP collectors need four entries: the Pod projection's
+	// fixed budget of three drops metrics, while a native runtime with room
+	// for four keeps both signals.
+	values := map[string]string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
+	}
+	split := func(name string) string { return values[name] }
+	base := func(entries int) []corev1.EnvVar {
+		env := make([]corev1.EnvVar, entries)
+		for i := range env {
+			env[i] = corev1.EnvVar{Name: fmt.Sprintf("ORKA_ACP_FIXTURE_%d", i), Value: "x"}
+		}
+		return env
+	}
+	pod := runtimePoolTelemetryEnv(true, split)
+	if len(pod) != 3 || slices.ContainsFunc(pod, func(v corev1.EnvVar) bool { return v.Name == "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" }) {
+		t.Fatalf("Pod projection = %v, want trace-only within three entries", pod)
+	}
+	both := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL"}
+	traces := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"}
+	for name, test := range map[string]struct {
+		base      int
+		fits      bool
+		entries   int
+		telemetry []string
+	}{
+		"room for every signal": {base: nativeRuntimeEnvironmentLimit - 4, fits: true, entries: 32, telemetry: both},
+		"room for traces":       {base: nativeRuntimeEnvironmentLimit - 3, entries: 32, telemetry: traces},
+		"no room":               {base: nativeRuntimeEnvironmentLimit - 2, entries: 30},
+		"already over":          {base: nativeRuntimeEnvironmentLimit + 1, entries: 33},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The runtime template arrives carrying the Pod projection.
+			env, fits, message := fitNativeRuntimeTelemetry(append(base(test.base), pod...), true, split)
+			if fits != test.fits || message == "" || len(env) != test.entries {
+				t.Fatalf("fit = %t %q with %d entries, want %t with %d", fits, message, len(env), test.fits, test.entries)
+			}
+			var telemetry []string
+			for _, variable := range env {
+				if !strings.HasPrefix(variable.Name, "ORKA_ACP_FIXTURE_") {
+					telemetry = append(telemetry, variable.Name)
+				}
+			}
+			if !slices.Equal(telemetry, test.telemetry) {
+				t.Fatalf("telemetry entries = %v, want %v", telemetry, test.telemetry)
+			}
+		})
+	}
+	// Readiness compares against every configured signal: a trace-only Pod
+	// projection is not reported as complete.
+	if _, fits, _ := fitNativeRuntimeTelemetry(append(base(nativeRuntimeEnvironmentLimit-3), pod...), true, split); fits {
+		t.Fatal("trace-only telemetry reported every signal projected")
+	}
+	// An unchanged projection that fits keeps its place in the environment.
+	tracesSignal, metricsSignal, _ := runtimePoolTelemetrySignals(true, split)
+	unchanged := append(append(base(2), encodeRuntimePoolTelemetryEnv(tracesSignal, metricsSignal)...), base(1)...)
+	if env, fits, _ := fitNativeRuntimeTelemetry(unchanged, true, split); !fits || !reflect.DeepEqual(env, unchanged) {
+		t.Fatalf("unchanged projection was rewritten: %v", env)
+	}
+	env, fits, message := fitNativeRuntimeTelemetry(append(base(31), pod...), false, split)
+	if len(env) != 31 || !fits || message != "" {
+		t.Fatalf("disabled telemetry kept %d entries or reported %q", len(env), message)
+	}
+}
+
+// Native fitting decides which collectors the runtime exports to, so the
+// gateway allowlist admits only those: a dropped metrics collector is not
+// reachable from the sandbox.
+func TestExternalRuntimePoolNativeCollectorEgressFollowsFittedTelemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces.otel.svc.cluster.local:4318/v1/traces")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://metrics.otel.svc.cluster.local:4318/v1/metrics")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	f := newExternalRuntimePoolFixture(t)
+	f.r.EnableTelemetry, f.r.TelemetryCollectorEgress = true, true
+	f.advertiseNativeProcess(t)
+	f.advertiseSubstrateV1Backend(t)
+	w := f.currentWorkspace(t)
+	w.Spec.Lifecycle.AllowedOnDetach = append(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := f.r.Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	workload := f.publish(t).Spec.Workload.Runtime
+	hosts := make([]string, 0, len(workload.Egress.Rules))
+	for _, rule := range workload.Egress.Rules {
+		hosts = append(hosts, rule.Host)
+	}
+	env := workload.Template.Spec.Containers[0].Env
+	if len(env) > nativeRuntimeEnvironmentLimit || !slices.Contains(hosts, "traces.otel.svc.cluster.local") || slices.Contains(hosts, "metrics.otel.svc.cluster.local") ||
+		!slices.Equal(telemetryCollectorEndpoints(env), []string{"http://traces.otel.svc.cluster.local:4318/v1/traces"}) {
+		t.Fatalf("native runtime with %d entries exports to %v and may reach %v", len(env), telemetryCollectorEndpoints(env), hosts)
+	}
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady); condition == nil ||
+		condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit {
+		t.Fatalf("TelemetryReady = %+v, want False/NativeEnvironmentLimit", condition)
+	}
+}
+
+// A request without supervisor telemetry clears readiness left by an earlier
+// request instead of describing a runtime that no longer exists.
+func TestExternalRuntimePoolClearsTelemetryReadyWithoutTelemetry(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	f.r.setRuntimePoolCondition(&pool, &pool.Status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
+		corev1alpha1.RuntimePoolReasonTelemetryProjected, "earlier request")
+	if err := f.r.Status().Update(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	f.publish(t)
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady); condition != nil {
+		t.Fatalf("stale TelemetryReady kept: %+v", condition)
+	}
+}
+
+// Empty model limits are equivalent to unset ones for both the supervisor
+// and the controller, so the native template omits them; set limits stay.
+func TestRuntimePoolNativeProcessTemplateOmitsOnlyEmptyModelLimits(t *testing.T) {
+	template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Env: []corev1.EnvVar{
+		{Name: "ORKA_ACP_MODEL_CONTEXT_LIMIT", Value: ""},
+		{Name: "ORKA_ACP_MODEL_OUTPUT_LIMIT", Value: ""},
+	}}}}}
+	if env := runtimePoolNativeProcessTemplate(template).Spec.Containers[0].Env; len(env) != 0 {
+		t.Fatalf("empty model limits kept: %v", env)
+	}
+	template.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "ORKA_ACP_MODEL_CONTEXT_LIMIT", Value: "200000"},
+		{Name: "ORKA_ACP_MODEL_OUTPUT_LIMIT", Value: "8192"},
+	}
+	if env := runtimePoolNativeProcessTemplate(template).Spec.Containers[0].Env; len(env) != 2 {
+		t.Fatalf("set model limits dropped: %v", env)
+	}
+	environment := map[string]string{}
+	if limits, err := runtimePoolModelLimitsFromEnvironment(environment); err != nil || limits != nil {
+		t.Fatalf("absent model limits = %v, %v; want unset", limits, err)
 	}
 }

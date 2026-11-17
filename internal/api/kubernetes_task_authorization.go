@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -27,6 +28,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, reader client.Reader, cl
 		return err
 	}
 	if err := authorizeTaskAgentUse(ctx, clientset, userInfo, task); err != nil {
+		return err
+	}
+	if err := authorizeTaskProviderUse(ctx, reader, clientset, userInfo, task); err != nil {
 		return err
 	}
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
@@ -106,11 +110,32 @@ func authorizeKubernetesResourceAction(
 	userInfo *UserInfo,
 	namespace, verb, group, resource, name string,
 ) error {
+	allowed, err := kubernetesResourceActionAllowed(ctx, clientset, userInfo, namespace, verb, group, resource, name)
+	if err != nil || !allowed {
+		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	return nil
+}
+
+// errKubernetesAccessReviewUnavailable reports a SubjectAccessReview that did
+// not return a usable answer, as opposed to an explicit denial.
+var errKubernetesAccessReviewUnavailable = errors.New("kubernetes access review is unavailable")
+
+// kubernetesResourceActionAllowed is authorizeKubernetesResourceAction's
+// three-way form for read-side hints: it reports allowed, denied, or (with an
+// error) that the review gave no usable answer. Callers that enforce access
+// must use authorizeKubernetesResourceAction, which refuses in both cases.
+func kubernetesResourceActionAllowed(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	userInfo *UserInfo,
+	namespace, verb, group, resource, name string,
+) (bool, error) {
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
-		return nil
+		return true, nil
 	}
 	if kubernetesClientsetIsNil(clientset) {
-		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+		return false, nil
 	}
 	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
 	for key, values := range userInfo.Extra {
@@ -125,10 +150,16 @@ func authorizeKubernetesResourceAction(
 			},
 		},
 	}, metav1.CreateOptions{})
-	if err != nil || review == nil || !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
-		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	if err != nil || review == nil {
+		return false, errKubernetesAccessReviewUnavailable
 	}
-	return nil
+	if review.Status.Denied {
+		return false, nil
+	}
+	if review.Status.EvaluationError != "" {
+		return false, errKubernetesAccessReviewUnavailable
+	}
+	return review.Status.Allowed, nil
 }
 
 // workerServiceAccountNames are the ServiceAccount names worker Pods run as

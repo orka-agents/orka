@@ -18,8 +18,34 @@ Approvals appear in three places:
 | Linked accounts | Every write tool that acts through a person's [connector](connectors.md) | Automatic |
 
 People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
-`orka task decline`, or through the API. The rest of this page covers the external-runtime
+`orka task decline`, or through the API. To alert reviewers instead of having them poll, see
+[Alerting reviewers](#alerting-reviewers). The rest of this page covers the external-runtime
 path.
+
+## Alerting reviewers
+
+A Task can send a signed webhook when an approval is requested and when it is approved,
+declined, expired, or cancelled. Select the events next to the Task's `webhookURL`:
+
+```yaml
+spec:
+  webhookURL: https://hooks.example.com/orka
+  webhookEvents:
+    - task.approval_requested
+    - task.approval_resolved
+```
+
+This works for all three approval paths and for [parked sign-offs](parking-agent-turns.md),
+whose decision can arrive after the parked turn `Succeeded`. A notice carries the approval ID,
+the gated tool's name, severity, the deadline when the approval has one, and the resolution.
+It never carries the proposed arguments, the action text, the reviewer's reason, or who
+decided. Open the approval in the dashboard or the API to review it. A brokered review that
+times out is sent as `expired` a few seconds after its deadline. Approval notices are retried
+for about three minutes, since review lasts at most ten.
+
+Treat the notice as an alert. Decide through the dashboard, the CLI, or the API, which check
+the approval again. See [Approval events](task-webhooks.md#approval-events) for the body,
+deduplication, ordering, and how to verify the signature.
 
 ## Approvals for external runtimes
 
@@ -110,6 +136,55 @@ message GitHub refused a missing permission with; nothing changed. An unknown
 outcome means the action may have run. Check the target system before
 choosing whether to make a new request. The controller logs the redacted
 cause of both.
+
+## Find pending approvals across Tasks
+
+The per-Task list answers one Task. To find every request waiting on a person
+in a namespace, read the approvals inbox or the wider attention view:
+
+```http
+GET /api/v1/approvals?namespace=<ns>&status=pending
+GET /api/v1/attention?namespace=<ns>&since=24h
+```
+
+Both are computed on each read and need only `list` on `core.orka.ai/tasks`.
+Every Task then passes the same context-token and Gateway read filters as
+`GET /api/v1/tasks`, and only Tasks that report a pending approval (a
+`WaitingForApproval` condition, or a parked approval wait that still takes a
+decision) have their approval history read. The inbox lists brokered, worker
+and parked approvals that can still be decided, soonest deadline first;
+expired and already decided requests drop out. The attention view adds Tasks
+with an unknown outcome, failed Tasks and Tasks whose Pod cannot start inside
+the `since` window (default 24 hours, at most 7 days), and blocked
+RepositoryMonitor work actions when the caller may also list
+`repositorymonitors` and `monitorworkactions`.
+
+Each item is a short safe summary: Task identity, the tool name of a brokered
+approval (recorded by the controller from the resolved tool), a fixed label for
+parked sign-offs, severity and deadline. It never includes action labels built
+from call arguments, fields of approvals the AI worker records, the input
+preview, risk
+summary, wait reason or decision reasons; open the Task's Approvals tab or the
+per-Task list for those before deciding. Each approval item carries
+`canApprove` and `canDecline`. They are hints from the same checks the
+decision endpoint runs, including the rule that only the requester may
+approve a call on a Task that acts on their behalf. `null` means the hint
+could not be settled cheaply, for example past the first 20 Tasks of a page
+for a ServiceAccount caller. The decision endpoint remains the only
+enforcement point.
+
+Results are ranked and paged with an opaque `continue` token that also fixes
+the `since` window. Scans are bounded; when a bound is hit the response sets
+`incomplete: true` and names it in `incompleteReasons`, and the ranking must
+not be read as complete. `sources.approvals` and `sources.monitors` report
+whether approval history and monitor items were included, unavailable, or
+forbidden to the caller. `sources.approvals` is `partial` when the caller may
+list a Task that reports a pending approval but may not read that Task's
+approvals, for example a context token with `orka:tasks:list` but not
+`orka:tasks:get`. Those approvals are left out without detail, so an empty
+inbox does not mean nothing is pending. `unavailable` takes precedence over
+`partial`; scan bounds are reported in `incompleteReasons` instead. See the
+[authorization reference](../reference/api-authorization.md#route-permissions).
 
 ## Waiting and cancellation
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -35,6 +36,12 @@ const (
 )
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string) error {
+	return r.recordRepositoryMonitorWorkActionStateWithMetadata(ctx, monitor, run, command, targetKind, targetNumber, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason, nil)
+}
+
+// recordRepositoryMonitorWorkActionStateWithMetadata also merges metadata
+// into the action's metadata, replacing keys it already has.
+func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWithMetadata(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string, metadata map[string]any) error {
 	if r.Store == nil || monitor == nil || command == nil {
 		return nil
 	}
@@ -91,6 +98,9 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		existing.BlockedReason = blockedReason
 		existing.Error = actionError
 		existing.CompletedAt = completedAt
+		if err := mergeRepositoryMonitorWorkActionMetadata(existing, metadata); err != nil {
+			return err
+		}
 		metrics.RecordRepositoryMonitorWorkAction(existing.DesiredAction, existing.Status)
 		return r.Store.UpdateWorkAction(ctx, existing)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -107,7 +117,13 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			}
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{repositoryMonitorEventActionKindKey: actionKind})
+	initial := map[string]any{}
+	maps.Copy(initial, metadata)
+	initial[repositoryMonitorEventActionKindKey] = actionKind
+	encodedMetadata, err := json.Marshal(initial)
+	if err != nil {
+		return err
+	}
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := r.Store.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -129,7 +145,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		TaskName:             taskName,
 		BlockedReason:        blockedReason,
 		Error:                actionError,
-		MetadataJSON:         string(metadata),
+		MetadataJSON:         string(encodedMetadata),
 		CreatedAt:            time.Now(),
 		CompletedAt:          completedAt,
 	}); err != nil {
@@ -138,6 +154,30 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		}
 		return err
 	}
+	return nil
+}
+
+// mergeRepositoryMonitorWorkActionMetadata merges metadata into the action's
+// metadata, replacing keys it already has.
+func mergeRepositoryMonitorWorkActionMetadata(action *store.WorkAction, metadata map[string]any) error {
+	if len(metadata) == 0 {
+		return nil
+	}
+	merged := map[string]any{}
+	if strings.TrimSpace(action.MetadataJSON) != "" {
+		if err := json.Unmarshal([]byte(action.MetadataJSON), &merged); err != nil {
+			return fmt.Errorf("decode work action %s metadata: %w", action.ID, err)
+		}
+	}
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	maps.Copy(merged, metadata)
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return err
+	}
+	action.MetadataJSON = string(encoded)
 	return nil
 }
 
