@@ -266,8 +266,10 @@ per poll in addition to the 20 per snapshot. A failed lookup is cached for the
 poll too, so a throttled account is not asked again until the next poll; both
 give `incomplete_retry`. The budget is fair across polls: a permission one
 poll read answers the monitor's later polls for three minutes, and accounts a
-poll deferred for lack of budget are served first by the next one, so pull
-requests that inventory reaches late are not starved by early ones. A repair
+poll deferred for lack of budget get up to half of later polls' budgets, the
+longest-waiting first, so every account is looked up within a bounded number
+of polls and pull requests that inventory reaches late are not starved by
+early ones. A repair
 handoff, which creates a Task, never uses a remembered permission. The memory
 is the controller's; a restart starts afresh.
 

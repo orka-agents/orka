@@ -315,9 +315,13 @@ type repositoryMonitorPermissionResult struct {
 // forward: recent permission results, and the accounts the last poll
 // deferred.
 type repositoryMonitorPermissionMemory struct {
-	mu       sync.Mutex
-	results  map[string]repositoryMonitorRememberedPermission
-	deferred map[string]bool
+	mu      sync.Mutex
+	results map[string]repositoryMonitorRememberedPermission
+	// deferred maps each account a poll deferred, and that has not been
+	// looked up since, to the poll that first deferred it, so reservations
+	// go to the accounts that have waited longest.
+	deferred map[string]int
+	polls    int
 }
 
 type repositoryMonitorRememberedPermission struct {
@@ -341,11 +345,21 @@ func withRepositoryMonitorPermissionCache(ctx context.Context) context.Context {
 func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (context.Context, func()) {
 	value, _ := r.permissionMemory.LoadOrStore(monitor.UID, &repositoryMonitorPermissionMemory{results: map[string]repositoryMonitorRememberedPermission{}})
 	memory := value.(*repositoryMonitorPermissionMemory)
-	// At most half the budget is reserved, so accounts reached early keep
-	// progressing too; deferred accounts beyond it are deferred again when
-	// this poll reaches them.
+	// Reservations go to the accounts that have waited longest, so every
+	// deferred account is looked up within a bounded number of polls. At
+	// most half the budget is reserved, so accounts reached early keep
+	// progressing too; the rest wait for a later poll.
 	memory.mu.Lock()
-	deferred := slices.Sorted(maps.Keys(memory.deferred))
+	memory.polls++
+	poll := memory.polls
+	deferred := slices.Collect(maps.Keys(memory.deferred))
+	slices.SortFunc(deferred, func(a, b string) int {
+		if c := memory.deferred[a] - memory.deferred[b]; c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	firstDeferred := maps.Clone(memory.deferred)
 	memory.mu.Unlock()
 	reserved := map[string]bool{}
 	for _, key := range deferred[:min(len(deferred), repositoryMonitorPermissionLookupBudget/2)] {
@@ -354,11 +368,19 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, deferred: map[string]bool{}}
 	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, cache), func() {
 		cache.mu.Lock()
-		deferred := maps.Clone(cache.deferred)
+		deferredNow := slices.Collect(maps.Keys(cache.deferred))
 		cache.mu.Unlock()
 		memory.mu.Lock()
 		defer memory.mu.Unlock()
-		memory.deferred = deferred
+		// An account deferred again keeps the poll that first deferred it;
+		// one looked up, or no longer reached, waits no more.
+		memory.deferred = map[string]int{}
+		for _, key := range deferredNow {
+			memory.deferred[key] = poll
+			if first, ok := firstDeferred[key]; ok {
+				memory.deferred[key] = first
+			}
+		}
 		for key, remembered := range memory.results {
 			if time.Since(remembered.at) >= repositoryMonitorPermissionMemoryTTL {
 				delete(memory.results, key)

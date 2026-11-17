@@ -382,3 +382,42 @@ func TestRepositoryMonitorReviewFeedbackCreatingRepairIsNotRecreated(t *testing.
 		t.Fatalf("outcome = %+v, want an uncertain failure that keeps the charge", outcome)
 	}
 }
+
+// When remembered permissions expire between every poll and a stable set of
+// accounts is reached in the same order each time, reservations go to the
+// accounts that have waited longest, so every account is looked up within a
+// few polls instead of the same ones every time. (Autoreview finding.)
+func TestRepositoryMonitorPermissionLookupsServeEveryAccountInOrderOfWaiting(t *testing.T) {
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	baseURL := f.reconciler.GitHubAPIBaseURL
+	accounts := make([]string, 0, 2*repositoryMonitorPermissionLookupBudget+1)
+	for i := range 2*repositoryMonitorPermissionLookupBudget + 1 {
+		accounts = append(accounts, fmt.Sprintf("account%03d", i))
+	}
+	lastServed := map[string]int{}
+	for poll := 1; poll <= 12; poll++ {
+		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
+		for _, account := range accounts {
+			_, err := f.reconciler.repositoryMonitorCollaboratorPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", account)
+			switch {
+			case err == nil:
+				lastServed[account] = poll
+			case !errors.Is(err, errRepositoryMonitorPermissionLookupBudget):
+				t.Fatal(err)
+			}
+		}
+		end()
+		// Every remembered permission expires before the next poll.
+		value, _ := f.reconciler.permissionMemory.Load(f.monitor.UID)
+		memory := value.(*repositoryMonitorPermissionMemory)
+		memory.mu.Lock()
+		clear(memory.results)
+		memory.mu.Unlock()
+	}
+	for _, account := range accounts {
+		// Each account is served at least once in the last few polls.
+		if lastServed[account] < 8 {
+			t.Fatalf("account %s last served in poll %d of 12", account, lastServed[account])
+		}
+	}
+}
