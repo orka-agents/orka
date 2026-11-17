@@ -180,6 +180,13 @@ type TaskReconciler struct {
 	OutboundAccessTrust               outboundaccess.TrustConfig
 	trustedServiceCleanupMu           sync.RWMutex
 	trustedServiceCleanupDone         bool
+	// WebhookDeliveryWorkers bounds the concurrent webhook attempts of the
+	// delivery runnable that SetupWithManager registers (ADR 0042). Zero
+	// selects DefaultTaskWebhookDeliveryWorkers.
+	WebhookDeliveryWorkers int
+	// webhookDeliveries sends the Task's webhook notices outside the
+	// reconcile worker.
+	webhookDeliveries *taskWebhookDispatcher
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -460,32 +467,23 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // reconcileTaskPhaseAndApprovalNotices runs the Task's phase work between
-// recording and sending its opt-in approval notices (ADR 0053). Notices
+// recording and scheduling its opt-in approval notices (ADR 0053). Notices
 // follow the approval events in every phase, including after a parked turn
 // Succeeded while its sign-off is still decidable, and never hold back the
 // Task's own progress: new notices are recorded in status before the phase
-// work, which the history hold and expiry recording rely on, and are sent
-// only after it, even when it failed, so a slow or unreachable receiver
-// cannot delay scheduling, monitoring or finalization. The Task requeues for
-// the earlier of the phase's requeue and the notices' next attempt.
+// work, which the history hold and expiry recording rely on, and are handed
+// to the delivery runnable only after it, even when it failed. The send runs
+// outside the reconcile worker, so a slow or unreachable receiver cannot
+// delay this Task's scheduling, monitoring or finalization, or any other
+// Task's reconcile. The Task requeues for the earlier of the phase's requeue
+// and the notices' next attempt.
 func (r *TaskReconciler) reconcileTaskPhaseAndApprovalNotices(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	approvalRequeue, err := r.prepareApprovalWebhooks(ctx, task)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	approvalsPending := firstPendingApprovalNotice(task.Status.ApprovalWebhooks) >= 0
 	result, err := r.reconcileTaskPhase(ctx, task)
-	if approvalsPending {
-		deliveryRequeue, deliveryErr := r.sendApprovalWebhooks(ctx, task)
-		switch {
-		case deliveryErr == nil:
-			approvalRequeue = minPositiveDuration(approvalRequeue, deliveryRequeue)
-		case err == nil:
-			err = deliveryErr
-		default:
-			logf.FromContext(ctx).Error(deliveryErr, "failed to advance approval webhook delivery")
-		}
-	}
+	approvalRequeue = minPositiveDuration(approvalRequeue, r.scheduleApprovalWebhooks(task))
 	if approvalRequeue > 0 && (result.RequeueAfter == 0 || approvalRequeue < result.RequeueAfter) {
 		result.RequeueAfter = approvalRequeue
 	}
@@ -517,36 +515,39 @@ func (r *TaskReconciler) prepareApprovalWebhooks(ctx context.Context, task *core
 	return r.WebhookNotifier.prepareApprovalNotices(ctx, r.Status(), r.ExecutionEventStore, task)
 }
 
-// sendApprovalWebhooks attempts the Task's next pending approval notice once
-// its phase work is done. The phase work may have left task stale, or
-// changed in memory without persisting the change, so delivery runs against
-// an uncached read and never writes those changes. A Task that is gone,
-// replaced or being deleted drops its notices. When the attempt settles the
-// last pending notice, the Task is requeued promptly: its phase work then
-// runs again, and a finished scheduled run reaches its parent's history
-// enforcement, which held the run while the notice was pending.
-func (r *TaskReconciler) sendApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
+// scheduleApprovalWebhooks hands the Task's next pending approval notice to
+// the delivery runnable once it is due, and returns when to look again (zero
+// when nothing is pending). The send never runs in the reconcile worker, so a
+// slow or hanging receiver delays neither this Task's phase work nor any other
+// Task's reconcile. Delivery reads the Task uncached, and a Task that is gone,
+// replaced or being deleted drops its notices. Its status writes reconcile the
+// Task again, so the phase work, such as a finished scheduled run's parent
+// history enforcement, runs once the last pending notice settles.
+func (r *TaskReconciler) scheduleApprovalWebhooks(task *corev1alpha1.Task) time.Duration {
 	if r.WebhookNotifier == nil {
-		return 0, nil
+		return 0
 	}
-	current := &corev1alpha1.Task{}
-	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
-		if apierrors.IsNotFound(err) {
-			return 0, nil
-		}
-		return 0, err
+	index := firstPendingApprovalNotice(task.Status.ApprovalWebhooks)
+	if index < 0 {
+		return 0
 	}
-	if current.UID != task.UID || !current.DeletionTimestamp.IsZero() {
-		return 0, nil
+	now := r.WebhookNotifier.now()
+	if next := task.Status.ApprovalWebhooks.Notices[index].NextAttemptTime; next != nil && now.Before(next.Time) {
+		return next.Sub(now)
 	}
-	requeue, err := r.WebhookNotifier.sendApprovalNotices(ctx, r.Status(), current)
-	if err != nil {
-		return 0, err
+	r.enqueueWebhookDelivery(task, false)
+	return webhookDeliveryRecheckInterval
+}
+
+// enqueueWebhookDelivery queues the Task's due notices for the delivery
+// runnable. terminal allows its terminal notice.
+func (r *TaskReconciler) enqueueWebhookDelivery(task *corev1alpha1.Task, terminal bool) {
+	if r.webhookDeliveries == nil {
+		logf.Log.WithName("task-webhook-delivery").Error(nil, "no webhook delivery runnable is registered; notice not sent",
+			"namespace", task.Namespace, "name", task.Name)
+		return
 	}
-	if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) < 0 {
-		return approvalWebhookSettledRequeue, nil
-	}
-	return requeue, nil
+	r.webhookDeliveries.enqueue(task, terminal)
 }
 
 // projectACPTaskAdmissionStatus projects the execution workspace status and
@@ -2789,14 +2790,18 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	// retired. Delivery state is durable in Task status and bounded; failed
 	// delivery never delays artifact reclamation, and retirement itself retains
 	// the capability safety grace period.
-	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered && r.WebhookNotifier != nil {
-		requeueAfter, err := r.WebhookNotifier.reconcileDelivery(ctx, r.Status(), task)
-		if err != nil {
-			log.Error(err, "failed to advance webhook delivery")
-			return ctrl.Result{}, err
-		}
-		if requeueAfter > 0 {
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	//
+	// The attempt itself runs in the delivery runnable, never here, so a slow
+	// or hanging receiver cannot hold the reconcile worker that every Task
+	// shares. Parent history enforcement still waits until the notice settles:
+	// the runnable's status writes reconcile this Task again.
+	if r.WebhookNotifier != nil {
+		if outstanding, nextAttempt := terminalNoticeOutstanding(task, r.WebhookNotifier.now()); outstanding {
+			if nextAttempt == 0 {
+				r.enqueueWebhookDelivery(task, true)
+				nextAttempt = webhookDeliveryRecheckInterval
+			}
+			return ctrl.Result{RequeueAfter: nextAttempt}, nil
 		}
 	}
 
@@ -4469,6 +4474,16 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventReasonField, eventReasonIndex); err != nil {
 		return err
 	}
+	if r.WebhookNotifier != nil && r.webhookDeliveries == nil {
+		workers := r.WebhookDeliveryWorkers
+		if workers < 0 || workers > MaxTaskWebhookDeliveryWorkers {
+			return fmt.Errorf("webhook delivery workers must be between 1 and %d, got %d", MaxTaskWebhookDeliveryWorkers, workers)
+		}
+		r.webhookDeliveries = newTaskWebhookDispatcher(r.WebhookNotifier, uncachedReader(r.APIReader, r.Client), r.Status(), workers)
+		if err := mgr.Add(r.webhookDeliveries); err != nil {
+			return fmt.Errorf("register Task webhook delivery: %w", err)
+		}
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
@@ -5335,8 +5350,9 @@ func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *
 }
 
 // approvalNoticesHoldRun reports whether a run must be kept because a Task in
-// its continuation chain, from head, still has a pending approval notice, or
-// approval events its projection has not reached yet (ADR 0053). Deleting a
+// its continuation chain, from head, still has a pending approval notice or
+// an outstanding terminal notice, or approval events its projection has not
+// reached yet (ADR 0053). Deleting a
 // Task drops its queued notices and its stream, and only a reconcile of the
 // Task itself can project and send them. It reads uncached state, because the
 // notices may have been queued earlier in the same reconcile, and follows at
@@ -5359,9 +5375,19 @@ func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev
 		return true
 	}
 	storeFailed := false
+	now := r.WebhookNotifier.now()
 	for range taskwait.MaxChainLength + 1 {
 		if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) >= 0 {
 			return true
+		}
+		// The terminal notice is sent asynchronously, after the run's own
+		// reconcile queued it, so the parent can see a finished run whose
+		// notice is still waiting for a delivery worker. A continuation that
+		// has not finished inherits the webhook URL but owes no notice yet.
+		if current.Status.Phase.IsTerminal() {
+			if outstanding, _ := terminalNoticeOutstanding(current, now); outstanding {
+				return true
+			}
 		}
 		unprojected, err := r.approvalEventsAwaitProjection(ctx, current)
 		if err != nil {

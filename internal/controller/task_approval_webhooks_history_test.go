@@ -102,11 +102,12 @@ func TestScheduledRunHistoryKeepsARunUntilItsApprovalNoticesSettle(t *testing.T)
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 	var sent []string
 	for range 6 {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 		sent = sent[:0]
@@ -260,6 +261,7 @@ func approvalHistoryHarness(t *testing.T, run *corev1alpha1.Task) (*approvalWebh
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 	return h, reconciler
 }
 
@@ -269,7 +271,7 @@ func reconcileApprovalHistoryRun(t *testing.T, h *approvalWebhookHarness, reconc
 	t.Helper()
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 	for range rounds {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 		if historyRunPruned(t, h.client, approvalWebhookTestTask) {
@@ -352,13 +354,14 @@ func TestScheduledRunHistoryParentHoldsUnprojectedApprovalEvents(t *testing.T) {
 }
 
 // unprojectedApprovalRun is a finished run that tracks both approval events,
-// with its cursor at seq.
+// with its cursor at seq. Its terminal notice was already delivered.
 func unprojectedApprovalRun(seq int64) *corev1alpha1.Task {
 	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
 	run.Spec.WebhookURL = "https://receiver.example/hook"
 	run.Spec.WebhookEvents = bothApprovalEvents
 	completed := metav1.NewTime(approvalWebhookTestNow.Add(-time.Minute))
 	run.Status.CompletionTime = &completed
+	run.Status.WebhookDelivered = true
 	run.Status.ApprovalWebhooks = &corev1alpha1.TaskApprovalWebhooks{Tracking: true, ProjectedSeq: seq}
 	return run
 }
@@ -370,6 +373,48 @@ func approvalHoldReconciler(t *testing.T, run *corev1alpha1.Task, eventStore sto
 	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	r.WebhookNotifier.now = func() time.Time { return now }
 	return r
+}
+
+// Delivery is asynchronous, so a finished run can still be waiting for a
+// worker to send its terminal notice. The parent keeps it until that notice
+// settles, since deleting the run drops the notice.
+func TestScheduledRunHistoryHoldsAnOutstandingTerminalNotice(t *testing.T) {
+	run := unprojectedApprovalRun(0)
+	run.Spec.WebhookEvents = nil
+	run.Status.WebhookDelivered = false
+	r := approvalHoldReconciler(t, run.DeepCopy(), nil, approvalWebhookTestNow)
+	if !r.approvalNoticesHoldRun(context.Background(), run) {
+		t.Fatal("a run whose terminal notice is not yet sent must be kept")
+	}
+
+	settled := run.DeepCopy()
+	settled.Status.WebhookDelivery = &corev1alpha1.TaskWebhookDelivery{State: corev1alpha1.TaskWebhookDeliveryFailed}
+	r = approvalHoldReconciler(t, settled.DeepCopy(), nil, approvalWebhookTestNow)
+	if r.approvalNoticesHoldRun(context.Background(), settled) {
+		t.Fatal("a run whose terminal notice settled must not be kept")
+	}
+}
+
+// A continuation that is still running inherits the webhook URL but owes no
+// terminal notice yet, so it does not hold its chain's head.
+func TestScheduledRunHistoryIgnoresTheTerminalNoticeOfARunningContinuation(t *testing.T) {
+	head := approvalHistoryRun("parked-run", "uid-parked-run", 3*time.Hour)
+	head.Spec.WebhookURL = "https://receiver.example/hook"
+	head.Status.WebhookDelivered = true
+	head.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "parked-run-next", ContinuationTaskUID: "uid-parked-run-next",
+	}
+	next := approvalHistoryRun("parked-run-next", "uid-parked-run-next", time.Hour)
+	next.Spec.WebhookURL = head.Spec.WebhookURL
+	next.Status.Phase = corev1alpha1.TaskPhaseRunning
+	next.Annotations = map[string]string{
+		labels.AnnotationContinuationOfName: "parked-run", labels.AnnotationContinuationOfUID: "uid-parked-run",
+	}
+	r := newUnitReconciler(newTestScheme(), head.DeepCopy(), next.DeepCopy())
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	if r.approvalNoticesHoldRun(context.Background(), head) {
+		t.Fatal("a running continuation's future terminal notice must not hold the run")
+	}
 }
 
 // A failed event store read keeps a recently settled run, since it cannot

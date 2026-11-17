@@ -4,8 +4,10 @@ Date: 2026-11-06
 
 ## Status
 
-Accepted. Replaces the best-effort, unsigned `spec.webhookURL` sender. It leaves
-per-receiver secrets, non-terminal events, and webhook egress through a proxy open.
+Accepted, partly superseded by [ADR 0054](0054-task-webhook-delivery-workers.md),
+which moves delivery attempts out of the Task reconcile. Replaces the best-effort,
+unsigned `spec.webhookURL` sender. It leaves per-receiver secrets, non-terminal
+events, and webhook egress through a proxy open.
 
 ## Context
 

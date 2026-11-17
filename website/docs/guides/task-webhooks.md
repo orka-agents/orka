@@ -173,6 +173,11 @@ status:
 - Each attempt is claimed in Task status before it is sent. A controller that
   dies mid-attempt leaves a two-minute lease; the next controller waits for it,
   then retries under the same delivery ID.
+- Attempts are sent by a pool of delivery workers, separate from Task
+  reconciliation, so a slow or unresponsive receiver never delays scheduling
+  or monitoring of any Task. Each Task's notices still go one attempt at a
+  time. The pool sends at most `--task-webhook-delivery-workers` attempts at
+  once (default 8); beyond that, other notices queue until a worker is free.
 - Only one notice is pending per Task. If the Task's terminal state changes
   before a pending notice is delivered, the controller supersedes it: the old
   delivery ID is never sent again, a new one carries the newer state, its
