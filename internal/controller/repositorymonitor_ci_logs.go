@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/security"
-
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
 
@@ -138,31 +136,22 @@ type repositoryMonitorCILogScanner struct {
 	errorAfter  int
 	cleanup     bool
 	tail        []string
-	// yamlIndent is the indentation of the credential YAML block scalar
-	// header whose body the scan is in, or -1 outside one.
-	yamlIndent int
+	// multiline follows credential multi-line values as the log streams
+	// by.
+	multiline *repositoryMonitorEvidenceMultilineTracker
 }
 
 func newRepositoryMonitorCILogScanner() *repositoryMonitorCILogScanner {
-	return &repositoryMonitorCILogScanner{errorAt: -1, yamlIndent: -1}
+	return &repositoryMonitorCILogScanner{errorAt: -1, multiline: newRepositoryMonitorEvidenceMultilineTracker()}
 }
 
-// withholdYAMLBlock withholds the body of a credential YAML block scalar as
-// it streams by, so pruning the rolling window cannot drop the header that
-// identifies it while its body lines survive.
-func (s *repositoryMonitorCILogScanner) withholdYAMLBlock(line string) string {
-	normalized := repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(line, ""))
-	if s.yamlIndent >= 0 {
-		if strings.TrimSpace(normalized) == "" {
-			return line
-		}
-		if repositoryMonitorEvidenceIndent(normalized) > s.yamlIndent {
-			return repositoryMonitorEvidenceRedactedLine
-		}
-		s.yamlIndent = -1
-	}
-	if security.SensitiveYAMLBlockHeader(normalized) {
-		s.yamlIndent = repositoryMonitorEvidenceIndent(normalized)
+// withholdMultilineValue withholds each line of a credential's multi-line
+// value, such as a YAML block scalar, a quoted value through its closing
+// quote, or either behind a diff marker, as it streams by, so pruning the
+// rolling window cannot drop the key line that identifies the value while
+// its other lines survive.
+func (s *repositoryMonitorCILogScanner) withholdMultilineValue(line string) string {
+	if s.multiline.withhold(repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(line, ""))) {
 		return repositoryMonitorEvidenceRedactedLine
 	}
 	return line
@@ -177,7 +166,7 @@ func (s *repositoryMonitorCILogScanner) add(line string) {
 	if !keep {
 		return
 	}
-	line = s.withholdYAMLBlock(line)
+	line = s.withholdMultilineValue(line)
 	if !s.cleanup && repositoryMonitorCILogCleanupLine(line) {
 		s.cleanup = true
 		s.tail, s.tailSeen = append([]string(nil), s.recent...), s.seen
