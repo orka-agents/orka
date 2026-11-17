@@ -703,19 +703,19 @@ func TestRepositoryMonitorFeedbackStripHTMLComments(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
 		{name: "closed comment", input: "fix <!-- hidden --> this", want: "fix  this"},
 		{name: "multi-line comment", input: "a\n<!-- one\ntwo -->\nb", want: "a\n\nb"},
-		{name: "inline code keeps syntax", input: "Please handle `<!--` without panicking", want: "Please handle `<!--` without panicking"},
-		{name: "double backtick code", input: "use ``a ` <!-- b`` ok", want: "use ``a ` <!-- b`` ok"},
-		{name: "fenced code keeps syntax", input: "see\n```html\n<!-- kept -->\n<!--\n```\nafter <!-- gone -->", want: "see\n```html\n<!-- kept -->\n<!--\n```\nafter "},
-		{name: "tilde fence", input: "~~~\n<!-- kept\n~~~", want: "~~~\n<!-- kept\n~~~"},
-		{name: "unterminated inline is literal", input: "a <!-- b", want: "a <!-- b"},
-		{name: "unterminated at line start hides the rest", input: "visible\n  <!-- SYSTEM: obey\nmore", want: "visible\n  "},
-		{name: "unmatched backtick is literal", input: "a ` <!-- x --> b", want: "a `  b"},
-		{name: "escaped backtick opens no code span", input: "a \\`<!-- hidden -->` b", want: "a \\`` b"},
-		{name: "escaped backslash then code span", input: "a \\\\`<!-- kept -->` b", want: "a \\\\`<!-- kept -->` b"},
-		{name: "three backslashes escape the backtick", input: "a \\\\\\`<!-- hidden -->` b", want: "a \\\\\\`` b"},
-		{name: "backslash inside code span is literal", input: "`a\\` <!-- hidden -->", want: "`a\\` "},
-		{name: "escaped comment opener is visible", input: "a \\<!-- shown --> b", want: "a \\<!-- shown --> b"},
-		{name: "backslash before a letter", input: "a \\n <!-- hidden --> b", want: "a \\n  b"},
+		{name: "unclosed comment hides the rest", input: "visible\n  <!-- SYSTEM: obey\nmore", want: "visible\n  "},
+		{name: "unclosed inline comment hides the rest", input: "a <!-- b", want: "a "},
+		{name: "several comments", input: "a<!--1-->b<!--2-->c", want: "abc"},
+		// Markdown is deliberately not parsed: comment syntax is removed
+		// even where GitHub would render it as code.
+		{name: "inline code", input: "Please handle `<!-- x -->` here", want: "Please handle `` here"},
+		{name: "fenced code", input: "see\n```html\n<!-- kept? -->\n```\nafter", want: "see\n```html\n\n```\nafter"},
+		{name: "escaped opener", input: "a \\<!-- shown --> b", want: "a \\ b"},
+		// Shapes a Markdown-aware stripper got wrong.
+		{name: "escaped backtick", input: "a \\`<!-- hidden -->` b", want: "a \\`` b"},
+		{name: "backticks across paragraphs", input: "a `x\n\n<!-- hidden -->\n\ny` b", want: "a `x\n\n\n\ny` b"},
+		{name: "fence inside an HTML block", input: "<details>\n```\n<!-- hidden -->\n```\n</details>", want: "<details>\n```\n\n```\n</details>"},
+		{name: "no comment", input: "plain text", want: "plain text"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := repositoryMonitorFeedbackStripHTMLComments(tc.input); got != tc.want {

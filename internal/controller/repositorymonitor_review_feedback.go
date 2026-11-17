@@ -676,126 +676,28 @@ func repositoryMonitorFeedbackBody(raw string) (body string, hidden bool, trunca
 	return body, hidden, truncated
 }
 
-// repositoryMonitorFeedbackStripHTMLComments removes the HTML comments
-// GitHub's Markdown does not render, so a reviewer never saw the text they
-// hide. Comment syntax inside a fenced code block or an inline code span is
-// visible text and stays, as is a backslash-escaped "<" or backtick, which
-// opens neither. An inline comment ends at "-->"; one that is never
-// closed is shown as written, except at the start of a line, where it opens
-// an HTML block that hides the rest of the text.
+// repositoryMonitorFeedbackStripHTMLComments removes every HTML comment, so
+// no text a reviewer could not see reaches the repairer. It deliberately
+// does not parse Markdown: code spans, fences, escapes and HTML blocks
+// decide what GitHub hides in ways a partial parser gets wrong, so comment
+// syntax is removed even where GitHub would show it as code, and an
+// unclosed "<!--" removes the rest of the text. Losing such visible text is
+// the safe failure; the snapshot reports that content was removed.
 func repositoryMonitorFeedbackStripHTMLComments(text string) string {
 	var out strings.Builder
-	fence := ""
-	lineStart := true
-	for i := 0; i < len(text); {
-		if lineStart {
-			lineStart = false
-			line := text[i:]
-			if end := strings.IndexByte(line, '\n'); end >= 0 {
-				line = line[:end]
-			}
-			marker := repositoryMonitorFeedbackFenceMarker(line)
-			switch {
-			case fence != "":
-				// Inside a fence everything is code; a closing fence is a
-				// run of the same character, at least as long, alone.
-				if marker != "" && marker[0] == fence[0] && len(marker) >= len(fence) && strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), marker[:1])) == "" {
-					fence = ""
-				}
-				out.WriteString(line)
-				i += len(line)
-				continue
-			case marker != "":
-				fence = marker
-				out.WriteString(line)
-				i += len(line)
-				continue
-			}
+	for {
+		start := strings.Index(text, "<!--")
+		if start < 0 {
+			out.WriteString(text)
+			return out.String()
 		}
-		switch c := text[i]; {
-		case c == '\n':
-			out.WriteByte(c)
-			i++
-			lineStart = true
-		case c == '\\' && i+1 < len(text) && repositoryMonitorASCIIPunctuation(text[i+1]):
-			// A backslash escape is literal text: an escaped backtick opens
-			// no code span, and an escaped "<" opens no comment.
-			out.WriteString(text[i : i+2])
-			i += 2
-		case c == '`':
-			run := len(text[i:]) - len(strings.TrimLeft(text[i:], "`"))
-			delimiter := text[i : i+run]
-			// An inline code span closes at the next backtick run of the
-			// same length; an unmatched run is literal backticks.
-			if end := repositoryMonitorFeedbackCodeSpanEnd(text[i+run:], delimiter); end >= 0 {
-				out.WriteString(text[i : i+run+end+run])
-				i += run + end + run
-				continue
-			}
-			out.WriteString(delimiter)
-			i += run
-		case strings.HasPrefix(text[i:], "<!--"):
-			if end := strings.Index(text[i+4:], "-->"); end >= 0 {
-				i += 4 + end + 3
-				continue
-			}
-			if repositoryMonitorFeedbackAtLineStart(text, i) {
-				return out.String()
-			}
-			out.WriteString("<!--")
-			i += 4
-		default:
-			out.WriteByte(c)
-			i++
+		out.WriteString(text[:start])
+		end := strings.Index(text[start+4:], "-->")
+		if end < 0 {
+			return out.String()
 		}
+		text = text[start+4+end+3:]
 	}
-	return out.String()
-}
-
-// repositoryMonitorASCIIPunctuation reports whether c is ASCII punctuation,
-// which CommonMark lets a backslash escape.
-func repositoryMonitorASCIIPunctuation(c byte) bool {
-	return c >= '!' && c <= '/' || c >= ':' && c <= '@' || c >= '[' && c <= '`' || c >= '{' && c <= '~'
-}
-
-// repositoryMonitorFeedbackFenceMarker returns the backtick or tilde run
-// that opens a fenced code block on line, or "".
-func repositoryMonitorFeedbackFenceMarker(line string) string {
-	trimmed := strings.TrimLeft(line, " ")
-	if len(line)-len(trimmed) > 3 || trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
-		return ""
-	}
-	run := len(trimmed) - len(strings.TrimLeft(trimmed, trimmed[:1]))
-	if run < 3 || trimmed[0] == '`' && strings.Contains(trimmed[run:], "`") {
-		return ""
-	}
-	return trimmed[:run]
-}
-
-// repositoryMonitorFeedbackCodeSpanEnd returns the offset in rest of the
-// backtick run exactly matching delimiter, or -1.
-func repositoryMonitorFeedbackCodeSpanEnd(rest, delimiter string) int {
-	for offset := 0; offset < len(rest); {
-		j := strings.IndexByte(rest[offset:], '`')
-		if j < 0 {
-			return -1
-		}
-		start := offset + j
-		run := len(rest[start:]) - len(strings.TrimLeft(rest[start:], "`"))
-		if run == len(delimiter) {
-			return start
-		}
-		offset = start + run
-	}
-	return -1
-}
-
-// repositoryMonitorFeedbackAtLineStart reports whether only up to three
-// spaces precede offset i on its line.
-func repositoryMonitorFeedbackAtLineStart(text string, i int) bool {
-	start := strings.LastIndexByte(text[:i], '\n') + 1
-	prefix := text[start:i]
-	return len(prefix) <= 3 && strings.Trim(prefix, " ") == ""
 }
 
 // repositoryMonitorFeedbackID builds a stable entry ID from a GitHub
