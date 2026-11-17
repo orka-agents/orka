@@ -227,11 +227,15 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 	if err != nil {
 		return nil, consolidationStoreError("read memory consolidation targets", err)
 	}
-	// Proposals created while the run ran are not repeated either.
-	input.LaterProposals, err = memoryconsolidation.OpenProposals(ctx, h.memoryProposalStore, namespace)
+	// Proposals created while the run ran are not repeated either. A reload
+	// that reached a limit marks the report's input truncated, since those
+	// left out were not checked.
+	var laterTruncated bool
+	input.LaterProposals, laterTruncated, err = memoryconsolidation.OpenProposals(ctx, h.memoryProposalStore, namespace)
 	if err != nil {
 		return nil, consolidationStoreError("read open memory proposals", err)
 	}
+	input.Truncated = input.Truncated || laterTruncated
 	kept, rejected, conflicts := memoryconsolidation.Validate(submission, input, current, settings.MaxOperations)
 	var proposals []store.MemoryProposal
 	if settings.Mode == corev1alpha1.MemoryConsolidationPropose {

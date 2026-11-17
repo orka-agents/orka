@@ -416,3 +416,20 @@ func TestMemoryConsolidationDoesNotRepeatAnOpenProposal(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, proposal.Description, "redundant with this one: remembered.")
 }
+
+// Proposals created while a run ran are checked at completion; a reload that
+// reaches its limit marks the report's input truncated.
+func TestMemoryConsolidationReportsALaterProposalReloadThatReachedItsLimit(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{MinNewSessions: new(int32(1))})
+	f.seedSessions(t, 1)
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.False(t, begin.Input.Truncated)
+	for i := range memoryconsolidation.MaxInputProposals {
+		require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: fmt.Sprintf("later-%d", i), Namespace: "default",
+			Type: store.MemoryProposalTypeMemory, Title: "Later", Content: fmt.Sprintf("fact %d", i)}))
+	}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{}}, &report))
+	require.True(t, report.InputTruncated, "the later proposals a full reload left out were not checked")
+}

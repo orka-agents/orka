@@ -222,7 +222,7 @@ otherwise. In the additional-checks column:
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories`, and in `Propose` mode `create` on `memoryproposals` |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories` and `memoryproposals`, and in `Propose` mode `create` on `memoryproposals` |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |

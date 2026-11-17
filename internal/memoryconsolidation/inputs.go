@@ -157,13 +157,14 @@ type ProposalLister interface {
 }
 
 // OpenProposals reads the namespace's open memory proposals as CollectInputs
-// does. A completion uses it to see proposals created while the run ran.
-func OpenProposals(ctx context.Context, src ProposalLister, namespace string) ([]InputProposal, error) {
+// does, and reports whether it reached a limit, so some were left out. A
+// completion uses it to see proposals created while the run ran.
+func OpenProposals(ctx context.Context, src ProposalLister, namespace string) ([]InputProposal, bool, error) {
 	var input Input
 	if err := collectProposals(ctx, src, namespace, &input); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return input.Proposals, nil
+	return input.Proposals, input.Truncated, nil
 }
 
 // collectProposals reads the namespace's open memory proposals, the newest
