@@ -1016,7 +1016,7 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 func (s *repositoryMonitorReviewFeedbackSnapshot) placeThread(thread *repositoryMonitorFeedbackPendingThread, fits bool) {
 	if !fits {
 		s.OmittedThreads++
-		if len(thread.authorized) > 0 || thread.thread.OmittedComments > 0 && !thread.thread.OrkaFindingThread {
+		if len(thread.authorized) > 0 || thread.hidesAuthority {
 			s.omittedWithAuthority++
 		}
 		return

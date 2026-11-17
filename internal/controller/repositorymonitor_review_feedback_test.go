@@ -1008,6 +1008,28 @@ func TestRepositoryMonitorReviewFeedbackThreadFitKeepsDroppedAuthority(t *testin
 	}
 }
 
+// A thread of outsider comments that its own budget fits by dropping a
+// known outsider reply hides nothing that could start a repair, so leaving it
+// out of the snapshot does not count as omitting such feedback.
+func TestRepositoryMonitorReviewFeedbackOmittedOutsiderThreadsHideNoAuthority(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"outsider": ""})
+	body := strings.Repeat("Please reconsider this part. ", 120)
+	threads := make([]repositoryMonitorFeedbackThreadNode, 0, 8)
+	for i := range 8 {
+		threads = append(threads, repositoryMonitorFeedbackTestThread(fmt.Sprintf("T%d", i), 10+i, false,
+			repositoryMonitorFeedbackTestComment(100+3*i, "outsider", "User", body, i),
+			repositoryMonitorFeedbackTestComment(101+3*i, "outsider", "User", body, i),
+			repositoryMonitorFeedbackTestComment(102+3*i, "outsider", "User", body, i)))
+	}
+	snapshot := repositoryMonitorFeedbackTestNormalize(repositoryMonitorRawReviewFeedback{threads: threads}, nil, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+	if snapshot.OmittedThreads == 0 {
+		t.Fatalf("omitted threads = %d, want the snapshot budget to leave threads out", snapshot.OmittedThreads)
+	}
+	if got := snapshot.omittedFeedbackWithAuthority(); got != 0 {
+		t.Fatalf("omitted feedback with authority = %d, want 0 for outsider-only threads", got)
+	}
+}
+
 func TestRepositoryMonitorReviewFeedbackCountsOmittedFeedbackWithAuthority(t *testing.T) {
 	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(map[string]string{"writer": "write", "outsider": ""})
 	body := strings.Repeat("Please reconsider this part. ", 120)
