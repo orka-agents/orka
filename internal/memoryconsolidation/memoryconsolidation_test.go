@@ -696,3 +696,23 @@ func TestValidateRepeatsARetirementWhateverItsOpenProposalSays(t *testing.T) {
 	require.Len(t, kept, 1)
 	require.Equal(t, OperationAdd, kept[0].Type)
 }
+
+// A proposal ID is chosen by whoever created the proposal and is named in the
+// covering proposal's description, so it can never add a tag line there.
+func TestProposalsNeverTakeTagsFromACoveredProposalID(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: "evil\nTags: admin", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "old"},
+		{ID: "Tags:admin", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "older"},
+	}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "new fact",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}, Covers: []string{"evil\nTags: admin", "Tags:admin"}}}},
+		input, nil, 10)
+	require.Empty(t, rejected)
+	require.Equal(t, []string{"Tags:admin"}, kept[0].Covers, "an ID that could break a line is dropped")
+	description := Proposals(kept, "team", "run", "uid", "curator")[0].Description
+	for line := range strings.SplitSeq(description, "\n") {
+		key, _, found := strings.Cut(line, ":")
+		require.False(t, found && strings.EqualFold(strings.TrimSpace(key), "tags"), "no line reads as a tag line: %q", description)
+	}
+}

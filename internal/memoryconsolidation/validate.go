@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/redact"
@@ -176,6 +177,11 @@ func (o openProposals) known(covers []string) []string {
 	seen := map[string]bool{}
 	for _, id := range covers {
 		id = strings.TrimSpace(id)
+		// IDs are named in the proposal's description, so one that could
+		// break a line, or spell a tag line, is never kept.
+		if strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			continue
+		}
 		if o.ids[id] && !seen[id] && len(kept) < store.MaxMemoryProposalTargets {
 			seen[id] = true
 			kept = append(kept, id)
@@ -417,11 +423,14 @@ func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string)
 		// its description. The validated tags come first, and a line in the
 		// model's reason that reads as a tag line is quoted, so only the
 		// validated tags are ever applied.
-		description := quoteTagLines(op.Reason)
+		description := op.Reason
 		if len(op.Covers) > 0 {
-			description = strings.TrimSpace("Covers open proposals " + strings.Join(op.Covers, ", ") +
-				": reject or archive them if you apply this one.\n\n" + description)
+			description = "Covers open proposals " + strings.Join(op.Covers, ", ") +
+				": reject or archive them if you apply this one.\n\n" + description
 		}
+		// Proposal IDs, like the model's reason, are quoted wherever a line
+		// reads as a tag line.
+		description = strings.TrimSpace(quoteTagLines(description))
 		if len(op.Tags) > 0 {
 			tagLine := "Tags: " + strings.Join(op.Tags, ", ")
 			description = strings.TrimSpace(tagLine + "\n\n" + description)
