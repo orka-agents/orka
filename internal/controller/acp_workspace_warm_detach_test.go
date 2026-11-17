@@ -10,6 +10,8 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -800,6 +802,86 @@ func TestACPWorkspaceRetentionExpiresTaintedWarmWorkspaceImmediately(t *testing.
 		t.Fatal(err)
 	} else if err == nil && current.DeletionTimestamp.IsZero() {
 		t.Fatal("tainted warm workspace was not deleted before its deadline")
+	}
+}
+
+// A fenced warm-window expiry that a queued Session continuation vetoes
+// deletes nothing. Retention watches only workspaces, so it must keep its
+// bounded lifetime requeue instead of leaving idle and maxLifetime
+// enforcement unscheduled if that continuation dies without touching the
+// workspace.
+func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspacev1alpha1.ExecutionWorkspace)
+	}{
+		{name: "tainted", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[operatoraccess.TaintAnnotation] = "x"
+		}},
+		{name: "failed", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+		}},
+		{name: "uncommitted", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			delete(w.Annotations, acpWorkspaceDurableSessionCommittedAnnotation)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			name := "acp-ws-warm-veto-" + test.name
+			// The tainted case cuts an open window short; the others expire.
+			deadline := now.Add(-time.Minute)
+			if test.name == "tainted" {
+				deadline = now.Add(5 * time.Minute)
+			}
+			workspace := warmRetentionWorkspace(t, name, deadline, test.mutate)
+			sessionUID := string(workspace.Spec.SessionRef.UID)
+			control := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: workspace.Namespace,
+					Name:      storekube.RuntimeSessionControlObjectName(acpTestSessionName),
+					UID:       types.UID(name + "-control-uid"),
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{SessionName: acpTestSessionName, SessionUID: sessionUID},
+			}
+			continuation := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         workspace.Namespace,
+					Name:              name + "-continuation",
+					UID:               types.UID(name + "-continuation-uid"),
+					CreationTimestamp: metav1.NewTime(now.Add(-time.Second)),
+					Labels:            map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+					Annotations:       map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:       corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: acpTestSessionName},
+				},
+			}
+			base := acpAdapterTestClient(t, workspace, control, continuation)
+			c := retentionFenceTimestampClient(base, func() time.Time { return now })
+			retention := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c, Now: func() time.Time { return now }}
+			result, err := retention.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := base.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				t.Fatal(err)
+			}
+			if !current.DeletionTimestamp.IsZero() {
+				t.Fatal("expiry deleted a workspace a queued continuation still demands")
+			}
+			fence := &coordinationv1.Lease{}
+			if err := base.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: acpWorkspaceRetentionFenceLeaseName(workspace)}, fence); !apierrors.IsNotFound(err) {
+				t.Fatalf("vetoed expiry kept its retention fence: %v", err)
+			}
+			if result.RequeueAfter != acpWorkspaceRetentionRequeue {
+				t.Fatalf("requeue = %s, want the bounded lifetime requeue %s", result.RequeueAfter, acpWorkspaceRetentionRequeue)
+			}
+		})
 	}
 }
 

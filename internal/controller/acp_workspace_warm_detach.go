@@ -262,14 +262,24 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, true, nil
 	}
+	// A fenced expiry can return without deleting: a Session continuation
+	// admitted before the retention fence vetoes it, or a concurrent update
+	// wins the precondition. Retention watches only workspaces, so keep the
+	// bounded lifetime requeue; a completed deletion makes it a no-op.
+	expire := func(reason, message string) (ctrl.Result, bool, error) {
+		if err := r.expireWorkspace(ctx, workspace, reason, message, true); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, true, nil
+	}
 	if tainted {
 		// Operator access forfeits retention and cuts the window short.
-		return ctrl.Result{}, true, r.expireWorkspace(ctx, workspace, "OperatorTaintedWarmWindowExpired",
-			"the warm-detach window ended early for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", true)
+		return expire("OperatorTaintedWarmWindowExpired",
+			"the warm-detach window ended early for a workspace tainted by operator access; applying the Delete disposition instead of Suspend")
 	}
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
-		return ctrl.Result{}, true, r.expireWorkspace(ctx, workspace, "FailedWorkspaceWarmWindowExpired",
-			"the warm-detach window elapsed for the terminally failed workspace; applying the Delete disposition", true)
+		return expire("FailedWorkspaceWarmWindowExpired",
+			"the warm-detach window elapsed for the terminally failed workspace; applying the Delete disposition")
 	}
 	if durableMarker, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; present && durableMarker != booleanTrueValue {
 		// Invalid controller-authenticated content is corruption, not
@@ -286,8 +296,8 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, true, nil
 	}
 	if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
-		return ctrl.Result{}, true, r.expireWorkspace(ctx, workspace, "UncommittedWorkspaceWarmWindowExpired",
-			"the warm-detach window elapsed before a durable RuntimeSession checkpoint was committed; deleting the empty workspace incarnation", true)
+		return expire("UncommittedWorkspaceWarmWindowExpired",
+			"the warm-detach window elapsed before a durable RuntimeSession checkpoint was committed; deleting the empty workspace incarnation")
 	}
 	err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, false, "", 0)
 	switch {

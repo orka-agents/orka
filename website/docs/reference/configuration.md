@@ -698,7 +698,8 @@ retain data past workspace deletion are rejected.
 changing the profile affects only new workspaces. A follow-up turn that arrives within the
 window attaches the running workspace and skips the cold resume. A turn that parked, an
 uncommitted, failed, or quarantined workspace, and a workspace tainted by operator access
-never stay warm; a taint during the window ends it at once. A warm workspace does not
+never stay warm; a taint during the window ends it at once and deletes the workspace,
+and its runtime is stopped without a data-preserving suspension. A warm workspace does not
 count against `maxSuspendedWorkspaces`. If that cap is full when the window ends, the
 runtime stops and the workspace stays `Ready`; retention applies the pending Suspend once
 the cap has room. Each warm workspace holds one private worker Pod for up to the window.

@@ -112,7 +112,19 @@ which the mid-Task bearer rotation already applies to a running Actor.
   idle retention. Attaching, suspending, or a new detach clears the marker.
 - **Warm Ready workspaces do not count against `maxSuspendedWorkspaces`.**
 - **Operator access cuts the window short.** A workspace tainted during the window
-  expires immediately instead of waiting for its deadline.
+  expires immediately instead of waiting for its deadline, and its pool stops holding
+  replicas at once. If the RuntimePool retires the runtime before retention deletes
+  the workspace, Core authorizes `Stop`, never `Suspend`: no data checkpoint is
+  captured. This hardening applies to every tainted Suspend-capable workspace, inside
+  or outside a window (worker eviction never drains a tainted one for suspension
+  either). A `Suspend` already authorized for the exact instance before the taint
+  landed is not rewritten mid-capture; the workspace's Delete disposition removes
+  that data.
+- **A vetoed expiry keeps its requeue.** Expiry deletion is fenced like idle expiry,
+  so a Session continuation admitted before the fence cancels it. Retention then keeps
+  its bounded `maxLifetime` / poll requeue, because it watches only workspaces and a
+  continuation that dies without touching the workspace would otherwise leave
+  retention unscheduled.
 
 ### Continuation during the window
 
