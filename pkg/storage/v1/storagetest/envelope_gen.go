@@ -889,6 +889,12 @@ func (p envelopedState) PutSealedConnectorCredential(ctx context.Context, a1 sto
 	return r0, err
 }
 
+func (p envelopedState) RecordMemoryRecall(ctx context.Context, a1 storagev1.MemoryRecall) error {
+	return p.ops.run(ctx, writeCall{method: "RecordMemoryRecall", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.RecordMemoryRecall(ctx, a1)
+	})
+}
+
 func (p envelopedState) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {
 	return p.ops.run(ctx, writeCall{method: "RecordUsage", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.RecordUsage(ctx, a1)

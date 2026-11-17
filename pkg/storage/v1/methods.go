@@ -336,6 +336,7 @@ var methodCatalog = map[string]MethodInfo{
 	"ReadConnectorCustody":                  stateRead(),
 	"ReadSessionSoul":                       stateRead(),
 	"ReadSessionTurnFinalizationBasis":      stateRead().as(CallBulk),
+	"RecordMemoryRecall":                    stateWrite(""),
 	"RecordUsage":                           stateWrite("$1.Namespace, $1.ID"),
 	"RecordUsagePullRequest":                stateWrite(""),
 	"RegisterTaskDataFence":                 stateWrite(""),

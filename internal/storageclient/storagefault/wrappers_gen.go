@@ -2400,6 +2400,16 @@ func (p *stateProvider) ReadSessionTurnFinalizationBasis(ctx context.Context, a1
 	return r0, err
 }
 
+func (p *stateProvider) RecordMemoryRecall(ctx context.Context, a1 storagev1.MemoryRecall) error {
+	_, err := p.injector.call(ctx, p.contract, "RecordMemoryRecall", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.RecordMemoryRecall(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {
 	_, err := p.injector.call(ctx, p.contract, "RecordUsage", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {

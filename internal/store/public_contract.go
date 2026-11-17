@@ -185,6 +185,7 @@ type (
 	UsageStore                                = storagev1.UsageStore
 	Memory                                    = storagev1.Memory
 	MemoryFilter                              = storagev1.MemoryFilter
+	MemoryRecall                              = storagev1.MemoryRecall
 	MemoryProposal                            = storagev1.MemoryProposal
 	MemoryProposalFilter                      = storagev1.MemoryProposalFilter
 	MemoryProposalReview                      = storagev1.MemoryProposalReview
@@ -267,6 +268,7 @@ const (
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
 	MaxMessageBatch                   = storagev1.MaxMessageBatch
+	MaxMemoryRecallIDs                = storagev1.MaxMemoryRecallIDs
 	MaxResultBytes                    = storagev1.MaxResultBytes
 )
 
