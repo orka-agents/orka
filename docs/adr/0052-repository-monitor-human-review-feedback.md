@@ -61,7 +61,10 @@ Text runs through the CI evidence sanitizer: ANSI and control characters are
 stripped, credentials are redacted per line and across wrapped lines, and the
 text is bounded (4 KiB and 80 lines per comment, 8 KiB per thread, 32 KiB in
 total). HTML comments are removed first. GitHub does not render them, so they
-can hide instructions from the people reading the thread. An outdated thread
+can hide instructions from the people reading the thread. Every comment is
+removed, even inside code, and an unclosed `<!--` removes the rest of the
+text: deciding what GitHub hides needs a full Markdown parser, and dropping
+some visible text is the safe failure. An outdated thread
 keeps only its original line, so it is never shown at a current line. Deleted
 comments are gone from the API. Minimized comments, and comments that are
 empty once hidden text is removed, are left out. Edits keep the comment's ID
