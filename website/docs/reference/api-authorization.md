@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 133 authenticated external route registrations, including 50
+The table covers all 159 authenticated external route registrations, including 64
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -197,8 +197,8 @@ otherwise. In the additional-checks column:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
-| `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
-| `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
+| `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
+| `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
@@ -208,6 +208,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/attention` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history; monitor items need `list` on `repositorymonitors` and `monitorworkactions` |
+| `GET` | `/api/v1/approvals` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -223,7 +225,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/stream` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
-| `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on the named Session; creates a fresh non-Gateway Session only |
+| `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on `core.orka.ai/sessions`, `:id`; creates a fresh non-Gateway Session only |
 | `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
 | `POST` | `/api/v1/sessions/:id/cancel` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | `update` on `core.orka.ai/tasks/cancel`; Gateway operate per Task |
 | `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
@@ -260,6 +262,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | none |
 | `PUT` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `update` | `:name` | `Q` | Class use |
 | `DELETE` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/tools/:name/mcp` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | Substrate MCP actor Tools only. TokenReview callers need named `get` on core `secrets` for the Tool's auth Secret and each Substrate egress credential Secret. Transaction tokens need enforced authorization and a tool-use scope covering the Tool; when the Tool uses credential Secrets, they also need a credential-read scope, and any token `secret` context must match each of those Secrets. Other identities are refused |
+| `DELETE` | `/api/v1/tools/:name/mcp` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | Same checks as `POST /api/v1/tools/:name/mcp` |
 | `GET` | `/api/v1/runtime-pools` | `core.orka.ai` | `runtimepools` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/runtime-pools/:name` | `core.orka.ai` | `runtimepools` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/agent-runtimes` | `core.orka.ai` | `agentruntimes` | `list` | empty | `Q` | none |
@@ -289,6 +293,7 @@ otherwise. In the additional-checks column:
 | `PUT` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `update` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
 | `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list`, `create`, and `delete` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans` and `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
+| `GET` | `/api/v1/security/repositories/:name/scans/:scanID/progress` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/slices` | `core.orka.ai` | `repositoryscans/slices` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/slices/:sliceID` | `core.orka.ai` | `repositoryscans/slices` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/dropped-findings` | `core.orka.ai` | `repositoryscans/droppedfindings` | `list` | `:name` | `Q` | none |
@@ -336,6 +341,9 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
+| `GET` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; returns only the caller's own agent host, found through their own Connections; context-token callers need a connector read scope |
+| `POST` | `/api/v1/agent-hosts/me/wake` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope; an operator-suspended host is not woken |
+| `DELETE` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope |
 | `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |

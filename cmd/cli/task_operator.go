@@ -63,6 +63,11 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			if tty {
 				stdin = true
 			}
+			if stdin {
+				if err := rejectStdinCredential(cmd, "orka task exec -i or -t passes to the command"); err != nil {
+					return err
+				}
+			}
 			timeoutSeconds, err := operatorExecTimeoutSeconds(timeout)
 			if err != nil {
 				return err
@@ -130,7 +135,7 @@ checkpointed for forks, or continued. Every exec is audited.`,
 	// The global --token flag owns the -t shorthand. Re-declaring "token"
 	// locally (without a shorthand) shadows it for this command only, so -t
 	// can mean --tty as operators expect from kubectl exec -it.
-	cmd.Flags().String("token", "", "Bearer token for authentication")
+	cmd.Flags().String("token", "", tokenFlagUsage)
 	cmd.Flags().BoolVarP(&stdin, "stdin", "i", false, "Pass stdin to the command")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "Allocate a terminal for the command (implies -i)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Do not print the session taint notice")
@@ -258,6 +263,11 @@ it will never be published, reused, checkpointed, or continued.`,
 			dstTask, dstPath, dstRemote := operatorCopyTarget(args[1])
 			if srcRemote == dstRemote {
 				return fmt.Errorf("exactly one of the source and destination must be <task>:<path>")
+			}
+			if !srcRemote && readsStdin(args[0]) {
+				if err := rejectStdinCredential(cmd, "orka task cp uses for the file to copy in"); err != nil {
+					return err
+				}
 			}
 			c := newClientFromCmd(cmd)
 			ctx := cmd.Context()

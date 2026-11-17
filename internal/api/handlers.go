@@ -131,6 +131,8 @@ type Handlers struct {
 	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
+	// attentionBounds overrides the attention scan bounds; zero uses defaults.
+	attentionBounds attentionBounds
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -295,6 +297,7 @@ type CreateTaskRequest struct {
 	Priority          *int32                           `json:"priority,omitempty"`
 	RetryPolicy       *corev1alpha1.RetryPolicy        `json:"retryPolicy,omitempty"`
 	WebhookURL        string                           `json:"webhookURL,omitempty"`
+	WebhookEvents     []corev1alpha1.TaskWebhookEvent  `json:"webhookEvents,omitempty"`
 	SecretRef         *corev1alpha1.SecretReference    `json:"secretRef,omitempty"`
 	SessionRef        *corev1alpha1.SessionReference   `json:"sessionRef,omitempty"`
 	AI                *corev1alpha1.AISpec             `json:"ai,omitempty"`
@@ -352,6 +355,9 @@ func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	}
 	if req.WebhookURL != "" {
 		spec.WebhookURL = req.WebhookURL
+	}
+	if req.WebhookEvents != nil {
+		spec.WebhookEvents = req.WebhookEvents
 	}
 	if req.SecretRef != nil {
 		spec.SecretRef = req.SecretRef
