@@ -4,7 +4,9 @@ Date: 2026-11-16
 
 ## Status
 
-Accepted. Amends [ADR 0042](0042-signed-durable-task-webhooks.md), which left
+Accepted, partly superseded by [ADR 0054](0054-task-webhook-delivery-workers.md),
+which moves delivery attempts out of the Task reconcile. Amends
+[ADR 0042](0042-signed-durable-task-webhooks.md), which left
 non-terminal events open, with opt-in approval notices on the same signed,
 durable delivery path. It answers, for Task webhooks, the approval notification
 that [ADR 0032](0032-gateway-interim-delivery.md) deferred to a separate ADR.

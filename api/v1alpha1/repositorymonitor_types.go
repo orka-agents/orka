@@ -516,6 +516,27 @@ type RepositoryMonitorRepairSpec struct {
 	// +listType=set
 	// +optional
 	CIOnlyLabels []string `json:"ciOnlyLabels,omitempty"`
+	// CIEvidence configures the CI evidence fix_ci repair prompts carry.
+	// +optional
+	CIEvidence RepositoryMonitorRepairCIEvidenceSpec `json:"ciEvidence,omitempty"`
+}
+
+// RepositoryMonitorRepairCIEvidenceSpec configures the CI evidence fix_ci
+// repair prompts carry. By default, evidence is structured only: check
+// names, apps, statuses, conclusions, and IDs; annotation paths, lines, and
+// levels; commit status contexts and states; and links to the monitored
+// repository's GitHub check runs and Actions jobs.
+type RepositoryMonitorRepairCIEvidenceSpec struct {
+	// Text adds the free text of failing checks to fix_ci repair prompts:
+	// check run output titles and summaries, annotation titles and messages,
+	// and commit status descriptions. Orka redacts credential-shaped text,
+	// but redaction cannot recognize every credential, and CI tools may print
+	// values GitHub does not mask. The text is stored in the repair Task's
+	// spec.prompt, which anyone who can read Tasks in the monitor namespace
+	// can see, and is sent to the model provider, so it is off by default.
+	// +kubebuilder:default=false
+	// +optional
+	Text bool `json:"text,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.

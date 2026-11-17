@@ -21,6 +21,7 @@ import (
 	"github.com/orka-agents/orka/internal/taskwebhook"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -58,8 +59,10 @@ func newBlockingApprovalReceiver(t *testing.T, read func() *corev1alpha1.Task) *
 }
 
 // A pending approval notice never holds back the Task's own phase work: the
-// phase transition is persisted before the notice is sent, while the receiver
-// still hangs, and the reconcile then waits for the notice's retry backoff.
+// reconcile persists the phase transition and returns while the receiver
+// still hangs, the delivery runnable attempts the notice against the
+// persisted phase, and the next reconcile waits for the notice's retry
+// backoff.
 func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhasePending, bothApprovalEvents...)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
@@ -86,18 +89,19 @@ func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T)
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	startTestWebhookDispatcher(t, reconciler, 1)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 
-	type outcome struct {
-		result ctrl.Result
-		err    error
+	// The reconcile returns without waiting for the receiver, which holds
+	// every request until it is released below; an inline send would wait
+	// out the request timeout here.
+	started := time.Now()
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
 	}
-	done := make(chan outcome, 1)
-	go func() {
-		result, err := reconciler.Reconcile(context.Background(),
-			ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}})
-		done <- outcome{result, err}
-	}()
-
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("Reconcile took %v while the approval receiver hangs", elapsed)
+	}
 	select {
 	case seen := <-receiver.arrived:
 		if seen == nil {
@@ -106,24 +110,33 @@ func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T)
 		if seen.Status.Phase != corev1alpha1.TaskPhaseFailed {
 			t.Fatalf("phase at the approval attempt = %s, want its phase work already persisted as Failed", seen.Status.Phase)
 		}
-	case got := <-done:
-		t.Fatalf("reconcile returned without attempting the approval notice: %+v, %v", got.result, got.err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("the approval notice was never attempted")
 	}
 	receiver.unblock()
-	got := <-done
-	if got.err != nil {
-		t.Fatal(got.err)
-	}
 
-	notice := h.task().Status.ApprovalWebhooks.Notices[0]
+	var notice corev1alpha1.TaskApprovalWebhookNotice
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		notice = h.task().Status.ApprovalWebhooks.Notices[0]
+		if notice.LastError != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the failed attempt was never recorded: %+v", notice.TaskWebhookDelivery)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if notice.State != corev1alpha1.TaskWebhookDeliveryPending || notice.Attempts != 1 || notice.NextAttemptTime == nil {
 		t.Fatalf("notice after a failed attempt = %+v, want pending with its retry recorded", notice.TaskWebhookDelivery)
 	}
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
 	retry := time.Until(notice.NextAttemptTime.Time)
-	if got.result.RequeueAfter <= 0 || got.result.RequeueAfter > retry+time.Second {
-		t.Fatalf("requeue = %v, want the notice's retry in %v", got.result.RequeueAfter, retry)
+	if result.RequeueAfter <= 0 || result.RequeueAfter > retry+time.Second {
+		t.Fatalf("requeue = %v, want the notice's retry in %v", result.RequeueAfter, retry)
 	}
 }
 
@@ -149,8 +162,9 @@ func TestTaskReconcilerDeliversApprovalNoticesWhenThePhaseWorkFails(t *testing.T
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 
-	_, err := reconciler.Reconcile(context.Background(),
+	_, err := reconcileThenDeliver(context.Background(), reconciler,
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}})
 	if !errors.Is(err, jobLookupFailed) {
 		t.Fatalf("reconcile error = %v, want the phase error", err)
@@ -163,9 +177,11 @@ func TestTaskReconcilerDeliversApprovalNoticesWhenThePhaseWorkFails(t *testing.T
 	}
 }
 
-// Once its last pending notice settles, the Task is requeued promptly, so the
-// phase work that ran before the attempt runs again.
-func TestTaskReconcilerRequeuesWhenTheLastApprovalNoticeSettles(t *testing.T) {
+// The delivery pass that settles the last pending notice writes Task
+// status, which reconciles the Task again under the manager, so the phase
+// work that ran before the attempt, such as parent history enforcement, runs
+// again. Afterwards the reconcile no longer schedules delivery.
+func TestTaskReconcilerReconcilesAgainWhenTheLastApprovalNoticeSettles(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskWebhookEventApprovalRequested)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
 	task.Finalizers = []string{labels.TaskFinalizer}
@@ -175,17 +191,19 @@ func TestTaskReconcilerRequeuesWhenTheLastApprovalNoticeSettles(t *testing.T) {
 		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	deliveries := attachTestWebhookDispatcher(t, reconciler)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 
 	settled := false
 	for range 4 {
-		result, err := reconciler.Reconcile(context.Background(), request)
-		if err != nil {
+		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 			t.Fatal(err)
 		}
+		before := h.task().ResourceVersion
+		deliveries.drain(context.Background())
 		if notices := h.task().Status.ApprovalWebhooks.Notices; len(notices) == 1 && notices[0].State == corev1alpha1.TaskWebhookDeliveryDelivered {
-			if result.RequeueAfter <= 0 || result.RequeueAfter > approvalWebhookSettledRequeue {
-				t.Fatalf("requeue after the last notice settled = %v, want at most %v", result.RequeueAfter, approvalWebhookSettledRequeue)
+			if h.task().ResourceVersion == before {
+				t.Fatal("settling the last approval notice did not write Task status")
 			}
 			settled = true
 			break
@@ -193,6 +211,12 @@ func TestTaskReconcilerRequeuesWhenTheLastApprovalNoticeSettles(t *testing.T) {
 	}
 	if !settled {
 		t.Fatalf("the approval notice never settled: %v", eventTypes(h.receipts()))
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if queued := deliveries.queue.Len(); queued != 0 {
+		t.Fatalf("delivery passes queued after every notice settled = %d, want 0", queued)
 	}
 }
 
@@ -212,9 +236,10 @@ func TestTaskReconcilerDeliversParkedSignOffNoticesAfterThePhaseWork(t *testing.
 		Client: h.client, APIReader: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
 		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
 	}
+	attachTestWebhookDispatcher(t, reconciler)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: taskWaitTestNamespace, Name: "parked"}}
 	for range 4 {
-		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -233,5 +258,91 @@ func TestTaskReconcilerDeliversParkedSignOffNoticesAfterThePhaseWork(t *testing.
 	}
 	if stored.Status.ApprovalWebhooks.Notices[0].State != corev1alpha1.TaskWebhookDeliveryDelivered {
 		t.Fatalf("notice = %+v, want Delivered", stored.Status.ApprovalWebhooks.Notices[0].TaskWebhookDelivery)
+	}
+}
+
+// The reconcile itself retires deselected approval notices when it observes
+// an opt-out, before anything is handed to the delivery runnable, so a notice
+// waiting out its retry backoff is never sent after the event is selected
+// again.
+func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.T) {
+	task := newApprovalWebhookTask(corev1alpha1.TaskPhasePending, bothApprovalEvents...)
+	task.Spec.Type = corev1alpha1.TaskTypeContainer
+	task.Finalizers = []string{labels.TaskFinalizer}
+	task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
+		Phase: corev1alpha1.TaskPhaseFailed, Message: "recorded outcome",
+	}
+	h := newApprovalWebhookHarness(t, task, http.StatusServiceUnavailable)
+	h.request(approvalWebhookTestUID, "approval-1")
+	reconciler := &TaskReconciler{
+		Client: h.client, Scheme: h.client.Scheme(), ExecutionEventStore: h.events,
+		WebhookNotifier: newTestWebhookNotifier(t, h.keys, nil),
+	}
+	startTestWebhookDispatcher(t, reconciler, 1)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
+	// The delivery runnable writes status concurrently, so a reconcile can
+	// lose an optimistic-concurrency race and is retried, as the controller
+	// would.
+	reconcile := func() {
+		t.Helper()
+		for range 20 {
+			_, err := reconciler.Reconcile(context.Background(), request)
+			if err == nil {
+				return
+			}
+			if !apierrors.IsConflict(err) {
+				t.Fatal(err)
+			}
+		}
+		t.Fatal("reconcile kept conflicting with the delivery runnable")
+	}
+
+	selectEvents := func(selected ...corev1alpha1.TaskWebhookEvent) {
+		t.Helper()
+		for range 20 {
+			stored := h.task()
+			stored.Spec.WebhookEvents = selected
+			err := h.client.Update(context.Background(), stored)
+			if err == nil {
+				return
+			}
+			if !apierrors.IsConflict(err) {
+				t.Fatal(err)
+			}
+		}
+		t.Fatal("updating webhookEvents kept conflicting with the delivery runnable")
+	}
+
+	reconcile()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if notices := h.task().Status.ApprovalWebhooks; notices != nil && len(notices.Notices) > 0 && notices.Notices[0].LastError != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first approval attempt was never recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryPending || head.NextAttemptTime == nil {
+		t.Fatalf("head notice = %+v, want pending in its retry backoff", head.TaskWebhookDelivery)
+	}
+
+	// Opt out of requests while the head waits out its backoff.
+	selectEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
+	reconcile()
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
+		t.Fatalf("head notice = %s after the reconcile observed the opt-out, want retired", head.State)
+	}
+	selectEvents(bothApprovalEvents...)
+	reconcile()
+	time.Sleep(200 * time.Millisecond)
+	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
+		t.Fatalf("head notice = %s after re-selecting, want it to stay retired", head.State)
+	}
+	// The terminal notice goes to the same receiver; count approval notices.
+	requested := slices.DeleteFunc(eventTypes(h.receipts()), func(eventType string) bool { return eventType != "task.approval_requested" })
+	if len(requested) != 1 {
+		t.Fatalf("approval request notices = %d, want only the attempt from before the opt-out", len(requested))
 	}
 }
