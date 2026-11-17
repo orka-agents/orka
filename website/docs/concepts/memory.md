@@ -97,7 +97,7 @@ spec:
       lookback: 168h        # how far back the first run reads; at most 720h
 ```
 
-`spec.ai.prompt` steers what the run focuses on. The run uses a fixed Orka system prompt, no tools, and no injected memory, whatever the Agent or Task configure. The field requires an `ai` Task without `sessionRef`, and cannot be added, removed or changed after the Task is created.
+`spec.ai.prompt` steers what the run focuses on. The run uses a fixed Orka system prompt, no tools, no skills, no soul, and no injected memory, whatever the Agent or Task configure. The field requires an `ai` Task without `sessionRef`, and cannot be added, removed or changed after the Task is created.
 
 ### Who can create a run
 

@@ -483,3 +483,14 @@ func TestUserMessageDataStaysWithinTheBudgetItWasCountedIn(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(data), &decoded))
 	require.Equal(t, tagged.Sessions[0].Messages, decoded.Sessions[0].Messages, "escaping changes no text the model reads")
 }
+
+func TestValidateKeepsAnOperationThatRepeatsItsCitations(t *testing.T) {
+	sources := make([]store.MemoryProposalSource, 0, 3*store.MaxMemoryProposalSources)
+	for range 3 * store.MaxMemoryProposalSources {
+		sources = append(sources, store.MemoryProposalSource{SessionName: "session-a"}, store.MemoryProposalSource{SessionName: "session-a", MessageID: "m1"})
+	}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{{Type: OperationAdd, Content: "A fact", Sources: sources}}}, validationInput(), nil, 10)
+	require.Empty(t, rejected, "repeated citations do not cost a valid operation")
+	require.Len(t, kept, 1)
+	require.Equal(t, []store.MemoryProposalSource{{SessionName: "session-a"}, {SessionName: "session-a", MessageID: "m1"}}, kept[0].Sources)
+}

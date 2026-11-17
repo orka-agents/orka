@@ -31,7 +31,9 @@ import (
 //     that changed since the run read it is dropped rather than proposed
 //     stale;
 //   - every source is a Session the run read, and a cited message is one of
-//     that Session's messages the run read; an add cites at least one;
+//     that Session's messages the run read; an add cites at least one.
+//     Repeated citations are dropped, and only the first
+//     MaxMemoryProposalSources are kept;
 //   - add, merge and supersede carry content of at most MaxContentChars;
 //   - the run keeps no more than maxOperations operations, and removes no
 //     more than a quarter of the memories it read, at least one. A merge of
@@ -102,6 +104,7 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 			reject(index, op, "%s", reason)
 			continue
 		}
+		op.Sources = distinctSources(op.Sources)
 		if reason := checkSources(op, messages); reason != "" {
 			reject(index, op, "%s", reason)
 			continue
@@ -206,10 +209,24 @@ func checkTargets(targets []store.MemoryProposalTarget, generations, current map
 	return ""
 }
 
-func checkSources(op Operation, messages map[string]map[string]bool) string {
-	if len(op.Sources) > store.MaxMemoryProposalSources {
-		return fmt.Sprintf("an operation cites at most %d sources", store.MaxMemoryProposalSources)
+// distinctSources drops repeated citations and keeps the first
+// MaxMemoryProposalSources, so a model that cites one Session many times does
+// not lose an otherwise valid operation.
+func distinctSources(sources []store.MemoryProposalSource) []store.MemoryProposalSource {
+	var kept []store.MemoryProposalSource
+	seen := map[store.MemoryProposalSource]bool{}
+	for _, source := range sources {
+		source.SessionName, source.MessageID = strings.TrimSpace(source.SessionName), strings.TrimSpace(source.MessageID)
+		if seen[source] || len(kept) >= store.MaxMemoryProposalSources {
+			continue
+		}
+		seen[source] = true
+		kept = append(kept, source)
 	}
+	return kept
+}
+
+func checkSources(op Operation, messages map[string]map[string]bool) string {
 	if op.Type == OperationAdd && len(op.Sources) == 0 {
 		return "an add operation cites the Sessions it learned from"
 	}
