@@ -91,9 +91,15 @@ func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T)
 	startTestWebhookDispatcher(t, reconciler, 1)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 
-	// The reconcile returns without waiting for the receiver.
+	// The reconcile returns without waiting for the receiver, which holds
+	// every request until it is released below; an inline send would wait
+	// out the request timeout here.
+	started := time.Now()
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("Reconcile took %v while the approval receiver hangs", elapsed)
 	}
 	select {
 	case seen := <-receiver.arrived:
