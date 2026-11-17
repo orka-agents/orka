@@ -30,6 +30,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, reader client.Reader, cl
 	if err := authorizeTaskAgentUse(ctx, clientset, userInfo, task); err != nil {
 		return err
 	}
+	if err := authorizeTaskProviderUse(ctx, reader, clientset, userInfo, task); err != nil {
+		return err
+	}
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
 		return nil
 	}

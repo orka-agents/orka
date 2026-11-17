@@ -2706,6 +2706,39 @@ func TestResolveProvider_NamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestResolveProvider_ProviderUseRefusesTaskRelativeProvidersOfARemoteAgent(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: "default"},
+		Status:     corev1alpha1.ProviderStatus{Ready: true},
+	}
+	r := newUnitReconciler(scheme, provider)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer", Namespace: "agents"},
+			AI:       &corev1alpha1.AISpec{Prompt: "hi"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: "agents"},
+		Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: "primary"}},
+	}
+
+	resolved, err := r.resolveProvider(context.Background(), task, agent)
+	if err != nil || resolved == nil || resolved.Name != "primary" {
+		t.Fatalf("without Provider use the relative Provider resolves in the Task namespace, got (%v, %v)", resolved, err)
+	}
+
+	// The Agent may have changed since the API checked it, and a direct write
+	// was never checked, so each run refuses it.
+	r.ProviderUseAuthorization = true
+	if _, err := r.resolveProvider(context.Background(), task, agent); err == nil || !strings.Contains(err.Error(), "primary") {
+		t.Fatalf("expected a refusal naming the Provider, got %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleDeletion
 // ---------------------------------------------------------------------------

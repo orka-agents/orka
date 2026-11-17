@@ -259,6 +259,18 @@ controller:
   agentUseAuthorization:
     enabled: false
 
+  # Require the `use` verb on a Provider before a request newly names it in a
+  # Task's spec.ai.providerRef or an Agent's providerRef or model fallbacks,
+  # and on every Provider a chat request resolves. Off by default, because
+  # callers without a `use` grant can no longer do those. A Task that runs its
+  # Agent's own Provider needs only `use` on the Agent. Enabling it sets
+  # --provider-use-authorization-enabled for API callers and installs
+  # ValidatingAdmissionPolicies for direct Kubernetes writes. Grant it with a
+  # Role rule such as
+  # {apiGroups: [core.orka.ai], resources: [providers], verbs: [use], resourceNames: [<provider>]}.
+  providerUseAuthorization:
+    enabled: false
+
   # External Agent identities (ADR 0039). Set both Entra values to accept
   # Agent.spec.identity.entra; an identity-bound Agent also needs
   # agentUseAuthorization.enabled and a runtime.ceiling.allowedTools.

@@ -128,6 +128,33 @@ with each OIDC group prefixed the same way, so bind Roles to, for example,
 Display claims such as `preferred_username`, `email`, and `name` are not used.
 Permission to read, create, or edit an Agent does not grant `use`.
 
+Provider `use` is a separate opt-in check, enabled with
+`--provider-use-authorization-enabled` (Helm:
+`controller.providerUseAuthorization.enabled`). When it is on, the same
+identities need `use` on `providers` in `core.orka.ai`, with the Provider name
+and the Provider's namespace, to:
+
+- create a Task whose `spec.ai.providerRef` names the Provider;
+- create or edit an Agent so that its `spec.providerRef` or a
+  `spec.model.fallbacks[].providerRef` names the Provider. Fallbacks are checked
+  in the Agent's namespace, and Providers the Agent already named are not
+  checked again;
+- send a request through `POST /api/v1/chat`, `/openai/v1/chat/completions`,
+  `/openai/v1/responses`, or `/anthropic/v1/messages`. Every Provider the request
+  resolves is checked before its credential is read: one it names, its Agent's,
+  a fallback, or the configured default.
+
+A Task that runs its Agent's own Provider needs only Agent `use`. An Agent from
+another namespace is the exception: it may be in a namespace no policy checked,
+its fallbacks and a `providerRef` without a namespace resolve in the Task's
+namespace, and it can change after the Task is created. So while the check is
+on, an `ai` Task that would take a Provider from an Agent in another namespace,
+its `providerRef` when the Task sets none or any of its fallbacks, is refused: by
+the API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Set the Task's own `spec.ai.providerRef` and use
+an Agent without fallbacks, or use an Agent from the Task's namespace. Permission to read, create, or edit a Provider, or `create`
+on `chats`, does not grant `use`.
+
 Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
 `agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
 `agentidentities/entra`), the lowercased identity ID as the name, and the Agent

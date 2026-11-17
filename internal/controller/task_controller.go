@@ -152,9 +152,13 @@ type TaskReconciler struct {
 	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
 	ACPToolboxPolicy ACPToolboxPolicy
 	// Identity configures external Agent identities (ADR 0039).
-	Identity                    agentidentity.Config
-	ACPRuntimeNamespace         string
-	EnforceNamespaceIsolation   bool
+	Identity                  agentidentity.Config
+	ACPRuntimeNamespace       string
+	EnforceNamespaceIsolation bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled.
+	// The controller then refuses an ai Task that takes a Provider from an
+	// Agent in another namespace; see ProvidersFromAgentInAnotherNamespace.
+	ProviderUseAuthorization    bool
 	MaxTasksPerNamespace        int32
 	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
@@ -194,8 +198,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // The controller, API, gateways, and monitors create Tasks for callers they
-// have already authorized, so they hold Agent `use` broadly.
+// have already authorized, so they hold Agent and Provider `use` broadly.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=use
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=use
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
@@ -1346,6 +1351,14 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 // resolveProvider fetches the Provider referenced by the task or agent, if any.
 func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
+	if r.ProviderUseAuthorization {
+		if names := corev1alpha1.ProvidersFromAgentInAnotherNamespace(task, agent); len(names) > 0 {
+			return nil, fmt.Errorf("provider use authorization refuses Providers %s taken from Agent %s/%s in another namespace "+
+				"than the Task's %q; set the Task's spec.ai.providerRef and use an Agent without model fallbacks, "+
+				"or use an Agent from the Task's namespace",
+				strings.Join(names, ", "), agent.Namespace, agent.Name, task.Namespace)
+		}
+	}
 	providerRef := r.resolveProviderRef(task, agent)
 	if providerRef == nil {
 		return nil, nil
