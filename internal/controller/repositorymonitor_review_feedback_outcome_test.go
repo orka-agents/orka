@@ -240,6 +240,15 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 0, repairState: repositoryMonitorRepairPhaseFailed,
 		},
 		{
+			name: "ended by a cancellation between creating the Task and starting",
+			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
+				l.lostCreate = true
+				_ = l.handoff(t)
+				l.endCommand(t, repositoryMonitorWorkActionStatusCancelled)
+			},
+			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 1, repairState: repositoryMonitorRepairPhaseQueued,
+		},
+		{
 			name: "ended by a cancellation after its Task started",
 			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
 				l.mustHandoff(t)

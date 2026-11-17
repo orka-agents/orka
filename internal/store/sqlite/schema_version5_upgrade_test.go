@@ -224,20 +224,28 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 	identity, err := readDataset(db)
 	require.NoError(t, err)
 	at := "2026-11-01 12:00:00+00:00"
-	for _, command := range []struct{ id, status, jobPhase string }{
-		{"queued", "accepted", ""},
-		{"queued-with-task", "accepted", "queued"},
-		{"ran", "processed", "succeeded"},
-		{"ran-and-failed", "processed", "failed"},
-		{"never-ran", "processed", ""},
-		{"create-failed", "processed", "queued"},
+	for _, command := range []struct{ id, status, jobPhase, pushed, blocked string }{
+		{id: "queued", status: "accepted"},
+		{id: "queued-with-task", status: "accepted", jobPhase: "queued"},
+		{id: "ran", status: "processed", jobPhase: "succeeded", pushed: "pushed-1"},
+		{id: "ran-before-settlement", status: "accepted", jobPhase: "succeeded", pushed: "pushed-1"},
+		{id: "ran-without-change", status: "processed", jobPhase: "succeeded"},
+		{id: "ran-and-failed", status: "processed", jobPhase: "failed"},
+		{id: "never-ran", status: "processed", blocked: "repair_pr_budget_exhausted"},
+		{id: "withdrawn", status: "processed", blocked: "review_feedback_withdrawn"},
+		{id: "create-failed", status: "processed", jobPhase: "queued"},
 	} {
 		_, err := db.Exec(`INSERT INTO command_events (id, monitor_namespace, monitor_name, kind, number, comment_id, status, created_at, processed_at)
 			VALUES (?, 'ns', 'monitor', 'pull_request', 7, ?, ?, ?, ?)`, command.id, command.id, command.status, at, at)
 		require.NoError(t, err)
 		if command.jobPhase != "" {
-			_, err := db.Exec(`INSERT INTO repair_jobs (id, monitor_namespace, monitor_name, pr_number, phase, task_name, created_at)
-				VALUES (?, 'ns', 'monitor', 7, ?, ?, ?)`, "repair-"+command.id, command.jobPhase, "task-"+command.id, at)
+			_, err := db.Exec(`INSERT INTO repair_jobs (id, monitor_namespace, monitor_name, pr_number, phase, task_name, pushed_sha, created_at)
+				VALUES (?, 'ns', 'monitor', 7, ?, ?, ?, ?)`, "repair-"+command.id, command.jobPhase, "task-"+command.id, command.pushed, at)
+			require.NoError(t, err)
+		}
+		if command.blocked != "" {
+			_, err := db.Exec(`INSERT INTO work_actions (id, monitor_namespace, monitor_name, command_event_id, status, blocked_reason, created_at, updated_at)
+				VALUES (?, 'ns', 'monitor', ?, 'blocked', ?, ?, ?)`, "action-"+command.id, command.id, command.blocked, at, at)
 			require.NoError(t, err)
 		}
 		for i, feedback := range []string{"review_comment:2", "review:1"} {
@@ -268,8 +276,12 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 		{"queued", "reserved", false},
 		{"queued-with-task", "reserved", false},
 		{"ran", "succeeded", true},
+		// A job settled from its Task before the command was settled.
+		{"ran-before-settlement", "succeeded", true},
+		{"ran-without-change", "no_change", true},
 		{"ran-and-failed", "failed", true},
 		{"never-ran", "failed", false},
+		{"withdrawn", "withdrawn", false},
 		{"create-failed", "failed", false},
 	} {
 		outcome, err := s.GetMonitorFeedbackOutcome(t.Context(), "ns", want.id)
@@ -292,6 +304,10 @@ func TestSchemaVersion8LedgerLayoutRecoversFeedbackOutcomes(t *testing.T) {
 			require.Nil(t, outcome.CompletedAt, want.id)
 		} else {
 			require.NotNil(t, outcome.CompletedAt, want.id)
+		}
+		if want.state == "withdrawn" {
+			require.Equal(t, "review_feedback_withdrawn", outcome.Reason)
+			require.Empty(t, outcome.ChargedIDs())
 		}
 	}
 }

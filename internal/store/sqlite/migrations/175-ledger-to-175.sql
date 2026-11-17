@@ -2,11 +2,15 @@
 -- An unreleased build wrote version 8 with the feedback attempt ledger but
 -- without the feedback outcome table. This adds the table and recovers one
 -- outcome per admitted feedback repair command from what that build kept:
--- a command that has not finished stays reserved, which reserves every
--- admitted feedback ID; a finished command whose repair job settled from its
--- Task is succeeded or failed and charges every admitted ID, since the
--- targets its Task froze were not recorded; any other finished command never
--- ran a Task and charges nothing.
+-- - a repair job that settled from its Task, whatever its command's status,
+--   recovers succeeded, no_change (succeeded without a push), or failed, and
+--   charges every admitted ID, since the targets its Task froze were not
+--   recorded;
+-- - otherwise a finished command whose work action was blocked as withdrawn
+--   recovers withdrawn, and any other finished command failed, neither of
+--   which ran a Task or charges anything;
+-- - any other command has not finished and stays reserved, which reserves
+--   every admitted ID. Its handoff or ingestion starts it from its Task.
 -- Transaction and complete-layout validation are owned by the caller.
 
 CREATE TABLE IF NOT EXISTS monitor_feedback_outcomes (
@@ -43,29 +47,50 @@ WITH commands AS (
 	         SELECT feedback_id FROM monitor_feedback_attempts AS attempts
 	         WHERE attempts.monitor_namespace = commands.monitor_namespace AND attempts.command_event_id = commands.command_event_id
 	         ORDER BY feedback_id)) AS admitted_ids,
-	       CASE
-	         WHEN command.status IS NULL OR command.status <> 'processed' THEN 'reserved'
-	         WHEN job.phase = 'succeeded' THEN 'succeeded'
-	         ELSE 'failed'
-	       END AS state,
-	       command.status IS NOT NULL AND command.status = 'processed' AND job.phase IS NOT NULL AND job.phase <> 'queued' AS ran,
+	       COALESCE(job.phase IS NOT NULL AND job.phase NOT IN ('', 'queued'), 0) AS ran,
+	       job.phase AS job_phase,
+	       COALESCE(job.pushed_sha, '') AS pushed_sha,
 	       COALESCE(job.task_name, '') AS task_name,
+	       COALESCE(job.last_error, '') AS job_error,
 	       job.created_at AS job_created_at,
-	       command.processed_at AS processed_at
+	       job.completed_at AS job_completed_at,
+	       COALESCE(command.status = 'processed', 0) AS finished,
+	       command.processed_at AS processed_at,
+	       (SELECT action.blocked_reason FROM work_actions AS action
+	        WHERE action.monitor_namespace = commands.monitor_namespace AND action.command_event_id = commands.command_event_id
+	          AND action.status = 'blocked' AND action.blocked_reason IN ('review_feedback_withdrawn', 'review_feedback_needs_person')
+	        LIMIT 1) AS withdrawn_reason,
+	       (SELECT COALESCE(NULLIF(action.blocked_reason, ''), NULLIF(action.error, ''), action.status) FROM work_actions AS action
+	        WHERE action.monitor_namespace = commands.monitor_namespace AND action.command_event_id = commands.command_event_id
+	        LIMIT 1) AS action_reason
 	FROM commands
 	LEFT JOIN command_events AS command ON command.monitor_namespace = commands.monitor_namespace AND command.id = commands.command_event_id
 	LEFT JOIN repair_jobs AS job ON job.monitor_namespace = commands.monitor_namespace AND job.id = commands.repair_job_id
+), classified AS (
+	SELECT recovered.*,
+	       CASE
+	         WHEN ran AND job_phase = 'succeeded' AND pushed_sha = '' THEN 'no_change'
+	         WHEN ran AND job_phase = 'succeeded' THEN 'succeeded'
+	         WHEN ran THEN 'failed'
+	         WHEN finished AND withdrawn_reason IS NOT NULL THEN 'withdrawn'
+	         WHEN finished THEN 'failed'
+	         ELSE 'reserved'
+	       END AS state
+	FROM recovered
 )
 INSERT INTO monitor_feedback_outcomes
 	(monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha, state, admitted_ids, targets,
 	 task_name, reason, created_at, updated_at, started_at, completed_at)
-SELECT monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha,
-       CASE WHEN state = 'succeeded' AND NOT ran THEN 'failed' ELSE state END,
-       admitted_ids,
+SELECT monitor_namespace, command_event_id, monitor_name, repo, pr_number, head_sha, state, admitted_ids,
        CASE WHEN ran THEN admitted_ids ELSE '[]' END,
        CASE WHEN ran THEN task_name ELSE '' END,
-       CASE WHEN state = 'reserved' THEN '' ELSE 'recovered_from_attempt_ledger' END,
+       CASE
+         WHEN state = 'reserved' THEN ''
+         WHEN ran THEN COALESCE(NULLIF(job_error, ''), 'recovered_from_attempt_ledger')
+         WHEN state = 'withdrawn' THEN withdrawn_reason
+         ELSE COALESCE(NULLIF(action_reason, ''), 'recovered_from_attempt_ledger')
+       END,
        created_at, created_at,
        CASE WHEN ran THEN COALESCE(job_created_at, created_at) END,
-       CASE WHEN state = 'reserved' THEN NULL ELSE COALESCE(processed_at, created_at) END
-FROM recovered;
+       CASE WHEN state = 'reserved' THEN NULL ELSE COALESCE(job_completed_at, processed_at, created_at) END
+FROM classified;

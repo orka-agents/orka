@@ -14,6 +14,8 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Feedback repairs turn authorized reviewer feedback into ordinary fix
@@ -255,12 +257,20 @@ func (r *RepositoryMonitorReconciler) startRepositoryMonitorFeedbackOutcome(ctx 
 
 // finishRepositoryMonitorFeedbackOutcome records how a feedback repair
 // ended, unless it already ended: the first terminal state is final. A
-// repair whose Task existed was not withdrawn, and one whose Task never
-// existed neither succeeded nor made no change, so those record a failure.
+// reserved outcome whose repair Task exists, because the controller stopped
+// between creating the Task and starting the outcome, starts first, so its
+// charge survives. A repair whose Task existed was not withdrawn, and one
+// whose Task never existed neither succeeded nor made no change, so those
+// record a failure.
 func (r *RepositoryMonitorReconciler) finishRepositoryMonitorFeedbackOutcome(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, state, reason string) error {
 	outcome, err := r.repositoryMonitorFeedbackOutcome(ctx, monitor, commandID)
 	if err != nil || outcome == nil || store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
 		return err
+	}
+	if outcome.State == store.MonitorFeedbackOutcomeReserved {
+		if outcome, err = r.recoverRepositoryMonitorFeedbackStart(ctx, monitor, outcome); err != nil {
+			return err
+		}
 	}
 	switch {
 	case outcome.State == store.MonitorFeedbackOutcomeStarted && state == store.MonitorFeedbackOutcomeWithdrawn,
@@ -269,6 +279,35 @@ func (r *RepositoryMonitorReconciler) finishRepositoryMonitorFeedbackOutcome(ctx
 	}
 	_, err = r.Store.FinishMonitorFeedbackRepair(ctx, store.FinishMonitorFeedbackRepairRequest{Namespace: monitor.Namespace, CommandEventID: commandID, State: state, Reason: reason})
 	return err
+}
+
+// recoverRepositoryMonitorFeedbackStart starts a reserved outcome whose
+// repair Task exists, with the targets the Task's prompt froze, and returns
+// the outcome as it now is.
+func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorFeedbackStart(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome *store.MonitorFeedbackOutcome) (*store.MonitorFeedbackOutcome, error) {
+	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, "repair-"+repositoryMonitorShortHash(outcome.CommandEventID))
+	if errors.Is(err, store.ErrNotFound) || err == nil && strings.TrimSpace(job.TaskName) == "" || r.Client == nil {
+		return outcome, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return outcome, nil
+		}
+		return nil, err
+	}
+	var targets []string
+	if input, ok := repositoryMonitorRepairFeedbackInputFromPrompt(task.Spec.Prompt, job.HeadSHA); ok {
+		targets = input.Targets
+	}
+	started, err := r.startRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome.CommandEventID, targets, task.Name)
+	if err != nil || started == nil {
+		return outcome, err
+	}
+	return started, nil
 }
 
 // endRepositoryMonitorFeedbackOutcomeFromTask records how a feedback
