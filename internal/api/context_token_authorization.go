@@ -692,6 +692,7 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 		Priority:          task.Spec.Priority,
 		RetryPolicy:       task.Spec.RetryPolicy,
 		WebhookURL:        task.Spec.WebhookURL,
+		WebhookEvents:     task.Spec.WebhookEvents,
 		SecretRef:         task.Spec.SecretRef,
 		SessionRef:        task.Spec.SessionRef,
 		AI:                task.Spec.AI,

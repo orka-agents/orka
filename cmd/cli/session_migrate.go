@@ -39,16 +39,21 @@ type migrationState struct {
 // Native migration requires an explicitly selected API endpoint. Kubernetes
 // discovery identifies resources, not the application entrusted with history.
 func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), error) {
-	server, _ := cmd.Flags().GetString("server")
+	server := configuredServer(cmd, loadConfig())
 	if server == "" {
-		server = loadConfig().Server
+		return nil, "", nil, errors.New("native migration requires an explicit --server, " + envServer + " or configured API endpoint; automatic Service discovery cannot establish Orka identity")
 	}
-	if server == "" {
-		return nil, "", nil, errors.New("native migration requires an explicit --server or configured API endpoint; automatic Service discovery cannot establish Orka identity")
+	c, err := resolveClient(cmd, server)
+	if err != nil {
+		return nil, "", nil, err
 	}
-	c := newClientFromCmdWithServer(cmd, server)
 	if strings.TrimSpace(c.Token) == "" && c.TxnToken == "" {
 		return nil, "", nil, errors.New("native migration requires API authentication: provide an Orka bearer token or transaction token; Kubernetes exec and certificate credentials are not API credentials")
+	}
+	// The journal and the import receipt are bound to the namespace, so it must
+	// be known before the request rather than chosen by the server.
+	if strings.TrimSpace(c.Namespace) == "" {
+		return nil, "", nil, errors.New("native migration requires a namespace: pass --namespace, set " + envNamespace + ", or configure one")
 	}
 	return c, server, func() {}, nil
 }

@@ -169,9 +169,17 @@ func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T
 	clock := &webhookTestClock{now: time.Unix(1_800_000_000, 0)}
 	notifier := newTestWebhookNotifier(t, newWebhookTestKeys(t), clock)
 	reconciler.WebhookNotifier = notifier
+	deliveries := attachTestWebhookDispatcher(t, reconciler)
 
 	for wantWebhookAttempts := int32(1); wantWebhookAttempts <= 2; wantWebhookAttempts++ {
 		current := &corev1alpha1.Task{}
+		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reconciler.handleCompleted(context.Background(), current); err != nil {
+			t.Fatal(err)
+		}
+		deliveries.drain(context.Background())
 		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
 			t.Fatal(err)
 		}
