@@ -137,25 +137,13 @@ func (s repositoryMonitorReviewFeedbackSnapshot) verdict() (repositoryMonitorFee
 	case failed > 0:
 		// A failed lookup does not show a reviewer has no authority.
 		return repositoryMonitorFeedbackIncompleteRetry, "Waiting to check reviewers' repository permissions."
-	case limited > 0 || s.incompleteThreads() > 0 || s.omittedFeedbackWithAuthority() > 0:
+	case limited > 0 || s.omittedFeedbackWithAuthority() > 0:
+		// Feedback the snapshot leaves out, whole threads or replies of a
+		// shown one, may hold feedback that could start a repair when it
+		// held authorized feedback or was never read.
 		return repositoryMonitorFeedbackNeedsPerson, "Some reviewer feedback could not be read or checked in full; a person must review it."
 	}
 	return repositoryMonitorFeedbackComplete, ""
-}
-
-// incompleteThreads counts the included threads that may hide feedback the
-// snapshot cannot show: unresolved threads that Orka's findings did not open,
-// with comments omitted because they were not read or did not fit the
-// thread's budget. An omitted comment's author and text are unknown, even in
-// a thread that shows authorized feedback, so a person must look.
-func (s repositoryMonitorReviewFeedbackSnapshot) incompleteThreads() int {
-	incomplete := 0
-	for _, thread := range s.Threads {
-		if thread.OmittedComments > 0 && !thread.OrkaFindingThread {
-			incomplete++
-		}
-	}
-	return incomplete
 }
 
 // repositoryMonitorFeedbackLedger summarizes the attempt ledger of one pull

@@ -404,6 +404,12 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		created, err := r.createRepositoryMonitorRepairTaskFor(ctx, monitor, run, command, owner, repository, pr, item, repairCountPR+1, repairCountHead+1, &handoff)
 		inputs := handoff
+		if errors.Is(err, errRepositoryMonitorFeedbackRepairTaskGone) {
+			// The repair started and its Task is gone: it is settled, not
+			// created again.
+			_, err := r.settleRepositoryMonitorFeedbackRepair(ctx, monitor, command, false)
+			return true, 0, err
+		}
 		if err != nil {
 			return true, created, err
 		}
@@ -1251,37 +1257,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return 0, err
 	}
-	created := 1
 	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, monitoredRepo, repositoryMonitorPullRequestKind, pr.Number)
 	if err != nil {
 		return 0, err
 	}
-	// From here a feedback repair's Task may exist, until it starts or the
-	// API server definitely refuses the create.
-	if err := r.prepareRepositoryMonitorFeedbackTask(ctx, monitor, command, task.Name); err != nil {
+	task, created, err := r.createOrAdoptRepositoryMonitorRepairTask(ctx, monitor, command, task, job)
+	if err != nil {
 		return 0, err
-	}
-	if err := r.Create(ctx, task); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			if releaseErr := r.releaseRepositoryMonitorFeedbackTask(ctx, monitor, command, err); releaseErr != nil {
-				return 0, releaseErr
-			}
-			job.Phase = repositoryMonitorRepairPhaseQueued
-			job.LastError = repositoryMonitorRepairTaskCreateError
-			job.CompletedAt = nil
-			_ = r.Store.UpdateRepairJob(ctx, job)
-			return 0, err
-		}
-		created = 0
-		var existing corev1alpha1.Task
-		// The cache may not have the Task the create just found.
-		if err := r.repositoryMonitorUncachedReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); err != nil {
-			return 0, err
-		}
-		if err := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); err != nil {
-			return 0, err
-		}
-		task = &existing
 	}
 	// The Task exists: a feedback repair's outcome starts with the targets
 	// its prompt froze, which now charge their attempts.

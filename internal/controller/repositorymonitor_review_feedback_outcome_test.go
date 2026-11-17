@@ -30,6 +30,9 @@ type repositoryMonitorFeedbackLifecycle struct {
 	// staleTaskReads makes the cached client report every Task missing, as
 	// a cache that lags a create does; the uncached reader still sees it.
 	staleTaskReads bool
+	// cachedTask, when set, is what the cached client still reports for its
+	// Task after the Task was deleted.
+	cachedTask *corev1alpha1.Task
 }
 
 func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedbackLifecycle {
@@ -43,6 +46,10 @@ func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedb
 	f.reconciler.APIReader = withWatch
 	f.reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if task, ok := obj.(*corev1alpha1.Task); ok && l.cachedTask != nil && key.Name == l.cachedTask.Name {
+				l.cachedTask.DeepCopyInto(task)
+				return nil
+			}
 			if _, task := obj.(*corev1alpha1.Task); task && l.staleTaskReads {
 				return apierrors.NewNotFound(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), key.Name)
 			}

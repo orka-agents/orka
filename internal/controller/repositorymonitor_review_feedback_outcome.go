@@ -93,17 +93,69 @@ func (r *RepositoryMonitorReconciler) startRepositoryMonitorFeedbackOutcomeForTa
 	return err
 }
 
+// errRepositoryMonitorFeedbackRepairTaskGone reports that a started
+// feedback repair's Task is gone, so the repair is settled rather than its
+// Task created again.
+var errRepositoryMonitorFeedbackRepairTaskGone = errors.New("the started feedback repair's Task is gone")
+
 // prepareRepositoryMonitorFeedbackTask records, before a feedback repair's
-// Task create is requested, that the Task may exist from now on.
-func (r *RepositoryMonitorReconciler) prepareRepositoryMonitorFeedbackTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, taskName string) error {
+// Task create is requested, that the Task may exist from now on, and reports
+// whether the repair already started, whose Task must never be created
+// again.
+func (r *RepositoryMonitorReconciler) prepareRepositoryMonitorFeedbackTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, taskName string) (bool, error) {
 	if !repositoryMonitorFeedbackCommand(command) {
-		return nil
+		return false, nil
 	}
-	_, err := r.Store.PrepareMonitorFeedbackRepairTask(ctx, store.PrepareMonitorFeedbackRepairTaskRequest{Namespace: monitor.Namespace, CommandEventID: command.ID, TaskName: taskName})
+	outcome, err := r.Store.PrepareMonitorFeedbackRepairTask(ctx, store.PrepareMonitorFeedbackRepairTaskRequest{Namespace: monitor.Namespace, CommandEventID: command.ID, TaskName: taskName})
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
+		return false, nil
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	return outcome.StartedAt != nil, nil
+}
+
+// createOrAdoptRepositoryMonitorRepairTask creates a repair's Task, or
+// adopts the one an earlier attempt created, and returns it with the number
+// it created. A feedback repair's outcome turns creating first. A started
+// feedback repair's Task is only ever adopted, read uncached: if it is gone
+// the repair ran, so errRepositoryMonitorFeedbackRepairTaskGone settles it
+// instead of creating it again.
+func (r *RepositoryMonitorReconciler) createOrAdoptRepositoryMonitorRepairTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, task *corev1alpha1.Task, job *store.RepairJob) (*corev1alpha1.Task, int, error) {
+	started, err := r.prepareRepositoryMonitorFeedbackTask(ctx, monitor, command, task.Name)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !started {
+		err = r.Create(ctx, task)
+		if err == nil {
+			return task, 1, nil
+		}
+		if !apierrors.IsAlreadyExists(err) {
+			if releaseErr := r.releaseRepositoryMonitorFeedbackTask(ctx, monitor, command, err); releaseErr != nil {
+				return nil, 0, releaseErr
+			}
+			job.Phase = repositoryMonitorRepairPhaseQueued
+			job.LastError = repositoryMonitorRepairTaskCreateError
+			job.CompletedAt = nil
+			_ = r.Store.UpdateRepairJob(ctx, job)
+			return nil, 0, err
+		}
+	}
+	// The cache may not have the Task the create just found, or may still
+	// hold one that is gone.
+	var existing corev1alpha1.Task
+	if err := r.repositoryMonitorUncachedReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); err != nil {
+		if started && apierrors.IsNotFound(err) {
+			return nil, 0, errRepositoryMonitorFeedbackRepairTaskGone
+		}
+		return nil, 0, err
+	}
+	if err := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); err != nil {
+		return nil, 0, err
+	}
+	return &existing, 0, nil
 }
 
 // releaseRepositoryMonitorFeedbackTask returns a feedback repair to

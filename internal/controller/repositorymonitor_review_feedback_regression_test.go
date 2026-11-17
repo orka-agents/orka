@@ -334,3 +334,25 @@ func TestRepositoryMonitorPermissionLookupsProgressPastLargeDeferrals(t *testing
 		t.Fatalf("looked up %d of %d accounts", len(looked), len(accounts))
 	}
 }
+
+// A started repair's Task is never created again: a retried handoff whose
+// cache still holds the deleted Task settles the repair instead of creating
+// a second Task under the same name.
+func TestRepositoryMonitorReviewFeedbackStartedRepairIsNotRecreated(t *testing.T) {
+	ctx := context.Background()
+	l := newRepositoryMonitorFeedbackLifecycle(t)
+	l.mustHandoff(t)
+	task := l.f.repairTasks(t)[0]
+	if err := l.f.reconciler.Delete(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	l.cachedTask = &task
+	l.mustHandoff(t)
+	l.cachedTask = nil
+	if got := len(l.f.repairTasks(t)); got != 0 {
+		t.Fatalf("created %d Task again for a started repair", got)
+	}
+	if outcome := l.outcome(t); outcome.State != store.MonitorFeedbackOutcomeFailed || outcome.Reason != repositoryMonitorRepairTaskMissing || l.f.ledger(t).spent["review_comment:11"] != 1 {
+		t.Fatalf("outcome = %+v, want the started repair failed and charged", outcome)
+	}
+}
