@@ -83,6 +83,13 @@ func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, inj
 }
 
 func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConfig, injection *externalProviderTokenInjection, getenv func(string) string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
+	return r.externalRuntimeEgressForCollectors(cfg, injection, runtimePoolTelemetryCollectorEndpoints(true, getenv))
+}
+
+// externalRuntimeEgressForCollectors admits exactly the collector endpoints
+// the runtime's own environment exports to, so a signal dropped to fit the
+// native environment leaves no collector origin behind.
+func (r *RuntimePoolReconciler) externalRuntimeEgressForCollectors(cfg runtimePoolConfig, injection *externalProviderTokenInjection, collectors []string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	type destination struct {
 		host string
 		port int32
@@ -100,7 +107,7 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConf
 	type origin struct{ name, flag, raw string }
 	others := []origin{{name: "controller API", flag: "--controller-url", raw: r.ControllerAPIURL}}
 	if r.EnableTelemetry && r.TelemetryCollectorEgress {
-		for _, endpoint := range runtimePoolTelemetryCollectorEndpoints(true, getenv) {
+		for _, endpoint := range collectors {
 			if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
 				return nil, fmt.Errorf("telemetry collector origin cannot be admitted to the runtime egress allowlist: %w", err)
 			}

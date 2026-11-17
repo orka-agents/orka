@@ -27,6 +27,12 @@ const repositoryMonitorAddressedPrefix = "✅ Addressed in `"
 // GitHub GraphQL queries.
 const repositoryMonitorGraphQLNumberVariable = "number"
 
+// repositoryMonitorPullRequestGraphQLVariables are the variables of a paged
+// GitHub GraphQL query about one pull request.
+func repositoryMonitorPullRequestGraphQLVariables(owner, repository string, number int64, after any) map[string]any {
+	return map[string]any{"owner": owner, "name": repository, repositoryMonitorGraphQLNumberVariable: number, "after": after}
+}
+
 // repositoryMonitorInlineFindingMarker matches the finding ID in the hidden
 // marker Orka appends to its inline comments.
 var repositoryMonitorInlineFindingMarker = regexp.MustCompile(`<!-- orka:repo-monitor-inline review=\S+ finding=(f-[0-9a-f]+) -->`)
@@ -302,7 +308,7 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorReviewThreads(ctx con
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, query, map[string]any{"owner": owner, "name": repository, repositoryMonitorGraphQLNumberVariable: number, "after": after}, &response); err != nil {
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, query, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
 			return nil, err
 		}
 		page := response.Repository.PullRequest.ReviewThreads

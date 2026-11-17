@@ -417,6 +417,7 @@ func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
 	cmd := newRootCmd()
 	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
 	require.NoError(t, cmd.PersistentFlags().Set("token", "test-only"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
 	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
 	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
 	c, target, cleanup, err := newMigrationClient(cmd)
@@ -445,6 +446,7 @@ func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
 	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
 	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
 	require.NoError(t, cmd.PersistentFlags().Set("txn-token", "test-only-transaction"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
 	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
 	c, target, cleanup, err := newMigrationClient(cmd)
 	require.NoError(t, err)
@@ -452,4 +454,36 @@ func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
 	require.Empty(t, c.Token)
 	require.NotEmpty(t, c.TxnToken)
 	require.Equal(t, "http://explicit.example", target)
+}
+
+// ORKA_SERVER names the endpoint as explicitly as --server does.
+func TestMigrationTargetAcceptsServerFromEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envServer, "http://env.example")
+	cmd := newRootCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("token", "test-only"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
+	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
+	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
+	c, target, cleanup, err := newMigrationClient(cmd)
+	require.NoError(t, err)
+	defer cleanup()
+	require.Equal(t, "http://env.example", target)
+	require.Equal(t, target, c.BaseURL)
+}
+
+// The journal and import receipt are bound to a namespace, so migration does
+// not leave it to the server to choose one.
+func TestMigrateImportRequiresNamespaceBeforeCapture(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home, journal := t.TempDir(), t.TempDir()
+	require.NoError(t, os.Chmod(journal, 0o700))
+	cmd := newRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--server", "http://explicit.example", "--token", "test-only", "--kubeconfig", "/missing/config",
+		"session", "migrate", "import", "private",
+		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+	require.ErrorContains(t, cmd.Execute(), "requires a namespace")
+	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 }

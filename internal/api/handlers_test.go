@@ -513,6 +513,25 @@ func TestHandlers_CreateTask_Valid(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_FlatWebhookEvents(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	bodyBytes := []byte(`{"name":"flat-webhook-events","namespace":"default","type":"container","image":"busybox",` +
+		`"webhookURL":"https://hooks.example.com/orka","webhookEvents":["task.approval_requested","task.approval_resolved"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	created := &corev1alpha1.Task{}
+	require.NoError(t, handlers.client.Get(context.Background(), types.NamespacedName{Name: "flat-webhook-events", Namespace: "default"}, created))
+	require.Equal(t, []corev1alpha1.TaskWebhookEvent{
+		corev1alpha1.TaskWebhookEventApprovalRequested, corev1alpha1.TaskWebhookEventApprovalResolved,
+	}, created.Spec.WebhookEvents)
+}
+
 func TestHandlers_CreateTask_MissingName(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)

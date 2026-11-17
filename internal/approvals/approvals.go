@@ -43,6 +43,10 @@ type Approval struct {
 	Binding           *CallBinding    `json:"binding,omitempty"`
 	ExecutionOutcome  string          `json:"executionOutcome,omitempty"`
 	ExecutionReason   string          `json:"executionReason,omitempty"`
+
+	// RequestSeq is the stream sequence of the event that requested the
+	// approval, or zero when none was seen. It is never serialized.
+	RequestSeq int64 `json:"-"`
 }
 
 // CallBinding identifies the original v2 call. Runtime-supplied identifiers are
@@ -97,6 +101,7 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 				ToolCallID:        firstNonEmpty(payload.ToolCallID, event.ToolCallID),
 				Status:            StatusPending,
 				CreatedAt:         createdAt,
+				RequestSeq:        event.Seq,
 				Timeout:           payload.Timeout,
 				Binding:           payload.Binding,
 			}

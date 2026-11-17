@@ -181,7 +181,11 @@ func TestRepositoryMonitorReviewFeedbackStartsBoundedRepair(t *testing.T) {
 	// feedback changed.
 	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T9", 99, "writer", "Something new.") + "]"}
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: "head1111"}
-	again, err := f.reconciler.repositoryMonitorRepairTaskFeedbackInput(ctx, f.monitor, &command, task.Name, pr)
+	_, stored, err := f.reconciler.repositoryMonitorRepairTaskInput(ctx, f.monitor, command.Intent, task.Name, "orka-agents/orka", pr)
+	if err != nil || stored != task.Spec.Prompt {
+		t.Fatalf("stored prompt was not adopted: err=%v", err)
+	}
+	again, err := f.reconciler.repositoryMonitorRepairTaskFeedbackInput(ctx, f.monitor, &command, pr, stored)
 	if err != nil || again == nil || again.digest() != frozen.digest() {
 		t.Fatalf("retried feedback input = %+v err=%v, want the frozen input", again, err)
 	}

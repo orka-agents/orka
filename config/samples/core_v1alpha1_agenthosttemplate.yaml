@@ -15,7 +15,7 @@ spec:
     # Copies the vendor's published, digest-pinned binaries into a scratch
     # volume the host mounts read-only.
     - name: copy-binaries
-      image: ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f
+      image: ghcr.io/github/copilotd:1.0.11@sha256:b813141cae80dd079ba3d4c3de0fd7de663827ae5815b56cdde114f734144a7b
       command: ["/bin/sh", "-c", "cp /usr/local/bin/copilotd /usr/local/bin/gh /opt/agent-bin/"]
       volumeMounts:
         - name: bin

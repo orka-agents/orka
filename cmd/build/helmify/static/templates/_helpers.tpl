@@ -933,7 +933,7 @@ maps, and must render as a fresh install would. The defaults match values.yaml.
 {{- define "orka.agentHostTemplate" -}}
 {{- $resources := dict "requests" (dict "cpu" "250m" "memory" "1Gi") "limits" (dict "cpu" "4" "memory" "8Gi") -}}
 {{- $defaults := dict "name" "copilotd" "storage" "20Gi" "resources" $resources
-  "copilotdImage" "ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f"
+  "copilotdImage" "ghcr.io/github/copilotd:1.0.11@sha256:b813141cae80dd079ba3d4c3de0fd7de663827ae5815b56cdde114f734144a7b"
   "hostImage" "mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770" -}}
 {{- $set := dig "agentHosts" "template" dict .Values.controller -}}
 {{- $template := mergeOverwrite $defaults (deepCopy $set) -}}

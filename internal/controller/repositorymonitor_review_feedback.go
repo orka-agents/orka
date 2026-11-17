@@ -411,9 +411,6 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 		raw.partial = true
 		raw.availability, raw.reason = repositoryMonitorEvidenceErrorAvailability(err)
 	}
-	variables := func(after any) map[string]any {
-		return map[string]any{"owner": owner, "name": repository, repositoryMonitorGraphQLNumberVariable: number, "after": after} //nolint:goconst // GraphQL variable names.
-	}
 	// checkHead records the head each page reports and reports false, with
 	// the reason set, for a missing head or pages that disagree, which mean
 	// the head moved during the read.
@@ -446,7 +443,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackThreadsQuery, variables(after), &response); err != nil {
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackThreadsQuery, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
 			stop(err)
 			return raw
 		}
@@ -490,7 +487,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackReviewsQuery, variables(after), &response); err != nil {
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, repositoryMonitorFeedbackReviewsQuery, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
 			stop(err)
 			return raw
 		}
@@ -909,9 +906,9 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		placements = append(placements, placement{rank: rank, thread: &threads[i]})
 	}
 	slices.SortStableFunc(placements, func(a, b placement) int { return a.rank - b.rank })
-	used := repositoryMonitorEvidenceEncodedSize(snapshot)
+	used := repositoryMonitorFeedbackSnapshotBaseSize(snapshot, len(threads), len(reviews))
 	fits := func(entry any) bool {
-		size := repositoryMonitorEvidenceEncodedSize(entry) + 1
+		size := repositoryMonitorEvidenceEncodedSize(entry) + repositoryMonitorCIEvidenceEntrySeparatorBytes
 		if used+size > repositoryMonitorFeedbackTotalEncodedBytes {
 			return false
 		}
@@ -960,11 +957,36 @@ func (s repositoryMonitorReviewFeedbackSnapshot) unverifiedFeedback() (failed, l
 	return failed, limited
 }
 
-func repositoryMonitorBoolRank(first bool) int {
-	if first {
-		return 0
+// repositoryMonitorFeedbackSnapshotPrefix is the prefix of the lines of a
+// snapshot's encoding in the repair prompt, whose payload encoder puts it one
+// level deep. Its threads and reviews are three levels deep, as CI evidence
+// entries are, so repositoryMonitorEvidenceEncodedSize measures them.
+const repositoryMonitorFeedbackSnapshotPrefix = "  "
+
+// repositoryMonitorFeedbackSnapshotEncodedSize is the number of bytes a
+// snapshot takes in the repair prompt.
+func repositoryMonitorFeedbackSnapshotEncodedSize(snapshot repositoryMonitorReviewFeedbackSnapshot) int {
+	encoded, err := json.MarshalIndent(snapshot, repositoryMonitorFeedbackSnapshotPrefix, repositoryMonitorCIEvidenceEntryIndent)
+	if err != nil {
+		return repositoryMonitorFeedbackTotalEncodedBytes + 1
 	}
-	return 1
+	return len(encoded)
+}
+
+// repositoryMonitorFeedbackSnapshotBaseSize is the prompt size of snapshot
+// before any thread or review is placed, as if the budget runs out: every
+// thread and review omitted and the snapshot marked truncated. Each placed
+// entry then adds its encoded size and one separator; the first entry of a
+// list also replaces null with brackets, two bytes more, reserved here.
+func repositoryMonitorFeedbackSnapshotBaseSize(snapshot repositoryMonitorReviewFeedbackSnapshot, threads, reviews int) int {
+	worst := snapshot
+	worst.Threads, worst.Reviews = nil, nil
+	worst.OmittedThreads += threads
+	worst.OmittedReviews += reviews
+	if worst.Availability == repositoryMonitorEvidenceAvailable {
+		worst.Availability, worst.Reason = repositoryMonitorEvidenceTruncated, repositoryMonitorEvidenceReasonEvidenceBudget
+	}
+	return repositoryMonitorFeedbackSnapshotEncodedSize(worst) + 2*len("[]")
 }
 
 // thread normalizes one review thread, or reports false when it has nothing
@@ -1036,10 +1058,19 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 	if len(thread.Comments) == 0 {
 		return repositoryMonitorFeedbackPendingThread{}, false
 	}
-	// Keep the thread within its own budget by dropping the oldest replies,
-	// never the root or the newest comment, then by shortening the longest
-	// remaining body. Bodies are already sanitized, so a cut only removes
-	// text.
+	authorized, ok := fitRepositoryMonitorFeedbackThread(&thread, authorized)
+	if !ok {
+		return repositoryMonitorFeedbackPendingThread{}, false
+	}
+	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized}, true
+}
+
+// fitRepositoryMonitorFeedbackThread keeps thread within its own budget by
+// dropping the oldest replies, never the root or the newest comment, then by
+// shortening the longest remaining body. Bodies are already sanitized, so a
+// cut only removes text. It returns authorized without the dropped replies,
+// and false when only metadata is left to cut.
+func fitRepositoryMonitorFeedbackThread(thread *repositoryMonitorFeedbackThread, authorized []repositoryMonitorFeedbackAuthorized) ([]repositoryMonitorFeedbackAuthorized, bool) {
 	for len(thread.Comments) > 2 && repositoryMonitorEvidenceEncodedSize(thread) > repositoryMonitorFeedbackThreadEncodedBytes {
 		dropped := thread.Comments[1]
 		thread.Comments = slices.Delete(thread.Comments, 1, 2)
@@ -1056,14 +1087,14 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		comment := &thread.Comments[longest]
 		if len(comment.Body) <= repositoryMonitorFeedbackMinCutBody {
 			// Only metadata is left to cut; such a thread is malformed.
-			return repositoryMonitorFeedbackPendingThread{}, false
+			return authorized, false
 		}
 		comment.Body = repositoryMonitorEvidenceCutRunes(comment.Body, len(comment.Body)/2)
 		if !slices.Contains(comment.Truncated, repositoryMonitorFeedbackTruncatedBody) {
 			comment.Truncated = append(comment.Truncated, repositoryMonitorFeedbackTruncatedBody)
 		}
 	}
-	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized}, true
+	return authorized, true
 }
 
 // review normalizes one current changes-requested review, or reports false

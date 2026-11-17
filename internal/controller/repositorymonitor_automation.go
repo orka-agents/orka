@@ -23,6 +23,20 @@ const repositoryMonitorRunTriggerWorkflow = "workflow"
 // repositoryMonitorEventRepairRefused records why an automatic repair did not start.
 const repositoryMonitorEventRepairRefused = "repair_refused"
 
+// tryRepositoryMonitorIdleFeedbackRepair starts a feedback repair when
+// nothing else needs repairing: authorized reviewer feedback can start a fix
+// of a pull request in full repair scope whose CI is not fixed first, once
+// any exhaustive review of the head has finished its passes.
+func (r *RepositoryMonitorReconciler) tryRepositoryMonitorIdleFeedbackRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem, fullScope, labelled bool) (bool, error) {
+	if !fullScope || !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) {
+		return false, nil
+	}
+	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
+		return false, err
+	}
+	return r.tryRepositoryMonitorFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, labelled)
+}
+
 // Repair.Enabled is the repository administrator's authorization for bounded
 // automatic repair. A controller policy action is never recorded as a human.
 // Repair labels narrow it to labelled pull requests; the account that added
@@ -69,16 +83,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		return false, err
 	}
 	if intent == "" {
-		// With nothing else to repair, authorized reviewer feedback can
-		// start a fix of a pull request in full repair scope, once any
-		// exhaustive review of the head has finished its passes.
-		if !full || ciFirst || !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) {
-			return false, nil
-		}
-		if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
-			return false, err
-		}
-		return r.tryRepositoryMonitorFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, labelled)
+		return r.tryRepositoryMonitorIdleFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, full && !ciFirst, labelled)
 	}
 	// The policy helper counts durable attempts, including commands exhausted
 	// before Task creation, before another command identity can be created.

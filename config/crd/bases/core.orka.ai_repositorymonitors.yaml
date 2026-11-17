@@ -361,6 +361,22 @@ spec:
                       GitHub reports that permission only when one pull request is read, so a
                       pull request seen only in an inventory list is never repaired as a fork.
                     type: boolean
+                  ciEvidence:
+                    description: CIEvidence configures the CI evidence fix_ci repair
+                      prompts carry.
+                    properties:
+                      text:
+                        default: false
+                        description: |-
+                          Text adds the free text of failing checks to fix_ci repair prompts:
+                          check run output titles and summaries, annotation titles and messages,
+                          and commit status descriptions. Orka redacts credential-shaped text,
+                          but redaction cannot recognize every credential, and CI tools may print
+                          values GitHub does not mask. The text is stored in the repair Task's
+                          spec.prompt, which anyone who can read Tasks in the monitor namespace
+                          can see, and is sent to the model provider, so it is off by default.
+                        type: boolean
+                    type: object
                   ciOnlyLabels:
                     description: |-
                       CIOnlyLabels marks pull requests whose CI is repaired without a review:
@@ -379,7 +395,9 @@ spec:
                     description: |-
                       HumanFeedback lets reviewers' unresolved review threads and
                       changes-requested reviews drive repairs of pull requests in full repair
-                      scope. Orka never replies to, resolves, or dismisses them.
+                      scope. Orka never replies to, resolves, or dismisses them. Review text
+                      is stored in repair Tasks' spec.prompt, which anyone who can read Tasks
+                      in the monitor namespace can see, and is sent to the model provider.
                     properties:
                       botLogins:
                         description: |-

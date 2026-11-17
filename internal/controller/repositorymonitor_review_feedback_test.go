@@ -365,7 +365,7 @@ func TestRepositoryMonitorReviewFeedbackBudget(t *testing.T) {
 	if snapshot.Availability != repositoryMonitorEvidenceTruncated || snapshot.Reason != repositoryMonitorEvidenceReasonEvidenceBudget || snapshot.OmittedThreads == 0 {
 		t.Fatalf("snapshot = availability %q reason %q omitted %d", snapshot.Availability, snapshot.Reason, snapshot.OmittedThreads)
 	}
-	if size := repositoryMonitorEvidenceEncodedSize(snapshot); size > repositoryMonitorFeedbackTotalEncodedBytes {
+	if size := repositoryMonitorFeedbackSnapshotEncodedSize(snapshot); size > repositoryMonitorFeedbackTotalEncodedBytes {
 		t.Fatalf("snapshot is %d bytes", size)
 	}
 	if snapshot.Threads[0].ID != "review_thread:W1" {
