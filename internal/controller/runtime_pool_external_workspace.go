@@ -425,6 +425,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	before := w.DeepCopy()
 	w.Spec.Workload, w.Spec.Retirement = &request, nil
+	setExternalRuntimeMilestone(w, externalWorkloadPublishedAnnotation, request.Sequence, r.now())
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -954,6 +955,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
+		setExternalRuntimeMilestone(w, externalRetirementAuthorizedAnnotation, retirement.Sequence, r.now())
 		if deleting {
 			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 			w.Spec.Attachment = nil

@@ -3567,6 +3567,9 @@ func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, poo
 		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
+	if runtimePoolHasExternalWorkspace(pool) {
+		r.observeExternalRuntimeTransition(ctx, pool, base.Status, status)
+	}
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
