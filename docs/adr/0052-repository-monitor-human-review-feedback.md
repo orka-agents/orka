@@ -188,8 +188,16 @@ same end. A command that ends any other way, such as a cancellation or
 exhausted retries, ends its outcome as it is settled. A restart in any state
 resumes from the record. A `started` repair whose Task disappeared before its
 result was recorded fails with `repair_task_missing`, keeps its charge, and is
-not run again; an outcome that already ended records that end on the job, the
-action, and the item again.
+not run again; repair ingestion settles it once the Task has been missing for
+five minutes, longer than a lagging cache. An outcome that already ended
+records that end on the job, the action, and the item again. Until the
+outcome starts, the repair job is marked `repair_task_create_pending`, and a
+Task create that failed without the API server refusing it, such as a
+timeout, keeps that mark. A `reserved` repair whose job is so marked and
+whose Task is missing may have run, so it fails with
+`repair_task_outcome_unknown` and keeps every admitted charge rather than
+running again. A create the API server refused outright stays retryable and
+charges nothing.
 
 The readiness projection skips a `withdrawn` repair, so a withdrawal leaves
 the head as if no repair had been requested. The pull request's repair budget

@@ -95,6 +95,11 @@ type RepositoryMonitorReconciler struct {
 	// returned before it recorded completion.
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]struct{}
+
+	// feedbackMissingTaskGrace is how long a started feedback repair's Task
+	// may be missing, as from a lagging cache, before the repair fails;
+	// zero means repositoryMonitorFeedbackMissingTaskGrace.
+	feedbackMissingTaskGrace time.Duration
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete

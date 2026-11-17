@@ -1141,12 +1141,9 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	if err != nil {
 		return 0, err
 	}
-	feedbackInput := inputs.feedback
-	if storedPrompt != "" || !inputs.feedbackRead {
-		feedbackInput, err = r.repositoryMonitorRepairTaskFeedbackInput(ctx, monitor, command, pr, storedPrompt)
-		if err != nil {
-			return 0, err
-		}
+	feedbackInput, err := r.repositoryMonitorRepairHandoffFeedbackInput(ctx, monitor, command, pr, storedPrompt, inputs)
+	if err != nil {
+		return 0, err
 	}
 	inputs.feedback = feedbackInput
 	prompt := storedPrompt
@@ -1179,6 +1176,12 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 		RepairCountHead:  repairCountHead,
 		TaskName:         taskName,
 		Branch:           pr.HeadBranch,
+	}
+	feedbackRepair := repositoryMonitorFeedbackCommand(command)
+	if feedbackRepair {
+		// Until the outcome starts, a feedback repair's job says its Task
+		// may exist, so a restart that finds no Task cannot run it twice.
+		job.LastError = repositoryMonitorRepairTaskCreatePending
 	}
 	if err := r.Store.CreateRepairJob(ctx, job); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "constraint") {
@@ -1257,10 +1260,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	if err != nil {
 		return 0, err
 	}
+	if err := r.markRepositoryMonitorFeedbackTaskCreatePending(ctx, job, feedbackRepair); err != nil {
+		return 0, err
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			job.Phase = repositoryMonitorRepairPhaseQueued
-			job.LastError = repositoryMonitorRepairTaskCreateError
+			job.LastError = repositoryMonitorRepairTaskCreateFailure(feedbackRepair, err)
 			job.CompletedAt = nil
 			_ = r.Store.UpdateRepairJob(ctx, job)
 			return 0, err
@@ -1277,19 +1283,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTaskFor(ctx c
 	}
 	// The Task exists: a feedback repair's outcome starts with the targets
 	// its prompt froze, which now charge their attempts.
-	if repositoryMonitorFeedbackCommand(command) {
-		var targets []string
-		if feedbackInput != nil {
-			targets = feedbackInput.Targets
-		}
-		if _, err := r.startRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, targets, task.Name); err != nil {
-			return created, err
-		}
+	if err := r.startRepositoryMonitorFeedbackOutcomeForTask(ctx, monitor, command, feedbackInput, task.Name); err != nil {
+		return created, err
 	}
 	if err := r.retainMonitorUsageTask(ctx, task, usageWorkID, "repair", pr.Number); err != nil {
 		return created, err
 	}
-	if job.LastError == repositoryMonitorRepairTaskCreateError {
+	if job.LastError == repositoryMonitorRepairTaskCreateError || job.LastError == repositoryMonitorRepairTaskCreatePending {
 		job.Phase = repositoryMonitorRepairPhaseQueued
 		job.LastError = ""
 		job.CompletedAt = nil
@@ -1785,6 +1785,11 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		var task corev1alpha1.Task
 		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {
 			if client.IgnoreNotFound(err) == nil {
+				settled, err := r.failRepositoryMonitorFeedbackRepairWithMissingTask(ctx, monitor, &job)
+				if err != nil {
+					return ingested, err
+				}
+				ingested = ingested || settled
 				continue
 			}
 			return ingested, err

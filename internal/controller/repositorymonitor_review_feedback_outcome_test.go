@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -23,6 +24,9 @@ type repositoryMonitorFeedbackLifecycle struct {
 	// lostCreate makes the next Task create succeed but report a failure,
 	// as when the controller stops right after creating the Task.
 	lostCreate bool
+	// ambiguousCreate makes the next Task create fail without saying
+	// whether the Task was created, and create none.
+	ambiguousCreate bool
 }
 
 func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedbackLifecycle {
@@ -35,6 +39,10 @@ func newRepositoryMonitorFeedbackLifecycle(t *testing.T) *repositoryMonitorFeedb
 	withWatch := f.reconciler.Client.(client.WithWatch)
 	f.reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, task := obj.(*corev1alpha1.Task); task && l.ambiguousCreate {
+				l.ambiguousCreate = false
+				return errors.New("connection reset while creating the Task")
+			}
 			if err := c.Create(ctx, obj, opts...); err != nil {
 				return err
 			}
@@ -247,6 +255,49 @@ func TestRepositoryMonitorReviewFeedbackOutcomeLifecycle(t *testing.T) {
 				l.endCommand(t, repositoryMonitorWorkActionStatusCancelled)
 			},
 			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 1, repairState: repositoryMonitorRepairPhaseQueued,
+		},
+		{
+			name: "Task create ambiguous and no Task found, restarted",
+			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
+				l.ambiguousCreate = true
+				if err := l.handoff(t); err == nil {
+					t.Fatal("handoff succeeded despite the failed create")
+				}
+				// The Task may have run and been deleted, so it is not
+				// created again.
+				l.mustHandoff(t)
+				l.mustHandoff(t)
+				if reason := l.outcome(t).Reason; reason != repositoryMonitorRepairTaskOutcomeUnknown {
+					t.Fatalf("reason = %q", reason)
+				}
+			},
+			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 0, repairState: repositoryMonitorRepairPhaseFailed,
+		},
+		{
+			name: "Task deleted after its handoff, settled by repair ingestion",
+			run: func(t *testing.T, l *repositoryMonitorFeedbackLifecycle) {
+				l.mustHandoff(t)
+				task := l.f.repairTasks(t)[0]
+				if err := l.f.reconciler.Delete(context.Background(), &task); err != nil {
+					t.Fatal(err)
+				}
+				// Within the grace period a missing Task may be a lagging
+				// cache.
+				if _, err := l.f.reconciler.ingestCompletedRepositoryMonitorRepairTasks(context.Background(), l.f.monitor); err != nil {
+					t.Fatal(err)
+				}
+				if state := l.outcome(t).State; state != store.MonitorFeedbackOutcomeStarted {
+					t.Fatalf("state within the grace period = %q", state)
+				}
+				l.f.reconciler.feedbackMissingTaskGrace = time.Nanosecond
+				if _, err := l.f.reconciler.ingestCompletedRepositoryMonitorRepairTasks(context.Background(), l.f.monitor); err != nil {
+					t.Fatal(err)
+				}
+				if reason := l.outcome(t).Reason; reason != repositoryMonitorRepairTaskMissing {
+					t.Fatalf("reason = %q", reason)
+				}
+			},
+			want: store.MonitorFeedbackOutcomeFailed, started: true, tasks: 0, repairState: repositoryMonitorRepairPhaseFailed,
 		},
 		{
 			name: "ended by a cancellation after its Task started",

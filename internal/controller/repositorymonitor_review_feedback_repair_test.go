@@ -18,6 +18,7 @@ import (
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -487,7 +488,7 @@ func repositoryMonitorFeedbackRepairTestPR() repositoryMonitorPullRequest {
 	return repositoryMonitorPullRequest{Number: 1, State: "open", BaseBranch: "main", BaseSHA: "base1111", HeadBranch: "feature", HeadRepo: "orka-agents/orka", HeadSHA: "head1111", MergeableState: "clean"}
 }
 
-// failRepairTaskCreates makes the fixture's Kubernetes client refuse to
+// failRepairTaskCreates makes the fixture's Kubernetes API server refuse to
 // create Tasks while *fail is true.
 func (f *repositoryMonitorFeedbackRepairFixture) failRepairTaskCreates(t *testing.T) *bool {
 	t.Helper()
@@ -499,7 +500,8 @@ func (f *repositoryMonitorFeedbackRepairFixture) failRepairTaskCreates(t *testin
 	f.reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if _, task := obj.(*corev1alpha1.Task); task && *fail {
-				return errors.New("injected Task create failure")
+				// The API server refused the create, so no Task exists.
+				return apierrors.NewTooManyRequests("injected Task create failure", 1)
 			}
 			return c.Create(ctx, obj, opts...)
 		},

@@ -45,6 +45,18 @@ const (
 	// repositoryMonitorRepairTaskMissing fails a started feedback repair
 	// whose Task disappeared before its result was recorded.
 	repositoryMonitorRepairTaskMissing = "repair_task_missing"
+	// repositoryMonitorRepairTaskCreatePending marks a feedback repair job
+	// whose Task may exist: its create was started, or failed in a way that
+	// does not rule out that the API server created it, and the outcome has
+	// not started.
+	repositoryMonitorRepairTaskCreatePending = "repair_task_create_pending"
+	// repositoryMonitorRepairTaskOutcomeUnknown fails a reserved feedback
+	// repair whose Task may have been created and is gone, so whether it
+	// ran is unknown. Its attempts stay charged.
+	repositoryMonitorRepairTaskOutcomeUnknown = "repair_task_outcome_unknown"
+	// repositoryMonitorFeedbackMissingTaskGrace is how long a started
+	// feedback repair's Task may be missing before repair ingestion fails it.
+	repositoryMonitorFeedbackMissingTaskGrace = 5 * time.Minute
 
 	repositoryMonitorFeedbackDigestMetadataKey       = "reviewFeedbackDigest"
 	repositoryMonitorFeedbackIDsMetadataKey          = "reviewFeedbackIDs"
@@ -335,10 +347,31 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorFeedbackRepairWitho
 		return false, nil
 	}
 	outcome, err := r.repositoryMonitorFeedbackOutcome(ctx, monitor, command.ID)
-	if err != nil || outcome == nil || outcome.State == store.MonitorFeedbackOutcomeReserved {
+	if err != nil || outcome == nil {
 		return false, err
 	}
 	actionKind := repositoryMonitorRepairWorkflowActionKind(command.Intent)
+	if outcome.State == store.MonitorFeedbackOutcomeReserved {
+		// A reserved repair whose Task may have been created and is now
+		// gone may have run, so it is not run again: it fails, charging
+		// every admitted ID.
+		job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, "repair-"+repositoryMonitorShortHash(command.ID))
+		if errors.Is(err, store.ErrNotFound) || err == nil && job.LastError != repositoryMonitorRepairTaskCreatePending {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if _, err := r.Store.StartMonitorFeedbackRepair(ctx, store.StartMonitorFeedbackRepairRequest{Namespace: monitor.Namespace, CommandEventID: command.ID, Targets: outcome.AdmittedIDs, TaskName: job.TaskName}); err != nil {
+			return true, err
+		}
+		if _, err := r.Store.FinishMonitorFeedbackRepair(ctx, store.FinishMonitorFeedbackRepairRequest{Namespace: monitor.Namespace, CommandEventID: command.ID, State: store.MonitorFeedbackOutcomeFailed, Reason: repositoryMonitorRepairTaskOutcomeUnknown}); err != nil {
+			return true, err
+		}
+		if outcome, err = r.repositoryMonitorFeedbackOutcome(ctx, monitor, command.ID); err != nil || outcome == nil {
+			return true, err
+		}
+	}
 	switch {
 	case outcome.State == store.MonitorFeedbackOutcomeWithdrawn:
 		return true, r.blockRepositoryMonitorWithdrawnPolicyRepair(ctx, monitor, run, command, pr, item, firstNonEmptyString(outcome.Reason, repositoryMonitorRepairSkipFeedbackWithdrawn))
@@ -377,6 +410,96 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorFeedbackRepairWitho
 	}
 	item.RepairState = phase
 	return true, r.Store.UpsertMonitorItem(ctx, item)
+}
+
+// failRepositoryMonitorFeedbackRepairWithMissingTask fails the started
+// feedback repair of a queued repair job whose Task has been missing longer
+// than the grace period, before its result was recorded. The repair ran, so
+// it keeps its charge and is not run again; the job, the work action, and
+// the pull request item record the failure. It reports whether it did.
+func (r *RepositoryMonitorReconciler) failRepositoryMonitorFeedbackRepairWithMissingTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, job *store.RepairJob) (bool, error) {
+	outcomes, err := r.repositoryMonitorFeedbackOutcomes(ctx, monitor, "", job.PRNumber)
+	if err != nil {
+		return false, err
+	}
+	grace := r.feedbackMissingTaskGrace
+	if grace <= 0 {
+		grace = repositoryMonitorFeedbackMissingTaskGrace
+	}
+	for commandID, outcome := range outcomes {
+		if outcome.State != store.MonitorFeedbackOutcomeStarted || outcome.TaskName != job.TaskName || outcome.StartedAt == nil || time.Since(*outcome.StartedAt) < grace {
+			continue
+		}
+		if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, commandID, store.MonitorFeedbackOutcomeFailed, repositoryMonitorRepairTaskMissing); err != nil {
+			return false, err
+		}
+		completedAt := time.Now()
+		job.Phase, job.LastError, job.CompletedAt = repositoryMonitorRepairPhaseFailed, repositoryMonitorRepairTaskMissing, &completedAt
+		if err := r.Store.UpdateRepairJob(ctx, job); err != nil {
+			return false, err
+		}
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: job.Intent}, repositoryMonitorPullRequestKind, job.PRNumber, job.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(job.Intent), repositoryMonitorWorkActionStatusFailed, job.Phase, job.TaskName, job.LastError); err != nil {
+			return false, err
+		}
+		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if item.HeadSHA == job.HeadSHA {
+			item.RepairState = repositoryMonitorRepairPhaseFailed
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// markRepositoryMonitorFeedbackTaskCreatePending marks a feedback repair's
+// job as possibly having a Task before its create is attempted.
+func (r *RepositoryMonitorReconciler) markRepositoryMonitorFeedbackTaskCreatePending(ctx context.Context, job *store.RepairJob, feedbackRepair bool) error {
+	if !feedbackRepair || job.LastError == repositoryMonitorRepairTaskCreatePending {
+		return nil
+	}
+	job.LastError = repositoryMonitorRepairTaskCreatePending
+	return r.Store.UpdateRepairJob(ctx, job)
+}
+
+// repositoryMonitorRepairTaskCreateFailure is the error a repair job records
+// when creating its Task failed. A feedback repair's Task may still exist
+// unless the API server refused the create.
+func repositoryMonitorRepairTaskCreateFailure(feedbackRepair bool, err error) string {
+	if feedbackRepair && !repositoryMonitorTaskCreateRejected(err) {
+		return repositoryMonitorRepairTaskCreatePending
+	}
+	return repositoryMonitorRepairTaskCreateError
+}
+
+// startRepositoryMonitorFeedbackOutcomeForTask starts a feedback repair's
+// outcome once its Task exists, with the targets its input froze.
+func (r *RepositoryMonitorReconciler) startRepositoryMonitorFeedbackOutcomeForTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, input *repositoryMonitorRepairFeedbackInput, taskName string) error {
+	if !repositoryMonitorFeedbackCommand(command) {
+		return nil
+	}
+	var targets []string
+	if input != nil {
+		targets = input.Targets
+	}
+	_, err := r.startRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, targets, taskName)
+	return err
+}
+
+// repositoryMonitorTaskCreateRejected reports whether the API server
+// rejected a Task create before storing it: a request it refused as
+// invalid, unauthorized, or throttled. Other failures, such as a timeout or
+// an internal error, do not rule out that the Task was created.
+func repositoryMonitorTaskCreateRejected(err error) bool {
+	return apierrors.IsBadRequest(err) || apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) ||
+		apierrors.IsTooManyRequests(err) || apierrors.IsNotFound(err) || apierrors.IsMethodNotSupported(err) || apierrors.IsRequestEntityTooLargeError(err)
 }
 
 // repositoryMonitorFeedbackTargets picks the startable feedback with
@@ -614,6 +737,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairTaskFeedbackInput(c
 		return nil, errRepositoryMonitorFeedbackWithdrawn
 	}
 	return input, err
+}
+
+// repositoryMonitorRepairHandoffFeedbackInput returns the feedback input a
+// repair Task receives: the input a stored prompt froze, the snapshot the
+// handoff already read, or, for a caller that read none, a new read.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairHandoffFeedbackInput(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, pr repositoryMonitorPullRequest, storedPrompt string, inputs *repositoryMonitorRepairInputs) (*repositoryMonitorRepairFeedbackInput, error) {
+	if storedPrompt == "" && inputs.feedbackRead {
+		return inputs.feedback, nil
+	}
+	return r.repositoryMonitorRepairTaskFeedbackInput(ctx, monitor, command, pr, storedPrompt)
 }
 
 // repositoryMonitorRepairFeedbackInputFromPrompt recovers the frozen
