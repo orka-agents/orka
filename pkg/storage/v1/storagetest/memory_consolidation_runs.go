@@ -197,6 +197,43 @@ func runMemoryConsolidationRuns(t *testing.T, newProvider StateFactory) {
 		require.Nil(t, other, "another mode is untouched")
 	})
 
+	t.Run("only a Propose run creates proposals", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		dry := consolidationRun("uid-dry", at, at.Add(time.Hour))
+		dry.Mode = "DryRun"
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, dry))
+		_, err := p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-dry", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{}`), CompletedAt: at.Add(time.Hour),
+			Proposals: []storagev1.MemoryProposal{runProposal("mprop-from-dry-run")}})
+		require.ErrorIs(t, err, storagev1.ErrValidation, "a dry run only reports")
+		_, err = p.GetMemoryProposal(ctx, conditionalNamespace, "mprop-from-dry-run")
+		require.ErrorIs(t, err, storagev1.ErrNotFound)
+		running, err := p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-dry")
+		require.NoError(t, err)
+		require.Equal(t, storagev1.MemoryConsolidationRunning, running.Status, "a refused completion changes nothing")
+	})
+
+	t.Run("a deleted Task's skipped run goes once a later run supersedes it", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-skipped", at, at.Add(time.Hour))))
+		_, err := p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-skipped", Status: storagev1.MemoryConsolidationSkipped, Report: []byte(`{}`), CompletedAt: at.Add(time.Hour)})
+		require.NoError(t, err)
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-skipped", true))
+		_, err = p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-skipped")
+		require.NoError(t, err, "the mode's only run holds its cursor, so it is kept")
+
+		require.NoError(t, p.BeginMemoryConsolidationRun(ctx, consolidationRun("uid-later", at, at.Add(2*time.Hour))))
+		_, err = p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: conditionalNamespace,
+			TaskUID: "uid-later", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{}`), CompletedAt: at.Add(2 * time.Hour)})
+		require.NoError(t, err)
+		require.NoError(t, p.ReleaseMemoryConsolidationRun(ctx, conditionalNamespace, "uid-later", true))
+		_, err = p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-skipped")
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "the skipped run no cursor needs is removed")
+		_, err = p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "uid-later")
+		require.NoError(t, err, "the latest completed run holds the cursor")
+	})
+
 	t.Run("a running run keeps another from beginning until its lease ends", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		first := consolidationRun("uid-first", at, at.Add(time.Hour))

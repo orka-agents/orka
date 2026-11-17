@@ -1,6 +1,7 @@
 -- SQLite transition: 173-to-174 (schema version 6 to 7).
 -- Adds memory consolidation runs: one row per run, keyed by its Task UID,
--- with the window of Sessions it reads, the input it read and its report,
+-- with the window of Sessions it reads, the input it read, its report and
+-- whether its Task was deleted,
 -- and an index that lists a namespace's Sessions by when they changed. It
 -- adds no rows, so a store whose key bootstrap is unfinished can still
 -- finish it.
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
  report BLOB,
  created_at TIMESTAMP NOT NULL,
  completed_at TIMESTAMP,
+ task_deleted INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY (namespace, task_uid)
 );
 

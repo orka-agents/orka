@@ -55,6 +55,10 @@ const (
 	// that another run took over. It can neither resume nor complete.
 	MemoryConsolidationAbandoned = "abandoned"
 
+	// MemoryConsolidationModePropose is the mode of a run that creates
+	// proposals; any other mode only reports.
+	MemoryConsolidationModePropose = "Propose"
+
 	MaxMemoryConsolidationReportBytes = 256 << 10
 	MaxMemoryConsolidationInputBytes  = 1 << 20
 	MaxMemoryConsolidationProposals   = 20
@@ -94,9 +98,11 @@ const (
 //     report and completion time, clears its Input, and creates every
 //     proposal, each validated
 //     as CreateMemoryProposal validates it, all in one transaction: an
-//     invalid or duplicate proposal changes nothing. A skipped run creates no
-//     proposals. A finished or abandoned run is returned unchanged and
-//     creates nothing. It returns the stored run.
+//     invalid or duplicate proposal changes nothing. A skipped run, or a run
+//     whose mode is not MemoryConsolidationModePropose, creates no proposals:
+//     proposals for one are refused with ErrValidation. A finished or
+//     abandoned run is returned unchanged and creates nothing. It returns the
+//     stored run.
 //   - ReleaseMemoryConsolidationRun releases the run of a namespace and
 //     TaskUID whose Task ended: a running run becomes
 //     MemoryConsolidationAbandoned, and the run's Input is cleared, so it

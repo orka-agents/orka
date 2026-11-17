@@ -309,6 +309,9 @@ func (c *Client) CompleteMemoryConsolidationRun(ctx context.Context, completion 
 			"a proposal's description": &proposal.Description,
 			"a proposal's content":     &proposal.Content,
 			"a proposal's patch":       &proposal.Patch,
+			"a proposal's reviewer":    &proposal.Reviewer,
+			"a proposal's review note": &proposal.ReviewNote,
+			"a proposal's applier":     &proposal.AppliedBy,
 		}); err != nil {
 			return nil, err
 		}

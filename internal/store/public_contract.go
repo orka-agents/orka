@@ -272,6 +272,7 @@ const (
 	MaxMemoryProposalTargets          = storagev1.MaxMemoryProposalTargets
 	MaxMemoryProposalSources          = storagev1.MaxMemoryProposalSources
 	MemoryConsolidationRunning        = storagev1.MemoryConsolidationRunning
+	MemoryConsolidationModePropose    = storagev1.MemoryConsolidationModePropose
 	MemoryConsolidationCompleted      = storagev1.MemoryConsolidationCompleted
 	MemoryConsolidationSkipped        = storagev1.MemoryConsolidationSkipped
 	MaxMemoryConsolidationReportBytes = storagev1.MaxMemoryConsolidationReportBytes

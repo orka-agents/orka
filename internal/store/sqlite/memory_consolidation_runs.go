@@ -189,6 +189,9 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	if run.Status != store.MemoryConsolidationRunning {
 		return run, tx.Commit()
 	}
+	if len(completion.Proposals) > 0 && run.Mode != store.MemoryConsolidationModePropose {
+		return nil, store.ValidationErrorf("only a Propose memory consolidation run creates proposals, not a %q run", run.Mode)
+	}
 	// The proposals are created in this transaction, as CreateMemoryProposal
 	// creates one, so an invalid proposal leaves the run running.
 	txCtx := context.WithValue(ctx, taskDataTransactionKey{}, taskDataTransaction{db: s.db, tx: tx.Tx})
@@ -273,29 +276,24 @@ func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_consolidation_runs
 		 SET status = CASE WHEN status = ? THEN ? ELSE status END, input = NULL,
-		     report = CASE WHEN ? THEN NULL ELSE report END
+		     report = CASE WHEN ? THEN NULL ELSE report END,
+		     task_deleted = CASE WHEN ? THEN 1 ELSE task_deleted END
 		 WHERE namespace = ? AND task_uid = ?`,
-		store.MemoryConsolidationRunning, store.MemoryConsolidationAbandoned, deleted, namespace, taskUID); err != nil {
+		store.MemoryConsolidationRunning, store.MemoryConsolidationAbandoned, deleted, deleted, namespace, taskUID); err != nil {
 		return err
 	}
 	if !deleted {
 		return nil
 	}
-	// This run goes when no cursor needs it.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM memory_consolidation_runs AS r WHERE r.namespace = ? AND r.task_uid = ? AND (
+	// Every run of a deleted Task in this mode goes once no cursor needs it,
+	// whatever its status: this run, and an earlier one kept as the cursor
+	// that a later run now supersedes. A run whose Task still exists is kept,
+	// as its report is still served and an abandoned run must not begin
+	// again.
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM memory_consolidation_runs AS r WHERE r.namespace = ? AND r.mode = ? AND r.task_deleted = 1 AND (
 		   (r.status = 'completed' AND `+supersededCompletedRunSQL+`) OR
 		   (r.status <> 'completed' AND `+supersededOtherRunSQL+`))`,
-		namespace, taskUID); err != nil {
-		return err
-	}
-	// An earlier deleted completed run kept as its mode's cursor goes once a
-	// later completed run supersedes it. A completed run that still has its
-	// report belongs to a Task that was not deleted, whose report is still
-	// served.
-	_, err = tx.ExecContext(ctx,
-		`DELETE FROM memory_consolidation_runs AS r
-		 WHERE r.namespace = ? AND r.mode = ? AND r.status = 'completed' AND r.report IS NULL AND `+supersededCompletedRunSQL,
 		namespace, mode)
 	return err
 }

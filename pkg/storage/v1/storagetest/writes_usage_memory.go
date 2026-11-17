@@ -196,7 +196,7 @@ func init() {
 			method: "CompleteMemoryConsolidationRun",
 			setup: func(t *testing.T, p storagev1.StateProvider) {
 				require.NoError(t, p.BeginMemoryConsolidationRun(t.Context(), &storagev1.MemoryConsolidationRun{Namespace: memoryTenant,
-					TaskUID: "uid-catalog", TaskName: "run", Mode: "DryRun", Status: storagev1.MemoryConsolidationRunning,
+					TaskUID: "uid-catalog", TaskName: "run", Mode: "Propose", Status: storagev1.MemoryConsolidationRunning,
 					WindowStart: writeCaseCreated, WindowEnd: writeCaseCreated.Add(time.Hour), CreatedAt: writeCaseCreated}))
 			},
 			args: rebuiltArgs(func() []any {

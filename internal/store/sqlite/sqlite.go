@@ -337,6 +337,7 @@ func currentSchemaStatements() []string {
 			report       BLOB,
 			created_at   TIMESTAMP NOT NULL,
 			completed_at TIMESTAMP,
+			task_deleted INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_uid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_consolidation_runs_cursor

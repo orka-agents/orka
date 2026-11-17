@@ -28,7 +28,7 @@ const (
 	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
 	schema173 = "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b" // schema version 6: memory generations and consolidation proposal targets
-	schema174 = "6480457017e6318fb1dde7002af8cc28faa078fb8dac2ac6e1c3ba11970cb88b" // schema version 7: memory consolidation runs
+	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d" // schema version 7: memory consolidation runs
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.

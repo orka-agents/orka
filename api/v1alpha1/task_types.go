@@ -458,8 +458,9 @@ type AISpec struct {
 	// reports, or proposes, merges, supersessions and retirements for review
 	// (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
 	// Prompt, when set, steers what it focuses on. Creating such a Task, or
-	// changing its spec, requires list and get on sessions in the namespace,
-	// and in Propose mode create on memoryproposals.
+	// changing its spec, requires list and get on sessions and list on
+	// memories in the namespace, and in Propose mode create on
+	// memoryproposals.
 	// +optional
 	MemoryConsolidation *MemoryConsolidationSpec `json:"memoryConsolidation,omitempty"`
 }
