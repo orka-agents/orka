@@ -398,6 +398,23 @@ func TestPublicationRefusedForContinuationSharingATaskTaintedIncarnation(t *test
 		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a taint refusal", refused, reason, err)
 	}
 
+	// The shared incarnation was deleted, or replaced under the same name,
+	// before a delayed publication ran: the predecessor's taint still counts.
+	for name, objects := range map[string][]client.Object{
+		"deleted":  {predecessor.DeepCopy(), continuation.DeepCopy()},
+		"replaced": {&workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "replacement-ws-uid"}}, predecessor.DeepCopy(), continuation.DeepCopy()},
+	} {
+		for _, object := range objects {
+			object.SetResourceVersion("")
+		}
+		c := operatorTaintTestClient(t, objects...)
+		d := &ACPDispatcher{Client: c, APIReader: c}
+		refused, _, err := d.taskPublicationRefused(context.Background(), continuation)
+		if err != nil || !refused {
+			t.Fatalf("%s incarnation: taskPublicationRefused = %v, %v; want a taint refusal", name, refused, err)
+		}
+	}
+
 	fresh := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "fresh-ws-uid"}}
 	staleLink := operatorTaintedLinkedTask("predecessor", "predecessor-uid", workspace)
 	freshContinuation := operatorTaintTestTask(map[string]string{acpExecutionWorkspaceUIDAnnotation: "fresh-ws-uid"})

@@ -41,15 +41,17 @@ func acpTaskOperatorTainted(ctx context.Context, reader client.Reader, task *cor
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: latest.Namespace, Name: name}, workspace); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("read ExecutionWorkspace operator taint: %w", err)
 		}
-		return false, fmt.Errorf("read ExecutionWorkspace operator taint: %w", err)
+	} else if string(workspace.UID) == uid && operatoraccess.Tainted(workspace.Annotations) {
+		return true, nil
 	}
-	if string(workspace.UID) != uid {
-		return false, nil
-	}
-	return acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	// The linked Tasks are consulted by the Task's recorded incarnation, not
+	// the one the name currently resolves to: a delayed or recovery
+	// publication still carries data from that incarnation after it was
+	// deleted or replaced.
+	return acpIncarnationLinkedTaskTainted(ctx, reader, latest.Namespace, name, types.UID(uid))
 }
 
 // acpWorkspaceOperatorTainted reports whether operator access tainted this
@@ -79,14 +81,26 @@ func acpWorkspaceOperatorTainted(
 		// the API server never stored.
 		return false, nil
 	}
+	return acpIncarnationLinkedTaskTainted(ctx, reader, workspace.Namespace, workspace.Name, workspace.UID)
+}
+
+// acpIncarnationLinkedTaskTainted reports whether any Task linked to the
+// exact workspace incarnation (name and UID) carries the operator taint,
+// whether or not that incarnation still exists. It fails closed on read errors.
+func acpIncarnationLinkedTaskTainted(
+	ctx context.Context,
+	reader client.Reader,
+	namespace, name string,
+	uid types.UID,
+) (bool, error) {
 	tasks := &corev1alpha1.TaskList{}
-	if err := reader.List(ctx, tasks, client.InNamespace(workspace.Namespace),
-		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: workspace.Name}); err != nil {
-		return false, fmt.Errorf("read operator taint of Tasks linked to ExecutionWorkspace %s: %w", workspace.Name, err)
+	if err := reader.List(ctx, tasks, client.InNamespace(namespace),
+		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: name}); err != nil {
+		return false, fmt.Errorf("read operator taint of Tasks linked to ExecutionWorkspace %s: %w", name, err)
 	}
 	for i := range tasks.Items {
 		linked := &tasks.Items[i]
-		if strings.TrimSpace(linked.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(workspace.UID) &&
+		if strings.TrimSpace(linked.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(uid) &&
 			operatoraccess.Tainted(linked.Annotations) {
 			return true, nil
 		}
