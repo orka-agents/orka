@@ -958,3 +958,33 @@ func TestRepositoryMonitorReviewFeedbackCountsOmittedFeedbackWithAuthority(t *te
 		})
 	}
 }
+
+// An unresolved thread whose fetched comments are all left out, here by bots
+// that are not allowlisted, still counts when it has replies that were not
+// read: they may hold feedback that could start a repair. One whose replies
+// were all read does not.
+func TestRepositoryMonitorReviewFeedbackCountsLeftOutThreadsWithUnreadReplies(t *testing.T) {
+	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(nil)
+	for _, tc := range []struct {
+		name  string
+		total int
+		want  int
+	}{
+		{name: "unread replies", total: 30, want: 1},
+		{name: "every reply read", total: 21, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			comments := make([]repositoryMonitorFeedbackCommentNode, 0, 21)
+			for i := range 21 {
+				comments = append(comments, repositoryMonitorFeedbackTestComment(100+i, "automation", "Bot", "automated note", i))
+			}
+			thread := repositoryMonitorFeedbackTestThread("T1", 10, false, comments...)
+			thread.Recent.Nodes = comments[1:]
+			thread.Root.TotalCount = tc.total
+			snapshot := repositoryMonitorFeedbackTestNormalize(repositoryMonitorRawReviewFeedback{threads: []repositoryMonitorFeedbackThreadNode{thread}}, nil, repositoryMonitorReviewFeedbackPolicy{MinPermission: "write"}, permissionOf)
+			if len(snapshot.Threads) != 0 || snapshot.omittedFeedbackWithAuthority() != tc.want {
+				t.Fatalf("threads = %d, omitted feedback with authority = %d, want %d", len(snapshot.Threads), snapshot.omittedFeedbackWithAuthority(), tc.want)
+			}
+		})
+	}
+}

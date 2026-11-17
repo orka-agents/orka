@@ -150,9 +150,10 @@ type repositoryMonitorReviewFeedbackSnapshot struct {
 	// was not read to why: the lookup failed, or the lookup limit was
 	// reached. Whether they may start a repair is unknown, not refused.
 	unverified map[string]string
-	// omittedWithAuthority counts the threads and reviews the budget left
-	// out that hold feedback by an author with the authority to start a
-	// repair, or a thread whose own omitted comments may hide such feedback.
+	// omittedWithAuthority counts the threads and reviews left out of the
+	// snapshot, by its budget or because nothing in them could be shown,
+	// that hold feedback by an author with the authority to start a repair,
+	// or a thread whose own omitted comments may hide such feedback.
 	omittedWithAuthority int
 }
 
@@ -922,8 +923,14 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 	normalizer.lookUpStartCandidates(raw.threads, currentReviews, orkaReviews)
 	var threads []repositoryMonitorFeedbackPendingThread
 	for _, node := range raw.threads {
-		if pending, ok := normalizer.thread(node, orkaReviews); ok {
+		pending, ok, hides := normalizer.thread(node, orkaReviews)
+		switch {
+		case ok:
 			threads = append(threads, pending)
+		case hides:
+			// A thread left out before placement can still hide feedback
+			// that could start a repair.
+			snapshot.omittedWithAuthority++
 		}
 	}
 	var reviews []repositoryMonitorFeedbackPendingReview
@@ -1062,11 +1069,14 @@ func repositoryMonitorFeedbackSnapshotBaseSize(snapshot repositoryMonitorReviewF
 }
 
 // thread normalizes one review thread, or reports false when it has nothing
-// to include.
-func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedbackThreadNode, orkaReviews map[string]bool) (repositoryMonitorFeedbackPendingThread, bool) {
+// to include. For a thread it leaves out, hides reports whether the thread
+// may still hold feedback that could start a repair: an unresolved thread
+// that Orka's findings did not open with replies that were not read, or one
+// that had authorized feedback but could not fit its budget.
+func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedbackThreadNode, orkaReviews map[string]bool) (pending repositoryMonitorFeedbackPendingThread, ok, hides bool) {
 	id := repositoryMonitorFeedbackNodeID(node.ID)
 	if node.IsResolved || id == "" {
-		return repositoryMonitorFeedbackPendingThread{}, false
+		return repositoryMonitorFeedbackPendingThread{}, false, false
 	}
 	thread := repositoryMonitorFeedbackThread{ID: repositoryMonitorFeedbackKindThread + ":" + id, Outdated: node.IsOutdated, Side: repositoryMonitorEvidenceToken(node.DiffSide)}
 	thread.Path, _ = repositoryMonitorEvidenceLine(node.Path, repositoryMonitorCIEvidencePathBytes)
@@ -1124,14 +1134,15 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		}
 		thread.Comments = append(thread.Comments, comment)
 	}
+	unread := thread.OmittedComments > 0 && !thread.OrkaFindingThread
 	if len(thread.Comments) == 0 {
-		return repositoryMonitorFeedbackPendingThread{}, false
+		return repositoryMonitorFeedbackPendingThread{}, false, unread
 	}
-	authorized, ok := fitRepositoryMonitorFeedbackThread(&thread, authorized)
-	if !ok {
-		return repositoryMonitorFeedbackPendingThread{}, false
+	authorized, fits := fitRepositoryMonitorFeedbackThread(&thread, authorized)
+	if !fits {
+		return repositoryMonitorFeedbackPendingThread{}, false, unread || len(authorized) > 0
 	}
-	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized}, true
+	return repositoryMonitorFeedbackPendingThread{thread: thread, authorized: authorized}, true, false
 }
 
 // fitRepositoryMonitorFeedbackThread keeps thread within its own budget by
