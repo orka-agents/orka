@@ -473,7 +473,7 @@ func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *test
 	if err := db.CreateReviewRecord(ctx, review); err != nil {
 		t.Fatal(err)
 	}
-	prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, monitor, "fix_ci", "orka-agents/orka", pr, item)
+	prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, monitor, "fix_ci", pr, item)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *test
 			case "missing":
 				otherItem.LastReviewID = "absent"
 			}
-			prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, &otherMonitor, "fix_ci", "orka-agents/orka", otherPR, &otherItem)
+			prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, &otherMonitor, "fix_ci", otherPR, &otherItem)
 			if err != nil {
 				t.Fatal(err)
 			}

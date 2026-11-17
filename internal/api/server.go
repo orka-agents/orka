@@ -435,6 +435,9 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
 	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
 	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	// Cross-Task attention read models, computed on read for one namespace.
+	api.Get("/attention", s.handlers.ListAttention)
+	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
