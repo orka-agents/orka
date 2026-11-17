@@ -114,7 +114,11 @@ type repositoryMonitorCIEvidence struct {
 	Reason        string `json:"reason,omitempty"`
 	// ChecksIncomplete means GitHub returned fewer head checks or statuses
 	// than it counted, so checks may not list every failure.
-	ChecksIncomplete     bool                                 `json:"checksIncomplete,omitempty"`
+	ChecksIncomplete bool `json:"checksIncomplete,omitempty"`
+	// TextOmitted means the monitor does not opt in to CI free text
+	// (spec.repair.ciEvidence.text): check output, annotation titles and
+	// messages, and commit status descriptions are left out.
+	TextOmitted          bool                                 `json:"textOmitted,omitempty"`
 	Checks               []repositoryMonitorCheckEvidence     `json:"checks"`
 	OmittedChecks        int                                  `json:"omittedChecks,omitempty"`
 	PendingChecks        []repositoryMonitorPendingCheckEntry `json:"pendingChecks,omitempty"`
@@ -275,6 +279,8 @@ type repositoryMonitorEvidenceFetch struct {
 	tokenErr                    error
 	rateLimited                 bool
 	annotationChecks            int
+	// text means the monitor opts in to CI free text.
+	text bool
 }
 
 // repositoryMonitorCIEvidenceFor normalizes the introduced failures of one
@@ -285,7 +291,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 	evidence.ChecksIncomplete = failures.headIncomplete
 	annotationCtx, cancel := context.WithTimeout(ctx, repositoryMonitorCIEvidenceFetchBudget)
 	defer cancel()
-	fetch := &repositoryMonitorEvidenceFetch{}
+	fetch := &repositoryMonitorEvidenceFetch{text: monitor.Spec.Repair.CIEvidence.Text}
+	evidence.TextOmitted = !fetch.text
 	fetch.token, fetch.tokenErr = r.repositoryMonitorGitHubToken(ctx, monitor)
 	if owner, name, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL); err == nil {
 		fetch.owner, fetch.repo = owner, name
@@ -370,9 +377,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckEvidenceFor(ctx cont
 	}
 	if failure.source == repositoryMonitorCIFailureSourceStatus {
 		entry.Kind = repositoryMonitorEvidenceKindCommitStatus
-		entry.URL = repositoryMonitorEvidenceURL(failure.url)
-		if entry.Description, cut = repositoryMonitorEvidenceLine(failure.description, repositoryMonitorCIEvidenceDescriptionBytes); cut {
-			entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldDesc)
+		entry.URL = repositoryMonitorEvidenceGitHubCheckURL(failure.url, fetch.owner, fetch.repo)
+		if fetch.text {
+			if entry.Description, cut = repositoryMonitorEvidenceLine(failure.description, repositoryMonitorCIEvidenceDescriptionBytes); cut {
+				entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldDesc)
+			}
 		}
 		// A commit status carries only a description and a target URL.
 		entry.Availability = repositoryMonitorEvidenceUnsupported
@@ -385,12 +394,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckEvidenceFor(ctx cont
 		entry.Availability, entry.Reason = repositoryMonitorEvidenceStale, repositoryMonitorEvidenceReasonHeadMismatch
 		return entry
 	}
-	entry.URL = repositoryMonitorEvidenceURL(failure.url)
-	if entry.Title, cut = repositoryMonitorEvidenceLine(failure.title, repositoryMonitorCIEvidenceTitleBytes); cut {
-		entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldTitle)
-	}
-	if entry.Summary, cut = repositoryMonitorEvidenceText(failure.summary, repositoryMonitorCIEvidenceSummaryBytes, repositoryMonitorCIEvidenceSummaryLines); cut {
-		entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldSummary)
+	entry.URL = repositoryMonitorEvidenceGitHubCheckURL(failure.url, fetch.owner, fetch.repo)
+	if fetch.text {
+		if entry.Title, cut = repositoryMonitorEvidenceLine(failure.title, repositoryMonitorCIEvidenceTitleBytes); cut {
+			entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldTitle)
+		}
+		if entry.Summary, cut = repositoryMonitorEvidenceText(failure.summary, repositoryMonitorCIEvidenceSummaryBytes, repositoryMonitorCIEvidenceSummaryLines); cut {
+			entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldSummary)
+		}
 	}
 	entry.AnnotationCount = max(failure.annotationCount, 0)
 	if entry.AnnotationCount > 0 {
@@ -450,10 +461,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAddCheckAnnotations(ctx c
 		var cut bool
 		item.Path, cut = repositoryMonitorEvidenceLine(annotation.Path, repositoryMonitorCIEvidencePathBytes)
 		textCut = textCut || cut
-		item.Title, cut = repositoryMonitorEvidenceLine(annotation.Title, repositoryMonitorCIEvidenceAnnotationTitleBytes)
-		textCut = textCut || cut
-		item.Message, cut = repositoryMonitorEvidenceText(annotation.Message, repositoryMonitorCIEvidenceAnnotationBytes, repositoryMonitorCIEvidenceAnnotationLines)
-		textCut = textCut || cut
+		if fetch.text {
+			item.Title, cut = repositoryMonitorEvidenceLine(annotation.Title, repositoryMonitorCIEvidenceAnnotationTitleBytes)
+			textCut = textCut || cut
+			item.Message, cut = repositoryMonitorEvidenceText(annotation.Message, repositoryMonitorCIEvidenceAnnotationBytes, repositoryMonitorCIEvidenceAnnotationLines)
+			textCut = textCut || cut
+		}
 		if level := strings.ToLower(strings.TrimSpace(annotation.AnnotationLevel)); repositoryMonitorAnnotationLevelRank(level) < 3 {
 			item.Level = level
 		}
@@ -601,6 +614,32 @@ func repositoryMonitorEvidenceURL(raw string) string {
 		return ""
 	}
 	return out
+}
+
+// repositoryMonitorEvidenceGitHubCheckPathPattern matches the path of a
+// GitHub check run or Actions page: a check run (/OWNER/REPO/runs/ID), an
+// Actions run, optionally one attempt of it, or one of its jobs.
+var repositoryMonitorEvidenceGitHubCheckPathPattern = regexp.MustCompile(`^/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:runs/[0-9]{1,20}|actions/runs/[0-9]{1,20}(?:/attempts/[0-9]{1,6})?(?:/job/[0-9]{1,20})?)$`)
+
+// repositoryMonitorEvidenceGitHubCheckURL keeps a link only when it is a
+// github.com check run or Actions page of the monitored repository, whose
+// path holds only the repository and numeric IDs. Any other link, such as a
+// commit status target_url on an external CI server, is dropped whole: its
+// path can carry a credential no check recognizes.
+func repositoryMonitorEvidenceGitHubCheckURL(raw, owner, repo string) string {
+	out := repositoryMonitorEvidenceURL(raw)
+	if out == "" || owner == "" || repo == "" {
+		return ""
+	}
+	parsed, err := url.Parse(out)
+	if err != nil || parsed.Scheme != urlSchemeHTTPS || !strings.EqualFold(parsed.Host, "github.com") || parsed.RawPath != "" {
+		return ""
+	}
+	match := repositoryMonitorEvidenceGitHubCheckPathPattern.FindStringSubmatch(parsed.Path)
+	if match == nil || !strings.EqualFold(match[1], owner) || !strings.EqualFold(match[2], repo) {
+		return ""
+	}
+	return "https://github.com" + parsed.Path
 }
 
 // repositoryMonitorANSIEscapePattern matches ANSI CSI, OSC, and other escape

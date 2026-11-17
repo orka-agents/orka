@@ -49,9 +49,12 @@ var (
 		// Google OAuth access tokens and API keys, Stripe secret and
 		// restricted keys, GitLab, npm, Vault, and Docker Hub tokens.
 		`ya29\.[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|gl(?:pat|ptt|dt|rt)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{30,}|hv[sbr]\.[A-Za-z0-9_-]{20,}|dckr_pat_[A-Za-z0-9_-]{20,})\b`)
-	// Webhook URLs whose path is the credential: Slack, Discord, and
-	// Microsoft Teams incoming webhooks.
-	webhookURLPathRe = regexp.MustCompile(`(?i)(\bhooks\.slack\.com/(?:services|workflows|triggers)/|\bdiscord(?:app)?\.com/api/webhooks/|\.webhook\.office\.com/webhookb2/)[A-Za-z0-9_./@-]+`)
+	// Webhook URL paths that are the credential, matched by their shape
+	// rather than their host so a proxied or relayed webhook is redacted
+	// too: Slack (/services/TEAM/BOT/SECRET, and workflow and trigger
+	// URLs), Discord (/api/webhooks/ID/TOKEN), and Microsoft Teams
+	// (/webhookb2/...) incoming webhooks.
+	webhookURLPathRe = regexp.MustCompile(`(/(?:services|workflows|triggers)/)T[A-Z0-9]{6,}/[A-Za-z0-9_/-]+|(/api/webhooks/)[0-9]{6,}/[A-Za-z0-9_-]+|(/webhookb2/)[A-Za-z0-9_./@-]+`)
 	// Azure Storage and Service Bus connection string keys.
 	azureConnectionKeyRe = regexp.MustCompile(`(?i)\b((?:AccountKey|SharedAccessKey|SharedAccessSignature)\s*=\s*)[^;\s"']+`)
 	jwtRe                = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
@@ -88,7 +91,7 @@ func SensitiveText(s string) string {
 	s = naturalLanguageSecretRe.ReplaceAllString(s, `${1}`+redactedValue)
 	s = urlCredentialRe.ReplaceAllString(s, `${1}`+redactedValue+`@`)
 	s = signedURLQueryRe.ReplaceAllString(s, `${1}`+redactedValue)
-	s = webhookURLPathRe.ReplaceAllString(s, `${1}`+redactedValue)
+	s = webhookURLPathRe.ReplaceAllString(s, `${1}${2}${3}`+redactedValue)
 	s = azureConnectionKeyRe.ReplaceAllString(s, `${1}`+redactedValue)
 	s = wellKnownTokenRe.ReplaceAllString(s, redactedValue)
 	s = jwtRe.ReplaceAllString(s, redactedValue)

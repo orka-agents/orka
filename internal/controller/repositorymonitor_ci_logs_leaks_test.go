@@ -126,3 +126,39 @@ func TestRepositoryMonitorCILogWithholdsMultilineValuesPastTheWindow(t *testing.
 		})
 	}
 }
+
+// The text and logs opt-ins are independent: log excerpts never bring check
+// text along, and check text never brings a log.
+func TestRepositoryMonitorCIEvidenceTextAndLogsAreIndependent(t *testing.T) {
+	for _, tc := range []struct{ text, logs bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+		t.Run(fmt.Sprintf("text=%t logs=%t", tc.text, tc.logs), func(t *testing.T) {
+			blobs := newRepositoryMonitorCILogBlobServer(t)
+			blobs.logs["/logs/961"] = repositoryMonitorCILogLeakLog("--- FAIL: TestFromLog (0.01s)")
+			run := repositoryMonitorEvidenceTestRun(961, "unit", "completed", "failure", 1)
+			run["output"].(map[string]any)["summary"] = "--- FAIL: TestFromSummary (0.01s)"
+			github := &repositoryMonitorRepairLabelsGitHub{
+				runs:            map[string][]map[string]any{"head51": {run}},
+				annotations:     map[int64][]map[string]any{961: {{"path": "a.go", "start_line": 3, "annotation_level": "failure", "message": "annotation text"}}},
+				jobs:            map[int64]map[string]any{961: repositoryMonitorCILogTestJob(961, "head51")},
+				jobLogLocations: map[int64]string{961: blobs.url("/logs/961")},
+			}
+			reconciler, monitor := repositoryMonitorEvidenceTestReconciler(t, github, "ci-text-logs")
+			monitor.Spec.Repair.CIEvidence.Text, monitor.Spec.Repair.CIEvidence.Logs = tc.text, tc.logs
+			reconciler.ciLogBlobClient = blobs.client()
+			pr := repositoryMonitorPullRequest{Number: 51, HeadSHA: "head51"}
+			input := reconciler.buildRepositoryMonitorRepairCIInput(context.Background(), monitor, "orka-agents/orka", pr)
+			prompt, err := reconciler.buildRepositoryMonitorRepairPromptWithCI(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{}, &input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for marker, want := range map[string]bool{"TestFromSummary": tc.text, "annotation text": tc.text, "TestFromLog": tc.logs} {
+				if strings.Contains(prompt, marker) != want {
+					t.Fatalf("prompt has %q = %t, want %t:\n%s", marker, !want, want, prompt)
+				}
+			}
+			if input.Evidence.TextOmitted == tc.text {
+				t.Fatalf("textOmitted = %t with text=%t", input.Evidence.TextOmitted, tc.text)
+			}
+		})
+	}
+}
