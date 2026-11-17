@@ -731,33 +731,58 @@ func (t *ahpTurn) thought(content string) {
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatReasoningAction{Type: ahptypes.ActionTypeChatReasoning, TurnId: t.id, PartId: t.thoughtPart, Content: content}})
 }
 
-// ahpKindToolNames names a call the runtime described only by its ACP kind,
-// with no input. Clients draw a few tool names as typed calls that read a path
-// or a pattern from the input: the Copilot app shows a "read" as "View
-// unknown" without one. Such a call gets a name no client types instead, and
-// clients show its title.
-var ahpKindToolNames = map[string]string{
-	ahpToolKindRead: "read_files", ahpToolKindSearch: "search_files", ahpToolKindEdit: "edit_files",
-}
-
-// ACP tool kinds clients draw as typed calls.
-const (
-	ahpToolKindRead   = "read"
-	ahpToolKindSearch = "search"
-	ahpToolKindEdit   = "edit"
-)
-
-func ahpToolName(update *harnessv2.ToolCallUpdate, input json.RawMessage) string {
-	if strings.TrimSpace(update.Name) != "" {
-		return update.Name
+// ahpTypedToolFields lists tool names clients draw as typed calls, with the
+// input fields each reads. The Copilot app draws a "read" or "view" as a file
+// view of the input's path, and shows "View unknown" without one; the Copilot
+// runtime names its calls by ACP kind ("read", "search", "edit") and sends no
+// input. A call so named whose input lacks every field is renamed, so clients
+// show its title instead.
+var ahpTypedToolFields = func() map[string][]string {
+	fields := map[string][]string{}
+	for _, group := range []struct{ names, fields string }{
+		{"read read_file view show_file", "file_path path"},
+		{"search grep glob rg", "pattern query"},
+		{"edit create write write_file str_replace_editor", "file_path path"},
+	} {
+		for name := range strings.FieldsSeq(group.names) {
+			fields[name] = strings.Fields(group.fields)
+		}
 	}
-	if strings.TrimSpace(update.Kind) == "" {
+	return fields
+}()
+
+// ahpToolName names a call for clients: the runtime's tool name, else its
+// ACP kind, renamed when clients would draw it as a typed call it cannot fill.
+func ahpToolName(update *harnessv2.ToolCallUpdate, input json.RawMessage) string {
+	name := update.Name
+	if strings.TrimSpace(name) == "" {
+		name = update.Kind
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return ahpToolFallbackName
 	}
-	if name, ok := ahpKindToolNames[strings.ToLower(strings.TrimSpace(update.Kind))]; ok && len(input) == 0 {
+	key := strings.ToLower(name)
+	fields, typed := ahpTypedToolFields[key]
+	if !typed || ahpInputHasAny(input, fields) {
 		return name
 	}
-	return update.Kind
+	return key + "_call"
+}
+
+// ahpInputHasAny reports whether a JSON object input has a non-empty string
+// in any of the fields.
+func ahpInputHasAny(input json.RawMessage, fields []string) bool {
+	var values map[string]any
+	if len(input) == 0 || json.Unmarshal(input, &values) != nil {
+		return false
+	}
+	for _, field := range fields {
+		if value, ok := values[field].(string); ok && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *ahpTurn) startTool(id, name, title string) *ahpToolCall {

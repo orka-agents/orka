@@ -3543,9 +3543,9 @@ func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 }
 
 // A call the runtime announces before describing it starts once it is
-// described, so clients show its title, and a call known only by a kind that
-// clients draw as a typed call reading its input is named so they do not.
-func TestAHPToolCallStartsDescribedAndAvoidsTypedKindNames(t *testing.T) {
+// described, so clients show its title, and a call named as a typed call
+// without the input that call reads is renamed so clients show its title.
+func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T) {
 	emitter := &ahpActionsEmitter{}
 	turn := &ahpTurn{id: "turn-1", ctx: t.Context(), emit: emitter, tools: map[string]*ahpToolCall{}}
 	starts := func() []*ahptypes.ChatToolCallStartAction {
@@ -3559,6 +3559,14 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedKindNames(t *testing.T) {
 		}
 		return out
 	}
+	startOf := func(id string) *ahptypes.ChatToolCallStartAction {
+		for _, start := range starts() {
+			if start.ToolCallId == id {
+				return start
+			}
+		}
+		return nil
+	}
 
 	// Announced without a title: nothing is shown yet.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Status: harnessv2.ToolCallStatusPending})
@@ -3567,37 +3575,44 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedKindNames(t *testing.T) {
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Title: "Viewing README.md", Status: harnessv2.ToolCallStatusPending})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Status: harnessv2.ToolCallStatusCompleted})
 	require.Len(t, starts(), 1)
-	require.Equal(t, "read_files", starts()[0].ToolName)
-	require.Equal(t, "Viewing README.md", starts()[0].DisplayName)
+	require.Equal(t, "read_call", startOf("read-1").ToolName)
+	require.Equal(t, "Viewing README.md", startOf("read-1").DisplayName)
 
 	// A call that runs without ever being described still starts, by its kind.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Kind: "search", Status: harnessv2.ToolCallStatusPending})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Status: harnessv2.ToolCallStatusInProgress})
-	require.Len(t, starts(), 2)
-	require.Equal(t, "search_files", starts()[1].ToolName)
+	require.Equal(t, "search_call", startOf("search-1").ToolName)
 
-	// Input announced early is kept: with it, the kind's own name is right.
-	input := json.RawMessage(`{"path":"go.mod"}`)
-	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-2", Kind: "read", RawInput: input, Status: harnessv2.ToolCallStatusPending})
-	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-2", Title: "Viewing go.mod", Status: harnessv2.ToolCallStatusInProgress})
-	require.Len(t, starts(), 3)
-	require.Equal(t, "read", starts()[2].ToolName)
-	require.JSONEq(t, string(input), string(turn.tools["read-2"].input))
+	// The Copilot runtime names its calls by their kind and sends no input.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-2", Name: "read", Kind: "read", Title: "Viewing go.sum", Status: harnessv2.ToolCallStatusPending})
+	require.Equal(t, "read_call", startOf("read-2").ToolName)
+	// A search with a path but no pattern is renamed too.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "grep-1", Name: "grep", Title: "Searching", RawInput: json.RawMessage(`{"path":"."}`), Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "grep_call", startOf("grep-1").ToolName)
+
+	// With the input its typed call reads, a name is kept: announced early,
+	// the input is kept until the call starts.
+	input := json.RawMessage(`{"file_path":"README.md"}`)
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Name: "Read", Kind: "read", RawInput: input, Status: harnessv2.ToolCallStatusPending})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Title: "Read File", Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "Read", startOf("read-3").ToolName)
+	require.JSONEq(t, string(input), string(turn.tools["read-3"].input))
 	require.Empty(t, turn.heldTools)
 
-	// The runtime's own tool name, and other kinds, pass through.
+	// Other names and kinds pass through.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-1", Name: "bash", Kind: "execute", Title: "Run tests", Status: harnessv2.ToolCallStatusInProgress})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "exec-1", Name: "execute", Kind: "execute", Title: "List files", Status: harnessv2.ToolCallStatusInProgress})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "other-1", Kind: "other", Title: "Thinking", Status: harnessv2.ToolCallStatusInProgress})
-	require.Equal(t, "bash", starts()[3].ToolName)
-	require.Equal(t, "other", starts()[4].ToolName)
+	require.Equal(t, "bash", startOf("bash-1").ToolName)
+	require.Equal(t, "execute", startOf("exec-1").ToolName)
+	require.Equal(t, "other", startOf("other-1").ToolName)
 
 	// A held call that asks for permission starts with what it was announced
 	// with, and the confirmation shows its input.
 	command := json.RawMessage(`{"command":"make test"}`)
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-2", Kind: "execute", RawInput: command, Status: harnessv2.ToolCallStatusPending})
 	turn.onApproval(&liveevents.Approval{ID: "approval-1", ToolCallID: "bash-2", State: liveevents.ApprovalPending})
-	require.Len(t, starts(), 6)
-	require.Equal(t, "execute", starts()[5].ToolName)
+	require.Equal(t, "execute", startOf("bash-2").ToolName)
 	require.JSONEq(t, string(command), string(turn.tools["bash-2"].input))
 	require.Empty(t, turn.heldTools)
 }
