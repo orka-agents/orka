@@ -92,24 +92,77 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 		}
 	}
 
+	task.Status.WebhookDelivery = delivery
+	return w.attemptNotice(ctx, status, task, terminalWebhookRecord, notice, superseded, w.terminalRetry(), func(task *corev1alpha1.Task) {
+		task.Status.WebhookDelivered = true
+	})
+}
+
+// webhookRecordRef returns the live delivery record of one notice in task's
+// status, or nil when it is gone. Every status write replaces the decoded
+// status, so the record is looked up again after each one.
+type webhookRecordRef func(task *corev1alpha1.Task) *corev1alpha1.TaskWebhookDelivery
+
+func terminalWebhookRecord(task *corev1alpha1.Task) *corev1alpha1.TaskWebhookDelivery {
+	return task.Status.WebhookDelivery
+}
+
+// webhookRetryPolicy bounds the attempts of one notice.
+type webhookRetryPolicy struct {
+	maxAttempts int32
+	maxBackoff  time.Duration
+	// signingUnavailable, when set, runs on the Task while signing keys are
+	// unavailable, before the notice is kept pending. It may retire notices
+	// whose wait for keys has ended, including this one, and reports whether
+	// it changed status and how long until the next such retirement (zero
+	// for none). Without it, as for terminal notices, a notice waits until
+	// signing is fixed.
+	signingUnavailable func(ctx context.Context, task *corev1alpha1.Task, now time.Time) (bool, time.Duration)
+}
+
+func (w *WebhookNotifier) terminalRetry() webhookRetryPolicy {
+	return webhookRetryPolicy{maxAttempts: w.maxAttempts, maxBackoff: w.maxBackoff}
+}
+
+// attemptNotice advances one pending notice, already placed in task status,
+// by at most one attempt. It applies the destination policy, the attempt
+// bound, and the signing requirement, claims the attempt durably under a
+// lease, sends the signed notice, and records the result. fresh means the
+// record was just created and holds no attempt yet. delivered runs on the
+// Task before the success is persisted.
+//
+//nolint:gocyclo // Every refusal before the send stays inline so none can be skipped.
+func (w *WebhookNotifier) attemptNotice(
+	ctx context.Context,
+	status taskStatusWriter,
+	task *corev1alpha1.Task,
+	record webhookRecordRef,
+	notice webhookNotice,
+	fresh bool,
+	retry webhookRetryPolicy,
+	delivered func(*corev1alpha1.Task),
+) (time.Duration, error) {
+	log := logf.FromContext(ctx)
+	delivery := record(task)
+	if delivery == nil {
+		return 0, errors.New("webhook notice record is missing from Task status")
+	}
 	if _, _, policyErr := validateWebhookURLPolicy(task.Spec.WebhookURL, task.Namespace, w.policy); policyErr != nil {
 		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
 		delivery.NextAttemptTime = nil
 		delivery.LastError = boundedWebhookError(policyErr)
-		task.Status.WebhookDelivery = delivery
 		log.Info("webhook destination rejected by policy", "deliveryID", delivery.DeliveryID, "reason", delivery.LastError)
 		return 0, status.Update(ctx, task)
 	}
 
 	// An attempt whose result was never recorded (a restart or a failed status
 	// write) still counts. Never claim past the bound.
-	if !superseded && delivery.Attempts >= w.maxAttempts {
+	if !fresh && delivery.Attempts >= retry.maxAttempts {
 		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
 		delivery.NextAttemptTime = nil
 		if delivery.LastError == "" {
 			delivery.LastError = "webhook delivery attempt limit reached"
 		}
-		task.Status.WebhookDelivery = delivery
 		log.Info("webhook delivery exhausted its attempts", "deliveryID", delivery.DeliveryID, "attempts", delivery.Attempts)
 		return 0, status.Update(ctx, task)
 	}
@@ -121,13 +174,12 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
 		delivery.NextAttemptTime = nil
 		delivery.LastError = boundedWebhookError(errors.New("webhook signing is disabled"))
-		task.Status.WebhookDelivery = delivery
-		logf.FromContext(ctx).Info("webhook delivery skipped: signing is disabled", "deliveryID", delivery.DeliveryID)
+		log.Info("webhook delivery skipped: signing is disabled", "deliveryID", delivery.DeliveryID)
 		return 0, status.Update(ctx, task)
 	}
 	keys, err := w.keys.SigningKeys(ctx)
 	if err != nil {
-		return w.recordSigningUnavailable(ctx, status, task, delivery, superseded, err)
+		return w.recordSigningUnavailable(ctx, status, task, delivery, fresh, retry, err)
 	}
 
 	// Claim the attempt durably before sending. Loading keys can block on
@@ -137,7 +189,7 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	// lets another replica claim the next attempt.
 	leaseCtx, cancelLease := context.WithTimeout(ctx, w.attemptLease)
 	defer cancelLease()
-	now = w.now()
+	now := w.now()
 	attempt := delivery.Attempts + 1
 	claimedAt := metav1.NewTime(now)
 	// Status times are serialized at whole seconds. Round the persisted lease
@@ -147,29 +199,34 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	delivery.Attempts = attempt
 	delivery.LastAttemptTime = &claimedAt
 	delivery.NextAttemptTime = &lease
-	task.Status.WebhookDelivery = delivery
 	if err := status.Update(leaseCtx, task); err != nil {
 		return 0, err
 	}
 
 	result := w.deliver(leaseCtx, task, notice, attempt, keys.Current)
 
-	delivery = task.Status.WebhookDelivery
+	delivery = record(task)
+	if delivery == nil {
+		// The claim persisted, so its lease still bounds the next attempt.
+		return 0, errors.New("webhook notice record is missing from Task status after its claim")
+	}
 	delivery.LastStatusCode = result.StatusCode
 	requeue := time.Duration(0)
 	if result.Err == nil {
 		delivery.State = corev1alpha1.TaskWebhookDeliveryDelivered
 		delivery.NextAttemptTime = nil
 		delivery.LastError = ""
-		task.Status.WebhookDelivered = true
+		if delivered != nil {
+			delivered(task)
+		}
 	} else {
 		delivery.LastError = boundedWebhookError(result.Err)
-		if attempt >= w.maxAttempts {
+		if attempt >= retry.maxAttempts {
 			delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
 			delivery.NextAttemptTime = nil
 			log.Info("webhook delivery exhausted its attempts", "deliveryID", delivery.DeliveryID, "attempts", attempt, "reason", delivery.LastError)
 		} else {
-			requeue = w.backoff(attempt)
+			requeue = w.backoffUpTo(attempt, retry.maxBackoff)
 			next := metav1.NewTime(w.now().Add(requeue))
 			delivery.NextAttemptTime = &next
 			log.Info("webhook delivery attempt failed", "deliveryID", delivery.DeliveryID, "attempt", attempt, "retryIn", requeue, "reason", delivery.LastError)
@@ -256,27 +313,38 @@ func taskWebhookEvent(task *corev1alpha1.Task) (string, webhookNoticeDisposition
 	return webhookEventType(corev1alpha1.TaskPhaseFailed), webhookNoticeDue
 }
 
-// recordSigningUnavailable keeps the notice pending without consuming an
-// attempt: nothing is ever sent unsigned, and a configuration fix resumes
-// delivery.
+// recordSigningUnavailable keeps the notice, already placed in task status,
+// pending without consuming an attempt: nothing is ever sent unsigned, and a
+// configuration fix resumes delivery. A retry policy with a signing hook may
+// instead retire the notice unsent; it then reports zero so the caller moves
+// on to the next notice.
 func (w *WebhookNotifier) recordSigningUnavailable(
 	ctx context.Context,
 	status taskStatusWriter,
 	task *corev1alpha1.Task,
 	delivery *corev1alpha1.TaskWebhookDelivery,
 	changed bool,
+	retry webhookRetryPolicy,
 	cause error,
 ) (time.Duration, error) {
 	logf.FromContext(ctx).Error(cause, "webhook signing key unavailable; delivery deferred", "deliveryID", delivery.DeliveryID)
+	requeue := webhookSigningRetryInterval
+	if retry.signingUnavailable != nil {
+		expired, next := retry.signingUnavailable(ctx, task, w.now())
+		changed = changed || expired
+		requeue = minPositiveDuration(requeue, next)
+	}
+	if delivery.State != corev1alpha1.TaskWebhookDeliveryPending {
+		return 0, status.Update(ctx, task)
+	}
 	message := boundedWebhookError(errors.New("webhook signing key is unavailable"))
-	if changed || delivery.LastError != message || task.Status.WebhookDelivery == nil {
+	if changed || delivery.LastError != message {
 		delivery.LastError = message
-		task.Status.WebhookDelivery = delivery
 		if err := status.Update(ctx, task); err != nil {
 			return 0, err
 		}
 	}
-	return webhookSigningRetryInterval, nil
+	return requeue, nil
 }
 
 // ceilToSecond rounds t up to the next whole second.
