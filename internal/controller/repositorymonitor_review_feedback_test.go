@@ -974,7 +974,7 @@ func TestRepositoryMonitorReviewFeedbackCountsLeftOutThreadsWithUnreadReplies(t 
 		{name: "every reply read", total: 21, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var comments []repositoryMonitorFeedbackCommentNode
+			comments := make([]repositoryMonitorFeedbackCommentNode, 0, 21)
 			for i := range 21 {
 				comments = append(comments, repositoryMonitorFeedbackTestComment(100+i, "automation", "Bot", "automated note", i))
 			}
