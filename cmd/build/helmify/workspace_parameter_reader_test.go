@@ -105,9 +105,7 @@ func TestStaticChartAggregatesWorkspaceParameterReadsOnlyForDispatch(t *testing.
 		{name: "dispatch disabled"},
 		{name: "MCP only", args: []string{
 			"--set", "controller.substrate.mcpToolsEnabled=true",
-			"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
-			"--set-string", "controller.substrate.apiCredentials.bearerTokenKey=token",
-			"--set-string", "controller.substrate.apiCredentials.caKey=ca",
+			"--set", "controller.substrate.podCertificate.enabled=true",
 		}},
 		{name: "RBAC disabled", args: []string{
 			"--set", "controller.executionWorkspace.dispatchEnabled=true",

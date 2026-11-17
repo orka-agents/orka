@@ -550,6 +550,12 @@ type TaskStatus struct {
 	// +optional
 	ChildTasks []ChildTaskStatus `json:"childTasks,omitempty"`
 
+	// Wait records a data-only park requested by this Task's agent turn: the
+	// awaited event, its deadline, and the continuation Task that resumes the
+	// Session once the event arrives. Process memory is never preserved.
+	// +optional
+	Wait *TaskWaitStatus `json:"wait,omitempty"`
+
 	// Conditions represent the current state of the Task
 	// +listType=map
 	// +listMapKey=type
@@ -609,8 +615,9 @@ const (
 	// TaskWebhookDeliveryDelivered means the receiver acknowledged the notice
 	// with a 2xx response.
 	TaskWebhookDeliveryDelivered TaskWebhookDeliveryState = "Delivered"
-	// TaskWebhookDeliveryFailed means the notice was rejected by policy or
-	// exhausted its bounded attempts. It is never retried.
+	// TaskWebhookDeliveryFailed means the notice was rejected by policy,
+	// exhausted its bounded attempts, or belonged to a parked turn whose
+	// continuation now reports instead. It is never retried.
 	TaskWebhookDeliveryFailed TaskWebhookDeliveryState = "Failed"
 )
 

@@ -99,3 +99,10 @@ lease.
 - Each attempt costs two Task status writes, and attempts are bounded.
 - The payload gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`.
   Existing fields are unchanged.
+- 2026-11-16: A parked agent Task (ADR 0041) is `Succeeded` for its own turn
+  while its work continues, so its notice follows `status.wait`. Nothing is sent
+  while the wait is active or after it resumes, since the continuation inherits
+  `spec.webhookURL` and reports. A wait that ends without resuming sends one
+  notice: `task.cancelled` if cancelled, and `task.failed` if expired or if it
+  was abandoned after a successful turn. `phase` in that body stays the Task's own
+  phase. The event set is unchanged.

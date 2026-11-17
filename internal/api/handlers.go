@@ -39,6 +39,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -127,8 +128,11 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
+	// attentionBounds overrides the attention scan bounds; zero uses defaults.
+	attentionBounds attentionBounds
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -156,6 +160,7 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -191,6 +196,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 	}
 }
@@ -456,6 +462,20 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
+// jsonObjectHasField reports whether object has a member that encoding/json
+// decodes into a struct field named field. encoding/json matches field names
+// under strings.EqualFold, which also folds non-ASCII spellings such as U+017F
+// (ſ) to "s", so "RequestedBy" and "requeſtedBy" both fill a field tagged
+// "requestedBy". strings.ToLower or an exact lookup misses some of them.
+func jsonObjectHasField(object map[string]json.RawMessage, field string) bool {
+	for key := range object {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
+}
+
 func rejectRequestedByTampering(body []byte) error {
 	if len(body) == 0 {
 		return nil
@@ -466,28 +486,24 @@ func rejectRequestedByTampering(body []byte) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	for key := range topLevel {
-		switch strings.ToLower(key) {
-		case "requestedby":
-			return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
-		case "transaction":
-			return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
-		}
+	if jsonObjectHasField(topLevel, "requestedBy") {
+		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+	}
+	if jsonObjectHasField(topLevel, "transaction") {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
 	}
 
 	for topKey, specRaw := range topLevel {
-		if strings.ToLower(topKey) != "spec" {
+		if !strings.EqualFold(topKey, "spec") {
 			continue
 		}
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
-			for key := range spec {
-				switch strings.ToLower(key) {
-				case "requestedby":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
-				case "transaction":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
-				}
+			if jsonObjectHasField(spec, "requestedBy") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if jsonObjectHasField(spec, "transaction") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}
@@ -778,6 +794,18 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// taskUIDQueryParam optionally fences a Task route to one Task UID, so a
+// client that resolved a Task earlier never reaches a later Task that reuses
+// its name.
+const taskUIDQueryParam = "uid"
+
+// taskMatchesExpectedUID reports whether the request names no UID or the
+// loaded Task's UID.
+func taskMatchesExpectedUID(c fiber.Ctx, task *corev1alpha1.Task) bool {
+	expected := c.Query(taskUIDQueryParam)
+	return expected == "" || string(task.UID) == expected
+}
+
 // DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -803,8 +831,17 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "deleteTask", task); err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
-	if err := h.client.Delete(ctx, task); err != nil {
+	// Delete exactly the Task that was authorized, never a later Task that
+	// reused its name in the meantime.
+	uid := task.UID
+	if err := h.client.Delete(ctx, task, client.Preconditions{UID: &uid}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete task: %v", err))
 	}
 
@@ -959,6 +996,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
@@ -970,6 +1010,19 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
+	}
+	// Results are stored by name. A UID-fenced read confirms the same Task
+	// still holds the name after the read, so the output is that Task's. The
+	// check reads live: the cache could still hold the original Task after a
+	// same-name replacement has published its result.
+	if c.Query(taskUIDQueryParam) != "" {
+		current, err := h.taskAccess().loadLive(c, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !taskMatchesExpectedUID(c, current) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -1614,7 +1667,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
-	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
@@ -1633,21 +1685,36 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return err
 	}
 
+	return h.updateAgentSpec(c, namespace, req.Spec, nil)
+}
+
+// updateAgentSpec keeps both routes on the same validation and authorization
+// path. Only the conditional route supplies expectations; they never advance
+// when a patch retries after a resourceVersion conflict.
+func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alpha1.AgentSpec, expected *UpdateAgentSpecRequest) error {
+	name := c.Params(apiFieldName)
 	ctx := c.Context()
 	token := contextTokenFromUserInfo(GetUserInfo(c))
+	var reader client.Reader = h.client
+	if expected != nil {
+		reader = h.uncachedReader()
+	}
 
 	var agent *corev1alpha1.Agent
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Agent{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
 			return err
 		}
 		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
 			return err
 		}
 
+		if expected != nil && (string(current.UID) != expected.ExpectedUID || current.Generation != expected.ExpectedGeneration) {
+			return fiber.NewError(fiber.StatusConflict, "agent UID or generation does not match")
+		}
 		patchBase := current.DeepCopy()
-		current.Spec = req.Spec
+		current.Spec = spec
 		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}

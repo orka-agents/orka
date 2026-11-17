@@ -795,6 +795,119 @@ spec:
                           rule: self.uid.size() > 0
                       containerName:
                         type: string
+                      egress:
+                        description: |-
+                          Egress carries the admitted host-name egress allowlist for backends that
+                          enforce egress at a gateway instead of with Kubernetes NetworkPolicy. It
+                          is mutually exclusive with NetworkPolicy; providers reject the shape they
+                          cannot enforce.
+                        properties:
+                          rules:
+                            items:
+                              description: |-
+                                RuntimeEgressRule allows one protocol to one host pattern on explicit TCP
+                                ports. Rules only add permissions.
+                              properties:
+                                host:
+                                  description: |-
+                                    Host is a lowercase fully qualified DNS name without a trailing dot, or
+                                    such a name whose leftmost label is "*" (matching exactly one label).
+                                    Bare "*", single-label wildcards, IP addresses, ports and URLs are invalid.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                ports:
+                                  description: |-
+                                    Ports are destination TCP ports, without repeats. Every rule names its
+                                    ports explicitly; there is no all-ports form.
+                                  items:
+                                    format: int32
+                                    maximum: 65535
+                                    minimum: 1
+                                    type: integer
+                                  maxItems: 16
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                protocol:
+                                  description: |-
+                                    RuntimeEgressProtocol selects how a host-name egress rule is enforced by a
+                                    backend egress gateway.
+                                  enum:
+                                  - HTTP
+                                  - HTTPS
+                                  - TLSPassthrough
+                                  type: string
+                                replaceHeaders:
+                                  description: |-
+                                    ReplaceHeaders asks the backend gateway to replace the value of each
+                                    named request header with a credential it resolves from a Kubernetes
+                                    Secret, so the runtime never holds that credential. A header is replaced
+                                    only when the runtime's request carries it (with any placeholder value);
+                                    requests without it are forwarded unchanged. Only exact-host HTTP and
+                                    HTTPS rules may carry replacements, and only providers advertising
+                                    runtime.egress-credential-injection enforce them. On HTTP the credential
+                                    leaves the gateway in cleartext, so use it only for in-cluster origins.
+                                  items:
+                                    description: |-
+                                      RuntimeEgressCredentialHeader replaces one HTTP request header with a
+                                      credential. The credential is referenced, never embedded.
+                                    properties:
+                                      header:
+                                        description: |-
+                                          Header is the case-insensitive HTTP request header to replace when the
+                                          request carries it. Hop-by-hop, routing, framing and cookie headers are
+                                          rejected.
+                                        maxLength: 128
+                                        minLength: 1
+                                        type: string
+                                      prefix:
+                                        description: |-
+                                          Prefix is prepended verbatim to the credential value, including any
+                                          separator, for example "Bearer " for Authorization.
+                                        maxLength: 64
+                                        type: string
+                                      secretKeyRef:
+                                        description: SecretKeyRef names the Kubernetes
+                                          Secret key holding the credential.
+                                        properties:
+                                          key:
+                                            maxLength: 253
+                                            minLength: 1
+                                            type: string
+                                          name:
+                                            maxLength: 253
+                                            minLength: 1
+                                            type: string
+                                          namespace:
+                                            description: |-
+                                              Namespace defaults to the workload's namespace. Only the workspace
+                                              intent writer (Orka core) sets another namespace, such as its private
+                                              runtime namespace; providers accept it only when configured to.
+                                            maxLength: 63
+                                            type: string
+                                        required:
+                                        - key
+                                        - name
+                                        type: object
+                                    required:
+                                    - header
+                                    - secretKeyRef
+                                    type: object
+                                  maxItems: 4
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - header
+                                  x-kubernetes-list-type: map
+                              required:
+                              - host
+                              - ports
+                              - protocol
+                              type: object
+                            maxItems: 256
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
                       networkPolicy:
                         description: |-
                           NetworkPolicy carries the admitted network permission envelope. Before
@@ -10730,6 +10843,15 @@ spec:
                           name:
                             type: string
                           namespace:
+                            type: string
+                          routerTarget:
+                            description: |-
+                              RouterTarget, when set, selects this process behind a backend router
+                              that dispatches on an explicit target rather than the endpoint authority.
+                              It must equal "<namespace>/<name>". The startup Endpoint is then the
+                              router's HTTPS URL, every request carries this target, and the admitted
+                              bootstrap port is the process's default port 80 rather than the router's.
+                            maxLength: 507
                             type: string
                           uid:
                             type: string

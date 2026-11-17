@@ -74,20 +74,14 @@ func (c *Client) CheckClocks(ctx context.Context) error {
 		bindings = bindings[:1]
 	}
 	var (
-		mu      sync.Mutex
-		errs    []error
-		checked = map[string]bool{}
-		wg      sync.WaitGroup
+		mu     sync.Mutex
+		errs   []error
+		claims = &clockClaims{claimed: map[string]bool{}}
+		wg     sync.WaitGroup
 	)
 	for _, binding := range bindings {
 		wg.Go(func() {
-			if err := c.checkClock(ctx, binding.contract, binding.provider, func(datasetID string) bool {
-				mu.Lock()
-				defer mu.Unlock()
-				first := !checked[datasetID]
-				checked[datasetID] = true
-				return first
-			}); err != nil {
+			if err := c.checkClock(ctx, binding.contract, binding.provider, claims); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
@@ -98,20 +92,51 @@ func (c *Client) CheckClocks(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// clockClaims records which datasets a clock sample has already decided in
+// one CheckClocks run, when separate bindings describe the same dataset.
+type clockClaims struct {
+	mu      sync.Mutex
+	claimed map[string]bool
+}
+
+// claim reports whether a sample with ObservedAt is the first to decide
+// datasetID, and claims it if so.
+func (c *clockClaims) claim(datasetID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.claimed[datasetID] {
+		return false
+	}
+	c.claimed[datasetID] = true
+	return true
+}
+
+// clearUnclaimed runs clear unless a sample with ObservedAt has decided
+// datasetID. A response without ObservedAt never claims the dataset, so it
+// cannot suppress another binding's reported skew, and it clears while
+// holding the lock so it cannot undo a refusal that binding sets.
+func (c *clockClaims) clearUnclaimed(datasetID string, clear func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.claimed[datasetID] {
+		clear()
+	}
+}
+
 // checkClock describes one provider and applies the clock check to its
-// dataset, unless first reports that another binding already checked it.
-func (c *Client) checkClock(ctx context.Context, contract string, provider storagev1.ProviderDescriber, first func(string) bool) error {
+// dataset, unless another binding's clock sample already decided it.
+func (c *Client) checkClock(ctx context.Context, contract string, provider storagev1.ProviderDescriber, claims *clockClaims) error {
 	sent := c.ops.now()
 	info, err := provider.Describe(ctx)
 	received := c.ops.now()
 	if err != nil {
 		return fmt.Errorf("check the %s clock: %w", contract, err)
 	}
-	if !first(info.DatasetID) {
+	if info.ObservedAt.IsZero() {
+		claims.clearUnclaimed(info.DatasetID, func() { c.ops.setClockSkew(info.DatasetID, nil) })
 		return nil
 	}
-	if info.ObservedAt.IsZero() {
-		c.ops.setClockSkew(info.DatasetID, nil)
+	if !claims.claim(info.DatasetID) {
 		return nil
 	}
 	skew := estimateClockSkew(sent, received, info.ObservedAt)

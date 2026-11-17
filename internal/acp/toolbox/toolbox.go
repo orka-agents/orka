@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/security"
 )
 
 const (
@@ -81,9 +83,19 @@ func failf(reason, format string, args ...any) *Failure {
 	return &Failure{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
-// FormatFailureLine renders the single stable line printed on failure.
+// WithheldDiagnostic replaces a failure message that would echo
+// credential-shaped content from an image.
+const WithheldDiagnostic = "toolbox diagnostic withheld because it appears to contain a secret or token"
+
+// FormatFailureLine renders the single stable line printed on failure. The
+// line reaches stderr, the termination log, and Task and RuntimePool status,
+// and its message can quote image-controlled file names, so a message that
+// looks like it carries a credential is replaced; the reason is always kept.
 func FormatFailureLine(f *Failure) string {
 	message := strings.NewReplacer("\n", " ", "\r", " ").Replace(f.Message)
+	if security.LooksLikeSecret(f.Message) || security.LooksLikeSecret(message) {
+		message = WithheldDiagnostic
+	}
 	return "FAIL reason=" + f.Reason + " msg=" + message
 }
 

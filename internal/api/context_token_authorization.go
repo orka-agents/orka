@@ -1558,6 +1558,15 @@ func contextTokenSortedUniqueToolNames(values []string) []string {
 	return normalized
 }
 
+// collectSubstrateMCPEgressCredentialSecrets adds the Secrets the Substrate
+// egress gateway injects into the Tool actor's requests; invoking the Tool
+// uses them, so any collected Secret requires the credential-read scope.
+func collectSubstrateMCPEgressCredentialSecrets(secrets map[string]struct{}, tool *corev1alpha1.Tool) {
+	for _, name := range aitools.SubstrateMCPEgressCredentialSecretNames(tool) {
+		secrets[name] = struct{}{}
+	}
+}
+
 func contextTokenTaskToolCredentialFailures(
 	ctx context.Context,
 	reader client.Reader,
@@ -1608,6 +1617,7 @@ func contextTokenTaskToolCredentialFailures(
 			}
 			return nil, fmt.Errorf("resolve Tool %q credential policy: %w", toolName, err)
 		}
+		collectSubstrateMCPEgressCredentialSecrets(credentialSecrets, tool)
 		if tool.Spec.HTTP == nil {
 			continue
 		}

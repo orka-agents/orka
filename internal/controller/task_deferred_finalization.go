@@ -43,6 +43,10 @@ type deferredTaskFinalization struct {
 	// refused rather than staged: finalization records why the Task has no
 	// result.
 	ResultTooLarge bool `json:"resultTooLarge,omitempty"`
+	// ResultLogTooLarge narrows ResultTooLarge to a stdout result log longer
+	// than its read limit, so finalization does not report a small result as
+	// too large.
+	ResultLogTooLarge bool `json:"resultLogTooLarge,omitempty"`
 }
 
 // stopTaskAfterUsageRetentionFailure preserves stop decisions while durable
@@ -149,6 +153,7 @@ func (r *TaskReconciler) loadDeferredTaskFinalization(ctx context.Context, task 
 		intent.ResultChunks < 0 || intent.ResultChunks > int(stdoutResultLogLimitBytes)/deferredResultChunkBytes+1 ||
 		intent.ResultBytes < 0 || intent.ResultBytes > int(stdoutResultLogLimitBytes) ||
 		(intent.ResultTooLarge && intent.ResultChunks != 0) ||
+		(intent.ResultLogTooLarge && !intent.ResultTooLarge) ||
 		(intent.ResultChunks == 0 && (intent.ResultBytes != 0 || intent.ResultDigest != "")) ||
 		(intent.ResultChunks > 0 && (len(intent.ResultDigest) != sha256.Size*2 || intent.ResultChunks != max(1, (intent.ResultBytes+deferredResultChunkBytes-1)/deferredResultChunkBytes))) {
 		return nil, errors.New("deferred Task finalization intent is invalid")
@@ -199,6 +204,7 @@ func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task
 			// Output that can never be stored is not staged; stopping the
 			// work must not wait on it.
 			intent.ResultTooLarge = true
+			intent.ResultLogTooLarge = errors.Is(err, errStdoutResultLogTooLarge)
 		case err != nil:
 			return err
 		case available:
@@ -222,6 +228,9 @@ func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task
 }
 
 func (r *TaskReconciler) deferredTaskResult(ctx context.Context, task *corev1alpha1.Task, intent *deferredTaskFinalization) ([]byte, bool, error) {
+	if intent.ResultLogTooLarge {
+		return nil, true, errStdoutResultLogTooLarge
+	}
 	if intent.ResultTooLarge {
 		return nil, true, errTaskResultTooLarge
 	}

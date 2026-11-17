@@ -325,7 +325,9 @@ type RepositoryMonitorIssueImplementationSpec struct {
 	// +optional
 	MaxChangedFiles *int32 `json:"maxChangedFiles,omitempty"`
 
-	// AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+	// AllowedPaths optionally restricts implementation and pull request repair
+	// patch files to these path globs/prefixes. Repository control paths are
+	// always denied.
 	// Examples: api/**, internal/**, docs/**.
 	// +listType=set
 	// +optional

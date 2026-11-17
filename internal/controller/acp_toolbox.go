@@ -44,6 +44,10 @@ func ParseACPToolboxMountMethod(raw string) (ACPToolboxMountMethod, error) {
 type ACPToolboxPolicy struct {
 	// Enabled turns the feature on. Off by default.
 	Enabled bool
+	// SkillsEnabled additionally admits runtime.skills, which reuse the
+	// toolbox image delivery, registry allowlist, pull secrets, node
+	// selector, and mount method. Off by default; requires Enabled.
+	SkillsEnabled bool
 	// AllowedRegistries lists registry hosts or host/path prefixes whose
 	// images may be used. Empty means no image is allowed.
 	AllowedRegistries []string

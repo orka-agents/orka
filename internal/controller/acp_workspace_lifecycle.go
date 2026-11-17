@@ -29,6 +29,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -206,6 +207,19 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			return "", false, nil
 		}
 		return "", false, err
+	}
+	if operatoraccess.Tainted(workspace.Annotations) &&
+		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
+		// Operator access tainted this incarnation. It is never re-attached,
+		// cold-resumed, or reused warm by another Task. While its holder
+		// still settles (which always deletes a tainted workspace), a
+		// continuation queues for the fresh replacement; a detached tainted
+		// incarnation that is not being settled fails the Task closed.
+		if workspace.Spec.Attachment != nil || acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("%w: workspace %s: %w; delete the workspace or start a new Session",
+			errACPWorkspaceTerminalFailure, workspace.Name, operatoraccess.ErrTainted)
 	}
 	if err := r.backfillACPWorkspaceSuspendedCap(ctx, workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
 		return "", false, err
@@ -408,6 +422,13 @@ func validateACPClassWorkspaceAttachmentAttempt(
 ) error {
 	if err := verifyACPClassWorkspace(workspace, task, binding, poolName); err != nil {
 		return err
+	}
+	// The attachment manager calls this for the exact object version of
+	// every optimistic-lock attempt, so a taint that orka-api committed after
+	// ensureACPClassWorkspace read the workspace still refuses the handoff.
+	if operatoraccess.Tainted(workspace.Annotations) &&
+		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
+		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
 	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
 	if err == nil || binding.Class.ControllerName == "" || workspace.Spec.Attachment != nil {
@@ -1216,7 +1237,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// changed after this read, and a Task that attached in between settles at
 	// its own settle time anyway.
 	terminallyFailed := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
-	if terminallyFailed && workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+	// Operator access forfeits retention: a tainted workspace is never
+	// suspended into a data checkpoint, retained for recovery export, or
+	// handed to a continuation. Its settlement always applies Delete.
+	operatorTainted := operatoraccess.Tainted(workspace.Annotations)
+	if terminallyFailed && !operatorTainted &&
+		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {
 		// The provider stops the failed attempt without capturing or replaying
 		// it. Keep the source Failed for explicit recovery export; existing
@@ -1225,7 +1251,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	}
 
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
-		!terminallyFailed {
+		!terminallyFailed && !operatorTainted {
 		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 			// The suspension may have been requested by retention (an idle
 			// timeout firing between revocation and settlement) with no
@@ -1319,7 +1345,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// honor.
 	if action := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; action != "" &&
 		action != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
-		if action != string(workspacev1alpha1.WorkspaceOnDetachSuspend) || !terminallyFailed {
+		if action != string(workspacev1alpha1.WorkspaceOnDetachSuspend) || (!terminallyFailed && !operatorTainted) {
 			return false, fmt.Errorf(
 				"workspace %s froze detach action %q, which this controller cannot execute; refusing destructive settlement",
 				workspace.Name, action,
@@ -1347,8 +1373,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// repository out from under another live queued continuation: the
 	// successor attaches and stamps its own frozen action instead. A Task
 	// that actually executed keeps the normal contract - its frozen Delete
-	// destroys the filesystem before any continuation runs.
-	if taskNeverHeldACPWorkspaceAttachment(task) {
+	// destroys the filesystem before any continuation runs. A tainted
+	// workspace is never handed to a successor.
+	if taskNeverHeldACPWorkspaceAttachment(task) && !operatorTainted {
 		if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
 			return false, deferErr
 		} else if retry {

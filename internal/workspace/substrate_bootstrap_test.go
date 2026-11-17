@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,7 +39,7 @@ func (c *substrateBootstrapRecoveryControl) GetActor(context.Context, string) (*
 	return &actor, nil
 }
 
-func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) {
+func TestNativeSubstrateWorkspaceBootstrapRetriesIssuedCredential(t *testing.T) {
 	for _, failure := range []string{"lost response", "failed observation", "closed executor", "restarted executor", "restarted after observation", "replaced during recovery", "replaced Actor", "replaced Pod", "changed during challenge"} {
 		t.Run(failure, func(t *testing.T) {
 			const secret = "fixture-signing-secret"
@@ -50,7 +52,6 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 				Atespace: identity.Atespace, ActorID: identity.Name, ActorUID: identity.UID,
 				PodUID: "first-pod-uid", Status: substrateStatusRunning,
 			}}
-			mint := &recordingSubstrateSessionIdentityClient{jwt: "first-minted-credential"}
 			installed, puts := "", 0
 			transport := substrateBootstrapRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 				var body []byte
@@ -91,7 +92,6 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 						installed = payload.HandoffToken
 					}
 					if puts == 1 {
-						mint.jwt = "second-minted-credential"
 						if failure == "failed observation" || failure == "restarted after observation" {
 							control.unavailable = true
 						} else {
@@ -103,9 +103,8 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 			})
 			newExecutor := func() *SubstrateWorkspaceExecutor {
 				executor, err := NewSubstrateExecutor(SubstrateConfig{
-					RouterURL: "http://router.test", ActorDNSSuffix: "actors.test", BootstrapToken: secret,
+					RouterURL: "http://router.test", BootstrapToken: secret,
 					SealedBootstrap: true, ControlClient: control, HTTPClient: &http.Client{Transport: transport},
-					SessionIdentityRequired: true, SessionIdentityToken: "fixture-session-identity", SessionIdentityClient: mint,
 				})
 				require.NoError(t, err)
 				return executor
@@ -119,7 +118,10 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 				require.Zero(t, puts, "changed placement must fail before sending bootstrap credentials")
 				return
 			}
-			require.Equal(t, "first-minted-credential", installed)
+			// The controller issues its own random per-Actor credential and never
+			// installs the caller-supplied static handoff value.
+			first := installed
+			require.Regexp(t, "^[0-9a-f]{64}$", first)
 			if failure == "closed executor" || failure == "restarted executor" || failure == "restarted after observation" || failure == "replaced during recovery" {
 				if failure == "closed executor" {
 					require.NoError(t, executor.Close())
@@ -140,18 +142,16 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 			if failure == "replaced during recovery" {
 				require.Error(t, err, "a changed Pod must not accept a recovered credential")
 				require.Equal(t, 1, puts, "recovery must stop before another credential delivery")
-				require.Equal(t, 1, mint.calls)
 				return
 			}
 			require.NoError(t, err, "retry must confirm the same installed credential")
 			_, err = executor.Upload(t.Context(), request)
 			require.NoError(t, err, "confirmed bootstrap remains idempotent")
 			if failure == "replaced Actor" || failure == "replaced Pod" {
-				require.Equal(t, 2, mint.calls)
-				require.Equal(t, "second-minted-credential", installed)
+				require.Regexp(t, "^[0-9a-f]{64}$", installed)
+				require.NotEqual(t, first, installed, "a new Actor or Pod lifetime receives a new credential")
 			} else {
-				require.Equal(t, 1, mint.calls)
-				require.Equal(t, "first-minted-credential", installed)
+				require.Equal(t, first, installed)
 			}
 		})
 	}
@@ -171,14 +171,13 @@ func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 			require.NoError(t, err)
 			puts := 0
 			router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "direct.ate-demo.actors.test", r.Host)
+				require.Equal(t, "ate-demo/direct", r.Header.Get(daemonprotocol.TargetActorHeader))
 				require.Equal(t, harnessv2.CredentialBootstrapPath, r.URL.Path)
 				require.Empty(t, r.Header.Get("Authorization"))
 				if r.Method == http.MethodGet {
 					require.NoError(t, json.NewEncoder(w).Encode(receiver.Challenge))
 					return
 				}
-				puts++
 				body, err := io.ReadAll(r.Body)
 				require.NoError(t, err)
 				require.NotContains(t, string(body), secret)
@@ -190,12 +189,25 @@ func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 				require.NoError(t, err)
 				var request harnessv2.WorkspaceBootstrapRequest
 				require.NoError(t, json.Unmarshal(plain, &request))
-				require.Equal(t, "fixture-handoff", request.HandoffToken)
+				if r.Method == http.MethodPost {
+					// A fresh process has no installed credential to recover.
+					require.True(t, request.Recover)
+					reply, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{})
+					require.NoError(t, err)
+					sealed, err := receiver.SealResponse(body, reply)
+					require.NoError(t, err)
+					_, _ = w.Write(sealed)
+					return
+				}
+				puts++
+				// The controller delivers its own per-Actor credential, never the
+				// static value supplied with the upload.
+				require.Regexp(t, "^[0-9a-f]{64}$", request.HandoffToken)
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer router.Close()
-			executor, err := NewSubstrateExecutor(SubstrateConfig{RouterURL: router.URL, ActorDNSSuffix: "actors.test", BootstrapToken: secret, SealedBootstrap: true,
-				ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning, substrateStatusRunning, substrateStatusRunning}}})
+			executor, err := NewSubstrateExecutor(SubstrateConfig{RouterURL: router.URL, BootstrapToken: secret, SealedBootstrap: true,
+				HTTPClient: router.Client(), ControlClient: &recordingSubstrateControlClient{getStatuses: slices.Repeat([]string{substrateStatusRunning}, 8)}})
 			require.NoError(t, err)
 			_, err = executor.Upload(t.Context(), UploadRequest{Ref: WorkspaceRef{ID: "direct.ate-demo"}, BootstrapHandoff: true, Timeout: time.Second,
 				Artifacts: []UploadArtifact{{Path: substrateHandoffTokenUploadPath, Data: []byte("fixture-handoff")}}})
@@ -216,8 +228,8 @@ func TestNativeSubstrateWorkspaceRefusesPlaintextFallback(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer router.Close()
-	executor, err := NewSubstrateExecutor(SubstrateConfig{RouterURL: router.URL, ActorDNSSuffix: "actors.test", BootstrapToken: "fixture-secret", SealedBootstrap: true,
-		ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning}}})
+	executor, err := NewSubstrateExecutor(SubstrateConfig{RouterURL: router.URL, BootstrapToken: "fixture-secret", SealedBootstrap: true,
+		HTTPClient: router.Client(), ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning}}})
 	require.NoError(t, err)
 	_, err = executor.Upload(t.Context(), UploadRequest{Ref: WorkspaceRef{ID: "direct.ate-demo"}, BootstrapHandoff: true, Timeout: time.Second,
 		Artifacts: []UploadArtifact{{Path: substrateHandoffTokenUploadPath, Data: []byte("fixture-handoff")}}})
@@ -236,7 +248,7 @@ func TestNativeSubstrateWorkspaceBootstrapRefusesRedirect(t *testing.T) {
 	}))
 	defer router.Close()
 	executor, err := NewSubstrateExecutor(SubstrateConfig{
-		RouterURL: router.URL, ActorDNSSuffix: "actors.test", BootstrapToken: "fixture-secret", SealedBootstrap: true,
+		RouterURL: router.URL, BootstrapToken: "fixture-secret", SealedBootstrap: true, HTTPClient: router.Client(),
 		ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning}},
 	})
 	require.NoError(t, err)

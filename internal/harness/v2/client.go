@@ -82,7 +82,7 @@ func WithHTTPClient(httpClient *http.Client) ClientOption {
 			return http.ErrUseLastResponse
 		}
 		c.httpClient = &clone
-		c.traceReliable = transportSupportsHTTPTrace(clone.Transport)
+		c.traceReliable = TransportSupportsHTTPTrace(clone.Transport)
 		return nil
 	}
 }
@@ -1085,10 +1085,22 @@ func newTrackedRequest(ctx context.Context, method, endpoint string, payload []b
 	return request, nil
 }
 
-func transportSupportsHTTPTrace(roundTripper http.RoundTripper) bool {
+// HTTPTraceDelegatingTransport is implemented by wrapping RoundTrippers that
+// pass every request context unchanged to a transport whose httptrace evidence
+// is exact, such as a wrapper that only adds a routing header.
+type HTTPTraceDelegatingTransport interface {
+	DelegatesHTTPTrace() bool
+}
+
+// TransportSupportsHTTPTrace reports whether httptrace hooks observe the real
+// connection and request writes for this RoundTripper.
+func TransportSupportsHTTPTrace(roundTripper http.RoundTripper) bool {
 	if roundTripper == nil {
 		return true
 	}
-	_, ok := roundTripper.(*http.Transport)
-	return ok
+	if _, ok := roundTripper.(*http.Transport); ok {
+		return true
+	}
+	delegating, ok := roundTripper.(HTTPTraceDelegatingTransport)
+	return ok && delegating.DelegatesHTTPTrace()
 }
