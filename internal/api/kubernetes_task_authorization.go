@@ -228,6 +228,8 @@ func isWorkerServiceAccount(userInfo *UserInfo) bool {
 // memoriesResource is the Kubernetes resource name of durable memories.
 const memoriesResource = "memories"
 
+const memoryProposalsResource = "memoryproposals"
+
 // authorizeTaskMemoryConsolidation checks, as the original caller, the grants
 // a memory consolidation run needs: it reads every user's Sessions and the
 // namespace's memories, and in Propose mode creates memory proposals. The API
@@ -239,8 +241,8 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 		return nil
 	}
 	denied := fiber.NewError(fiber.StatusForbidden,
-		"not authorized to create a memory consolidation run: it needs list and get on sessions, list on memories, "+
-			"and create on memoryproposals in Propose mode")
+		"not authorized to create a memory consolidation run: it needs list and get on sessions, list on memories "+
+			"and memoryproposals, and create on memoryproposals in Propose mode")
 	// The caller is reviewed as its canonical identity: a TokenReview user as
 	// Kubernetes authenticated it, and an OIDC or transaction-token caller
 	// as issuer#subject with issuer-prefixed groups, never as a display name
@@ -253,9 +255,10 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 		{Verb: apiObjectList, Resource: usageSessionResource},
 		{Verb: gatewayVerbGet, Resource: usageSessionResource},
 		{Verb: apiObjectList, Resource: memoriesResource},
+		{Verb: apiObjectList, Resource: memoryProposalsResource},
 	}
 	if task.Spec.AI.MemoryConsolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
-		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: "memoryproposals"})
+		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: memoryProposalsResource})
 	}
 	for _, check := range checks {
 		check.Namespace = task.Namespace

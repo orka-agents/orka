@@ -1272,6 +1272,7 @@ rules:
   - memoryproposals
   verbs:
   - create
+  - list
 - apiGroups:
   - core.orka.ai
   resources:
@@ -3882,6 +3883,10 @@ spec:
   - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
     message: caller is not authorized to list memories, which a memory consolidation
       run reads and reports on
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memory proposals, which a memory consolidation
+      run reads so it does not repeat them
     reason: Forbidden
   - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
       != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'
