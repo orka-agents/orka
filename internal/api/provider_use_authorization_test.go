@@ -275,3 +275,40 @@ func TestExternalAPIAgentAndTaskWritesRequireProviderUse(t *testing.T) {
 		})
 	}
 }
+
+func TestToolAgentWritesRequireProviderUse(t *testing.T) {
+	enableProviderUseAuthorization(t)
+	user := &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview}
+	named := func(provider string) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "helper"},
+			Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: provider}},
+		}
+	}
+	denied, _ := providerUseClientset()
+
+	// A caller who may read the Provider but not use it cannot bind an Agent
+	// to it through a chat tool, which writes with Orka's identity.
+	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), providerUseReader(t), denied, user, named("protected")))
+	allowed, _ := providerUseClientset("team-a/protected")
+	require.NoError(t, authorizeToolAgentProviderUse(context.Background(), providerUseReader(t), allowed, user, named("protected")))
+
+	// An update that keeps the stored Agent's Provider needs no grant; one
+	// that switches it does.
+	stored := providerUseReader(t, named("protected"))
+	require.NoError(t, authorizeToolAgentProviderUse(context.Background(), stored, denied, user, named("protected")))
+	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), stored, denied, user, named("other")))
+	requireForbidden(t, authorizeToolAgentProviderUse(context.Background(), nil, allowed, user, named("protected")))
+
+	// Each compatibility profile checks the Agent tools it exposes. The
+	// Anthropic proxy exposes create_agent but not update_agent.
+	for _, profile := range []compatProxyToolContextProfile{openAICompatProxyToolContextProfile, anthropicCompatProxyToolContextProfile} {
+		toolCtx := newCompatProxyToolContext(compatProxyToolContextConfig{
+			Client: providerUseReader(t).(client.Client), KubeClient: denied, Namespace: "team-a", Profile: profile, UserInfo: user,
+		})
+		require.NotNil(t, toolCtx.AuthorizeAgentCreate(context.Background(), named("protected")), profile.SourceLabel)
+		if profile.AgentUpdateAction != "" {
+			require.NotNil(t, toolCtx.AuthorizeAgentUpdate(context.Background(), named("protected")), profile.SourceLabel)
+		}
+	}
+}

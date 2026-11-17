@@ -269,15 +269,19 @@ every chat or OpenAI- or Anthropic-compatible request, which spends the
 Provider's credential directly. The API checks its caller, and
 ValidatingAdmissionPolicies check direct writes to Tasks and Agents that newly
 name a Provider. The Helm value installs those policies; without Helm, also
-apply `config/provider-use-policy`. A Task that runs its Agent's own Provider
+apply `config/provider-use-policy`. Its bindings match every namespace, so on
+a cluster with more than one installation, first scope them to this
+installation's namespace as that directory's README describes. A Task that runs its Agent's own Provider
 needs only Agent `use`, except that an `ai` Task is refused when it would take
 a Provider from an Agent in another namespace. Without either check, anyone who may create Tasks,
 Agents, or chats in a namespace may use any Provider there, and, unless
 namespace isolation is enforced, any Provider in another namespace. Orka's
 controller and workers hold `use` on every Provider, so delegated child Tasks
-and agent-created Agents are not checked against the root caller. The check is
-off by default, because turning it on denies every caller without a `use`
-grant.
+and agent-created Agents are not checked against the root caller. Providers an
+Agent named before the check was enabled were never checked, and running that
+Agent needs only Agent `use`, so review existing Agents' `providerRef` and
+fallbacks before you enable it. The check is off by default, because turning it
+on denies every caller without a `use` grant.
 
 ### Agent identities
 

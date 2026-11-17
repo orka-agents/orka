@@ -200,3 +200,26 @@ func authorizeChatProviderUse(c fiber.Ctx, clientset kubernetes.Interface, objec
 	}
 	return authorizeKubernetesProviderUse(c.Context(), clientset, GetUserInfo(c), provider.Namespace, provider.Name, objectKind, "")
 }
+
+// authorizeToolAgentProviderUse checks an Agent a chat or compatibility tool
+// creates or updates. The tool writes with Orka's identity, which admission
+// trusts, so the caller's use of every Provider the Agent newly names is
+// checked here. The stored Agent, if any, is the previous version.
+func authorizeToolAgentProviderUse(ctx context.Context, reader client.Reader, clientset kubernetes.Interface, userInfo *UserInfo, agent *corev1alpha1.Agent) error {
+	if agent == nil || !providerUseAuthorization.Load() {
+		return nil
+	}
+	if reader == nil || reflect.ValueOf(reader).Kind() == reflect.Pointer && reflect.ValueOf(reader).IsNil() {
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to write agents")
+	}
+	var previous *corev1alpha1.Agent
+	stored := &corev1alpha1.Agent{}
+	switch err := reader.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: agent.Name}, stored); {
+	case err == nil:
+		previous = stored
+	case !apierrors.IsNotFound(err):
+		log.Error(err, "provider use authorization could not read the stored Agent", "namespace", agent.Namespace, "agent", agent.Name)
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to write agents")
+	}
+	return authorizeAgentProviderRefsUse(ctx, clientset, userInfo, agent, previous)
+}

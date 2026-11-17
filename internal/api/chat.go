@@ -501,10 +501,16 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return authorizeContextTokenTaskDeleteObject(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolDeleteTask", task)
 	})
 	executor.SetAgentCreateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
-		return authorizeContextTokenToolAgentCreate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
+		if err := authorizeContextTokenToolAgentCreate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent); err != nil {
+			return err
+		}
+		return authorizeToolAgentProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentUpdateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
-		return authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent)
+		if err := authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent); err != nil {
+			return err
+		}
+		return authorizeToolAgentProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentDeleteAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		return authorizeContextTokenToolAgentDelete(contextToken, ch.contextTokenAuthorization, "chatToolDeleteAgent", agent)
