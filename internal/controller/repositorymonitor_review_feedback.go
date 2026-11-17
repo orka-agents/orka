@@ -146,6 +146,10 @@ type repositoryMonitorReviewFeedbackSnapshot struct {
 	// was not read to why: the lookup failed, or the lookup limit was
 	// reached. Whether they may start a repair is unknown, not refused.
 	unverified map[string]string
+	// omittedWithAuthority counts the threads and reviews the budget left
+	// out that hold feedback by an author with the authority to start a
+	// repair, or a thread whose own omitted comments may hide such feedback.
+	omittedWithAuthority int
 }
 
 // repositoryMonitorFeedbackThread is one unresolved review thread.
@@ -947,6 +951,9 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		switch {
 		case place.review != nil && !fits(place.review.review):
 			snapshot.OmittedReviews++
+			if place.review.authorized != nil {
+				snapshot.omittedWithAuthority++
+			}
 		case place.review != nil:
 			snapshot.Reviews = append(snapshot.Reviews, place.review.review)
 			if place.review.authorized != nil {
@@ -954,6 +961,9 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 			}
 		case !fits(place.thread.thread):
 			snapshot.OmittedThreads++
+			if thread := place.thread; len(thread.authorized) > 0 || thread.thread.OmittedComments > 0 && !thread.thread.OrkaFindingThread {
+				snapshot.omittedWithAuthority++
+			}
 		default:
 			snapshot.Threads = append(snapshot.Threads, place.thread.thread)
 			snapshot.authorized = append(snapshot.authorized, place.thread.authorized...)
@@ -983,6 +993,14 @@ func (s repositoryMonitorReviewFeedbackSnapshot) unverifiedFeedback() (failed, l
 		}
 	}
 	return failed, limited
+}
+
+// omittedFeedbackWithAuthority counts the threads and reviews the snapshot
+// left out to stay within its budget that hold, or may hide, feedback that
+// could start a repair. Feedback that is left out cannot be addressed or
+// checked, so a person must look at it.
+func (s repositoryMonitorReviewFeedbackSnapshot) omittedFeedbackWithAuthority() int {
+	return s.omittedWithAuthority
 }
 
 // repositoryMonitorFeedbackSnapshotPrefix is the prefix of the lines of a
