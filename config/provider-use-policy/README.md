@@ -19,7 +19,9 @@ A Task that runs its Agent's Provider needs only `use` on the Agent; see
 Task runs an Agent from another namespace, that Agent's fallbacks and a
 `providerRef` without a namespace resolve in the Task's namespace. Admission
 cannot read the Agent, so restrict direct Task writes that name another
-namespace's Agent, or enforce namespace isolation.
+namespace's Agent, or enforce namespace isolation. Even through the API, the
+check runs when the Task is created, so a later edit to that Agent can change
+which of the Task namespace's Providers it resolves.
 
 These bindings match every namespace. With more than one installation on a
 cluster, add a `matchResources.namespaceSelector` on

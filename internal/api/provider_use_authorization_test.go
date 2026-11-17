@@ -134,6 +134,10 @@ func TestTaskCreateChecksACrossNamespaceAgentsTaskRelativeProviders(t *testing.T
 
 	// Without a reader the Agent cannot be checked, so the request is refused.
 	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), nil, clientset, user, providerUseTask(nil, agentRef)))
+
+	// A missing Agent is refused: one created before the Task runs could name
+	// Providers in the Task's namespace that were never checked.
+	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t), clientset, user, providerUseTask(nil, agentRef)))
 }
 
 func TestAgentProviderRefsUseChecksOnlyNewlyNamedProviders(t *testing.T) {

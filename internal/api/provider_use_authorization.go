@@ -116,16 +116,16 @@ func authorizeTaskProviderUse(ctx context.Context, reader client.Reader, clients
 	}
 	if reader == nil || reflect.ValueOf(reader).Kind() == reflect.Pointer && reflect.ValueOf(reader).IsNil() {
 		log.Info("provider use authorization unavailable: missing reader", "task", task.Name, "namespace", task.Namespace)
-		return providerUseForbidden(task.Spec.AgentRef.Name)
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to create tasks")
 	}
 	agent := &corev1alpha1.Agent{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: agentNamespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			// The Task fails when it runs; there is no Provider to check.
-			return nil
+		// A missing Agent is refused too: one created before the Task runs
+		// could name Providers in the Task's namespace that nobody checked.
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "provider use authorization could not read the Task's Agent",
+				"task", task.Name, "namespace", task.Namespace, "agentNamespace", agentNamespace)
 		}
-		log.Error(err, "provider use authorization could not read the Task's Agent",
-			"task", task.Name, "namespace", task.Namespace, "agentNamespace", agentNamespace)
 		return fiber.NewError(fiber.StatusForbidden, "not authorized to create tasks")
 	}
 	if !taskProvider && agent.Spec.ProviderRef != nil && strings.TrimSpace(agent.Spec.ProviderRef.Namespace) == "" {

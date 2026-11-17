@@ -147,7 +147,10 @@ and the Provider's namespace, to:
 A Task that runs its Agent's own Provider needs only Agent `use`. A Task that
 runs an Agent from another namespace also needs `use` on that Agent's fallbacks,
 and on a `providerRef` without a namespace, in the Task's namespace, because
-they resolve there. Permission to read, create, or edit a Provider, or `create`
+they resolve there; naming a missing Agent from another namespace is refused.
+This runs when the Task is created, so a later edit to that Agent, which its
+own namespace's checks cover, can still change the Providers the Task resolves
+in its namespace; enforce namespace isolation to rule this out. Permission to read, create, or edit a Provider, or `create`
 on `chats`, does not grant `use`.
 
 Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
