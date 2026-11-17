@@ -68,11 +68,7 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		read := InputMemory{ID: memory.ID, Generation: memory.Generation, Content: truncateRunes(memory.Content, MaxMemoryChars),
 			Tags: boundedTags(memory.Tags), RecalledCount: memory.RecalledCount, LastRecalledAt: memory.LastRecalledAt,
 			UpdatedAt: memory.UpdatedAt.UTC()}
-		size := encodedLen(read.Content)
-		for _, tag := range read.Tags {
-			size += encodedLen(tag)
-		}
-		if budget -= size; budget < 0 {
+		if budget -= encodedSize(read); budget < 0 {
 			input.Truncated = true
 			break
 		}
@@ -109,44 +105,43 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 		}
 		read := InputSession{Name: session.Name, Type: sessionType(session.SessionType), UpdatedAt: session.UpdatedAt.UTC()}
 		// The budget keeps a Session's newest turns, which the run is meant
-		// to learn from; the model still reads them in order.
+		// to learn from; the model still reads them in order. The Session's
+		// own fields count once it keeps any turn.
+		remaining := budget - encodedSize(read)
 		kept := len(messages)
 		for kept > 0 {
-			size := encodedLen(messages[kept-1].Content)
-			if budget-size < 0 {
+			size := encodedSize(messages[kept-1])
+			if remaining-size < 0 {
 				input.Truncated = true
-				budget = 0
 				break
 			}
-			budget -= size
+			remaining -= size
 			kept--
 		}
 		read.Messages = messages[kept:]
 		if len(read.Messages) > 0 {
 			input.Sessions = append(input.Sessions, read)
+			budget = remaining
+		}
+		if kept > 0 {
+			// Older Sessions would only fit in part, after a newer one was cut.
+			budget = 0
 		}
 	}
 	return input, nil
 }
 
-// encodedLen is how many characters text takes in the run's JSON data: a
-// quote, backslash, newline, carriage return or tab is escaped as two, and
-// any other control character, or a line or paragraph separator, as at most
-// six. Text that spells the data block's tag
-// grows by five for each "<" escaped.
-func encodedLen(text string) int {
-	size := 0
-	for _, r := range text {
-		switch {
-		case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
-			size += 2
-		case r < 0x20 || r == '\u2028' || r == '\u2029':
-			size += 6
-		default:
-			size++
-		}
+// encodedSize is how many characters value takes in the run's data, as
+// UserMessage encodes it, plus one for the comma that separates it from the
+// next item. Counting each item as encoded charges the budgets for escapes
+// and for every field name, ID and timestamp, not only for the text.
+func encodedSize(value any) int {
+	data, err := encodeData(value)
+	if err != nil {
+		// Input values always encode; count an impossible failure as full.
+		return MaxInputChars
 	}
-	return size + 5*len(dataTag.FindAllStringIndex(text, -1))
+	return utf8.RuneCount(data) + 1
 }
 
 // boundedTags returns at most MaxTags tags of a memory, each cut to
