@@ -388,13 +388,42 @@ Repairers run in Orka's built-in runtime image, which has no language toolchains
 
 A `fix_ci` repair prompt carries CI evidence for the exact PR head next to the check names. `failingChecks` names the checks the PR broke and `baseFailingChecks` the checks that also fail on the base commit. `failingCheckEvidence` (schema `orka.prRepair.ciEvidence.v1`) describes each failing check in `failingChecks`:
 
-- Check runs: check-run ID, app slug, name, status, conclusion, link, `output.title`, `output.summary`, and up to 10 annotations (path, lines, level, title, message), failures first.
-- Commit statuses: context, state, description, and target URL. Statuses have no output or annotations.
+- Check runs: check-run ID, app slug, name, status, conclusion, link, and up to 10 annotations (path, start and end line, level), failures first.
+- Commit statuses: context, state, and link. Statuses have no output or annotations.
 - Check runs that have not completed, listed in `pendingChecks`.
 
 Every entry has an `availability`: `available`, `truncated` (the `truncated` list names the bounded fields), `unavailable` or `rate_limited` (with a `reason` such as `github_api_status_404`), `unsupported` (commit statuses), or `stale` (GitHub reported the check for another commit; its output is left out). When the CI lookup itself fails, the prompt still runs: `failingCheckEvidence` has no checks and its `reason` says why. A rate limit stops further annotation reads. Evidence never fails or delays a repair.
 
-CI output is untrusted. Orka strips ANSI escapes, control, and format characters, then redacts or withholds credential-shaped text before it bounds the text on line boundaries. This covers well-known token prefixes, `Authorization` headers in any common scheme, including quoted, JSON, and Go `http.Header` forms, and tokens and header values wrapped or backslash-continued across lines. It also withholds whole PEM blocks and the whole multi-line value of a credential key: a YAML block scalar (`password: |`), a value continued on indented lines, or a quoted value through its closing quote, even behind a diff marker. Whole lines are also withheld when they carry command-line passwords (`--password`, `docker login -p`, `curl -u user:password`), `auth` fields (`.npmrc` `_auth`, Docker config `auth`, `*_AUTH=`), kubeconfig client key data, connection-string keys, webhook URLs, or a `::add-mask::` workflow command. Withholding is conservative: a line next to a credential may be withheld with it. Links lose credentials, query strings, and fragments; a link whose path carries a credential, such as a webhook URL, is dropped. The prompt tells the repairer that CI output is untrusted data, separate from review findings and from Orka's instructions.
+By default, evidence is structured only and `failingCheckEvidence.textOmitted` is `true`. CI tools write check output, annotation text, and commit status descriptions, and they can print credentials that GitHub does not mask, such as a password in a shell trace or a registry config dump. So none of that free text reaches the prompt: no `output.title`, `output.summary`, or `output.text`, no annotation title, message, or `raw_details`, and no status description. Links are kept only when they point to a check run or GitHub Actions run, attempt, or job of the monitored repository on `github.com` (`https://github.com/OWNER/REPO/runs/ID` or `https://github.com/OWNER/REPO/actions/runs/ID[/attempts/N][/job/ID]`), without their query or fragment. Any other link is left out whole, path included, in every mode: a commit status `target_url` on an external CI server, or a link on a GitHub Enterprise host.
+
+To include the free text, set `spec.repair.ciEvidence.text: true`:
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    ciEvidence:
+      text: true
+```
+
+With `text: true`, check runs also carry `title`, `summary`, and annotation `title` and `message`, and commit statuses carry `description`.
+
+:::warning
+Opting in can expose credentials. The text is stored in the repair Task's `spec.prompt`, which anyone who can read Tasks in the monitor's namespace can see, and it is sent to the model provider of the repairer agent. Orka redacts the credential shapes it recognizes, but redaction is best effort and cannot recognize every credential a CI tool prints. Turn it on only where Task readers and the model provider may see your CI output, and mask secrets in CI.
+:::
+
+When the text is included, Orka strips ANSI escapes, control, and format characters, then redacts or withholds credential-shaped text before it bounds the text on line boundaries. This covers well-known token prefixes, `Authorization` headers in any common scheme, including quoted, JSON, and Go `http.Header` forms, and tokens and header values wrapped or backslash-continued across lines. It also withholds whole PEM blocks and the whole multi-line value of a credential key: a YAML block scalar (`password: |`), a value continued on indented lines, or a quoted value through its closing quote, even behind a diff marker. Whole lines are also withheld when they carry command-line passwords (`--password`, `docker login -p`, `curl -u user:password`), `auth` fields (`.npmrc` `_auth`, Docker config `auth`, `*_AUTH=`), kubeconfig client key data, connection-string keys, webhook URLs, or a `::add-mask::` workflow command. Withholding is conservative: a line next to a credential may be withheld with it.
+
+Known limits of redaction, each of which can leave a credential in the text:
+
+- Values split from their option or key across lines, as with `--password \` and the value on the next line, or a value wrapped over several lines inside a quoted argument.
+- Quoted or serialized forms the checks do not parse, such as a quoted option name (`'--password' 'VALUE'`), a password with leading spaces, or JSON-escaped config (`\"auth\":\"VALUE\"`).
+- Multi-line values under keys or forms it does not list, such as `pwd:`, tagged quoted scalars (`!!str "..."`), a block whose lines carry a timestamp prefix, or an `auth` value on the line after its key.
+- Short values: a short token after an unknown `Authorization` scheme, or a short base64 `_auth`.
+- Connection-string keys written as `AccountKey="VALUE"` or `AccountKey: VALUE`.
+- Any credential in a shape that is not a recognized token prefix, header, assignment, or command option.
+
+The prompt tells the repairer that CI output is untrusted data, separate from review findings and from Orka's instructions.
 
 Evidence limits:
 
@@ -404,8 +433,8 @@ Evidence limits:
 | Pending checks | 10 (more are counted in `omittedPendingChecks`) |
 | Check runs whose annotations are read | 5, at most 2 pages of 50 annotations each |
 | Annotations kept per check | 10 |
-| `output.summary` | 1,536 bytes and 30 lines |
-| Annotation message | 512 bytes and 8 lines |
+| `output.summary`, with `text: true` | 1,536 bytes and 30 lines |
+| Annotation message, with `text: true` | 512 bytes and 8 lines |
 | One entry, as indented in the prompt | 4 KiB |
 | All entries, as indented in the prompt with their separators | 16 KiB, pending checks included; entries that do not fit are counted as omitted |
 | Time for annotation reads | 20 seconds |
