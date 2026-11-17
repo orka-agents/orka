@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -829,6 +830,26 @@ func repositoryMonitorFeedbackThreadComments(node repositoryMonitorFeedbackThrea
 	return comments
 }
 
+// repositoryMonitorFeedbackAnchorPattern matches the fragments GitHub uses
+// to link a review comment, a review, or a conversation comment. They are
+// digits only, so keeping them cannot carry a credential.
+var repositoryMonitorFeedbackAnchorPattern = regexp.MustCompile(`^(?:discussion_r|pullrequestreview-|issuecomment-)[0-9]{1,20}$`)
+
+// repositoryMonitorFeedbackURL sanitizes a feedback link like any evidence
+// URL, then restores GitHub's own comment or review anchor so the link still
+// points at the cited feedback. Any other fragment stays dropped.
+func repositoryMonitorFeedbackURL(raw string) string {
+	out := repositoryMonitorEvidenceURL(raw)
+	if out == "" {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !repositoryMonitorFeedbackAnchorPattern.MatchString(parsed.Fragment) {
+		return out
+	}
+	return out + "#" + parsed.Fragment
+}
+
 // repositoryMonitorFeedbackBody removes hidden HTML comments, then sanitizes
 // and bounds untrusted reviewer text with the CI evidence sanitizer.
 func repositoryMonitorFeedbackBody(raw string) (body string, hidden bool, truncated []string) {
@@ -1141,7 +1162,7 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		}
 		comment := repositoryMonitorFeedbackComment{
 			ID: commentID, Author: author.login, AuthorType: author.kind, Permission: author.permission,
-			Body: body, URL: repositoryMonitorEvidenceURL(raw.URL), CreatedAt: raw.CreatedAt.UTC(),
+			Body: body, URL: repositoryMonitorFeedbackURL(raw.URL), CreatedAt: raw.CreatedAt.UTC(),
 			HiddenContentRemoved: hidden, Truncated: truncated,
 		}
 		if raw.LastEditedAt != nil {
@@ -1222,7 +1243,7 @@ func (n *repositoryMonitorFeedbackNormalizer) review(node repositoryMonitorFeedb
 	body, hidden, truncated := repositoryMonitorFeedbackBody(node.Body)
 	review := repositoryMonitorFeedbackReview{
 		ID: id, Author: author.login, AuthorType: author.kind, Permission: author.permission,
-		Body: body, URL: repositoryMonitorEvidenceURL(node.URL), SubmittedAt: node.SubmittedAt.UTC(),
+		Body: body, URL: repositoryMonitorFeedbackURL(node.URL), SubmittedAt: node.SubmittedAt.UTC(),
 		HiddenContentRemoved: hidden, Truncated: truncated,
 	}
 	if node.Commit != nil {

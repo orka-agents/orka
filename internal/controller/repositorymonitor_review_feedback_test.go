@@ -877,6 +877,24 @@ func TestRepositoryMonitorReviewFeedbackQuietPeriodIgnoresOutsideComments(t *tes
 	}
 }
 
+func TestRepositoryMonitorFeedbackURLKeepsGitHubAnchorsOnly(t *testing.T) {
+	const base = "https://github.com/orka-agents/orka/pull/1"
+	for _, tc := range []struct{ in, want string }{
+		{base + "#discussion_r123", base + "#discussion_r123"},
+		{base + "#pullrequestreview-456", base + "#pullrequestreview-456"},
+		{base + "#issuecomment-789", base + "#issuecomment-789"},
+		{base + "?token=abc#discussion_r123", base + "#discussion_r123"},
+		{base + "#access_token=abc", base},
+		{base + "#discussion_r12x", base},
+		{base, base},
+		{"https://user:pass@github.com/x#discussion_r1", ""},
+	} {
+		if got := repositoryMonitorFeedbackURL(tc.in); got != tc.want {
+			t.Errorf("feedback URL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestRepositoryMonitorReviewFeedbackBotPullRequestAuthorNeverStarts(t *testing.T) {
 	permissionOf, _ := repositoryMonitorFeedbackTestPermissions(nil)
 	// GraphQL names the bot without the suffix the allowlist and REST use.
