@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Agent runtimes | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/agent-runtimes"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Agent runtimes | Orka"><meta data-rh="true" name="description" content="How Orka runs coding agents: ACP RuntimePools, sessions, and the pool lifecycle."><meta data-rh="true" property="og:description" content="How Orka runs coding agents: ACP RuntimePools, sessions, and the pool lifecycle."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/agent-runtimes"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/agent-runtimes" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/agent-runtimes" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Agent runtimes","item":"https://orka-agents.github.io/orka/docs/agent-runtimes"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.ac5ac93b.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.16ff5817.js" defer="defer"></script>
 <script src="/orka/assets/js/main.5a4e78cf.js" defer="defer"></script>
 </head>
 <body>
@@ -153,6 +153,39 @@ allowing one exposes the group and disallowing one closes the group. For
 read-intent workspaces, Orka also disables Bash and OpenCode Grep because Grep
 cannot carry the secret-file exclusions applied to OpenCode Read; Read and Glob
 remain available when allowed by policy.</p>
+<p>The cloned repository is untrusted input, so built-in runtimes do not load
+agent configuration from it that could run commands or change provider
+routing outside the Orka tool policy:</p>
+<ul>
+<li class=""><strong>Claude</strong> loads no settings files, neither from the repository&#x27;s <code>.claude/</code>
+directory nor from the session home. Repository hooks, <code>env</code>, and
+<code>CLAUDE.md</code> are ignored. Orka&#x27;s <a class="" href="/orka/docs/guides/runtime-skills">runtime skills</a>
+reach Claude as a read-only plugin instead.</li>
+<li class=""><strong>Codex</strong> does not trust the session workspace, so it ignores the
+repository&#x27;s <code>.codex/config.toml</code>, including MCP servers and shell
+environment settings. It still reads <code>AGENTS.md</code>.</li>
+<li class=""><strong>Copilot</strong> runs only hooks from the image&#x27;s managed policy. Repository
+hooks in <code>.github/hooks</code>, <code>.github/copilot/settings.json</code>, and
+<code>.claude/settings.json</code>, and hooks in the session home, do not run.
+Copilot CLI 1.0.96 still reads repository instruction files, such as
+<code>AGENTS.md</code> and <code>.github/copilot-instructions.md</code>, as prompt context.</li>
+<li class=""><strong>OpenCode</strong> 1.19.0 imports project plugins even when project
+configuration is disabled. Orka therefore refuses an OpenCode session whose
+workspace root contains <code>.opencode/</code>, <code>opencode.json</code>, or <code>opencode.jsonc</code>,
+and fails the Task with <code>RuntimeSessionStartFailed</code>. It does not remove
+those files, because they may be published. The check runs on every
+session start, including a resume, and again before Orka restarts an
+adapter that exited while idle. That restart also checks the session&#x27;s own
+OpenCode configuration folder and <code>~/.opencode</code>, which OpenCode reads as
+global configuration and which the agent can write. Before that check,
+Orka stops any running <a class="" href="/orka/docs/guides/operator-workspace-access">operator access</a>
+command and refuses new ones until the restarted OpenCode accepts the
+prompt, because those commands run as the session&#x27;s identity. If the agent added
+configuration or plugins to any of these, Orka retires the session instead
+of restarting OpenCode. The replacement session gets fresh configuration
+folders but the same workspace, so it starts only if the workspace still
+passes the check.</li>
+</ul>
 <p>For built-in RuntimePools, Task-level <code>spec.agentRuntime</code> contains runtime overrides such as <code>maxTurns</code>, <code>allowedTools</code>, <code>disallowedTools</code>, and <code>allowBash</code>. For <code>runtimeRef</code>, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its <code>capabilities.mcpPolicy</code> stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit <code>spec.model</code>, <code>spec.systemPrompt</code>, <code>spec.skills</code>, enabled <code>spec.tools</code>, <code>defaultMaxTurns</code>, <code>defaultAllowedTools</code>, <code>defaultAllowBash</code>, and <code>defaultReasoningEffort</code>. Disabled Agent tool entries are inert and accepted. Task-level <code>allowedTools</code> must equal the registered allowlist when brokered tools are exposed. Orka rejects <code>maxTurns</code>, <code>disallowedTools</code>, and <code>allowBash</code> because those values are fixed by the registration. Repository configuration belongs at top-level <code>spec.workspace</code>.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="cap-what-tasks-can-request">Cap what Tasks can request<a href="#cap-what-tasks-can-request" class="hash-link" aria-label="Direct link to Cap what Tasks can request" title="Direct link to Cap what Tasks can request" translate="no">​</a></h3>
 <p>The <code>default*</code> fields are only defaults: a Task can replace them with its own
@@ -301,6 +334,7 @@ cross-namespace Vekil ingress boundary.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="troubleshooting">Troubleshooting<a href="#troubleshooting" class="hash-link" aria-label="Direct link to Troubleshooting" title="Direct link to Troubleshooting" translate="no">​</a></h2>
 <ul>
 <li class=""><strong>Task fails before queueing</strong>: for a built-in runtime, verify the Agent has <code>runtime.type: codex</code>, <code>claude</code>, <code>copilot</code>, or <code>opencode</code>, ACP is enabled, and the matching digest-pinned image is configured. For <code>runtimeRef</code>, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.</li>
+<li class=""><strong>OpenCode Task fails with <code>RuntimeSessionStartFailed</code>: &quot;the OpenCode runtime refuses workspaces containing .opencode, opencode.json, or opencode.jsonc&quot;</strong>: the workspace root contains one of those entries; the runtime log names it. Run the Task with another built-in runtime, or remove those entries from the repository or branch it uses.</li>
 <li class=""><strong>Task remains queued</strong>: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.</li>
 <li class=""><strong>Agent warnings in Task results</strong>: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex&#x27;s missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its <code>Info:</code> lines into the reply.</li>
 <li class=""><strong>Task reports <code>OutcomeUnknown</code></strong>: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.</li>
