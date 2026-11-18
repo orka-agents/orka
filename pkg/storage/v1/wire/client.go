@@ -193,15 +193,21 @@ func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call 
 	evidence := &sendEvidence{conn: c.conn}
 	var served metadata.MD
 	if err := call(withSendEvidence(ctx, evidence), grpc.Header(&served)); err != nil {
+		if answersForDataset(err) {
+			if mismatch := c.checkServed(m, served); mismatch != nil {
+				return mismatch
+			}
+		}
 		return decodeError(ctx, m, err, evidence)
 	}
 	return c.checkServed(m, served)
 }
 
-// checkServed refuses a response a bound client's call received from a
-// dataset other than its own, which a server that checks the request's
-// dataset header never sends. A write or an administrative call reached a
-// server serving another dataset, so its outcome is unknown.
+// checkServed refuses a response, or a storage error that answers for the
+// server's dataset, that a bound client's call received from a dataset other
+// than its own, which a server that checks the request's dataset header never
+// sends. A write or an administrative call reached a server serving another
+// dataset, so its outcome is unknown.
 func (c *Client) checkServed(m *method, served metadata.MD) error {
 	if c.dataset == "" || m.mayOmitDataset() {
 		return nil

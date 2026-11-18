@@ -43,7 +43,9 @@ func runWriteWatermark[P suiteProvider](t *testing.T, newProvider func(t *testin
 		_, second, err := advanceWatermark(t, provider, suiteFence)
 		require.NoError(t, err)
 		require.Equal(t, int64(2), second.Value)
-		require.False(t, second.AdvancedAt.Before(firstWatermark.AdvancedAt))
+		// AdvancedAt is the provider's wall clock, which may step back between
+		// advances; Value carries the order.
+		require.False(t, second.AdvancedAt.IsZero())
 
 		replayed, err := provider.AdvanceWriteWatermark(storagev1.WithWriteEnvelope(ctx, first))
 		require.NoError(t, err)

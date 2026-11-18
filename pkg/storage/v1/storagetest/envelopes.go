@@ -31,10 +31,12 @@ type suiteOptions struct {
 	recomputedDigests map[string]bool
 }
 
-// Parallel runs the contract families in parallel with each other. Cases
-// within a family still run in order. The factory must then be safe for
-// concurrent use, and each dataset it returns must stay isolated from the
-// others, as a schema per case on a shared database is.
+// Parallel runs the suite's families, including the ones a harness option
+// enables, in parallel with each other. Cases within a family still run in
+// order. The factory must then be safe for concurrent use, and each dataset
+// it returns must stay isolated from the others, as a schema per case on a
+// shared database is; a harness then acts on its dataset while the other
+// families use theirs.
 func Parallel() Option {
 	return func(o *suiteOptions) { o.parallel = true }
 }

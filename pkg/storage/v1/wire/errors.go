@@ -136,17 +136,17 @@ func contractStatus(err error) (encoded error, ok bool) {
 			return errorStatus(entry.code, entry.reason, entry.sentinel.Error(), nil), true
 		}
 	}
-	var tooLarge storagev1.TooLargeError
-	var binding storagev1.BindingConflictError
+	binding, isBinding := asTyped[storagev1.BindingConflictError](err)
+	tooLarge, isTooLarge := asTyped[storagev1.TooLargeError](err)
 	switch {
 	case errors.Is(err, storagev1.ErrFenced):
 		return messageStatus(codes.FailedPrecondition, ReasonFenced, typedMessage[storagev1.FencedError](err)), true
 	case errors.Is(err, storagev1.ErrPreconditionFailed):
 		return messageStatus(codes.FailedPrecondition, ReasonPreconditionFailed,
 			typedMessage[storagev1.PreconditionFailedError](err)), true
-	case errors.As(err, &binding):
+	case isBinding:
 		return bindingConflictStatus(binding), true
-	case errors.As(err, &tooLarge):
+	case isTooLarge:
 		// Only the typed fields cross, never the provider's wrapping text.
 		bounded := storagev1.TooLargeError{What: sanitizeText(tooLarge.What, messageLimit), Size: tooLarge.Size, Limit: tooLarge.Limit}
 		return errorStatus(codes.ResourceExhausted, ReasonTooLarge, bounded.Error(), map[string]string{
@@ -170,6 +170,23 @@ func contractStatus(err error) (encoded error, ok bool) {
 	return nil, false
 }
 
+// asTyped finds the typed contract error T in err's chain in its value or
+// its pointer form. The contract's typed errors have value receivers, so a
+// provider may return either.
+func asTyped[T error, P interface {
+	*T
+	error
+}](err error) (T, bool) {
+	if typed, ok := errors.AsType[T](err); ok {
+		return typed, true
+	}
+	if typed, ok := errors.AsType[P](err); ok && typed != nil {
+		return *typed, true
+	}
+	var zero T
+	return zero, false
+}
+
 // typedMessage returns the message of the typed error T in err's chain, so
 // the client's errors.As finds the message an in-process caller finds. A
 // provider that wrapped the bare sentinel instead sends its error's text. A
@@ -179,11 +196,8 @@ func typedMessage[T error, P interface {
 	*T
 	error
 }](err error) string {
-	if typed, ok := errors.AsType[T](err); ok {
+	if typed, ok := asTyped[T, P](err); ok {
 		return typed.Error()
-	}
-	if pointer, ok := errors.AsType[P](err); ok && pointer != nil {
-		return (*pointer).Error()
 	}
 	return err.Error()
 }
@@ -252,6 +266,32 @@ func storageErrorInfo(st *status.Status) *errdetails.ErrorInfo {
 		}
 	}
 	return nil
+}
+
+// refusedBeforeDataset holds the reasons a server can send before its
+// dataset check, or without knowing its dataset: authentication, the contract
+// and request checks, the dataset check itself, and a provider that cannot
+// describe its dataset.
+var refusedBeforeDataset = map[string]bool{
+	ReasonUnauthenticated:  true,
+	ReasonContractMismatch: true,
+	ReasonUnsupportedField: true,
+	ReasonDatasetMismatch:  true,
+	ReasonUnavailable:      true,
+	ReasonIncompatible:     true,
+}
+
+// answersForDataset reports whether err is a storage status that answers for
+// the server's dataset, so the response must name the client's dataset as a
+// successful response must. A NOT_FOUND or a refused write from another
+// dataset says nothing about the client's own.
+func answersForDataset(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	info := storageErrorInfo(st)
+	return info != nil && !refusedBeforeDataset[info.GetReason()]
 }
 
 // decodeError turns a failed call into the error its caller receives.

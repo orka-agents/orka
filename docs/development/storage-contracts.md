@@ -1389,8 +1389,8 @@ SQLite provider runs it directly with both options, refusing writes without
 an envelope as in production, and again over the wire loopback (see "Wire
 protocol"), and the storage client runs it over SQLite with
 `ProviderAttachesEnvelopes`, so the client attaches the envelopes. The
-`Parallel` option runs the families in parallel for a factory that returns
-isolated datasets concurrently.
+`Parallel` option runs every family, the harness families included, in
+parallel for a factory that returns isolated datasets concurrently.
 
 `internal/storageclient/storagefault` injects storage faults for Orka's own
 tests. It wraps a state provider, an artifact provider or the embedded store
@@ -1475,8 +1475,13 @@ artifact-fence cases run only in process.
   server's revision and, once the server knows it, the serving dataset; a
   bound client refuses any other response for another dataset, as
   `ErrOutcomeUnknown` for a write or an administrative call and
-  `ErrDatasetMismatch` for a read. A write's `WriteEnvelope` travels as the
-  binary header `orka-storage-envelope-bin`, and the server puts it in the
+  `ErrDatasetMismatch` for a read. It refuses an error for another dataset the
+  same way, unless the server can send that error before its dataset check
+  (`UNAUTHENTICATED`, `CONTRACT_MISMATCH`, `UNSUPPORTED_FIELD`,
+  `DATASET_MISMATCH`, `UNAVAILABLE` or `INCOMPATIBLE`), so another dataset's
+  `NOT_FOUND` or refused write is never taken as an answer for its own. A
+  write's `WriteEnvelope` travels as the binary header
+  `orka-storage-envelope-bin`, and the server puts it in the
   provider's context with `WithWriteEnvelope`. A read or an administrative
   call never carries one: the client leaves it off, and the server refuses one
   (`VALIDATION`). A call made under a Task data fence carries the
