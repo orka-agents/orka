@@ -2311,3 +2311,68 @@ func TestHeldTaskRecordsNoSucceededOutcome(t *testing.T) {
 		t.Fatalf("succeeded outcome recorded after the hold was released = %v", err)
 	}
 }
+
+// supersedingEpochDataset reports, once switched closes, that another
+// controller advanced it: a later epoch, or this epoch for another holder.
+type supersedingEpochDataset struct {
+	*switchingEpochDataset
+	later bool
+}
+
+func (d *supersedingEpochDataset) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	state, err := d.switchingEpochDataset.GetControllerEpochMirror(ctx, name)
+	select {
+	case <-d.switched:
+		if err == nil {
+			state.Epoch.HolderID = "controller-b"
+			if d.later {
+				state.Epoch.Epoch++
+			}
+		}
+	default:
+	}
+	return state, err
+}
+
+// A switched dataset that another controller took over does not pass the
+// switch check: this controller's fences stay closed, it admits no work, it
+// writes no watermark there and it raises no hold on the new owner's behalf.
+func TestSwitchCheckKeepsFencesClosedForADatasetAnotherControllerHolds(t *testing.T) {
+	for name, later := range map[string]bool{"later epoch": true, "same epoch, other holder": false} {
+		t.Run(name, func(t *testing.T) {
+			authority, _ := newKubernetesControllerEpochAuthority(t)
+			dataset := &supersedingEpochDataset{
+				switchingEpochDataset: &switchingEpochDataset{
+					recordingEpochDataset: newRecordingEpochDataset("dataset-a"), durability: storagev1.DurabilitySynchronousReplicated,
+					switched: make(chan struct{}),
+				},
+				later: later,
+			}
+			manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+			startEpochManager(t, manager)
+			if _, err := fenceWithTimeout(manager); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "a recorded watermark", func() bool { return recordedWatermark(t, authority) >= 2 })
+			close(dataset.switched)
+			eventually(t, "the switched dataset's fence to close", func() bool {
+				_, _, err := writeFenceWithin(manager, storagev1.StateContract, 20*time.Millisecond)
+				return err != nil
+			})
+			stored := datasetWatermark(t, dataset)
+			time.Sleep(5 * durabilityTestInterval)
+			if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 20*time.Millisecond); err == nil {
+				t.Fatal("the fence reopened for a dataset another controller holds")
+			}
+			if err := manager.AdmitWork(context.Background(), func(context.Context) error { return nil }); !errors.Is(err, store.ErrNotReady) {
+				t.Fatalf("AdmitWork for a dataset another controller holds = %v, want ErrNotReady", err)
+			}
+			if after := datasetWatermark(t, dataset); after != stored {
+				t.Fatalf("the watermark of a dataset another controller holds moved from %d to %d", stored, after)
+			}
+			if recordedHold(t, authority) != nil {
+				t.Fatal("a hold was raised for a dataset another controller holds")
+			}
+		})
+	}
+}
