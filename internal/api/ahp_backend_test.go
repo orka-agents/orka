@@ -3438,6 +3438,44 @@ func TestAHPBackendTakesBackAFailedTurnTheStoreRefusedAtFirst(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the session is free again")
 }
 
+// A turn whose Task creation reported a failure stays the session's until
+// that Task is known absent or asked to stop: a Task the server kept anyway
+// must not run beside the next turn.
+func TestAHPBackendKeepsAFailedTurnUntilItsTaskIsStopped(t *testing.T) {
+	env := newAHPTestEnv(t)
+	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 50}
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	var reachable atomic.Bool
+	var looks atomic.Int32
+	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && !reachable.Load() {
+				looks.Add(1)
+				return errors.New("the API server is unreachable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	env.onTaskCreate = func(*corev1alpha1.Task) error { return errors.New("the create timed out") }
+	_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "hello", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return looks.Load() >= 3 }, 5*time.Second, 5*time.Millisecond, "the Task is looked for again")
+	var current ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current))
+	require.Equal(t, "turn-1", current.ActiveTurn, "the session stays busy while the Task may run")
+	reachable.Store(true)
+	require.Eventually(t, func() bool {
+		var now ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &now) == nil && now.ActiveTurn == ""
+	}, 5*time.Second, 10*time.Millisecond, "the turn is taken back once the Task is known absent")
+}
+
 // A message waiting behind a turn whose Task was not created runs once the
 // turn's take-back lands, also when the store refused it at first.
 func TestAHPBackendRunsAWaitingMessageAfterALateTakeBack(t *testing.T) {
