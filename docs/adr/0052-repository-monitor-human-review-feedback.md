@@ -46,7 +46,7 @@ with `fullDatabaseId`, author login and type, body, URL, creation and last-edit
 times, minimized flag, and the review it belongs to. Each review keeps its
 `fullDatabaseId`, state, body, author, commit, and times. Reads are bounded
 (four pages of 50 threads, four pages of 50 reviews, 20 permission lookups, 20
-seconds), and a read that stops early sets an explicit `partial` flag with a
+seconds; permission lookups are also cached and bounded per monitor poll), and a read that stops early sets an explicit `partial` flag with a
 reason. Reviews are read newest page first (`reviews(last:, before:)`), so a
 read cut at its page limit holds the newest reviews: every reviewer it holds
 has their true latest verdict, and a reviewer whose latest review is older than
@@ -145,15 +145,185 @@ key on the first five fields and a contiguity check make attempt `n` admissible
 only once, and only after attempt `n-1`.
 
 The rows are written in the same transaction as the repair's command event.
-Admission is atomic with the existing repair admission, so two reconciles that
-pick different targets cannot both schedule a repair. A replay of the same
-command is idempotent. Editing a comment keeps its ID, so the edit does not reset
-its lifetime budget of `maxAttemptsPerComment` (default 2). A new head
+The command's dedupe key names the budget slot it takes: the pull request, its
+head, and the repair counts the budget check saw. Admission is therefore atomic
+with the existing repair admission. Two reconciles that pick different targets
+cannot both schedule a repair, or both fit into one remaining slot. Replaying
+the same command for the same monitor and pull request is idempotent. The
+command's budget slot ignores the monitor generation, because repair budgets
+outlive spec changes. Editing a comment keeps its ID, so the edit does not
+reset its lifetime budget of `maxAttemptsPerComment` (default 2). A new head
 re-triggers feedback only while attempts remain and the thread is still
-unresolved and current. The repair Task's prompt freezes the snapshot it
-received, using the CI evidence mechanism: a retried handoff reuses the
-prompt's input. The work action and the `repair_task_created` event record
-that snapshot's digest and IDs.
+unresolved and current.
+
+### One outcome per feedback repair
+
+Earlier designs inferred whether an attempt had run from the command's status,
+the repair job's phase, whether the repair Task still existed, and the work
+action's status and metadata. Each was written at a different moment, and the
+attempt charge, the readiness projection, and the repair budget each inferred
+differently, which repeatedly disagreed on edge cases. Instead, each feedback
+repair has one mutable outcome record beside its immutable attempts, in the
+store table `monitor_feedback_outcomes`, keyed by the command event. It is the
+only source of truth for what the repair did; the repair job, the work action,
+and the pull request item are projections of it.
+
+- `reserved`, written with the command and its attempts at admission, lists
+  the admitted feedback IDs. All of them are charged, so a queued repair holds
+  its attempts.
+- `creating` is written immediately before the repair Task's create is
+  requested, with the Task's name and the time. From then on the Task may
+  exist, or may have run and been deleted, so every admitted ID stays
+  charged. Only `started`, or a definite refusal by the API server (a request
+  it rejected as invalid, unauthorized, or throttled), which returns the
+  outcome to `reserved` and charges nothing, clears it. A timeout or an
+  internal error leaves it `creating`.
+- `started` is written only once the repair Task exists, with the
+  `humanFeedbackTargets` its prompt froze and the Task's name. From then on
+  only those targets are charged; admitted feedback that was resolved before
+  the Task was created is released.
+- One terminal state follows and never changes: `withdrawn` (only from
+  `reserved`), `failed` (from `reserved`, `creating`, or `started`),
+  `no_change` or `succeeded` (only from `started`). A terminal outcome keeps
+  its reason and the head a succeeded repair pushed.
+
+The charge is a function of the record alone: `reserved` and `creating`
+charge every admitted ID, a repair that started charges its targets, one that
+ended while `creating` charges every admitted ID, and one that ended before
+any create was requested charges nothing. An attempt without an outcome is
+charged, so the budget fails closed. Every terminal path honours `creating`:
+a cancellation, exhausted retries, a refusal, a handoff that finds no Task,
+and repair ingestion first start the outcome from the Task if it exists, and
+otherwise end it `failed` with every admitted charge kept.
+
+Each transition is written where it becomes known, idempotently and under
+the controller's write fence, before the projections that follow from it.
+Absence of a Task is only ever concluded from an uncached read of the API
+server, never from the cache, which can lag a create. A restart in any state
+resumes from the record:
+
+- A `creating` repair whose Task is gone may have run, so it fails with
+  `repair_task_outcome_unknown` and is not created again.
+- A `started` repair whose Task disappeared before its result was recorded
+  fails with `repair_task_missing`, keeps its charge, and is not run again;
+  repair ingestion settles it as soon as an uncached read confirms the Task
+  is gone, even after the command's handoff succeeded.
+- Projections always follow the stored outcome. Repair ingestion records a
+  Task's end only for an outcome that has not ended, then projects whatever
+  the stored outcome says, so a Task that succeeds after its repair was
+  refused never projects success. A terminal outcome that is not yet marked
+  projected has its projections replayed on every repair ingestion: its
+  repair job, push mutation, and work action are made to record its end,
+  whether they had not ended or ended differently, and the item's repair
+  state is derived again. Each write is idempotent, and the outcome is marked
+  projected only once no projection contradicts it. No other path writes the
+  work action of a feedback repair whose outcome has ended: a retry, stale
+  head, or policy block that would projects the stored outcome instead. A
+  bulk cancel, such as a stop command's, projects again every ended feedback
+  repair of the pull request it cancelled, and projection may settle a
+  cancelled action, which no other writer may reopen. The projector reads
+  its records back and marks an outcome projected only when they record it,
+  and only once the work action it wrote exists; a write that was refused
+  is retried. Each pass over unprojected outcomes resumes where the last
+  stopped and wraps around, so outcomes whose projection keeps failing
+  cannot keep others from being projected. Each repair ingestion also checks a
+  rotating window of 20 projected outcomes and projects again any whose job,
+  push mutation, or work action a later writer contradicted. One repair's
+  ingestion or projection error is logged and retried without holding up the
+  others.
+- A withdrawn repair's job, even one whose Task create the API server
+  refused, ends in the `withdrawn` phase, which readiness ignores, and its push
+  mutation ends too. Ingestion visits every queued job, so jobs that never
+  end cannot keep older ones from being ingested.
+
+The readiness projection skips a `withdrawn` repair, so a withdrawal leaves
+the head as if no repair had been requested. The pull request's repair budget
+counts every feedback repair past `reserved`, including one withdrawn before
+its Task existed. A feedback repair whose Task verifiably changed nothing,
+because its feedback was already addressed, ends `no_change`: it keeps its
+charge, is not a failed repair, and leaves the head and its review alone;
+open-feedback readiness decides whether a person is needed.
+
+An unreleased build of this change wrote schema version 8 without the outcome
+table. Opening such a store repairs its layout in place at version 8 and
+recovers one outcome per admitted command, unprojected so its projections are
+replayed: a repair job that settled from its Task keeps every admitted
+charge; a job still queued with a Task name may have created its Task, since
+that build recorded any create failure alike, so it recovers `creating`
+while its command is unfinished and `failed` once it finished, keeping every
+admitted charge; a finished command that was withdrawn recovers `withdrawn`,
+any other finished command `failed` without a charge, and an unfinished
+command without a job `reserved`.
+
+### One read per handoff and one completeness verdict
+
+A queued feedback repair reads feedback once per handoff. The same snapshot
+rechecks the repair before its Task exists and becomes the Task's input, so no
+change can fall between a recheck and the input. A retried handoff whose Task
+already exists adopts the Task's frozen input and reads nothing.
+
+Every decision about whether a snapshot is complete goes through one verdict:
+
+- `complete`: every piece of feedback that could start a repair is shown,
+  with its author's authority known. Only a complete snapshot admits a repair
+  or hands one off.
+- `incomplete_retry`: a transient failure: a failed or throttled GitHub read
+  or permission lookup, the poll's permission lookup budget, or a read for
+  another head. Readiness waits and a queued repair is deferred.
+- `needs_person`: a permanent limit: more feedback than the page limits hold,
+  a single thread whose response exceeds GitHub's limit even when read alone
+  (larger thread pages are read again at half the size, so they are not a
+  limit),
+  an unresolved thread whose omitted replies may hide feedback, even one
+  whose fetched comments were all left out (comments in unsubmitted reviews
+  are excluded, not omitted), a thread or
+  review left out of the 32 KiB budget that holds or may hide feedback that
+  could start a repair, or more reviewers than one snapshot may look up.
+  Readiness asks for a person and a queued repair is withdrawn with
+  `review_feedback_needs_person`.
+
+Collaborator permissions are cached for one monitor poll, shared by every
+pull request, readiness, and repair label checks, and bounded to 60 lookups
+per poll in addition to the 20 per snapshot. A failed lookup is cached for the
+poll too, so a throttled account is not asked again until the next poll; both
+give `incomplete_retry`. The budget is fair across polls: a permission one
+poll read answers the monitor's later polls for three minutes. Lookups are
+scoped to the feedback snapshot of one pull request. A snapshot the budget
+cut short waits with every reviewer it needs, and later polls reserve whole
+waiting snapshots, the longest-waiting first, within half their budget, so
+all of a reserved snapshot's reviewers are looked up in the same poll and the
+snapshot completes even when remembered permissions expire between polls.
+Pull requests that inventory reaches late are therefore not starved by early
+ones. A reconcile that looks nothing up leaves the waiting snapshots as they
+were. A waiting snapshot needs its current reviewers only, so reviewer churn
+cannot grow it, and one that does not fit what is left of a poll's
+reservation is passed over for that poll rather than holding up later ones.
+The memory is kept per monitor UID: a deleted monitor's is evicted when its
+reconcile finds it gone, a monitor recreated under the same name drops the
+one it replaced, and memories unused for an hour, or beyond 1,024 monitors,
+are swept. The memory is the controller's; a restart starts afresh.
+
+A cached permission may only make automation more cautious, never less:
+
+- **Authorization for a write is never cached.** Every decision that writes
+  to GitHub or creates a Task reads the permissions it rests on from GitHub
+  then, using neither the poll's cache nor the memory: every command
+  handoff (a feedback repair, any other fix, a CI fix, or a branch update),
+  the repair label check before a policy repair is admitted, and the
+  recheck before every branch update `PUT`, including a resubmission and
+  the recovery of a submission a crash left recorded. A recovered
+  submission whose grant was withdrawn is recorded failed and never sent.
+  These lookups count toward the poll's budget but are never refused by it.
+- **Only authority is remembered.** The poll's cache and the memory answer
+  scheduling and readiness only with a permission that grants the authority
+  the caller checks for. A reviewer or labeller without it, read-only or not
+  a collaborator, is looked up again by each evaluation, so readiness
+  concludes that someone lacks authority only from a lookup it made itself.
+  A lookup the budget refuses leaves authority unknown, which gives
+  `incomplete_retry`, never success. A snapshot waiting for budget reserves
+  a lookup per evaluation for each such reviewer, and the longest-waiting
+  snapshot is reserved even past half the budget, so readiness still
+  completes in turn when every pull request is evaluated more than once.
 
 ### Budgets and maxRounds
 
@@ -166,13 +336,15 @@ still bound the work. This is open for maintainer review.
 
 ### Readiness
 
-When `humanFeedback` is enabled, a head that would otherwise be ready stays
-`pending` ("Addressing N reviewer comments") while authorized current feedback
-has attempts left. It becomes a non-success status saying a person is needed
-once that feedback's attempts are exhausted, or when authorized feedback is
-open but automation will not act on it, such as an outdated thread. An
-unreadable or partial snapshot never reports success. Readiness never resolves
-or replies to threads.
+When `humanFeedback` is enabled, a head that would otherwise be ready follows
+the snapshot's verdict first: `incomplete_retry` keeps it `pending`, and
+`needs_person` makes it a non-success status saying a person must review the
+feedback. A complete snapshot stays `pending` ("Addressing N reviewer
+comments") while authorized current feedback has attempts left. It becomes a
+non-success status saying a person is needed once that feedback's attempts are
+exhausted, or when authorized feedback is open but automation will not act on
+it, such as an outdated thread or a repair label added by an account that may
+not start repairs. Readiness never resolves or replies to threads.
 
 ### Why there is no thread resolution in v1
 
@@ -196,13 +368,15 @@ and the maintainer-edits rule also apply unchanged.
 
 - Reviewer comments can drive repairs, but only from authorized authors and
   only within the attempt and repair budgets.
-- Each feedback repair costs two GraphQL reads and up to 20 permission lookups.
+- Each feedback repair handoff costs one feedback read (two GraphQL
+  connections) and up to 20 permission lookups, cached across the poll.
   Readiness makes the same reads only for a head that would otherwise report
   success.
 - A comment the repairer addressed still counts against its budget until a
   person resolves the thread or the change makes it outdated. With the default
   of two attempts, a satisfied but unresolved comment can get one extra no-op
   repair before readiness asks for a person.
-- The schema gains one table and moves to schema version 6.
+- The schema gains the attempt ledger and outcome tables and moves to schema
+  version 8. The state provider contract gains the outcome methods in revision 9.
 - Reply and resolve actions, webhook-driven latency for review events, and the
   issue's resolved-thread evidence remain future work.

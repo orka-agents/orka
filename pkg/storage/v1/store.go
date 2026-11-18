@@ -472,6 +472,60 @@ type RepositoryMonitorStore interface {
 
 	CreateMonitorEvent(ctx context.Context, event *MonitorEvent) error
 	ListMonitorEvents(ctx context.Context, filter MonitorEventFilter) ([]MonitorEvent, string, error)
+
+	// AdmitMonitorFeedbackRepair creates admission's command event, its
+	// feedback attempts, and its reserved [MonitorFeedbackOutcome] in one
+	// transaction and reports whether it created them. Every attempt names
+	// the command and its monitor and pull request, and its feedback IDs are
+	// distinct. Attempt n of a feedback ID is admitted only when attempts 1
+	// to n-1 exist. Admitting the same command again with the same attempts
+	// creates nothing and returns false; an attempt number already taken by
+	// another command, or one that skips a number, fails with ErrConflict and
+	// creates nothing.
+	AdmitMonitorFeedbackRepair(ctx context.Context, admission MonitorFeedbackAdmission) (bool, error)
+	// ListMonitorFeedbackAttempts lists feedback attempts newest first.
+	ListMonitorFeedbackAttempts(ctx context.Context, filter MonitorFeedbackAttemptFilter) ([]MonitorFeedbackAttempt, string, error)
+	// PrepareMonitorFeedbackRepairTask moves a reserved feedback outcome to
+	// creating with the request's Task name, before the Task create is
+	// requested, and returns the stored outcome. Preparing an outcome again
+	// that is creating or started with the same Task name changes nothing
+	// and returns it; another Task name, or an outcome that ended, fails with
+	// ErrConflict. A missing outcome is ErrNotFound.
+	PrepareMonitorFeedbackRepairTask(ctx context.Context, request PrepareMonitorFeedbackRepairTaskRequest) (*MonitorFeedbackOutcome, error)
+	// ReleaseMonitorFeedbackRepairTask returns a creating feedback outcome to
+	// reserved, clearing its Task name and create time, because the API
+	// server definitely refused the create, and returns the stored outcome.
+	// Releasing a reserved outcome changes nothing; any other outcome fails
+	// with ErrConflict. A missing outcome is ErrNotFound.
+	ReleaseMonitorFeedbackRepairTask(ctx context.Context, request ReleaseMonitorFeedbackRepairTaskRequest) (*MonitorFeedbackOutcome, error)
+	// StartMonitorFeedbackRepair moves a reserved or creating feedback
+	// outcome to started with the request's targets, sorted, and Task name,
+	// and returns the stored outcome. Targets must be a nonempty subset of
+	// the admitted IDs, or it fails with ErrValidation. Starting an outcome
+	// again with the same targets and Task name, even after it ended,
+	// changes nothing and returns it; other targets, a Task name other than
+	// the creating outcome's, or an outcome that ended without starting,
+	// fail with ErrConflict. A missing outcome is ErrNotFound.
+	StartMonitorFeedbackRepair(ctx context.Context, request StartMonitorFeedbackRepairRequest) (*MonitorFeedbackOutcome, error)
+	// FinishMonitorFeedbackRepair moves a feedback outcome to the request's
+	// terminal state, with its reason and result head, and returns the
+	// stored outcome. Withdrawn ends only a reserved outcome; no_change and
+	// succeeded end only a started one; failed ends a reserved, creating or
+	// started one. A terminal outcome never changes: finishing it again in
+	// the same state returns it unchanged, and any other transition fails
+	// with ErrConflict. A state that is not terminal is ErrValidation; a
+	// missing outcome is ErrNotFound.
+	FinishMonitorFeedbackRepair(ctx context.Context, request FinishMonitorFeedbackRepairRequest) (*MonitorFeedbackOutcome, error)
+	// MarkMonitorFeedbackOutcomeProjected records, once, that a terminal
+	// feedback outcome's projections record its end, and returns the stored
+	// outcome. Marking it again changes nothing; an outcome that has not
+	// ended fails with ErrConflict. A missing outcome is ErrNotFound.
+	MarkMonitorFeedbackOutcomeProjected(ctx context.Context, request MarkMonitorFeedbackOutcomeProjectedRequest) (*MonitorFeedbackOutcome, error)
+	// GetMonitorFeedbackOutcome returns the outcome of the feedback repair
+	// commandEventID names.
+	GetMonitorFeedbackOutcome(ctx context.Context, namespace, commandEventID string) (*MonitorFeedbackOutcome, error)
+	// ListMonitorFeedbackOutcomes lists feedback outcomes newest first.
+	ListMonitorFeedbackOutcomes(ctx context.Context, filter MonitorFeedbackOutcomeFilter) ([]MonitorFeedbackOutcome, string, error)
 }
 
 // MaxMessageBatch is the most messages one ListUnreadMessages or

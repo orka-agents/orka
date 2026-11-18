@@ -268,6 +268,21 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 	}
 	switch action.Status {
 	case repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorWorkActionStatusCancelled:
+		// A feedback repair's outcome ends with its command. The decision
+		// points record the precise end; this covers the ones that end a
+		// command without one, such as a cancellation or exhausted retries.
+		if repositoryMonitorFeedbackCommand(&command) {
+			state := store.MonitorFeedbackOutcomeFailed
+			if action.Status == repositoryMonitorWorkActionStatusSucceeded {
+				state = store.MonitorFeedbackOutcomeSucceeded
+			}
+			if action.Status == repositoryMonitorWorkActionStatusBlocked && (action.BlockedReason == repositoryMonitorRepairSkipFeedbackWithdrawn || action.BlockedReason == repositoryMonitorRepairSkipFeedbackNeedsPerson) {
+				state = store.MonitorFeedbackOutcomeWithdrawn
+			}
+			if err := r.finishRepositoryMonitorFeedbackOutcome(ctx, monitor, command.ID, state, firstNonEmptyWorkflow(action.BlockedReason, action.Error, action.Status), ""); err != nil {
+				return false, err
+			}
+		}
 		now := time.Now()
 		command.Status = repositoryMonitorCommandProcessed
 		command.ProcessedAt = &now

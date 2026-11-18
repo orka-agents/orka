@@ -391,6 +391,67 @@ spec:
                   enabled:
                     description: Enabled enables repair jobs.
                     type: boolean
+                  humanFeedback:
+                    description: |-
+                      HumanFeedback lets reviewers' unresolved review threads and
+                      changes-requested reviews drive repairs of pull requests in full repair
+                      scope. Orka never replies to, resolves, or dismisses them. Review text
+                      is stored in repair Tasks' spec.prompt, which anyone who can read Tasks
+                      in the monitor namespace can see, and is sent to the model provider.
+                    properties:
+                      botLogins:
+                        description: |-
+                          BotLogins allowlists the bots whose inline comments on a current diff
+                          line are evidence and can start a repair. Other bots are ignored.
+                        items:
+                          maxLength: 44
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$
+                          type: string
+                        maxItems: 20
+                        type: array
+                        x-kubernetes-list-type: set
+                      changesRequestedReviews:
+                        default: true
+                        description: |-
+                          ChangesRequestedReviews lets an authorized reviewer's current
+                          changes-requested review start a repair. Defaults to true.
+                        type: boolean
+                      enabled:
+                        default: false
+                        description: Enabled turns on feedback-driven repairs. Defaults
+                          to false.
+                        type: boolean
+                      maxAttemptsPerComment:
+                        default: 2
+                        description: |-
+                          MaxAttemptsPerComment bounds the repairs that address one comment or
+                          review over its lifetime; editing it does not reset the count.
+                          Defaults to 2.
+                        format: int32
+                        maximum: 10
+                        minimum: 1
+                        type: integer
+                      maxCommentsPerRepair:
+                        default: 10
+                        description: |-
+                          MaxCommentsPerRepair bounds the comments and reviews one repair
+                          addresses. Defaults to 10.
+                        format: int32
+                        maximum: 50
+                        minimum: 1
+                        type: integer
+                      minPermission:
+                        description: |-
+                          MinPermission is the minimum repository permission an author needs for
+                          their feedback to start a repair. Defaults to
+                          spec.triggers.github.labels.requireActorPermission;
+                          spec.policy.allowedRepositoryPermissions also applies.
+                        enum:
+                        - write
+                        - maintain
+                        - admin
+                        type: string
+                    type: object
                   includeLabels:
                     description: |-
                       IncludeLabels limits automatic repair to pull requests with any of these
@@ -425,6 +486,10 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: humanFeedback.enabled requires repair.enabled
+                  rule: '!has(self.humanFeedback) || !self.humanFeedback.enabled ||
+                    self.enabled'
               repoURL:
                 description: RepoURL is the repository URL to monitor.
                 minLength: 1

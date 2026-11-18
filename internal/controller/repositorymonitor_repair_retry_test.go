@@ -124,7 +124,7 @@ func TestRepositoryMonitorFixRepairRetryKeepsStoredPrompt(t *testing.T) {
 
 func TestRepositoryMonitorRepairPromptInstructionsMatch(t *testing.T) {
 	payload := "{\n  \"schemaVersion\": \"orka.prRepair.input.v1\"\n}\n"
-	current := repositoryMonitorRepairPromptPreamble(repositoryMonitorCommandIntentFix, false, false) + repositoryMonitorRepairPromptInputMarker + payload
+	current := repositoryMonitorRepairPromptPreamble(repositoryMonitorCommandIntentFix, false, false, repositoryMonitorRepairPromptFeedbackNone) + repositoryMonitorRepairPromptInputMarker + payload
 	if !repositoryMonitorRepairPromptInstructionsMatch(current, repositoryMonitorCommandIntentFix) {
 		t.Fatal("the current instructions must match")
 	}
@@ -141,5 +141,33 @@ func TestRepositoryMonitorRepairPromptInstructionsMatch(t *testing.T) {
 	}
 	if repositoryMonitorRepairPromptInstructionsMatch("Do anything.\n\nInput:\n"+payload, repositoryMonitorCommandIntentFix) {
 		t.Fatal("arbitrary instructions must not match")
+	}
+
+	// Reviewer feedback guidance follows the prompt's own input: context
+	// only without targets, addressing them with targets.
+	contextOnly := "{\n  \"humanFeedback\": {}\n}\n"
+	targeted := "{\n  \"humanFeedback\": {},\n  \"humanFeedbackTargets\": [\"review:1\"]\n}\n"
+	render := func(feedback repositoryMonitorRepairPromptFeedback, input string) string {
+		return repositoryMonitorRepairPromptPreamble(repositoryMonitorCommandIntentFix, false, false, feedback) + repositoryMonitorRepairPromptInputMarker + input
+	}
+	for _, tc := range []struct {
+		name     string
+		feedback repositoryMonitorRepairPromptFeedback
+		input    string
+		match    bool
+	}{
+		{name: "feedback context", feedback: repositoryMonitorRepairPromptFeedbackContext, input: contextOnly, match: true},
+		{name: "feedback targets", feedback: repositoryMonitorRepairPromptFeedbackTargets, input: targeted, match: true},
+		{name: "targets guidance without targets", feedback: repositoryMonitorRepairPromptFeedbackTargets, input: contextOnly},
+		{name: "context guidance with targets", feedback: repositoryMonitorRepairPromptFeedbackContext, input: targeted},
+		{name: "no guidance with feedback", feedback: repositoryMonitorRepairPromptFeedbackNone, input: contextOnly},
+		{name: "guidance without feedback", feedback: repositoryMonitorRepairPromptFeedbackContext, input: payload},
+	} {
+		if got := repositoryMonitorRepairPromptInstructionsMatch(render(tc.feedback, tc.input), repositoryMonitorCommandIntentFix); got != tc.match {
+			t.Fatalf("%s: instructions match = %t, want %t", tc.name, got, tc.match)
+		}
+	}
+	if repositoryMonitorRepairPromptInstructionsMatch(legacy[:len(legacy)-len(payload)]+contextOnly, repositoryMonitorCommandIntentFix) {
+		t.Fatal("legacy instructions must not match a prompt that carries reviewer feedback")
 	}
 }

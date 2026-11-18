@@ -66,6 +66,9 @@ const (
 	repositoryMonitorFeedbackReasonThreadPageLimit = "review_thread_page_limit"
 	repositoryMonitorFeedbackReasonReviewPageLimit = "review_page_limit"
 	repositoryMonitorFeedbackReasonMalformed       = "malformed_response"
+	// repositoryMonitorFeedbackReasonResponseTooLarge stops a read whose
+	// smallest page still exceeds the GitHub response limit.
+	repositoryMonitorFeedbackReasonResponseTooLarge = "review_feedback_response_too_large"
 
 	// Bounds. Text limits are UTF-8 bytes after sanitizing; encoded limits
 	// are bytes of the JSON encoding.
@@ -144,6 +147,10 @@ type repositoryMonitorReviewFeedbackSnapshot struct {
 	Reviews        []repositoryMonitorFeedbackReview     `json:"changesRequestedReviews"`
 	OmittedReviews int                                   `json:"omittedReviews,omitempty"`
 	authorized     []repositoryMonitorFeedbackAuthorized `json:"-"`
+	// unverified maps the IDs of included entries whose author's permission
+	// was not read to why: the lookup failed, or the lookup limit was
+	// reached. Whether they may start a repair is unknown, not refused.
+	unverified map[string]string
 	// omittedWithAuthority counts the threads and reviews left out of the
 	// snapshot, by its budget or because nothing in them could be shown,
 	// that hold feedback by an author with the authority to start a repair,
@@ -437,6 +444,12 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 	stop := func(err error) {
 		raw.partial = true
 		raw.availability, raw.reason = repositoryMonitorEvidenceErrorAvailability(err)
+		if errors.Is(err, errRepositoryMonitorGitHubResponseTooLarge) {
+			// A thread page is already as small as it gets, and reviews are
+			// not read in smaller pages, so reading again cannot help: like
+			// a page limit, this is more feedback than one read holds.
+			raw.availability, raw.reason = repositoryMonitorEvidenceAvailable, repositoryMonitorFeedbackReasonResponseTooLarge
+		}
 	}
 	// checkHead records the head each page reports and reports false, with
 	// the reason set, for a missing head or pages that disagree, which mean
@@ -562,9 +575,10 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 }
 
 // buildRepositoryMonitorReviewFeedback reads and normalizes the review
-// feedback of pr's head. GitHub failures degrade to a snapshot that says why;
-// only an invalid repository URL or a store failure is returned.
-func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, policy repositoryMonitorReviewFeedbackPolicy) (repositoryMonitorReviewFeedbackSnapshot, error) {
+// feedback of pr's head, reading reviewers' permissions as use requires.
+// GitHub failures degrade to a snapshot that says why; only an invalid
+// repository URL or a store failure is returned.
+func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx context.Context, use repositoryMonitorPermissionUse, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, policy repositoryMonitorReviewFeedbackPolicy) (repositoryMonitorReviewFeedbackSnapshot, error) {
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return repositoryMonitorReviewFeedbackSnapshot{}, err
@@ -584,7 +598,9 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx c
 	raw := r.fetchRepositoryMonitorReviewFeedback(ctx, token, owner, repository, pr.Number)
 	baseURL := repositoryMonitorGitHubBaseURL(r)
 	permissionOf := func(login string) (string, error) {
-		return r.repositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repository, token, login)
+		return r.repositoryMonitorPermission(ctx, use, baseURL, owner, repository, token, login, func(permission string) bool {
+			return repositoryMonitorPermissionMeets(policy.MinPermission, policy.AllowedPermissions, permission)
+		})
 	}
 	return normalizeRepositoryMonitorReviewFeedback(snapshot, pr, raw, orkaReviews, policy, permissionOf), nil
 }
@@ -680,6 +696,16 @@ type repositoryMonitorFeedbackNormalizer struct {
 	policy      repositoryMonitorReviewFeedbackPolicy
 	prAuthor    string
 	permissions *repositoryMonitorFeedbackPermissions
+	unverified  map[string]string
+}
+
+// noteUnverified records an entry whose author's authority is unknown
+// because their permission lookup failed or was not made.
+func (n *repositoryMonitorFeedbackNormalizer) noteUnverified(id string, author repositoryMonitorFeedbackAuthor) {
+	switch author.authority.reason {
+	case repositoryMonitorFeedbackAuthorityLookupFailed, repositoryMonitorFeedbackAuthorityLookupLimit:
+		n.unverified[id] = author.authority.reason
+	}
 }
 
 func (n *repositoryMonitorFeedbackNormalizer) author(actor *repositoryMonitorFeedbackActor) repositoryMonitorFeedbackAuthor {
@@ -927,6 +953,7 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 		policy:      policy,
 		prAuthor:    strings.TrimSpace(raw.prAuthor),
 		permissions: &repositoryMonitorFeedbackPermissions{lookup: permissionOf, known: map[string]string{}, failed: map[string]bool{}},
+		unverified:  map[string]string{},
 	}
 	currentReviews := repositoryMonitorCurrentChangesRequestedReviews(raw.reviews)
 	normalizer.lookUpStartCandidates(raw.threads, currentReviews, orkaReviews)
@@ -1008,7 +1035,27 @@ func normalizeRepositoryMonitorReviewFeedback(snapshot repositoryMonitorReviewFe
 	if (snapshot.OmittedThreads > 0 || snapshot.OmittedReviews > 0) && snapshot.Availability == repositoryMonitorEvidenceAvailable {
 		snapshot.Availability, snapshot.Reason = repositoryMonitorEvidenceTruncated, repositoryMonitorEvidenceReasonEvidenceBudget
 	}
+	snapshot.unverified = normalizer.unverified
 	return snapshot
+}
+
+// authorityLookupFailed reports whether an included entry's author's
+// permission lookup failed, so the entry's authority is unknown for now.
+func (s repositoryMonitorReviewFeedbackSnapshot) authorityLookupFailed(id string) bool {
+	return s.unverified[id] == repositoryMonitorFeedbackAuthorityLookupFailed
+}
+
+// unverifiedFeedback counts the included entries whose author's permission
+// lookup failed, and those past the lookup limit.
+func (s repositoryMonitorReviewFeedbackSnapshot) unverifiedFeedback() (failed, limited int) {
+	for _, reason := range s.unverified {
+		if reason == repositoryMonitorFeedbackAuthorityLookupFailed {
+			failed++
+		} else {
+			limited++
+		}
+	}
+	return failed, limited
 }
 
 // placeThread adds a normalized thread to the snapshot when it fits the
@@ -1111,6 +1158,11 @@ func (n *repositoryMonitorFeedbackNormalizer) thread(node repositoryMonitorFeedb
 		if strings.TrimSpace(body) == "" {
 			continue
 		}
+		// A reply on an Orka finding thread never starts a repair, whatever
+		// its author's permission, so its unknown authority holds nothing.
+		if !thread.OrkaFindingThread {
+			n.noteUnverified(commentID, author)
+		}
 		comment := repositoryMonitorFeedbackComment{
 			ID: commentID, Author: author.login, AuthorType: author.kind, Permission: author.permission,
 			Body: body, URL: repositoryMonitorFeedbackURL(raw.URL), CreatedAt: raw.CreatedAt.UTC(),
@@ -1190,6 +1242,7 @@ func (n *repositoryMonitorFeedbackNormalizer) review(node repositoryMonitorFeedb
 	if !author.evidence || author.kind == repositoryMonitorFeedbackAuthorBot {
 		return repositoryMonitorFeedbackPendingReview{}, false
 	}
+	n.noteUnverified(id, author)
 	body, hidden, truncated := repositoryMonitorFeedbackBody(node.Body)
 	review := repositoryMonitorFeedbackReview{
 		ID: id, Author: author.login, AuthorType: author.kind, Permission: author.permission,

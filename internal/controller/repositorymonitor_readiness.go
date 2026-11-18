@@ -197,6 +197,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if !ci.passed {
 		return repositoryMonitorStatusPending, "Waiting for repository CI to pass.", nil
 	}
+	// Authorized reviewer feedback that is still open holds back a head
+	// that is otherwise ready. Orka never resolves it; people do.
+	if state, description, held, err := r.repositoryMonitorFeedbackReadiness(ctx, monitor, pr); err != nil || held {
+		return state, description, err
+	}
 	return repositoryMonitorStatusSuccess, repositoryMonitorReadinessSuccess, nil
 }
 

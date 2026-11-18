@@ -242,6 +242,8 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ? AND (operation != 'readiness_status' OR external_id = '')`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM monitor_feedback_attempts WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM monitor_feedback_outcomes WHERE monitor_namespace = ? AND monitor_name = ?`,
 	} {
 		result, err := tx.ExecContext(ctx, stmt, namespace, name)
 		if err != nil {

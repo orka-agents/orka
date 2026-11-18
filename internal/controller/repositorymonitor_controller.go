@@ -95,6 +95,24 @@ type RepositoryMonitorReconciler struct {
 	// returned before it recorded completion.
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]struct{}
+
+	// permissionMemory holds each monitor's repositoryMonitorPermissionMemory
+	// by UID. It lives in memory: a restarted controller starts afresh.
+	permissionMemory sync.Map
+	// feedbackVerifyCursors holds, by monitor UID, where the next check of
+	// projected feedback outcomes resumes.
+	feedbackVerifyCursors sync.Map
+	// feedbackProjectCursors holds, by monitor UID, where the next pass over
+	// the monitor's unprojected feedback outcomes resumes.
+	feedbackProjectCursors sync.Map
+	// monitorUIDs maps each monitor's namespace/name to the UID whose
+	// in-memory state the controller holds, so a deleted or recreated
+	// monitor's state can be evicted.
+	monitorUIDs sync.Map
+	// permissionSweepMu guards permissionSweptAt, when the permission
+	// memories were last swept.
+	permissionSweepMu sync.Mutex
+	permissionSweptAt time.Time
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
@@ -117,6 +135,10 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !found {
 		return ctrl.Result{}, nil
 	}
+	// One poll looks each account's repository permission up at most once,
+	// within a budget shared fairly with the monitor's later polls.
+	ctx, endPermissionPoll := r.withRepositoryMonitorPermissionPoll(ctx, monitor)
+	defer endPermissionPoll()
 
 	state, handled, result, err := r.prepareRepositoryMonitor(ctx, monitor)
 	if err != nil || handled {
@@ -179,6 +201,8 @@ func (r *RepositoryMonitorReconciler) getRepositoryMonitor(ctx context.Context, 
 				return nil, false, deleteErr
 			}
 		}
+		// The monitor is gone, so is the controller's memory of it.
+		r.forgetRepositoryMonitor(req.Namespace + "/" + req.Name)
 		return nil, false, nil
 	}
 	return monitor, true, nil
@@ -1013,7 +1037,7 @@ func repositoryMonitorRunFailureState(err error) string {
 		return repositoryMonitorRunRetryScheduled
 	}
 	// Partial CI results settle on their own; retry rather than terminalize.
-	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
+	if errors.Is(err, errRepositoryMonitorCIIncomplete) || errors.Is(err, errRepositoryMonitorReviewFeedbackUnavailable) {
 		return repositoryMonitorRunRetryScheduled
 	}
 	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {

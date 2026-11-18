@@ -2,6 +2,7 @@ package storagetest
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -128,6 +129,40 @@ func observeRepairJob(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	job, err := p.GetRepairJob(t.Context(), workflowNamespace, "repair-1")
 	return observed(t, job, err)
+}
+
+func catalogFeedbackAdmission() storagev1.MonitorFeedbackAdmission {
+	command := storagev1.CommandEvent{ID: "feedback-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
+		Kind: "pull_request", Number: 12, DedupeKey: "feedback-1", CommentID: "feedback-1", Command: "fix", Intent: "fix", Status: "accepted", CreatedAt: workflowAt(0)}
+	return storagev1.MonitorFeedbackAdmission{Command: command, Attempts: []storagev1.MonitorFeedbackAttempt{{
+		ID: "attempt-1", MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor, Repo: "org/repo", PRNumber: 12,
+		FeedbackID: "review_comment:1", Attempt: 1, HeadSHA: "head-1", SnapshotDigest: "sha256:aa", CommandEventID: "feedback-1",
+		RepairJobID: "repair-feedback-1", CreatedAt: workflowAt(0),
+	}}}
+}
+
+func observeFeedbackAdmission(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	event, err := p.GetCommandEvent(t.Context(), workflowNamespace, "feedback-1")
+	attempts, _, listErr := p.ListMonitorFeedbackAttempts(t.Context(), storagev1.MonitorFeedbackAttemptFilter{Namespace: workflowNamespace})
+	require.NoError(t, listErr)
+	return []any{observed(t, event, err), attempts}
+}
+
+func observeFeedbackOutcome(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	outcome, err := p.GetMonitorFeedbackOutcome(t.Context(), workflowNamespace, "feedback-1")
+	if err == nil {
+		// Transition times come from the provider's clock; only whether
+		// they are set is observed.
+		outcome.UpdatedAt = time.Time{}
+		for _, at := range []**time.Time{&outcome.TaskCreateAt, &outcome.StartedAt, &outcome.CompletedAt, &outcome.ProjectedAt} {
+			if *at != nil {
+				*at = &time.Time{}
+			}
+		}
+	}
+	return observed(t, outcome, err)
 }
 
 func observeMonitorEvents(t *testing.T, p storagev1.StateProvider) any {
@@ -330,6 +365,62 @@ func init() {
 				return []any{job}
 			}),
 			observe: observeRepairJob,
+		},
+		monitorCase{
+			method:  "AdmitMonitorFeedbackRepair",
+			args:    rebuiltArgs(func() []any { return []any{catalogFeedbackAdmission()} }),
+			observe: observeFeedbackAdmission,
+		},
+		monitorCase{
+			method: "StartMonitorFeedbackRepair",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args: fixed(storagev1.StartMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1",
+				Targets: []string{"review_comment:1"}, TaskName: "task-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "PrepareMonitorFeedbackRepairTask",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.PrepareMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", TaskName: "task-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "ReleaseMonitorFeedbackRepairTask",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+				_, err = p.PrepareMonitorFeedbackRepairTask(t.Context(), storagev1.PrepareMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", TaskName: "task-1"})
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.ReleaseMonitorFeedbackRepairTaskRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "MarkMonitorFeedbackOutcomeProjected",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+				_, err = p.FinishMonitorFeedbackRepair(t.Context(), storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1", State: storagev1.MonitorFeedbackOutcomeWithdrawn})
+				require.NoError(t, err)
+			},
+			args:    fixed(storagev1.MarkMonitorFeedbackOutcomeProjectedRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1"}),
+			observe: observeFeedbackOutcome,
+		},
+		monitorCase{
+			method: "FinishMonitorFeedbackRepair",
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				_, err := p.AdmitMonitorFeedbackRepair(t.Context(), catalogFeedbackAdmission())
+				require.NoError(t, err)
+			},
+			args: fixed(storagev1.FinishMonitorFeedbackRepairRequest{Namespace: workflowNamespace, CommandEventID: "feedback-1",
+				State: storagev1.MonitorFeedbackOutcomeWithdrawn, Reason: "review_feedback_withdrawn"}),
+			observe: observeFeedbackOutcome,
 		},
 		monitorCase{
 			method: "CreateMonitorEvent",

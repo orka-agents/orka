@@ -23,6 +23,20 @@ const repositoryMonitorRunTriggerWorkflow = "workflow"
 // repositoryMonitorEventRepairRefused records why an automatic repair did not start.
 const repositoryMonitorEventRepairRefused = "repair_refused"
 
+// tryRepositoryMonitorIdleFeedbackRepair starts a feedback repair when
+// nothing else needs repairing: authorized reviewer feedback can start a fix
+// of a pull request in full repair scope whose CI is not fixed first, once
+// any exhaustive review of the head has finished its passes.
+func (r *RepositoryMonitorReconciler) tryRepositoryMonitorIdleFeedbackRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem, fullScope, labelled bool) (bool, error) {
+	if !fullScope || !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) {
+		return false, nil
+	}
+	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
+		return false, err
+	}
+	return r.tryRepositoryMonitorFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, labelled)
+}
+
 // Repair.Enabled is the repository administrator's authorization for bounded
 // automatic repair. A controller policy action is never recorded as a human.
 // Repair labels narrow it to labelled pull requests; the account that added
@@ -65,8 +79,11 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		}
 	}
 	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst, ciFirst)
-	if err != nil || intent == "" {
+	if err != nil {
 		return false, err
+	}
+	if intent == "" {
+		return r.tryRepositoryMonitorIdleFeedbackRepair(ctx, monitor, run, owner, repo, pr, item, full && !ciFirst, labelled)
 	}
 	// The policy helper counts durable attempts, including commands exhausted
 	// before Task creation, before another command identity can be created.
@@ -80,14 +97,12 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	id := "policy-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s|%d|%d", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, intent, prCount, headCount))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
-		if labelled {
-			permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
-			if err != nil {
-				return false, err
-			}
-			if !permitted {
-				return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, repositoryMonitorRepairSkipLabelActorNotPermitted)
-			}
+		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, repositoryMonitorPermissionForWrite, monitor, owner, repo, pr, full, labelled)
+		if err != nil {
+			return false, err
+		}
+		if reason != "" {
+			return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, reason)
 		}
 		now := time.Now()
 		command = &store.CommandEvent{ID: id, CommentID: id, DedupeKey: id, IdempotencyKey: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation, Repo: owner + "/" + repo, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Source: repositoryMonitorControllerPolicySource, Author: repositoryMonitorControllerActor, Permission: "repository_repair_policy", Intent: intent, Command: intent, HeadSHA: pr.HeadSHA, Status: repositoryMonitorCommandAccepted, CreatedAt: now}

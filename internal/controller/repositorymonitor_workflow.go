@@ -45,6 +45,17 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWith
 	if r.Store == nil || monitor == nil || command == nil {
 		return nil
 	}
+	// A feedback repair whose outcome has ended has its action written only
+	// by its projection: any other writer, such as a retry, a stale head, or
+	// a policy check, projects the stored outcome instead.
+	if projected, err := r.projectTerminalRepositoryMonitorFeedbackAction(ctx, monitor, command, actionKind); err != nil || projected {
+		return err
+	}
+	return r.writeRepositoryMonitorWorkActionState(ctx, monitor, run, command, targetKind, targetNumber, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason, metadata)
+}
+
+// writeRepositoryMonitorWorkActionState creates or advances a work action.
+func (r *RepositoryMonitorReconciler) writeRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string, metadata map[string]any) error {
 	desiredAction := store.RepositoryMonitorDesiredActionForActionKind(actionKind)
 	if desiredAction == "" {
 		desiredAction = store.RepositoryMonitorDesiredActionForIntent(command.Intent)
@@ -80,7 +91,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWith
 			return nil
 		}
 		verifiedUpdateBranchSuccess := desiredAction == repositoryMonitorCommandIntentUpdateBranch && status == repositoryMonitorWorkActionStatusSucceeded
-		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess {
+		// A cancelled action is final, except to the projection of a feedback
+		// repair's stored outcome, which a bulk cancel cannot overrule.
+		projecting := ctx.Value(repositoryMonitorFeedbackProjectingKey{}) != nil
+		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess && !projecting {
 			return nil
 		}
 		existing.RunID = firstNonEmptyWorkflow(runID(run), existing.RunID)

@@ -140,8 +140,18 @@ const (
 	// SaveResult or SaveArtifact replaces a stored result or file only when
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
-	// [ProviderLimits.MaxResultBytes].
-	ContractRevision = 8
+	// [ProviderLimits.MaxResultBytes]. Revision 9 adds the reviewer
+	// feedback attempt ledger and outcomes:
+	// [RepositoryMonitorStore.AdmitMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.ListMonitorFeedbackAttempts],
+	// [RepositoryMonitorStore.PrepareMonitorFeedbackRepairTask],
+	// [RepositoryMonitorStore.ReleaseMonitorFeedbackRepairTask],
+	// [RepositoryMonitorStore.StartMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.FinishMonitorFeedbackRepair],
+	// [RepositoryMonitorStore.MarkMonitorFeedbackOutcomeProjected],
+	// [RepositoryMonitorStore.GetMonitorFeedbackOutcome] and
+	// [RepositoryMonitorStore.ListMonitorFeedbackOutcomes].
+	ContractRevision = 9
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
