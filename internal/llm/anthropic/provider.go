@@ -129,7 +129,13 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if !completed {
 		// A dropped connection ends the stream without an error. Returning
 		// the partial message would pass truncated output off as complete.
-		return nil, &llm.ProviderError{Provider: "anthropic", Message: "anthropic stream ended before the message finished"}
+		// None of it has reached the caller, so report a gateway failure,
+		// which the retry layer retries.
+		return nil, &llm.ProviderError{
+			Provider:   "anthropic",
+			Message:    "anthropic stream ended before the message finished",
+			StatusCode: http.StatusBadGateway,
+		}
 	}
 
 	// Convert response

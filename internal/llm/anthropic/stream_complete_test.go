@@ -185,8 +185,13 @@ func TestCompleteRejectsTruncatedStream(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Complete() = %+v, want an error for a stream that ended mid-message", resp)
 	}
-	if _, ok := errors.AsType[*llm.ProviderError](err); !ok {
-		t.Errorf("error type = %T, want *llm.ProviderError", err)
+	pe, ok := errors.AsType[*llm.ProviderError](err)
+	if !ok {
+		t.Fatalf("error type = %T, want *llm.ProviderError", err)
+	}
+	// A dropped connection is transient, and no output escaped Complete.
+	if pe.StatusCode != http.StatusBadGateway || !llm.ShouldRetry(err) {
+		t.Errorf("status code = %d, retry = %t; want 502, true", pe.StatusCode, llm.ShouldRetry(err))
 	}
 }
 
