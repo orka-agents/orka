@@ -5,7 +5,6 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 ## Non-negotiables
 
 - **Never commit, log, or print credentials** — API keys, tokens, or secrets of any kind. Use Kubernetes Secrets or env vars.
-- **No binaries in the repository** — checked by `go test -count=1 ./hack/repocheck`.
 - **Scope discipline** — implement exactly what was asked, nothing more. Report incidental, out-of-scope findings rather than fixing them, unless necessary for the requested outcome.
 - **Never push to `main`.** Push to the current branch after a change when it is not `main`.
 - **Transaction-token integration is fail-closed** — never store raw TxTokens in Task specs/status/logs. Use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
