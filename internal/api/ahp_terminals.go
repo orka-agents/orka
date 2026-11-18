@@ -50,15 +50,21 @@ type ahpTerminal struct {
 	input   chan []byte
 	sizes   chan remotecommand.TerminalSize
 	cancel  context.CancelFunc
-	// pending counts input admitted and not yet written, so admission can
-	// refuse input instead of a full queue dropping it.
-	pending atomic.Int64
+	// pending counts input admitted and not yet written, and pendingBytes
+	// its size, so admission can refuse input instead of a full queue
+	// dropping it, and a shell that does not read cannot hold much memory.
+	pending      atomic.Int64
+	pendingBytes atomic.Int64
 	// pidFile records the shell's session in the workspace, so ending the
 	// terminal can stop every process it started.
 	pidFile string
 }
 
-const ahpTerminalInputQueue = 512
+const (
+	ahpTerminalInputQueue = 512
+	// ahpTerminalInputQueueBytes bounds the input a terminal holds unwritten.
+	ahpTerminalInputQueueBytes = 1 << 20
+)
 
 // Next implements remotecommand.TerminalSizeQueue. It returns nil once the
 // terminal ends, which releases the resize worker.
@@ -189,6 +195,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 			case data := <-term.input:
 				_, err := stdinWriter.Write(data)
 				term.pending.Add(-1)
+				term.pendingBytes.Add(-int64(len(data)))
 				if err != nil {
 					return
 				}
@@ -305,7 +312,10 @@ const (
 )
 
 // retireLocked remembers a used terminal URI. Clients name terminals with
-// fresh random URIs, so refusing reuse costs them nothing. b.mu must be held.
+// fresh random URIs, so refusing reuse costs them nothing. The set keeps at
+// most ahpRetiredTerminalsMax URIs: past it, those older than
+// ahpRetiredTerminalTTL go, and then the oldest, however many terminals a
+// client churns through. b.mu must be held.
 func (b *ahpBackend) retireLocked(key string) {
 	if b.retired == nil {
 		b.retired = map[string]time.Time{}
@@ -317,6 +327,15 @@ func (b *ahpBackend) retireLocked(key string) {
 				delete(b.retired, old)
 			}
 		}
+	}
+	for len(b.retired) >= ahpRetiredTerminalsMax {
+		oldest, oldestAt := "", now
+		for old, at := range b.retired {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = old, at
+			}
+		}
+		delete(b.retired, oldest)
 	}
 	b.retired[key] = now
 }
@@ -465,7 +484,13 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 		}
 		// Reserve room for the input now, on the terminal just checked: once
 		// admitted it is always delivered.
+		size := int64(len(a.Data))
 		if term.pending.Add(1) > ahpTerminalInputQueue {
+			term.pending.Add(-1)
+			return &ahphost.Rejection{Reason: "the terminal is not reading input; try again"}
+		}
+		if term.pendingBytes.Add(size) > ahpTerminalInputQueueBytes {
+			term.pendingBytes.Add(-size)
 			term.pending.Add(-1)
 			return &ahphost.Rejection{Reason: "the terminal is not reading input; try again"}
 		}
@@ -489,11 +514,13 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 // reserved when the host could not apply it, so a storage outage cannot fill
 // the queue with input that will never be written.
 func (b *ahpBackend) ReleaseClientAction(_ context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction) {
-	if _, ok := action.Value.(*ahptypes.TerminalInputAction); !ok {
+	input, ok := action.Value.(*ahptypes.TerminalInputAction)
+	if !ok {
 		return
 	}
 	if term := b.terminal(principal.UserKey, channel); term != nil {
 		term.pending.Add(-1)
+		term.pendingBytes.Add(-int64(len(input.Data)))
 	}
 }
 
