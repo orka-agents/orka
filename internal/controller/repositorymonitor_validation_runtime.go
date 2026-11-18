@@ -136,6 +136,10 @@ func (r *TaskReconciler) repositoryMonitorValidationTask(ctx context.Context, ta
 		return false, nil
 	}
 
+	if binding.Kind == tools.RepositoryValidationKindRepair || isRepositoryMonitorRepairValidationTask(task) {
+		return true, r.verifyRepositoryMonitorRepairValidationTask(ctx, task, binding)
+	}
+
 	reader := r.validationResourceReader()
 	monitor := &corev1alpha1.RepositoryMonitor{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: binding.MonitorNamespace, Name: binding.MonitorName}, monitor); err != nil {
@@ -331,7 +335,7 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 		}
 		return nil
 	}
-	prepared, err := repositoryMonitorValidationPreconditionsCompleted(pod)
+	prepared, err := repositoryMonitorValidationPreconditionsCompleted(pod, isRepositoryMonitorRepairValidationTask(task))
 	if err != nil {
 		return err
 	}
@@ -695,13 +699,14 @@ func repositoryMonitorValidationMetadataContains(actual, expected map[string]str
 	return true
 }
 
-func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, error) {
+func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod, repairPatch bool) (bool, error) {
 	if pod == nil {
 		return false, nil
 	}
 	foundWorkspace := false
 	foundCommand := false
 	foundProbe := false
+	foundPatch := false
 	for i := range pod.Spec.InitContainers {
 		switch pod.Spec.InitContainers[i].Name {
 		case workspacePreparationInitContainerName:
@@ -710,7 +715,15 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 			foundCommand = true
 		case repositoryMonitorValidationNetworkProbeContainer:
 			foundProbe = true
+		case repositoryMonitorRepairValidationPatchContainer:
+			foundPatch = true
 		}
+	}
+	if repairPatch != foundPatch {
+		if repairPatch {
+			return false, repositoryMonitorValidationConfinementErrorf("repair validation Pod is missing the patch init container")
+		}
+		return false, repositoryMonitorValidationConfinementErrorf("review validation Pod has an unexpected patch init container")
 	}
 	if !foundWorkspace {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the workspace preparation init container")
@@ -725,6 +738,7 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 	workspacePrepared := false
 	commandMaterialized := false
 	networkBaselineEstablished := false
+	patchApplied := !repairPatch
 	for i := range pod.Status.InitContainerStatuses {
 		status := &pod.Status.InitContainerStatuses[i]
 		if status.State.Terminated == nil || status.State.Terminated.ExitCode != 0 {
@@ -737,7 +751,9 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 			commandMaterialized = true
 		case repositoryMonitorValidationNetworkProbeContainer:
 			networkBaselineEstablished = true
+		case repositoryMonitorRepairValidationPatchContainer:
+			patchApplied = true
 		}
 	}
-	return workspacePrepared && commandMaterialized && networkBaselineEstablished, nil
+	return workspacePrepared && commandMaterialized && networkBaselineEstablished && patchApplied, nil
 }

@@ -113,17 +113,25 @@ type ACPDispatcher struct {
 	Publisher                *publisherservice.Client
 	ArtifactCapabilitySecret []byte
 	ArtifactReservations     artifactcap.CapabilityReservationRecorder
-	MCPRegistry              *tools.Registry
-	PromptLeases             *ACPMCPPromptLeaseRegistry
-	Interval                 time.Duration
-	MaxConcurrent            int
-	IdlePoolTTL              time.Duration
-	ReservationTTL           time.Duration
-	RateLimitRetryInterval   time.Duration
-	AdmissionGate            *ACPAdmissionGate
-	ACPRuntimeImages         ACPRuntimeImages
-	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	// RepositoryValidationBindings records the durable binding and result of
+	// each repository monitor repair validation (ADR 0038). Without it, a
+	// repair whose monitor sets spec.validation.repairCommand fails closed.
+	RepositoryValidationBindings tools.RepositoryValidationBindingStore
+	// RepairValidationPollInterval and RepairValidationWaitTimeout override
+	// the repair validation wait for tests.
+	RepairValidationPollInterval time.Duration
+	RepairValidationWaitTimeout  time.Duration
+	MCPRegistry                  *tools.Registry
+	PromptLeases                 *ACPMCPPromptLeaseRegistry
+	Interval                     time.Duration
+	MaxConcurrent                int
+	IdlePoolTTL                  time.Duration
+	ReservationTTL               time.Duration
+	RateLimitRetryInterval       time.Duration
+	AdmissionGate                *ACPAdmissionGate
+	ACPRuntimeImages             ACPRuntimeImages
+	SubstrateRouter              *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	runtimeContextFactory        func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -2395,7 +2403,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.failTaskForDelivery(ctx, task, deliveryStatus, deliveryStatus.Message)
 	case harnessv2.WorkspaceDeltaPrepared:
-		publicationResult, publicationErr := d.publishWorkspaceDelta(runtimeCtx, task, attemptID, fence, baseline, delta.Delta, sessionExecution)
+		// A repository monitor repair with spec.validation.repairCommand is
+		// published only after its exact patch passes that command (ADR 0038).
+		var publicationResult acpPublicationResult
+		gateStatus, publicationErr := d.gateRepositoryMonitorRepairPublication(runtimeCtx, task, attemptID, fence, delta.Delta)
+		if publicationErr != nil {
+			publicationResult.Status = gateStatus
+		} else {
+			publicationResult, publicationErr = d.publishWorkspaceDelta(runtimeCtx, task, attemptID, fence, baseline, delta.Delta, sessionExecution)
+		}
 		publicationID = publicationResult.PublicationID
 		deliveryStatus = publicationResult.Status
 		if deliveryStatus.State != "" {

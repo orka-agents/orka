@@ -12,6 +12,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -647,6 +648,24 @@ func (r *TaskReconciler) acpArtifactRetirementIdentities(
 	}
 
 	identities := []artifactcap.Identity{{Namespace: task.Namespace, TaskID: string(acpTaskControlUID(task))}}
+	// A repair's pre-publication validation Tasks (ADR 0038) download its
+	// patch under their own Task identity; retire those with the repair.
+	var validationTasks corev1alpha1.TaskList
+	if err := reader.List(ctx, &validationTasks, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name), labels.LabelPurpose: repositoryMonitorValidationPurpose}); err != nil {
+		return nil, false, fmt.Errorf("list repair validation tasks for artifact retirement: %w", err)
+	}
+	validationIdentities := make([]string, 0, len(validationTasks.Items))
+	for i := range validationTasks.Items {
+		validationTask := &validationTasks.Items[i]
+		if validationTask.UID != "" && metav1.IsControlledBy(validationTask, task) && isRepositoryMonitorRepairValidationTask(validationTask) {
+			validationIdentities = append(validationIdentities, string(validationTask.UID))
+		}
+	}
+	sort.Strings(validationIdentities)
+	for _, uid := range validationIdentities {
+		identities = append(identities, artifactcap.Identity{Namespace: task.Namespace, TaskID: uid})
+	}
 	orderedPublications := make([]string, 0, len(publicationIDs))
 	for publicationID := range publicationIDs {
 		orderedPublications = append(orderedPublications, publicationID)

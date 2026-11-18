@@ -846,6 +846,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if waitingForJob {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+		if err := r.retireRepositoryMonitorRepairValidationIdentity(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		// Release session lock if held
 		if task.Spec.SessionRef != nil {

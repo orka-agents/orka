@@ -382,7 +382,34 @@ Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expected
 
 Repair Tasks follow the same path limits as issue implementation. A repair may not change repository control paths (`.github/workflows/`, `config/rbac/`, and `charts/` paths that contain `secret`), and when `spec.issueWorkflow.implementation.allowedPaths` is set, it may change only files that match those patterns. Orka checks the repair's changes before publishing them, so a repair that breaks either rule pushes nothing and fails with `patch_path_denied` or `patch_path_not_allowed`.
 
-Repairers run in Orka's built-in runtime image, which has no language toolchains, so by default a repair cannot build or test its change before Orka publishes it. `spec.validation.image` checks only the next review of the pushed head. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing.
+Repairers run in Orka's built-in runtime image, which has no language toolchains. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing. That is the agent checking its own work, though; to have Orka check every repair before pushing it, set `spec.validation.repairCommand`.
+
+### Validate repairs before pushing them
+
+When `spec.validation.repairCommand` is set together with `spec.validation.image`, Orka does not push a repair as soon as the repair turn ends. It first runs a separate validation Task:
+
+- **Image:** the monitor's digest-pinned `validation.image`.
+- **Code:** the exact pull request head the repair started from, plus the repair's patch. An Orka-owned init container downloads the patch with a single-use, download-only capability bound to the patch digest and the validation Task, and applies it with the publisher's path rules. A digest mismatch, a path or symlink that escapes the repository, or a repository control path the repair was not allowed to change fails the Task before any repository code runs.
+- **Network:** a deny-all NetworkPolicy is in place before the command starts.
+- **Command:** your `repairCommand`, for example `make test`. The repairer never chooses it.
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    maxValidationRetries: 2
+  validation:
+    image: ghcr.io/example/app-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    repairCommand: make test
+```
+
+What happens next depends on the result, which Orka records against the exact patch digest:
+
+- **Passed:** Orka publishes exactly the patch that passed. A different patch is validated again. If `spec.validation.image` or `repairCommand` changes while a patch is being validated, the old result does not count: the repair fails closed as unavailable.
+- **Failed:** the command ran and exited non-zero, or started and ran past the validation timeout (a patch that makes the tests hang is something the next attempt can fix). Nothing is pushed. Orka continues the repair in the same session with a new Task (named `<repair task>-rv<n>`) whose prompt says the previous attempt failed and repeats the command. Pre-push failures and review-validation failures after a push share one budget, `spec.repair.maxValidationRetries` (default `2`). When the retries run out, the repair fails with `repair_validation_failed`, nothing is pushed, and the readiness status says the repair did not pass `spec.validation.repairCommand`.
+- **Unavailable:** the check could not run, for example because the image could not be pulled or the patch could not be applied. Orka fails closed: nothing is pushed, the repair fails with `repair_validation_unavailable`, and it is not retried.
+
+As with review validation, the command's output is hidden; Orka records only the exit status and bounded, redacted evidence. The command runs offline, so the image must already contain every tool and dependency it needs. The gate catches build and test failures, not wrong fixes that still pass; the next review handles those. The checkout the command sees matches the tree Git can publish: directories the patch leaves empty are removed, since the pushed commit cannot contain them. Without `repairCommand`, repairs are pushed without this check, as before.
 
 ### CI evidence for repairs
 

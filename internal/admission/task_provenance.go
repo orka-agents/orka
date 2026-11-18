@@ -284,8 +284,11 @@ func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupC
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
 		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
 			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
+	// A monitor repair's validation attempt count and lineage are held as
+	// well: clearing them would reset spec.repair.maxValidationRetries.
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
-		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation})...)
+		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation,
+			labels.AnnotationRepairValidationAttempt, labels.AnnotationRepairValidationOriginalTask})...)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
 	// metadata then has no matching owner UID, so coordination access fails
 	// closed. Cleanup controllers cannot attach the Task to a different owner.

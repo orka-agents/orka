@@ -560,6 +560,7 @@ type RepositoryMonitorPolicySpec struct {
 }
 
 // RepositoryMonitorValidationSpec configures isolated validation.
+// +kubebuilder:validation:XValidation:rule="!has(self.repairCommand) || size(self.repairCommand) == 0 || (has(self.image) && size(self.image) > 0)",message="repairCommand requires image"
 type RepositoryMonitorValidationSpec struct {
 	// Image is the digest-pinned repository-specific container image used for validation.
 	// The reviewer chooses the validation command from the checked-out code.
@@ -569,6 +570,16 @@ type RepositoryMonitorValidationSpec struct {
 	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// RepairCommand is the operator-selected offline shell command that gates
+	// every repair before Orka pushes it, for example "make test". Orka runs it
+	// in Image against the exact pull request head the repair started from with
+	// the repair's patch applied, without network access. A repair whose patch
+	// does not pass is not pushed. The repairer never chooses this command.
+	// Requires Image. When empty, repairs are not gated.
+	// +kubebuilder:validation:MaxLength=8192
+	// +optional
+	RepairCommand string `json:"repairCommand,omitempty"`
 
 	// Mode is retained only so upgraded clusters preserve the legacy field.
 	// Deprecated: validation scope is selected by the reviewer from repository evidence.

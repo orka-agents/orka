@@ -4,9 +4,17 @@ Date: 2026-10-22
 
 ## Status
 
-Accepted. Not implemented yet. Builds on the clean-room publication path and the
+Accepted. Implemented. Builds on the clean-room publication path and the
 repository monitor validation image; it changes neither for Tasks outside
 repository monitor repairs.
+
+Implementation notes: a failed pre-push validation continues the repair
+session with a new repair Task named `<first repair task>-rv<n>` that carries
+the failure evidence. Pre-push failures and post-push review-validation
+failures share `spec.repair.maxValidationRetries`. When the retries run out
+the repair job fails with `repair_validation_failed`; a validation that cannot
+run fails the job immediately with `repair_validation_unavailable` and is not
+retried, since another agent turn cannot fix it.
 
 ## Context
 
