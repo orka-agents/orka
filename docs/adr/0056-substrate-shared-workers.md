@@ -144,9 +144,12 @@ hold:
      grace, never zero, so its absence stays kubelet-confirmed;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
      never behind the native sweep (which has a one-minute deadline);
-   - unreadable or inconsistent lifetime evidence retires the pool at once. A
-     creation-time deadline annotation keeps a rewritten ledger from extending the
-     bound.
+   - unreadable or inconsistent lifetime evidence retires the pool at once;
+   - the bound never exceeds the pool's server-set creation time plus the shortest
+     lifetime frozen in the journals that recorded it, nor that creation time plus
+     24h, so rewriting the pool's own annotations cannot extend it;
+   - discovery does not depend on the removable shared label;
+   - no failed ledger write can block the deletion.
 
 ### Credentials Core owns
 
