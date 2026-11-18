@@ -369,7 +369,7 @@ ID            STATUS   TOOL               ARGUMENTS                             
 Administrators can run a command in, or copy a single file out of or into, the
 execution workspace of a running class-backed ACP Task. These commands are off
 by default. They need the controller flag, a class opt-in, and dedicated
-`tasks/exec` / `tasks/files` permissions. Every call is audited:
+`tasks/exec` / `tasks/files` permissions. Every authenticated call is audited:
 
 ```bash
 orka task exec my-task -- git status

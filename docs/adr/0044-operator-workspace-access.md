@@ -73,8 +73,8 @@ link:
 8. The runtime Pod's UID and IP match the active instance.
 9. The supervisor advertises operator access for the pinned profile digest.
 
-Refused requests produce an audit record and never reach the supervisor's data
-plane.
+Refused requests never reach the supervisor's data plane. Each refusal of an
+authenticated request produces an audit record.
 
 ### Data path and execution identity
 
@@ -180,13 +180,16 @@ the data it covered.
 
 ### Audit
 
-Every call produces structured audit records: started, finished, or denied.
-Each record carries the actor and authentication type, the Task and
-RuntimeSession identity, and the workspace. Exec records add the command
-basename, argument count, and argv digest, never raw arguments. Records also
-carry the path, byte count, exit code or outcome, and timestamps. Records are
-logged by orka-api and emitted as Kubernetes Events on the Task. No file
-content, token, or credential enters a record.
+Every authenticated call produces structured audit records: started,
+finished, or denied. Each record carries the actor and authentication type, the
+Task and RuntimeSession identity, and the workspace, as far as they are known.
+Exec records add the command basename, argument count, and argv digest, never
+raw arguments. Records also carry the path, byte count, exit code or outcome,
+and timestamps. Records are logged by orka-api. Once the Task has been read,
+they are also emitted as Kubernetes Events on the Task; an Event needs the Task
+UID, so a refusal before that point, such as a failed permission check or the
+disabled flag, is logged only. A request that fails authentication produces no
+record. No file content, token, or credential enters a record.
 
 ## Consequences
 
