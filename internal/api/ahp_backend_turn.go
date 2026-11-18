@@ -308,7 +308,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		// The Task may exist even so; stop it, then take the turn back. Its
 		// number stays used, so a Task the server kept under the name never
 		// stands in the next turn's way.
-		_ = b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
+		_ = b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name, "")
 		b.takeBackUncreatedTurn(ctx, principal, record, action.TurnId, emit)
 		b.mu.Lock()
 		if b.turns[turnKey] == turn {
@@ -432,7 +432,7 @@ func (b *ahpBackend) cancelIfClientCancelled(ctx context.Context, principal ahph
 	cancelled := turn.clientCancelled
 	turn.mu.Unlock()
 	if cancelled {
-		b.keepCancelling(ctx, principal, turn.session.Session, task.Namespace, task.Name)
+		b.keepCancelling(ctx, principal, turn.session.Session, task.Namespace, task.Name, string(task.UID))
 	}
 }
 

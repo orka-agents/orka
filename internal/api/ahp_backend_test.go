@@ -1021,6 +1021,35 @@ func TestAHPBackendKeepsASessionWhoseTaskItCannotCancel(t *testing.T) {
 	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the Task was asked to stop")
 }
 
+// A cancel bound to a Task's UID leaves another Task created later under the
+// same name alone: it is not the turn's.
+func TestAHPBackendCancelsOnlyTheTaskItsTurnCreated(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "run", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser},
+			Model: &ahptypes.ModelSelection{Id: "claude-haiku-5.5"}},
+	}})
+	require.NoError(t, err)
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Issuer: "https://issuer.example",
+		Subject: "alice", Username: "alice", Namespace: ahpTestNamespace}
+	var record ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	task := env.waitForTask(record.OrkaSession + "-t1")
+	require.NotEmpty(t, task.UID)
+
+	require.NoError(t, env.backend.cancelTask(ctx, alice, task.Namespace, task.Name, "another-task-uid"))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task))
+	require.NotContains(t, task.Annotations, labels.AnnotationCancelRequested, "a Task under another UID is not stopped")
+
+	require.NoError(t, env.backend.cancelTask(ctx, alice, task.Namespace, task.Name, string(task.UID)))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task))
+	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the turn's own Task is stopped")
+}
+
 // A root read of a file an agent changed comes from the user's running
 // workspace, where a terminal may have changed or deleted it since; the
 // reported contents serve only while no workspace runs.

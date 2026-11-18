@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -343,9 +344,14 @@ func TestAHPTerminalRefusesInputItCannotQueue(t *testing.T) {
 		require.NoError(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
 		env.backend.HandleClientAction(context.Background(), alice, term.channel, input, nil)
 	}
-	// The shell reads nothing, so the next input is refused, not dropped.
-	require.Error(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
+	// The shell reads nothing, so the next input is refused, not dropped,
+	// and refusals reserve nothing.
+	for range 3 {
+		require.Error(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
+	}
 	require.Len(t, term.input, ahpTerminalInputQueue)
+	require.EqualValues(t, ahpTerminalInputQueue, term.pending.Load())
+	require.EqualValues(t, ahpTerminalInputQueue, term.pendingBytes.Load())
 }
 
 // Input the host admitted but could not apply gives its room back, so a
@@ -366,7 +372,51 @@ func TestAHPTerminalReleasesInputTheHostCouldNotApply(t *testing.T) {
 		releaser.ReleaseClientAction(context.Background(), alice, term.channel, input)
 	}
 	require.Zero(t, term.pending.Load())
+	require.Zero(t, term.pendingBytes.Load())
 	require.Empty(t, term.input)
+}
+
+// A shell that reads nothing holds at most ahpTerminalInputQueueBytes of
+// input, however few inputs that takes.
+func TestAHPTerminalBoundsQueuedInputByBytes(t *testing.T) {
+	env := newAHPTestEnv(t)
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	term := &ahpTerminal{ctx: ctx, channel: "ahp-terminal:/a", input: make(chan []byte, ahpTerminalInputQueue), cancel: cancel}
+	env.backend.mu.Lock()
+	env.backend.shells[ahpTerminalKey(alice.UserKey, term.channel)] = term
+	env.backend.mu.Unlock()
+	input := ahptypes.StateAction{Value: &ahptypes.TerminalInputAction{
+		Type: ahptypes.ActionTypeTerminalInput, Data: strings.Repeat("x", ahpTerminalInputMax),
+	}}
+	fits := ahpTerminalInputQueueBytes / ahpTerminalInputMax
+	require.Less(t, fits, ahpTerminalInputQueue, "the byte bound is the tighter one")
+	for range fits {
+		require.NoError(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
+		env.backend.HandleClientAction(context.Background(), alice, term.channel, input, nil)
+	}
+	require.Error(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
+	require.EqualValues(t, ahpTerminalInputQueueBytes, term.pendingBytes.Load(), "a refused input reserves nothing")
+	require.EqualValues(t, fits, term.pending.Load())
+}
+
+// The retired URIs stay bounded however fast a client churns terminals.
+func TestAHPRetiredTerminalURIsStayBounded(t *testing.T) {
+	env := newAHPTestEnv(t)
+	start := time.Now()
+	for i := range ahpRetiredTerminalsMax + 10 {
+		at := start.Add(time.Duration(i) * time.Second)
+		env.backend.now = func() time.Time { return at }
+		env.backend.mu.Lock()
+		env.backend.retireLocked(fmt.Sprintf("alice\x00ahp-terminal:/%d", i))
+		env.backend.mu.Unlock()
+	}
+	env.backend.mu.Lock()
+	defer env.backend.mu.Unlock()
+	require.Len(t, env.backend.retired, ahpRetiredTerminalsMax)
+	require.NotContains(t, env.backend.retired, "alice\x00ahp-terminal:/0", "the oldest URI went first")
+	require.Contains(t, env.backend.retired, fmt.Sprintf("alice\x00ahp-terminal:/%d", ahpRetiredTerminalsMax+9))
 }
 
 func TestAHPTerminalURIsAreNotReused(t *testing.T) {
