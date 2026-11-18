@@ -125,8 +125,8 @@ type ACPDispatcher struct {
 	ACPRuntimeImages         ACPRuntimeImages
 	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
 	// Informers, when set, wake the dispatcher as soon as a Task is queued
-	// or a RuntimePool starts admitting or frees capacity, instead of only
-	// on the next Interval tick.
+	// or a RuntimePool starts serving or accepting, or frees capacity,
+	// instead of only on the next Interval tick.
 	Informers             cache.Informers
 	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 

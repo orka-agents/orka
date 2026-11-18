@@ -106,18 +106,30 @@ func TestACPRuntimePoolOpenedForDispatch(t *testing.T) {
 		Status: corev1alpha1.RuntimePoolStatus{
 			ObservedGeneration: 2, Lifecycle: corev1alpha1.RuntimePoolLifecycleServing,
 			AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1", ControllerEpoch: 1},
 			Capacity:       corev1alpha1.RuntimePoolCapacityStatus{RunningPrompts: 1, ReservedPrompts: 1},
 		},
 	}
 	starting := serving.DeepCopy()
 	starting.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
 	starting.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	unobserved := serving.DeepCopy()
-	unobserved.Generation = 3
+	// A Serving pool closed to new sessions still admits a continuation's
+	// prompt-only reservation.
+	closed := serving.DeepCopy()
+	closed.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	closedReleased := closed.DeepCopy()
+	closedReleased.Status.Capacity.RunningPrompts = 0
 	released := serving.DeepCopy()
 	released.Status.Capacity.RunningPrompts = 0
 	busier := serving.DeepCopy()
 	busier.Status.Capacity.ReservedPrompts = 2
+	rebound := serving.DeepCopy()
+	rebound.Status.ActiveInstance.ControllerEpoch = 2
+	probed := serving.DeepCopy()
+	observed := metav1.Now()
+	probed.Status.ActiveInstance.LastObservedTime = &observed
+	noInstance := serving.DeepCopy()
+	noInstance.Status.ActiveInstance = nil
 	deleting := serving.DeepCopy()
 	now := metav1.Now()
 	deleting.DeletionTimestamp = &now
@@ -127,12 +139,17 @@ func TestACPRuntimePoolOpenedForDispatch(t *testing.T) {
 		old, new *corev1alpha1.RuntimePool
 		want     bool
 	}{
-		{name: "started admitting", old: starting, new: serving, want: true},
-		{name: "observed its generation", old: unobserved, new: serving, want: true},
+		{name: "started serving and accepting", old: starting, new: serving, want: true},
+		{name: "started serving closed to new sessions", old: starting, new: closed, want: true},
+		{name: "started accepting sessions", old: closed, new: serving, want: true},
 		{name: "released capacity", old: serving, new: released, want: true},
+		{name: "closed pool released prompt capacity", old: closed, new: closedReleased, want: true},
+		{name: "active instance rebound to the current epoch", old: serving, new: rebound, want: true},
+		{name: "health probe timestamp", old: serving, new: probed},
 		{name: "took more capacity", old: serving, new: busier},
-		{name: "stopped admitting", old: serving, new: starting},
-		{name: "generation not observed", old: starting, new: unobserved},
+		{name: "stopped serving", old: serving, new: starting},
+		{name: "stopped accepting", old: serving, new: closed},
+		{name: "no active instance", old: starting, new: noInstance},
 		{name: "deleting", old: starting, new: deleting},
 		{name: "unchanged", old: serving, new: serving.DeepCopy()},
 	} {

@@ -9,6 +9,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	toolscache "k8s.io/client-go/tools/cache"
@@ -68,8 +70,8 @@ func waitForNextDispatchScan(ctx context.Context, tick <-chan time.Time, wake <-
 }
 
 // registerDispatchWakeHandlers wakes the dispatcher when a Task becomes
-// queued for dispatch and when a RuntimePool starts admitting or frees
-// capacity. Without informers, or if registration fails, the dispatcher keeps
+// queued for dispatch and when a RuntimePool starts serving or accepting, or
+// frees capacity. Without informers, or if registration fails, the dispatcher keeps
 // its periodic scan only. The returned function removes the handlers.
 func (d *ACPDispatcher) registerDispatchWakeHandlers(ctx context.Context) func() {
 	if d.Informers == nil {
@@ -131,13 +133,23 @@ func acpTaskEnteredDispatchQueue(oldTask, newTask *corev1alpha1.Task) bool {
 }
 
 // acpRuntimePoolOpenedForDispatch reports a RuntimePool update after which a
-// waiting Task may now be reservable: the pool started admitting its current
-// generation, or an admitting pool released reserved or running capacity.
+// waiting Task may now be reservable, mirroring runtimePoolReservationAdmission:
+// prompt slots need a Serving pool with an active instance, and only a new
+// resident session also needs Accepting. It wakes when the pool starts
+// serving, starts accepting sessions, changes its active instance, or frees
+// prompt or session capacity while serving.
 func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool) bool {
-	if !runtimePoolAdmittingForDispatch(newPool) {
+	if !runtimePoolServingForDispatch(newPool) {
 		return false
 	}
-	if !runtimePoolAdmittingForDispatch(oldPool) {
+	if !runtimePoolServingForDispatch(oldPool) {
+		return true
+	}
+	if newPool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
+		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		return true
+	}
+	if !reflect.DeepEqual(activeInstanceIdentity(oldPool.Status.ActiveInstance), activeInstanceIdentity(newPool.Status.ActiveInstance)) {
 		return true
 	}
 	previous, current := oldPool.Status.Capacity, newPool.Status.Capacity
@@ -148,9 +160,8 @@ func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool)
 		len(current.Reservations) < len(previous.Reservations)
 }
 
-func runtimePoolAdmittingForDispatch(pool *corev1alpha1.RuntimePool) bool {
+func runtimePoolServingForDispatch(pool *corev1alpha1.RuntimePool) bool {
 	return pool != nil && pool.DeletionTimestamp.IsZero() &&
 		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
-		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
-		pool.Status.ObservedGeneration == pool.Generation
+		pool.Status.ActiveInstance != nil && strings.TrimSpace(pool.Status.ActiveInstance.RuntimeInstanceID) != ""
 }
