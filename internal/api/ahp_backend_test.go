@@ -36,6 +36,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1434,21 +1436,53 @@ func TestAHPBackendSessionsPublishToTheClientsBranch(t *testing.T) {
 	var cloned map[string]any
 	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": ahpTestRepo}, &cloned))
 	provider := "copilot"
-	for session, branch := range map[string]string{"ahp-session:/named": `"feature-x"`, "ahp-session:/bad": `"../escape"`, "ahp-session:/base": `"main"`} {
+	for session, branch := range map[string]string{
+		"ahp-session:/named": `"feature-x"`, "ahp-session:/bad": `"../escape"`, "ahp-session:/base": `"main"`, "ahp-session:/under": `"main/fix"`,
+	} {
 		require.NoError(t, c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
 			Channel: session, Provider: &provider, WorkingDirectories: []string{ahpTestDir},
 			Config: map[string]json.RawMessage{"branch": json.RawMessage(branch), "baseBranch": json.RawMessage(`"main"`)},
 		}, nil))
 	}
 	userKey := ahphost.UserKey("https://issuer.example", "alice")
-	var named, bad, base ahpSession
+	var named, bad, base, under ahpSession
 	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/named", &named))
 	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/bad", &bad))
 	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/base", &base))
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/under", &under))
 	require.Equal(t, "feature-x", named.Branch)
 	require.True(t, strings.HasPrefix(bad.Branch, "orka/session-"), "an unsafe branch name is replaced")
 	require.True(t, strings.HasPrefix(base.Branch, "orka/session-"), "a session never publishes to its base branch")
+	require.True(t, strings.HasPrefix(under.Branch, "orka/session-"), "Git cannot hold a branch under the base branch")
 	require.Equal(t, "/workspace/src/octo/widgets", named.WorkDir, "without workspaces the session works in the project path")
+}
+
+// A workspace's clone holds the project's default branch, so a session
+// branch under it is replaced even when the session starts elsewhere.
+func TestAHPBackendKeepsWorkspaceBranchesClearOfTheDefault(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	var cloned map[string]any
+	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": ahpTestRepo}, &cloned))
+	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
+	clientset, err := kubernetes.NewForConfig(unreachable)
+	require.NoError(t, err)
+	env.backend.workspaces = &ahpWorkspaces{b: env.backend, clientset: clientset, rest: unreachable, namespace: "orka-ahp-workspaces",
+		image: "example.com/git@sha256:" + ahpHash("x"), startWait: 50 * time.Millisecond}
+	provider := "copilot"
+	for session, branch := range map[string]string{"ahp-session:/under": `"main/fix"`, "ahp-session:/beside": `"develop/fix"`} {
+		require.NoError(t, c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
+			Channel: session, Provider: &provider, WorkingDirectories: []string{ahpTestDir},
+			Config: map[string]json.RawMessage{"branch": json.RawMessage(branch), "baseBranch": json.RawMessage(`"release"`)},
+		}, nil))
+	}
+	userKey := ahphost.UserKey("https://issuer.example", "alice")
+	var under, beside ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/under", &under))
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/beside", &beside))
+	require.True(t, strings.HasPrefix(under.Branch, "orka/session-"), "Git cannot hold a branch under the clone's default branch")
+	require.Equal(t, "develop/fix", beside.Branch)
 }
 
 func TestAHPBackendGivesEachBranchOneSession(t *testing.T) {
@@ -1458,14 +1492,18 @@ func TestAHPBackendGivesEachBranchOneSession(t *testing.T) {
 	var cloned map[string]any
 	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": ahpTestRepo}, &cloned))
 	provider := "copilot"
-	create := func(session string) error {
+	create := func(session, branch string) error {
 		return c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
 			Channel: session, Provider: &provider, WorkingDirectories: []string{ahpTestDir},
-			Config: map[string]json.RawMessage{"branch": json.RawMessage(`"feature-x"`)},
+			Config: map[string]json.RawMessage{"branch": json.RawMessage(`"` + branch + `"`)},
 		}, nil)
 	}
-	require.NoError(t, create("ahp-session:/first"))
-	require.Error(t, create("ahp-session:/second"), "a second session cannot share the branch and its worktree")
+	require.NoError(t, create("ahp-session:/first", "feature-x"))
+	require.Error(t, create("ahp-session:/second", "feature-x"), "a second session cannot share the branch and its worktree")
+	require.Error(t, create("ahp-session:/child", "feature-x/child"), "Git cannot hold a branch under another session's")
+	require.NoError(t, create("ahp-session:/parent", "nested/child"))
+	require.Error(t, create("ahp-session:/nested", "nested"), "Git cannot hold a branch over another session's")
+	require.NoError(t, create("ahp-session:/sibling", "feature-xy"), "a longer name is not a clash")
 	require.Equal(t, "/workspace/worktrees/octo/widgets/feature-x", ahpWorktreePath(ahpProject{Owner: "octo", Name: "widgets"}, "feature-x"))
 }
 

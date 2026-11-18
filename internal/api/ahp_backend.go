@@ -941,7 +941,11 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	if raw, ok := req.Config[ahpConfigBranch]; ok {
 		_ = json.Unmarshal(raw, &branch)
 	}
-	if !ahpValidBranch(branch) || branch == baseBranch {
+	// Git cannot hold a branch alongside one it is a prefix of, so a branch
+	// that clashes with the base, or with the default branch a workspace's
+	// clone holds, is replaced too.
+	if !ahpValidBranch(branch) || ahpBranchesClash(branch, baseBranch) ||
+		(b.workspaces.enabled() && ahpBranchesClash(branch, project.DefaultBranch)) {
 		branch = "orka/session-" + ahpRandomHex(8)
 	}
 	existing, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
@@ -950,7 +954,10 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	}
 	for _, raw := range existing {
 		var other ahpSession
-		if json.Unmarshal(raw.Value, &other) == nil && other.ProjectID == project.ID && other.Branch == branch {
+		if json.Unmarshal(raw.Value, &other) == nil && other.ProjectID == project.ID && ahpBranchesClash(other.Branch, branch) {
+			if other.Branch != branch {
+				return nil, &ahphost.Rejection{Reason: fmt.Sprintf("the branch %s clashes with the branch %s another session uses", branch, other.Branch)}
+			}
 			return nil, &ahphost.Rejection{Reason: fmt.Sprintf("another session already uses the branch %s", branch)}
 		}
 	}
