@@ -1272,6 +1272,7 @@ rules:
   - memoryproposals
   verbs:
   - create
+  - list
 - apiGroups:
   - core.orka.ai
   resources:
@@ -3638,6 +3639,15 @@ spec:
     message: only the Orka core controller may set or change ExecutionWorkspace attachment
       intent (attachment and attachmentEpoch)
     reason: Forbidden
+  - expression: |-
+      oldObject == null || !has(oldObject.metadata.annotations) || !('acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations) || (has(object.metadata.annotations) &&
+
+       'acp.workspace.orka.ai/operator-tainted' in object.metadata.annotations &&
+       object.metadata.annotations['acp.workspace.orka.ai/operator-tainted'] ==
+         oldObject.metadata.annotations['acp.workspace.orka.ai/operator-tainted'])
+    message: the operator access taint of an ExecutionWorkspace is permanent; no identity
+      may remove or change it
+    reason: Forbidden
   variables:
   - expression: 'has(object.metadata.labels) && ''workspace.orka.ai/controller-name''
       in object.metadata.labels ? object.metadata.labels[''workspace.orka.ai/controller-name'']
@@ -3882,6 +3892,10 @@ spec:
   - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
     message: caller is not authorized to list memories, which a memory consolidation
       run reads and reports on
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memory proposals, which a memory consolidation
+      run reads so it does not repeat them
     reason: Forbidden
   - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
       != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'

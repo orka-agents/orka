@@ -11,7 +11,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/redact"
@@ -34,6 +36,10 @@ import (
 //     that Session's messages the run read; an add cites at least one.
 //     Repeated citations are dropped, and only the first
 //     MaxMemoryProposalSources are kept;
+//   - it does not repeat an open proposal the run read: it is not the same
+//     change as one, even when it covers it, and it targets a memory or
+//     proposes content that an open proposal already does only when it covers
+//     that proposal. Covers keeps only open proposals the run read;
 //   - add, merge and supersede carry content of at most MaxContentChars;
 //   - the run keeps no more than maxOperations operations, and removes no
 //     more than a quarter of the memories it read, at least one. A merge of
@@ -57,6 +63,7 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 	removalBudget := RemovalBudget(len(input.Memories))
 	removed := 0
 	targeted := map[string]bool{}
+	open := newOpenProposals(input.Proposals, input.LaterProposals)
 
 	var kept []Operation
 	var rejected []Rejection
@@ -109,6 +116,15 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 			reject(index, op, "%s", reason)
 			continue
 		}
+		op.Covers = open.known(op.Covers)
+		if slices.ContainsFunc(op.Covers, func(id string) bool { return input.ClosedProposals[id] }) {
+			reject(index, op, "a proposal it covers was reviewed while the run ran")
+			continue
+		}
+		if reason := open.check(op); reason != "" {
+			reject(index, op, "%s", reason)
+			continue
+		}
 		if removed+removes(op) > removalBudget {
 			reject(index, op, "the run removes at most %d of the %d memories it read", removalBudget, len(input.Memories))
 			continue
@@ -129,6 +145,109 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 			Reason: fmt.Sprintf("%d operations past the first %d were not read", len(submission.Operations)-maxSubmittedItems, maxSubmittedItems)})
 	}
 	return kept, rejected, validConflicts(submission.Conflicts, generations)
+}
+
+// openProposals indexes the open proposals a run read.
+type openProposals struct {
+	ids     map[string]bool
+	targets map[string][]string // memory ID -> proposals that change it
+	// contents maps normalized proposed content to the proposals proposing it.
+	contents map[string][]string
+	// changes holds each proposal's change: its type, targets and content.
+	changes map[string]bool
+}
+
+func newOpenProposals(read, later []InputProposal) openProposals {
+	open := openProposals{ids: map[string]bool{}, targets: map[string][]string{}, contents: map[string][]string{}, changes: map[string]bool{}}
+	for _, proposal := range read {
+		open.ids[proposal.ID] = true
+	}
+	for _, proposal := range append(append([]InputProposal(nil), read...), later...) {
+		for _, target := range proposal.Targets {
+			open.targets[target.MemoryID] = append(open.targets[target.MemoryID], proposal.ID)
+		}
+		// A retire creates no memory, so whatever content it carries is not
+		// proposed content.
+		if key := contentKey(proposal.Content); key != "" && proposal.Type != store.MemoryProposalTypeRetire {
+			open.contents[key] = append(open.contents[key], proposal.ID)
+		}
+		open.changes[changeKey(proposal.Type, proposal.Targets, proposal.Content)] = true
+	}
+	return open
+}
+
+// known keeps the distinct covered IDs that name open proposals the run read,
+// at most MaxProposalTargets of them; any other ID is the model's invention.
+func (o openProposals) known(covers []string) []string {
+	var kept []string
+	seen := map[string]bool{}
+	for _, id := range covers {
+		id = strings.TrimSpace(id)
+		// IDs are named in the proposal's description, so one that could
+		// break a line, or spell a tag line, is never kept.
+		if len([]rune(id)) > MaxCoveredIDChars ||
+			strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			continue
+		}
+		if o.ids[id] && !seen[id] && len(kept) < store.MaxMemoryProposalTargets {
+			seen[id] = true
+			kept = append(kept, id)
+		}
+	}
+	return kept
+}
+
+// check returns why op repeats an open proposal, or "" when it does not. A
+// change identical to an open proposal is always a repeat, even one that
+// names it in covers. Otherwise an operation may target a memory, or propose
+// content, that an open proposal already does only when it covers that
+// proposal: it replaces it with a different change, such as a supersede in
+// place of an add beside the outdated memory.
+func (o openProposals) check(op Operation) string {
+	if o.changes[changeKey(proposalTypes[op.Type], op.Targets, op.Content)] {
+		return "an open proposal already proposes this change"
+	}
+	covered := make(map[string]bool, len(op.Covers))
+	for _, id := range op.Covers {
+		covered[id] = true
+	}
+	for _, target := range op.Targets {
+		for _, id := range o.targets[target.MemoryID] {
+			if !covered[id] {
+				return "a target memory already has an open proposal; cover it or leave the memory to that review"
+			}
+		}
+	}
+	if op.Type != OperationRetire {
+		for _, id := range o.contents[contentKey(op.Content)] {
+			if !covered[id] {
+				return "an open proposal already proposes this content"
+			}
+		}
+	}
+	return ""
+}
+
+// changeKey identifies a change by its proposal type, its targets at their
+// generations in any order, and its normalized content. A retire's content is
+// ignored: it creates no memory, and validation clears a submitted retire's
+// content.
+func changeKey(proposalType string, targets []store.MemoryProposalTarget, content string) string {
+	if proposalType == store.MemoryProposalTypeRetire {
+		content = ""
+	}
+	keys := make([]string, 0, len(targets))
+	for _, target := range targets {
+		keys = append(keys, fmt.Sprintf("%s@%d", target.MemoryID, target.Generation))
+	}
+	slices.Sort(keys)
+	return proposalType + "|" + strings.Join(keys, ",") + "|" + contentKey(content)
+}
+
+// contentKey normalizes memory content for an exact duplicate check: case,
+// spacing and a final period do not make two memories different.
+func contentKey(content string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.Join(strings.Fields(content), " ")), ".")
 }
 
 // RemovalBudget is how many of memories active memories a run may remove:
@@ -311,7 +430,14 @@ func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string)
 		// its description. The validated tags come first, and a line in the
 		// model's reason that reads as a tag line is quoted, so only the
 		// validated tags are ever applied.
-		description := quoteTagLines(op.Reason)
+		description := op.Reason
+		if len(op.Covers) > 0 {
+			description = "The run judged these open proposals redundant with this one: " + strings.Join(op.Covers, ", ") +
+				". Check them; if they are, reject or archive them when you apply this one.\n\n" + description
+		}
+		// Proposal IDs, like the model's reason, are quoted wherever a line
+		// reads as a tag line.
+		description = strings.TrimSpace(quoteTagLines(description))
 		if len(op.Tags) > 0 {
 			tagLine := "Tags: " + strings.Join(op.Tags, ", ")
 			description = strings.TrimSpace(tagLine + "\n\n" + description)
@@ -372,9 +498,10 @@ func (r *Report) Redact() {
 // Encode redacts the report and encodes it in at most limit bytes. Every
 // field is bounded, but text that is mostly multibyte or escaped can still
 // encode larger than a run's report may be. Encode then drops, in order, the
-// rejected operations, the conflicts, the summary, and the kept operations'
-// text, and marks the report Abridged: the kept operations' proposals keep
-// their full text, so the report loses nothing that a review needs.
+// rejected operations, the conflicts, the summary, the kept operations' text
+// and their covered proposal IDs, and marks the report Abridged: the kept
+// operations' proposals keep their full text and name what they cover, so the
+// report loses nothing that a review needs.
 func (r *Report) Encode(limit int) ([]byte, error) {
 	r.Redact()
 	steps := []func(){
@@ -384,6 +511,11 @@ func (r *Report) Encode(limit int) ([]byte, error) {
 		func() {
 			for i := range r.Operations {
 				r.Operations[i].Title, r.Operations[i].Content, r.Operations[i].Reason, r.Operations[i].Tags = "", "", "", nil
+			}
+		},
+		func() {
+			for i := range r.Operations {
+				r.Operations[i].Covers = nil
 			}
 		},
 	}
@@ -407,7 +539,7 @@ func (r *Report) Encode(limit int) ([]byte, error) {
 
 // Structure returns the report without any text a model wrote or a run
 // read: titles, content, reasons, tags, conflict notes and the summary. It
-// keeps each operation's type, targets and sources, each rejection's index,
+// keeps each operation's type, targets, sources and covered proposal IDs, each rejection's index,
 // known type and reason, which Orka writes and which name only memories the
 // run read, and the counts. A run's Task result is its structure, since
 // anyone who can read the Task can read the result; the full report needs
@@ -418,7 +550,7 @@ func (r Report) Structure() Report {
 	structure.Structural = true
 	structure.Operations = make([]Operation, len(r.Operations))
 	for i, op := range r.Operations {
-		structure.Operations[i] = Operation{Type: op.Type, Targets: op.Targets, Sources: op.Sources}
+		structure.Operations[i] = Operation{Type: op.Type, Targets: op.Targets, Sources: op.Sources, Covers: op.Covers}
 	}
 	structure.Rejected = make([]Rejection, len(r.Rejected))
 	for i, rejection := range r.Rejected {

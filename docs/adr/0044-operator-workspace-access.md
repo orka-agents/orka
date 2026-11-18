@@ -73,8 +73,8 @@ link:
 8. The runtime Pod's UID and IP match the active instance.
 9. The supervisor advertises operator access for the pinned profile digest.
 
-Refused requests produce an audit record and never reach the supervisor's data
-plane.
+Refused requests never reach the supervisor's data plane. Each refusal of an
+authenticated request produces an audit record.
 
 ### Data path and execution identity
 
@@ -155,8 +155,12 @@ patch, and the Task. If either write fails, the operation is refused. Copies
 out never taint.
 
 Both prefixes are controller-protected: by the core workspace admission policy
-and by the Task provenance webhook. A tainted session is enforced at these
-points:
+and by the Task provenance webhook. The core workspace admission policy also
+makes the workspace marker permanent for every identity, including one that
+holds the core `admit` verb. Each enforcement point below treats the
+incarnation as tainted when either the workspace or any Task linked to that
+exact workspace UID carries the marker, and fails closed when it cannot read
+those Tasks. A tainted session is enforced at these points:
 
 - **Publication.** The fresh and recovery pre-publishing decision treats taint
   like cancellation and settles the publication as cancelled before publish.
@@ -180,13 +184,16 @@ the data it covered.
 
 ### Audit
 
-Every call produces structured audit records: started, finished, or denied.
-Each record carries the actor and authentication type, the Task and
-RuntimeSession identity, and the workspace. Exec records add the command
-basename, argument count, and argv digest, never raw arguments. Records also
-carry the path, byte count, exit code or outcome, and timestamps. Records are
-logged by orka-api and emitted as Kubernetes Events on the Task. No file
-content, token, or credential enters a record.
+Every authenticated call produces structured audit records: started,
+finished, or denied. Each record carries the actor and authentication type, the
+Task and RuntimeSession identity, and the workspace, as far as they are known.
+Exec records add the command basename, argument count, and argv digest, never
+raw arguments. Records also carry the path, byte count, exit code or outcome,
+and timestamps. Records are logged by orka-api. Once the Task has been read,
+they are also emitted as Kubernetes Events on the Task; an Event needs the Task
+UID, so a refusal before that point, such as a failed permission check or the
+disabled flag, is logged only. A request that fails authentication produces no
+record. No file content, token, or credential enters a record.
 
 ## Consequences
 

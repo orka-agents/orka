@@ -49,6 +49,25 @@ pod-certificate SPIFFE IDs (`spiffe://cluster.local/ns/<namespace>/sa/<serviceac
 to `--ingress-allowed-spiffe-ids`; no other Orka workload needs router access.
 Namespaces whose Pods call the native API need the `ate.dev/api-access=true` label.
 
+With the default Envoy dataplane (`--atenet-dataplane=envoy`), the router limits
+each request's total duration with `--route-timeout`, 5 minutes by default. Its
+stream idle timeout is 30 seconds longer. Because the limit covers the whole
+response, streamed updates do not extend it. Each ACP prompt is one streamed
+request, so a turn that runs longer is reset mid-stream, and Core logs
+`runtime prompt stream disconnected`. Because the runtime had already accepted
+the prompt, Core can't tell whether the turn finished, so it marks the Task
+`OutcomeUnknown` and doesn't replay it. If Core can't record the stream-failure
+event, the Task fails with `ExecutionEventPersistenceFailed` instead. Set
+`--route-timeout` above the longest turn your Tasks may run. The agentgateway
+dataplane ignores this flag and takes its routes from its static configuration,
+so set the equivalent timeout there. Orka cannot set either.
+
+Router rollouts also cut long turns. On shutdown, the Envoy router drains
+established streams for a fixed window of about 15 seconds. `--drain-timeout`
+bounds only the later drain of parked requests and doesn't extend that window.
+A turn still streaming when a router Pod stops is reset the same way, so roll
+the router when no long turns are running.
+
 Actor, ActorTemplate, Atespace, Worker, and Tag are native API resources. WorkerPool
 is a Kubernetes CRD. Create infrastructure templates through the native API, such
 as `kubectl ate create actor-template -f`, rather than applying an ActorTemplate
