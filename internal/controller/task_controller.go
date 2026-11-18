@@ -4536,13 +4536,16 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return fmt.Errorf("register Task webhook delivery: %w", err)
 		}
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
 		Owns(&networkingv1.NetworkPolicy{}).
-		Owns(&corev1alpha1.Task{}).
-		Named("task").
-		Complete(r)
+		Owns(&corev1alpha1.Task{})
+	builder, err := registerACPTaskWakeWatches(context.Background(), mgr, builder)
+	if err != nil {
+		return fmt.Errorf("register ACP workspace Task wakeups: %w", err)
+	}
+	return builder.Named("task").Complete(r)
 }
 
 const (

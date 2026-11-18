@@ -862,7 +862,11 @@ func (e *errAgentExecutionBindingConflict) Error() string {
 }
 
 // persistAgentExecutionBinding implements the uncached compare-if-absent
-// write-once binding CAS. It never overwrites an existing binding.
+// write-once binding CAS. It never overwrites an existing binding. When it
+// returns the persisted binding it also refreshes task in place from the
+// uncached object that carries it, so the caller's later optimistic-lock
+// patches start from the resourceVersion the binding write produced instead
+// of the stale cached copy (which would always conflict once).
 func (r *TaskReconciler) persistAgentExecutionBinding(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -880,7 +884,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	// recovering an ambiguous status-patch response.
 	if existing := current.Status.AgentExecutionBinding; existing != nil {
 		if existing.BindingDigest == candidate.binding.BindingDigest {
-			return existing, nil
+			current.DeepCopyInto(task)
+			return task.Status.AgentExecutionBinding, nil
 		}
 		return nil, &errAgentExecutionBindingConflict{
 			existingDigest:  existing.BindingDigest,
@@ -908,7 +913,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 			latest.UID == task.UID {
 			if existing := latest.Status.AgentExecutionBinding; existing != nil {
 				if existing.BindingDigest == candidate.binding.BindingDigest {
-					return existing, nil
+					latest.DeepCopyInto(task)
+					return task.Status.AgentExecutionBinding, nil
 				}
 				return nil, &errAgentExecutionBindingConflict{
 					existingDigest:  existing.BindingDigest,
@@ -918,7 +924,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 		}
 		return nil, fmt.Errorf("write-once binding patch: %w", err)
 	}
-	return current.Status.AgentExecutionBinding, nil
+	current.DeepCopyInto(task)
+	return task.Status.AgentExecutionBinding, nil
 }
 
 func decodeAgentExecutionSnapshot(body []byte) (agentExecutionSnapshotBody, error) {
@@ -1510,6 +1517,15 @@ func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1al
 	return 0
 }
 
+// taskAdvancedPastBindingPass reports whether a fresh uncached copy shows the
+// Task past the stage the pending binding pass decided from: another phase, a
+// deletion, or an execution already recorded.
+func taskAdvancedPastBindingPass(decided, fresh *corev1alpha1.Task) bool {
+	return fresh.Status.Phase != decided.Status.Phase ||
+		fresh.DeletionTimestamp.IsZero() != decided.DeletionTimestamp.IsZero() ||
+		(decided.Status.Execution == nil && fresh.Status.Execution != nil)
+}
+
 // ensureAgentExecutionBinding runs the binding stage for the ACP execution
 // path. It returns handled=true when the caller must return the result
 // immediately (failure or requeue) and handled=false when dispatch may
@@ -1535,7 +1551,16 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 		}
 		if current.Status.AgentExecutionBinding != nil {
-			task = current
+			if taskAdvancedPastBindingPass(task, current) {
+				// The cache lags a Task that has already moved on; this
+				// pending pass must not act on it. Lifecycle handling
+				// re-enters once the cache catches up.
+				return ctrl.Result{RequeueAfter: time.Second}, nil, true
+			}
+			// Adopt the uncached bound object in place: the caller queues
+			// this same Task next and must see the binding and the current
+			// resourceVersion, not the cache's pre-binding copy.
+			current.DeepCopyInto(task)
 		}
 	}
 	if existing := task.Status.AgentExecutionBinding; existing != nil {
@@ -1595,6 +1620,7 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		}
 	}
 	firstBinding := task.Status.AgentExecutionBinding == nil
+	beforeBinding := task.DeepCopy()
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
 	if err == nil && firstBinding {
 		r.recordAgentExecutionSettings(task, candidate)
@@ -1610,6 +1636,11 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		}
 		log.Error(err, "write-once binding persistence failed")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+	}
+	if taskAdvancedPastBindingPass(beforeBinding, task) {
+		// The binding is persisted, but the refreshed Task has moved past
+		// the pending pass that produced it; re-enter lifecycle handling.
+		return ctrl.Result{RequeueAfter: time.Second}, nil, true
 	}
 	task.Status.AgentExecutionBinding = binding
 	if err := r.verifyBoundExecution(ctx, task, binding); err != nil {
