@@ -21,6 +21,9 @@ type AHPToken struct {
 	RevokedAt   *time.Time
 }
 
+// MaxAHPClientsPerUser bounds the clients a user's AHP connections record.
+const MaxAHPClientsPerUser = 256
+
 // AHPClient binds an AHP clientId to the user that first used it and records
 // what that connection negotiated, so a reconnect restores it.
 type AHPClient struct {
@@ -98,7 +101,9 @@ type AHPStore interface {
 	// PutAHPClient records a client, created and updated at its UpdatedAt, or
 	// updates the protocol version, dialect and update time of one the same
 	// user recorded. It returns ErrConflict, changing nothing, when the
-	// clientId already belongs to another user.
+	// clientId already belongs to another user. A user keeps at most
+	// [MaxAHPClientsPerUser] clients: recording another forgets those least
+	// recently updated.
 	PutAHPClient(ctx context.Context, client AHPClient) error
 
 	// GetAHPServerSeq returns the user's last assigned sequence number, or 0.

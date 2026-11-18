@@ -763,9 +763,11 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 	var existing ahpProject
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, id, &existing); err == nil {
 		if existing.DefaultBranch == "" {
-			existing.DefaultBranch = b.defaultBranch(ctx, principal.Namespace, repo)
-			if existing.DefaultBranch != "" {
-				return existing, b.putRecord(ctx, principal.UserKey, ahpRecordProject, id, existing)
+			// Under the lock projects are removed with, and only if the
+			// project is still stored: one removed meanwhile stays removed.
+			if branch := b.defaultBranch(ctx, principal.Namespace, repo); branch != "" {
+				b.backfillDefaultBranch(ctx, principal.UserKey, id, branch)
+				existing.DefaultBranch = branch
 			}
 		}
 		return existing, nil
