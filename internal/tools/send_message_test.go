@@ -287,3 +287,53 @@ func TestSendMessageTool_BrokeredSiblingScope(t *testing.T) {
 		})
 	}
 }
+
+func TestSendMessageToolRefusesContentOverTheMessageLimit(t *testing.T) {
+	messages := &recordingMessageStore{}
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		TaskID: testWorkerAName, Namespace: defaultNamespace, ParentTaskID: testCoordinatorTaskName, MessageStore: messages,
+	})
+	// A two-byte rune: the limit counts bytes, not characters.
+	content := strings.Repeat("é", store.MaxMessageContentBytes/2) + "x"
+	args, err := json.Marshal(SendMessageArgs{ToTask: testSiblingTaskName, Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewSendMessageTool().Execute(ctx, args)
+	if err == nil || !strings.Contains(err.Error(), "exceeds the 1048576 byte limit") {
+		t.Fatalf("Execute() error = %v, want the message limit", err)
+	}
+	if len(messages.messages) != 0 {
+		t.Fatalf("stored %d messages, want none", len(messages.messages))
+	}
+
+	args, err = json.Marshal(SendMessageArgs{ToTask: testSiblingTaskName, Content: content[:len(content)-1]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSendMessageTool().Execute(ctx, args); err != nil {
+		t.Fatalf("Execute() at the limit error = %v", err)
+	}
+	if len(messages.messages) != 1 {
+		t.Fatalf("stored %d messages, want one", len(messages.messages))
+	}
+}
+
+func TestSendMessageToolReportsTheMessageLimitFromTheController(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	}))
+	defer server.Close()
+	t.Setenv(envOrkaTaskName, testWorkerAName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
+	t.Setenv(envOrkaControllerURL, server.URL)
+	args, err := json.Marshal(SendMessageArgs{ToTask: testSiblingTaskName, Content: testHelloText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewSendMessageTool().Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "send a shorter message") {
+		t.Fatalf("Execute() error = %v, want the message limit", err)
+	}
+}

@@ -64,7 +64,7 @@ func (t *SendMessageTool) Parameters() json.RawMessage {
 			},
 			"content": {
 				"type": "string",
-				"description": "Message content to send"
+				"description": "Message content to send, at most 1048576 bytes of UTF-8 (1 MiB)"
 			}
 		},
 		"required": ["to_task", "content"]
@@ -81,6 +81,9 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 	targetTask := strings.TrimSpace(a.ToTask)
 	if targetTask == "" || a.Content == "" {
 		return "", fmt.Errorf("to_task and content are required")
+	}
+	if len(a.Content) > store.MaxMessageContentBytes {
+		return "", errMessageContentTooLarge(len(a.Content))
 	}
 
 	toolCtx := GetToolContext(ctx)
@@ -165,6 +168,16 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("Message sent to %s", target), nil
 	}
 
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		return "", errMessageContentTooLarge(len(a.Content))
+	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return "", fmt.Errorf("failed to send message: HTTP %d: %s", resp.StatusCode, string(respBody))
+}
+
+// errMessageContentTooLarge tells the agent to shorten a message over the
+// storage contract's per-message limit.
+func errMessageContentTooLarge(size int) error {
+	return fmt.Errorf("message content is %d bytes and exceeds the %d byte limit; send a shorter message",
+		size, store.MaxMessageContentBytes)
 }

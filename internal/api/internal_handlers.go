@@ -615,6 +615,10 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 	if req.FromTask == "" || req.ToTask == "" || req.Content == "" || req.ParentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "fromTask, toTask, parentTask, and content are required")
 	}
+	if len(req.Content) > store.MaxMessageContentBytes {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge,
+			fmt.Sprintf("message content exceeds %d bytes", store.MaxMessageContentBytes))
+	}
 	msg := &store.Message{
 		Namespace:  namespace,
 		FromTask:   req.FromTask,

@@ -320,7 +320,12 @@ the observable parts.
   write stamp and limits results to `MaxResultBytes` (see "Result and
   artifact replacement order"). Revision 9 requires the write watermark,
   `AdvanceWriteWatermark` and `GetWriteWatermark`, on both provider contracts
-  (see "Durability, switch detection and recovery holds").
+  (see "Durability, switch detection and recovery holds"). Revision 10
+  bounds inter-agent messages by bytes: `SendMessage` refuses content over
+  `MaxMessageContentBytes`, a message batch stops before its content passes
+  `MaxMessageBatchBytes`, and the limit is reported in
+  `ProviderLimits.MaxMessageContentBytes` (see "Messages, counters and chat
+  turns").
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
@@ -562,7 +567,15 @@ write without one.
   not return is never marked at any isolation level; its replay returns the
   same messages, without any that Task cleanup deleted in between. Both
   return at most `MaxMessageBatch` (500) messages per call, so a longer
-  backlog is read over several calls. Orka's own message store keeps one
+  backlog is read over several calls. Messages are also bounded by bytes.
+  `SendMessage` refuses content over `MaxMessageContentBytes` (1 MiB) with a
+  `TooLargeError` and stores nothing, and a state.v1 provider reports exactly
+  that limit in `ProviderLimits.MaxMessageContentBytes`. A batch stops before
+  the message that would take its total content past `MaxMessageBatchBytes`
+  (4 MiB), and a non-empty inbox always yields at least one message. The
+  batch is sized before `ConsumeMessages` marks anything, so a message left
+  out stays unread for the next call, and a consumed batch with its metadata
+  always fits one wire response. Orka's own message store keeps one
   `GetMessages(markRead)`, which the client maps onto the two. SQLite keeps
   the consumed IDs with the receipt and reads the messages again on replay,
   which is why a provider never reuses a message ID.
@@ -1498,7 +1511,11 @@ artifact-fence cases run only in process.
   write's transport failure is `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
   only its transparent retries of attempts the server never processed remain.
   The client refuses invalid UTF-8, out-of-range times and requests over the
-  16 MiB message limit before sending anything.
+  16 MiB message limit before sending anything. The server reports a
+  response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
+  fail it with a status that reads as a transport failure; the message byte
+  budgets keep a contract-conforming provider's message batches well under
+  it.
 
 ### Orka policy above the client
 

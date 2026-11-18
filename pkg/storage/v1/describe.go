@@ -88,6 +88,12 @@ type ProviderLimits struct {
 	// state.v1 provider reports at least MaxResultBytes; a provider that does
 	// not serve state.v1 reports zero.
 	MaxResultBytes int64
+	// MaxMessageContentBytes is the largest message content the provider
+	// stores. A state.v1 provider reports exactly MaxMessageContentBytes,
+	// since a provider that accepts more breaks the batch budget
+	// (MaxMessageBatchBytes); a provider that does not serve state.v1 reports
+	// zero.
+	MaxMessageContentBytes int64
 	// MaxValueBytes is the largest single stored value the provider accepts,
 	// or zero when the provider imposes no limit of its own.
 	MaxValueBytes int64

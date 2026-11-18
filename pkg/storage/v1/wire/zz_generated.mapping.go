@@ -330,6 +330,7 @@ func toWireProviderLimits(in storagev1.ProviderLimits) (*storagepb.ProviderLimit
 	var err error
 	out.MaxArtifactBytes = in.MaxArtifactBytes
 	out.MaxResultBytes = in.MaxResultBytes
+	out.MaxMessageContentBytes = in.MaxMessageContentBytes
 	out.MaxValueBytes = in.MaxValueBytes
 	out.ReceiptRetention = durationToWire(in.ReceiptRetention)
 	out.MaxReceiptResultBytes = in.MaxReceiptResultBytes
@@ -345,6 +346,7 @@ func fromWireProviderLimits(in *storagepb.ProviderLimits, exact bool) (storagev1
 	_ = exact
 	out.MaxArtifactBytes = in.MaxArtifactBytes
 	out.MaxResultBytes = in.MaxResultBytes
+	out.MaxMessageContentBytes = in.MaxMessageContentBytes
 	out.MaxValueBytes = in.MaxValueBytes
 	if out.ReceiptRetention, err = durationFromWire(in.ReceiptRetention, "ProviderLimits.ReceiptRetention"); err != nil {
 		return out, err

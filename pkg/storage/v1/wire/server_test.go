@@ -381,6 +381,26 @@ func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 	require.False(t, errors.Is(err, storagev1.ErrValidation), "the request was valid")
 }
 
+// gRPC refuses to send a response over the message limit with a bare status,
+// which would make a read look safe to retry. The server reports it as a
+// provider error instead.
+func TestOversizeResponsesAreProviderErrors(t *testing.T) {
+	provider := newRecordingProvider()
+	client := wiretest.Serve(t, provider)
+	half := strings.Repeat("x", wire.MaxMessageBytes/2)
+	oversize := []any{[]storagev1.Message{{Content: half}, {Content: half}}}
+
+	provider.set("ListUnreadMessages", oversize, nil)
+	_, err := client.ListUnreadMessages(t.Context(), "n", "t", "p", 0)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, storagev1.ErrUnavailable), "the read reached the provider, so it is not safe to retry")
+	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "a read is never an unknown outcome")
+
+	provider.set("ConsumeMessages", oversize, nil)
+	_, err = client.ConsumeMessages(t.Context(), storagev1.ConsumeMessagesRequest{Namespace: "n", TaskName: "t", ParentTask: "p"})
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown, "ConsumeMessages marks what it returns read, so it is a write")
+}
+
 func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("Describe", []any{storagev1.ProviderInfo{

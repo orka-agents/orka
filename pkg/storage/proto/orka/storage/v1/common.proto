@@ -111,6 +111,7 @@ message ProviderLimits {
   int64 max_value_bytes = 3;
   google.protobuf.Duration receipt_retention = 4;
   int64 max_receipt_result_bytes = 5;
+  int64 max_message_content_bytes = 6;
 }
 
 // DatasetBootstrap reports how far a dataset is through its first start.

@@ -160,6 +160,13 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 		if field, invalid := firstInvalidString(message.ProtoReflect()); invalid {
 			return nil, s.encodeError(ctx, m, fmt.Errorf("response field %s is not valid UTF-8", field))
 		}
+		// gRPC refuses to send a response over the message limit with a bare
+		// status the client cannot tell from a transport failure, so a read
+		// would look safe to retry. Report it as the provider error it is. The
+		// contract's message budgets keep a provider's batches under the limit.
+		if size := proto.Size(message); size > MaxMessageBytes {
+			return nil, s.encodeError(ctx, m, fmt.Errorf("response of %d bytes exceeds the %d byte message limit", size, MaxMessageBytes))
+		}
 	}
 	return resp, nil
 }

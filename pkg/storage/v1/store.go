@@ -479,6 +479,20 @@ type RepositoryMonitorStore interface {
 // several calls.
 const MaxMessageBatch = 500
 
+// MaxMessageContentBytes is the largest Message.Content, in bytes, that
+// SendMessage stores. A larger message is refused with a [TooLargeError] and
+// stores nothing.
+const MaxMessageContentBytes = 1 << 20
+
+// MaxMessageBatchBytes bounds the content one ListUnreadMessages or
+// ConsumeMessages call returns: a batch stops before the message that would
+// take its total Content bytes past it, and always holds at least one message
+// when the inbox has one. It is at least MaxMessageContentBytes, so any stored
+// message fits a batch of its own, and with MaxMessageBatch messages of
+// metadata it stays well under the wire's message limit, so a consumed batch
+// can always be sent.
+const MaxMessageBatchBytes = 4 << 20
+
 // Message represents an inter-agent message.
 type Message struct {
 	// ID is assigned by the provider when it stores the message. IDs increase
@@ -516,18 +530,25 @@ type ConsumeMessagesRequest struct {
 type MessageStore interface {
 	// SendMessage stores a new message. Use toTask="*" for broadcast. The
 	// provider writes the assigned ID and creation time back into msg; a
-	// replay writes back the same ones and stores nothing.
+	// replay writes back the same ones and stores nothing. Content over
+	// MaxMessageContentBytes returns a TooLargeError (What "message content")
+	// and stores nothing.
 	SendMessage(ctx context.Context, msg *Message) error
 
 	// ListUnreadMessages returns up to limit of the oldest unread messages in
-	// a Task's inbox, ordered by ID, and changes nothing. A limit of zero
-	// selects MaxMessageBatch; a negative limit or one above MaxMessageBatch
-	// returns ErrValidation.
+	// a Task's inbox, ordered by ID, and changes nothing. The batch stops
+	// before the message that would take its Content past
+	// MaxMessageBatchBytes; a non-empty inbox always yields at least one
+	// message. A limit of zero selects MaxMessageBatch; a negative limit or
+	// one above MaxMessageBatch returns ErrValidation.
 	ListUnreadMessages(ctx context.Context, namespace, taskName, parentTask string, limit int) ([]Message, error)
 
 	// ConsumeMessages returns up to request.Limit of the oldest unread
 	// messages in a Task's inbox, ordered by ID, and marks exactly those
-	// messages read. A replay returns the same messages and marks nothing
+	// messages read. The batch stops before the message that would take its
+	// Content past MaxMessageBatchBytes, as ListUnreadMessages does, so a
+	// message left out is not marked; a non-empty inbox always yields at
+	// least one message. A replay returns the same messages and marks nothing
 	// more; it leaves out a message that DeleteTaskMessages or
 	// DeleteParentMessages removed in between, such as when its sender or
 	// its parent Task is cleaned up, and under a Task data fence that cleanup
