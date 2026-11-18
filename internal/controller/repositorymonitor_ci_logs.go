@@ -267,7 +267,7 @@ func (s *repositoryMonitorCILogScanner) excerpt(truncated bool) (repositoryMonit
 
 // readRepositoryMonitorCILog scans at most limit bytes of a log body, one
 // line at a time as addRaw describes. A final line the limit or a read error
-// cut short is dropped, so no fragment of a credential survives the cut. The
+// cut short is dropped, unless a probe confirms the log ended at the limit, so no fragment of a credential survives the cut. The
 // second result reports that the read stopped before the end of the log.
 func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitorCILogScanner, bool, error) {
 	limited := &io.LimitedReader{R: body, N: limit}
@@ -291,13 +291,13 @@ func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitor
 		case errors.Is(err, io.EOF):
 			// A body that ends without a final newline is complete only
 			// when the limit did not stop it.
-			if limited.N > 0 {
-				if len(line) > 0 {
-					scanner.addRaw(string(line))
-				}
-				return scanner, false, nil
+			// When the limit stopped it, the probe past the limit decides:
+			// only a confirmed EOF makes the buffered line whole.
+			complete := limited.N > 0 || repositoryMonitorCILogAtEOF(body)
+			if complete && len(line) > 0 {
+				scanner.addRaw(string(line))
 			}
-			return scanner, !repositoryMonitorCILogAtEOF(body), nil
+			return scanner, !complete, nil
 		default:
 			return scanner, true, err
 		}

@@ -218,6 +218,44 @@ func TestRepositoryMonitorCILogReadNeedsEOFAfterTheLimit(t *testing.T) {
 	}
 }
 
+// TestRepositoryMonitorCILogReadScansAFinalLineEndingAtTheLimit covers a log
+// that ends exactly at the read limit without a final newline: a confirmed
+// EOF scans the buffered last line, and a failed probe or more data drops it.
+func TestRepositoryMonitorCILogReadScansAFinalLineEndingAtTheLimit(t *testing.T) {
+	const log = "2026-11-16T10:00:00Z ##[error]early failure\n2026-11-16T10:00:01Z ##[error]final failure"
+	for _, tc := range []struct {
+		name          string
+		after         io.Reader
+		wantTruncated bool
+		wantKind      string
+		want, notWant string
+	}{
+		{name: "eof", after: strings.NewReader(""), wantKind: repositoryMonitorCILogExcerptLastError, want: "final failure"},
+		{name: "connection reset", after: iotest.ErrReader(errors.New("connection reset by peer")), wantTruncated: true,
+			wantKind: repositoryMonitorCILogExcerptErrorInReadPart, notWant: "final failure"},
+		{name: "more data", after: strings.NewReader(" continues\n"), wantTruncated: true,
+			wantKind: repositoryMonitorCILogExcerptErrorInReadPart, notWant: "final failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scanner, truncated, err := readRepositoryMonitorCILog(io.MultiReader(strings.NewReader(log), tc.after), int64(len(log)))
+			if err != nil || truncated != tc.wantTruncated {
+				t.Fatalf("readRepositoryMonitorCILog() truncated=%t err=%v, want truncated=%t", truncated, err, tc.wantTruncated)
+			}
+			excerpt, kind := scanner.excerpt(truncated)
+			text := repositoryMonitorCILogExcerptText(excerpt)
+			if kind != tc.wantKind {
+				t.Fatalf("excerpt kind = %q, want %q (text %q)", kind, tc.wantKind, text)
+			}
+			if tc.want != "" && !strings.Contains(text, tc.want) {
+				t.Fatalf("excerpt = %q, want %q", text, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(text, tc.notWant) {
+				t.Fatalf("excerpt = %q, want no %q", text, tc.notWant)
+			}
+		})
+	}
+}
+
 // repositoryMonitorCILogBlobServer serves signed log blobs over TLS and
 // records the Authorization header of every request.
 type repositoryMonitorCILogBlobServer struct {
