@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -117,6 +118,11 @@ type TokenService struct {
 	// example whether the OIDC subject allowlist still admits them. Tokens of
 	// an owner it refuses are invalid, at the door and on every recheck.
 	Admit func(Principal) error
+
+	// minting serializes mints, so concurrent requests cannot all pass the
+	// active-token check before any is stored. The AHP host serves from one
+	// process at a time.
+	minting sync.Mutex
 }
 
 func (s *TokenService) now() time.Time {
@@ -153,6 +159,8 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 	if ttl < time.Minute || ttl > s.maxTTL() {
 		return MintedToken{}, fmt.Errorf("%w: ttl must be between 1m and %s", ErrInvalidMintRequest, s.maxTTL())
 	}
+	s.minting.Lock()
+	defer s.minting.Unlock()
 	now := s.now()
 	owned, err := s.Store.ListAHPTokens(ctx, UserKey(req.Issuer, req.Subject))
 	if err != nil {
