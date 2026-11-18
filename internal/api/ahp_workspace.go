@@ -109,6 +109,11 @@ type ahpWorkspaces struct {
 	writeToken func(ctx context.Context, pod *corev1.Pod, token string) error
 	// removeToken removes a workspace's token; nil removes it with exec.
 	removeToken func(ctx context.Context, pod *corev1.Pod) error
+	// readToken reads the token a workspace holds; nil reads it with exec.
+	readToken func(ctx context.Context, pod *corev1.Pod) (string, error)
+	// recovered is, per user, the workspace Pod whose installed token this
+	// process has read back.
+	recovered map[string]types.UID
 	// collecting are the workspaces an idle collection is deciding about.
 	collecting map[string]chan struct{}
 	// git serializes each user's clones and worktree changes, which share
@@ -217,6 +222,11 @@ func (w *ahpWorkspaces) ensure(ctx context.Context, principal ahphost.Principal,
 			_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
 		case pod.Status.Phase == corev1.PodRunning && ahpContainerRunning(pod):
 			w.touch(principal, pod.DeepCopy())
+			// What the workspace shows is redacted for the token it holds,
+			// which an earlier run of this server may have installed.
+			if err := w.recoverToken(ctx, principal, pod); err != nil {
+				return nil, err
+			}
 			// The token comes first: a restore may clone private repositories.
 			w.provideCredential(ctx, principal, pod)
 			if created || pod.Annotations[ahpWorkspaceRestoredAnnotation] == "" {

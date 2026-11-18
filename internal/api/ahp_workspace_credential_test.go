@@ -93,6 +93,39 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 		w.tokensFor(principal.UserKey))
 }
 
+// A workspace an earlier run of this server gave a token is redacted for it
+// before anything in it is shown, and is not shown while the token cannot be
+// read.
+func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
+	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{
+		RepositoryCredential: func(context.Context, string, string, string) (string, error) { return "", nil },
+	}}
+	var reads atomic.Int32
+	readErr := errors.New("exec failed")
+	w := &ahpWorkspaces{
+		b: b, namespace: "orka-ahp-workspaces", image: "example.com/git@sha256:" + ahpHash("x"),
+		rest: &rest.Config{}, clientset: k8sfake.NewClientset(),
+		readToken: func(context.Context, *corev1.Pod) (string, error) {
+			reads.Add(1)
+			return "earlier-token-0123456789\n", readErr
+		},
+	}
+	principal := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-1"}}
+
+	require.Error(t, w.recoverToken(context.Background(), principal, pod), "an unreadable token stops the workspace being shown")
+	require.Empty(t, w.tokensFor(principal.UserKey))
+	readErr = nil
+	require.NoError(t, w.recoverToken(context.Background(), principal, pod))
+	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
+	require.NoError(t, w.recoverToken(context.Background(), principal, pod))
+	require.Equal(t, int32(2), reads.Load(), "a Pod's token is read back once")
+	require.NoError(t, w.recoverToken(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-2"}}))
+	require.Equal(t, int32(3), reads.Load(), "a new Pod's token is read back")
+	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
+	require.Equal(t, "the [REDACTED] here", string(ahpRedactWholeTokens([]byte("the earlier-token-0123456789 here"), w.tokensFor(principal.UserKey))))
+}
+
 // A token the person no longer holds that cannot be removed from their
 // workspace is tried again on the next request, not counted as removed.
 func TestAHPWorkspaceRetriesATokenItCouldNotRemove(t *testing.T) {
