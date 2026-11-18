@@ -9,6 +9,7 @@ package repocheck
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,6 +85,9 @@ func TestKubebuilderScaffoldMarkerListIsComplete(t *testing.T) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(root, f.path))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // deleted in the working tree but still staged
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
