@@ -394,6 +394,12 @@ orka run --agent reviewer "review this diff"
 
 It may depend on live provider credentials, model configuration, and server-side chat support.
 
+`orka ask` puts a question to the installation's [in-cluster guide](../guides/orka-guide.md), which answers from the docs of the installed version. It runs the question as an agent Task for the `orka-guide` Agent and waits for the answer:
+
+```bash
+orka ask -n orka-system "how do I mount a toolbox into an Agent?"
+```
+
 `orka dashboard` creates a ServiceAccount token, or uses `--token` or `--token-file`, and opens the dashboard signed in with it, passing the token in the URL fragment. It ignores `ORKA_TOKEN` and the config file's token. It opens `--server`, `ORKA_SERVER` or the config file's server, else `http://localhost:8080`; unlike other commands, it does not find the server through the kubeconfig. The ServiceAccount is in `--namespace`, `ORKA_NAMESPACE` or the config file's namespace, else `default`. It does not save the token or sign the CLI in; other commands authenticate on their own. It needs a controller that serves the dashboard (`--dashboard-enabled`); against one that does not, it stops before creating a token:
 
 ```bash

@@ -248,6 +248,7 @@ make docker-build-acp-claude-runtime     # Immutable Claude ACP runtime
 make docker-build-acp-copilot-runtime    # Immutable GitHub Copilot ACP runtime
 make docker-build-acp-opencode-runtime    # Immutable OpenCode ACP runtime
 make docker-build-workspace-publisher    # Clean-room Workspace/Publisher
+make docker-build-guide-docs            # Docs snapshot for the in-cluster guide (not in docker-build-all)
 make docker-build-all
 
 # Push images
@@ -259,6 +260,7 @@ make docker-push-acp-claude-runtime
 make docker-push-acp-copilot-runtime
 make docker-push-acp-opencode-runtime
 make docker-push-workspace-publisher
+make docker-push-guide-docs
 make docker-push-all
 ```
 

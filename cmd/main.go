@@ -380,6 +380,9 @@ func main() {
 	var acpToolboxImagePullSecrets string
 	var acpToolboxNodeSelector string
 	var acpToolboxMountMethod string
+	var guideEnabled bool
+	var guideRuntime, guideModel, guideDocsImage, guideOwnerDeployment string
+	var guideMaxTurns int
 	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
 	var operatorWorkspaceAccessEnabled bool
@@ -680,6 +683,18 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&guideEnabled, "guide-enabled", strings.EqualFold(os.Getenv("ORKA_GUIDE_ENABLED"), "true"),
+		"Create and maintain the orka-guide Agent in the watch namespace, a read-only agent that answers questions from the installed version's docs. Off by default; disabling it deletes the Agent the controller created.")
+	flag.StringVar(&guideRuntime, "guide-runtime", envutil.String("ORKA_GUIDE_RUNTIME", string(corev1alpha1.AgentRuntimeClaude)),
+		"Built-in runtime of the guide Agent: claude or copilot. Its runtime image must be configured.")
+	flag.StringVar(&guideModel, "guide-model", os.Getenv("ORKA_GUIDE_MODEL"),
+		"Model ID the guide Agent requests through the provider proxy. Required with --guide-enabled.")
+	flag.IntVar(&guideMaxTurns, "guide-max-turns", envutil.MustInt("ORKA_GUIDE_MAX_TURNS", int(controller.DefaultGuideMaxTurns)),
+		"Default turn limit for one guide answer (1-1000).")
+	flag.StringVar(&guideDocsImage, "guide-docs-image", os.Getenv("ORKA_GUIDE_DOCS_IMAGE"),
+		"Digest-pinned docs snapshot image mounted into the guide Agent as a toolbox. Required with --guide-enabled; needs --acp-toolboxes-enabled and an allowed registry.")
+	flag.StringVar(&guideOwnerDeployment, "guide-owner-deployment", os.Getenv("ORKA_GUIDE_OWNER_DEPLOYMENT"),
+		"Controller Deployment in the watch namespace that owns the guide Agent, so deleting the installation deletes it. The Agent is created only once this Deployment exists. With the guide disabled, it identifies a guide Agent the controller created, so it's deleted even without its labels.")
 	flag.BoolVar(&operatorWorkspaceAccessEnabled, "operator-workspace-access-enabled", false,
 		"Serve the operator workspace debugging API (orka task exec / orka task cp). Each call additionally "+
 			"requires the ExecutionWorkspaceClass acp.workspace.orka.ai/operator-access opt-in and the dedicated "+
@@ -1264,6 +1279,12 @@ func main() {
 
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
+	// The guide is validated against the configured images; tag resolution
+	// runs later, once cluster DNS is reachable.
+	configuredRuntimeImages := controller.ACPRuntimeImages{
+		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+		Opencode: acpOpencodeRuntimeImage,
+	}
 	restConfig := ctrl.GetConfigOrDie()
 	acpToolboxPolicy, err := resolveACPToolboxPolicy(acpToolboxesEnabled, acpToolboxAllowedRegistries,
 		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
@@ -1276,6 +1297,15 @@ func main() {
 		os.Exit(1)
 	}
 	acpToolboxPolicy.SkillsEnabled = acpSkillsEnabled
+	guideConfig, err := guideAgentConfig(guideEnabled, guideRuntime, guideModel, guideMaxTurns, guideDocsImage,
+		guideOwnerDeployment, watchNamespace, currentPodNamespace(), mode)
+	if err == nil {
+		err = guideConfig.Validate(acpToolboxPolicy, configuredRuntimeImages)
+	}
+	if err != nil {
+		setupLog.Error(err, "invalid guide configuration")
+		os.Exit(1)
+	}
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,
@@ -2307,6 +2337,16 @@ func main() {
 		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
+		os.Exit(1)
+	}
+	// Registered even when the guide is disabled, so it deletes a guide Agent
+	// it created before.
+	if err := (&controller.GuideAgentReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Config:    guideConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "GuideAgent")
 		os.Exit(1)
 	}
 
