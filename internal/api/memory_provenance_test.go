@@ -336,3 +336,31 @@ func TestRetireApplyLeavesTargetProvenance(t *testing.T) {
 	require.Equal(t, "applied", applied.Status)
 	require.Equal(t, "protected", applied.AppliedMemoryID)
 }
+
+// Update never changes sourceProposalId, so an ordinary memory cannot be
+// linked to a pending proposal and later returned as its application.
+func TestMemoryUpdateCannotLinkAPendingProposal(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			proposal := &store.MemoryProposal{Namespace: "default", Type: "memory", Title: "reviewed", Content: "Reviewed content."}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+			status, body := f.request(t, http.MethodPut, route+"protected",
+				`{"content":"Unreviewed content.","sourceProposalId":"`+proposal.ID+`"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			require.Empty(t, stored.SourceProposalID)
+
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{Namespace: "default", ID: proposal.ID, AppliedBy: "applier"})
+			require.NoError(t, err)
+			require.NotEqual(t, "protected", applied.ID)
+			require.Equal(t, "Reviewed content.", applied.Content)
+			require.Equal(t, proposal.ID, applied.SourceProposalID)
+		})
+	}
+}

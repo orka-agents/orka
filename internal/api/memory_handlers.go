@@ -256,8 +256,8 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	}
 	apply.Namespace = namespace
 	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeTokenReview {
-		// An applied proposal returns the memory it already references.
-		// Authorize that read within the transaction, including retries.
+		// The store may resolve either an applied ID or a source-proposal link.
+		// Authorize its final choice within the transaction, including retries.
 		apply.AuthorizeExistingMemory = func(ctx context.Context, namespace, id string) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "get", "core.orka.ai", "memories", id)

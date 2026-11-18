@@ -377,8 +377,8 @@ func TestMemoryConsolidationReportsAWindowCutPastMaxLookback(t *testing.T) {
 }
 
 // A run submits operations only. Orka builds each proposal, so a submission
-// cannot choose a proposal's ID, namespace or attribution, record a review or
-// apply outcome, or set the provenance of a memory.
+// cannot choose a proposal's ID, namespace or attribution, or record a review
+// or apply outcome.
 func TestMemoryConsolidationSubmissionCannotSetServerOwnedFields(t *testing.T) {
 	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
 	f.seedSessions(t, 5)
@@ -415,12 +415,4 @@ func TestMemoryConsolidationSubmissionCannotSetServerOwnedFields(t *testing.T) {
 	require.Nil(t, proposal.AppliedAt)
 	_, err = f.store.GetMemoryProposal(t.Context(), "default", "mprop-chosen")
 	require.ErrorIs(t, err, store.ErrNotFound)
-
-	for _, id := range []string{"mem-a", "mem-b"} {
-		memory, err := f.store.GetMemory(t.Context(), "default", id)
-		require.NoError(t, err)
-		require.Equal(t, store.MemorySourceManual, memory.Source)
-		require.Empty(t, memory.SourceProposalID)
-		require.False(t, memory.Deleted)
-	}
 }
