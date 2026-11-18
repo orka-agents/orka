@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Agent Host Protocol clients | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/operations/agent-host-protocol"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Agent Host Protocol clients | Orka"><meta data-rh="true" name="description" content="Install, expose and connect desktop Agent Host Protocol clients so they run sessions on Orka&#x27;s built-in runtimes."><meta data-rh="true" property="og:description" content="Install, expose and connect desktop Agent Host Protocol clients so they run sessions on Orka&#x27;s built-in runtimes."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/operations/agent-host-protocol"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/operations/agent-host-protocol" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/operations/agent-host-protocol" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Agent Host Protocol clients","item":"https://orka-agents.github.io/orka/docs/operations/agent-host-protocol"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.84a3497b.css">
-<script src="/orka/assets/js/runtime~main.4e131177.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.ddf87101.js" defer="defer"></script>
 <script src="/orka/assets/js/main.1769f833.js" defer="defer"></script>
 </head>
 <body>
@@ -142,11 +142,14 @@ and name on another host: remove it in a terminal first.</li>
 Sessions they continue, are shown through Orka&#x27;s API, CLI and dashboard only to the
 person who sent them: everyone else signed in to the namespace gets <code>404</code> for them,
 does not see them in lists or usage, and cannot continue them with a Task of their own.
-ServiceAccounts keep the access RBAC grants them. Other Kubernetes identities, such as
-people the API server signs in through its own OIDC or a webhook, are held to the same
-privacy and see no one&#x27;s turns: they carry no Orka issuer and subject to own one. A Task
-created through the API, CLI or a chat tool cannot continue an AHP session, not even the
-person&#x27;s own, since such a Task is not private; continue the session from the AHP client.</li>
+Usage reports keep showing the person their turns&#x27; usage after the Tasks are cleaned
+up. Usage that names no requester, such as a chat&#x27;s in an AHP session, is shown only to
+ServiceAccounts. ServiceAccounts keep the access RBAC grants them. Other Kubernetes
+identities, such as people the API server signs in through its own OIDC or a webhook,
+are held to the same privacy and see no one&#x27;s turns or usage: they carry no Orka issuer
+and subject to own one. A Task created through the API, CLI or a chat tool cannot
+continue an AHP session, not even the person&#x27;s own, since such a Task is not private;
+continue the session from the AHP client.</li>
 <li class=""><strong>Sessions.</strong> A session runs in an Orka Session, which is bound to one runtime profile.
 When the person picks another model, the session moves to a new Orka Session that
 starts with the conversation so far as context. A branch a turn already published
