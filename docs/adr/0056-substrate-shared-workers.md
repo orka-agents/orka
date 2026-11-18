@@ -46,8 +46,13 @@ workers, but gives no per-Actor proof of sandbox exit:
   satisfy, including an empty one, can land on a worker.
 - A worker Pod has a hardcoded 3600 s termination grace, within which the worker drains
   for at most 30 minutes.
-- The egress gateway caches an Actor's policy for 10 s; the worker's DNS relay for 5 s,
-  and it keeps a stale policy when a refresh fails.
+- The egress gateway caches an Actor's policy for its configurable
+  `--egress-policy-cache-ttl` (default 10 s). Expiry governs only new requests.
+- The worker's DNS relay caches the policy for 5 s and keeps a stale policy when a
+  refresh fails.
+- A checkpoint's `Tunnel.Deactivate` stops ingress and TCP egress and drains their
+  streams. It does not stop the DNS relay, which ends only in the later, best-effort
+  teardown.
 
 ## Decision
 
@@ -115,11 +120,20 @@ hold:
    unchanged.
 3. **Everything it could use is revoked.**
    - Its egress policy, including credential injection, is replaced by deny-all and
-     verified. `SuspendActor` is issued only after deny-all has been stored for 15 s,
-     the gateway's 10 s policy cache plus a margin; upstream offers no enforcement
-     acknowledgement. The checkpoint then deactivates the Actor's tunnel synchronously.
-     A DNS relay that cannot refresh keeps its stale policy until then, which is
-     residual risk.
+     verified.
+   - `SuspendActor` is issued only after deny-all has been stored for longer than the
+     larger of the gateway's declared policy cache and the DNS relay's 5 s cache, plus
+     5 s: 15 s by default.
+     - The declared cache is the provider's `--substrate-egress-policy-cache-ttl`,
+       which operators must set to the gateway's own value. The provider cannot read
+       the gateway's value, and upstream offers no enforcement acknowledgement.
+     - The checkpoint then deactivates the tunnel, which ends streams admitted earlier.
+   - Residual risk:
+     - a mis-declared gateway TTL shortens the window;
+     - the DNS relay keeps answering by its last fetched policy until teardown;
+     - if its refresh failed, that policy is the stale allowlist;
+     - for a leaked sandbox, the DNS relay may keep answering until the worker Pod is
+       gone.
    - The instance's Orka credentials are made unusable by Core, asynchronously (see the
      next section).
 4. **The residue is bounded in time.** `maxWorkerLifetime` is a hard bound on the worker
@@ -128,7 +142,11 @@ hold:
    - admission closes an hour earlier;
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
      grace, never zero, so its absence stays kubelet-confirmed;
-   - all of this runs first in each provider sweep, using Kubernetes alone.
+   - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
+     never behind the native sweep (which has a one-minute deadline);
+   - unreadable or inconsistent lifetime evidence retires the pool at once. A
+     creation-time deadline annotation keeps a rewritten ledger from extending the
+     bound.
 
 ### Credentials Core owns
 
@@ -154,8 +172,13 @@ Core makes these unusable, asynchronously:
   - a foreign template or Actor appears;
   - any upstream error.
 
-  It also applies to any uncertainty in the suspend path: an unreadable Actor, failed
-  egress revocation, or a suspend issued whose effect is unresolved.
+  It also applies to every error on a shared worker after the suspension intent is
+  persisted, apart from a retried journal write conflict. That covers an unreadable
+  Actor, failed egress revocation, failed template verification, invalid snapshot
+  evidence, any Tag-capture failure, and a suspend issued whose effect is unresolved.
+  A persisted strong marker always drives the pool's deletion and the absence proof to
+  completion, from every retirement pass and from the provider's bounds loop, even
+  after a crash right after the marker was saved.
 - **No replay.** An unresolved suspend is never replayed. Once the worker Pod is proven
   absent, the instance is reported lost and retires through Stop with its last
   checkpoint.
