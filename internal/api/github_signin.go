@@ -280,14 +280,16 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		Username: user.Login, Namespace: h.watchNamespace,
 	}
 	declined := req.NoHost || !cfg.CreateHosts || !expiryConfirmed
-	connection, held, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
+	connection, held, deadline, err := h.linkGitHubSignIn(ctx, ui, provider, oauth, tokens, declined)
 	if !held {
 		revokeUnused(tokens.AccessToken)
 	}
 	if err != nil {
 		return err
 	}
-	response, err := h.issueSession(ctx, ui, h.signInSessionDeadline(ctx, connection, tokens))
+	// A link that cannot refresh ends with its token, and the session with
+	// it: it could not renew past that.
+	response, err := h.issueSession(ctx, ui, deadline)
 	if err != nil {
 		return err
 	}
@@ -426,27 +428,6 @@ func (h *Handlers) newSession(ui *UserInfo, deadline time.Time) (string, store.A
 	}, nil
 }
 
-// signInSessionDeadline is when a sign-in's session must end: with the token
-// custody holds for the link when that token cannot refresh, as the session
-// could not renew past it. A repeat sign-in may keep an earlier link, so the
-// link's own token decides, not the one just submitted. When custody cannot
-// be read, the link it keeps may be one that cannot refresh, so the session
-// ends no later than a token obtained now would: a link that can refresh
-// only renews sooner.
-func (h *Handlers) signInSessionDeadline(ctx context.Context, connection *corev1alpha1.Connection, tokens githubauth.Tokens) time.Time {
-	cfg := h.githubSignIn
-	if cfg.Credentials != nil {
-		held, err := cfg.Credentials.HostCredential(ctx, connection.Namespace, connection.Name, sessionRenewHorizon)
-		if err == nil {
-			if held.Refreshable {
-				return time.Time{}
-			}
-			return held.ExpiresAt
-		}
-	}
-	return gitHubTokenExpiry(cfg.now(), tokens.ExpiresIn)
-}
-
 // gitHubTokenExpiry is when a GitHub token obtained at now ends: as GitHub
 // reported, at most maxGitHubAccessTokenLife, which is also the deadline of
 // one reported without an expiry. The lifetime is capped in seconds, before
@@ -471,10 +452,10 @@ var errSignInLinkUnrecorded = fiber.NewError(fiber.StatusInternalServerError, "f
 // false nothing stored them, after a failure or when an existing link was
 // kept, and the caller revokes them if it minted them.
 func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
-	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, err error) {
+	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, deadline time.Time, err error) {
 	connection, err = h.ensureSignInConnection(ctx, ui, provider, declined)
 	if err != nil {
-		return nil, false, err
+		return nil, false, time.Time{}, err
 	}
 	// Sign-ins for one Connection take turns, and each judges the link as
 	// the one before it left it: a sign-in that waited reuses what that one
@@ -482,7 +463,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	unlock := h.completionLocks.lock(string(connection.UID))
 	defer unlock()
 	if connection, err = h.reloadSignInConnection(ctx, connection, ui); err != nil {
-		return nil, false, err
+		return nil, false, time.Time{}, err
 	}
 	// A decline is recorded and lifted only under the lock, so overlapping
 	// sign-ins never undo each other's. It is recorded before the link
@@ -490,41 +471,47 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// custody holds a grant a host may take.
 	if declined {
 		if err := h.recordAgentHostDecline(ctx, connection, ui, true); err != nil {
-			return nil, false, err
+			return nil, false, time.Time{}, err
 		}
 	}
 	// Signing in again keeps a link that still holds the person's account:
 	// each commit retains the grant it replaces until disconnect, so linking
 	// every sign-in would soon refuse new ones. The caller revokes the
 	// unused token, unless custody holds that very token.
-	custody, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui, !declined)
+	kept, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui, !declined)
+	custody := kept.AccessToken
 	if err != nil {
 		// Replacing a link that may still work would spend one of the grants
 		// custody retains; the person retries instead.
-		return nil, custody != "" && tokens.AccessToken == custody,
+		return nil, custody != "" && tokens.AccessToken == custody, time.Time{},
 			fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
 	}
 	if holds {
 		if !declined {
 			if err := h.recordAgentHostDecline(ctx, connection, ui, false); err != nil {
-				return nil, tokens.AccessToken == custody, err
+				return nil, tokens.AccessToken == custody, time.Time{}, err
 			}
 		}
-		return connection, tokens.AccessToken == custody, nil
+		// The kept link's token, not the one just submitted, bounds the
+		// session when it cannot refresh.
+		if !kept.Refreshable {
+			deadline = kept.ExpiresAt
+		}
+		return connection, tokens.AccessToken == custody, deadline, nil
 	}
 	mode, err := normalizeConnectionMode(connection.Spec.Mode)
 	if err != nil {
-		return nil, false, fiber.NewError(fiber.StatusConflict, "your link has an invalid mode")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusConflict, "your link has an invalid mode")
 	}
 
 	now := h.connectors.now()
 	consentNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	verifier, _, err := connectors.GeneratePKCE()
 	if err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	subject := connectors.SubjectDigest(ui.Issuer, ui.Subject)
 	scopes := connectors.ScopesForMode(provider, mode)
@@ -535,16 +522,21 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 		AuthorityDigest:  connectors.ProviderAuthorityDigest(provider),
 		Scopes:           scopes, ExpiresAt: now.Add(connectors.ConsentTTL),
 	}); err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
 	consent, err := h.connectors.Consents.ConsumeConnectorConsent(ctx, consentNonce)
 	if err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
 	expires := gitHubTokenExpiry(now, tokens.ExpiresIn)
+	// The token linked now bounds the session when it cannot refresh.
+	var linked time.Time
+	if tokens.RefreshToken == "" {
+		linked = expires
+	}
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	completion := store.ConnectorCompletion{
 		Nonce: completionNonce, ConnectionUID: consent.ConnectionUID, Namespace: consent.Namespace, Name: consent.Name,
@@ -559,21 +551,21 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	}
 	if err := h.connectors.Consents.CreateConnectorCompletion(ctx, completion); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			return nil, false, fiber.NewError(fiber.StatusConflict, "your GitHub link is being disconnected; sign in again in a moment")
+			return nil, false, time.Time{}, fiber.NewError(fiber.StatusConflict, "your GitHub link is being disconnected; sign in again in a moment")
 		}
 		if errors.Is(err, store.ErrConnectorConsentSuperseded) {
-			return nil, false, fiber.NewError(fiber.StatusConflict, "another sign-in is linking GitHub at the same time; retry")
+			return nil, false, time.Time{}, fiber.NewError(fiber.StatusConflict, "another sign-in is linking GitHub at the same time; retry")
 		}
 		// Whether the completion was stored is unknown.
-		return nil, true, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
+		return nil, true, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
-		return nil, true, fiber.NewError(fiber.StatusConflict, "your link's identity is incomplete")
+		return nil, true, time.Time{}, fiber.NewError(fiber.StatusConflict, "your link's identity is incomplete")
 	}
 	committed, err := h.connectors.Consents.CommitConnectorCompletion(ctx, completionNonce, ref, completion.Credential)
 	if err != nil {
-		return nil, true, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
+		return nil, true, time.Time{}, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
 	}
 	// Custody now holds this sign-in's grant, so a host may take it. The
 	// decline is lifted before the status write, which the Connection
@@ -581,16 +573,16 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	// a decline.
 	if !declined {
 		if err := h.recordAgentHostDecline(ctx, connection, ui, false); err != nil {
-			return nil, true, err
+			return nil, true, time.Time{}, err
 		}
 	}
 	if err := h.markConnectionLinked(ctx, connection, provider, committed); err != nil {
-		return connection, true, errSignInLinkUnrecorded
+		return connection, true, linked, errSignInLinkUnrecorded
 	}
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, completionNonce); err != nil {
 		log.Error(err, "consumed sign-in completion could not be removed", "connection", connection.Name)
 	}
-	return connection, true, nil
+	return connection, true, linked, nil
 }
 
 // recordAgentHostDecline records whether connection's person declined an
@@ -635,36 +627,38 @@ func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuth
 // one custody cannot refresh: its expiry is a deadline Orka chose, which a
 // host does not take. It returns an error when it cannot tell,
 // such as when custody or GitHub cannot answer: only a link shown not to
-// work is replaced. With an error, the token is custody's when custody gave
+// work is replaced. It returns the credential custody holds for a kept link.
+// With an error, the token is custody's when custody gave
 // one, or empty when custody could not be read.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
-	oauth connectors.OAuthProviderConfig, ui *UserInfo, startsHost bool) (string, bool, error) {
+	oauth connectors.OAuthProviderConfig, ui *UserInfo, startsHost bool) (credential.HostCredential, bool, error) {
 	cfg := h.githubSignIn
+	none := credential.HostCredential{}
 	if cfg.Credentials == nil || !connectors.ConnectionLinked(connection) {
-		return "", false, nil
+		return none, false, nil
 	}
 	held, err := cfg.Credentials.HostCredential(ctx, connection.Namespace, connection.Name, sessionRenewHorizon)
 	if errors.Is(err, credential.ErrHostLinkUnavailable) {
-		return "", false, nil
+		return none, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return none, false, err
 	}
 	if held.ExpiresAt.IsZero() || (startsHost && !held.Refreshable) {
-		return "", false, nil
+		return none, false, nil
 	}
 	account, err := cfg.GitHub.CheckToken(ctx, oauth.ClientID, oauth.ClientSecret, held.AccessToken)
 	if errors.Is(err, githubauth.ErrInvalidToken) {
-		return "", false, nil
+		return none, false, nil
 	}
 	if err != nil {
 		// Custody's token is still named, so the caller never revokes it.
-		return held.AccessToken, false, err
+		return credential.HostCredential{AccessToken: held.AccessToken}, false, err
 	}
 	if strconv.FormatInt(account.ID, 10) != ui.Subject {
-		return "", false, nil
+		return none, false, nil
 	}
-	return held.AccessToken, true, nil
+	return held, true, nil
 }
 
 // reloadSignInConnection reads connection again, uncached, and requires it

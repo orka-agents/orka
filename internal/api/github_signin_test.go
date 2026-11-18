@@ -989,23 +989,13 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 	}
 
 	// A repeat sign-in that keeps a link which cannot refresh ends with that
-	// link's token, not the one just submitted.
+	// link's token, not the one just submitted, even one that can refresh.
 	kept := time.Now().Add(time.Hour)
 	h.identity = nil
 	h.handlers.githubSignIn.Credentials = keptSignInCredentials{expires: kept}
-	_, session = h.signIn(map[string]any{"accessToken": "ghu_alice"})
-	if !session.ExpiresAt.Equal(kept.UTC()) {
-		t.Fatalf("session ends at %v, want with the kept link's token at %v", session.ExpiresAt, kept)
-	}
-
-	// When custody cannot be read, a refresh token just submitted does not
-	// lengthen the session: the link kept may be one that cannot refresh.
-	h.identity = nil
-	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{}
-	before = time.Now()
-	_, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
-	if session.ExpiresAt.After(before.Add(maxGitHubAccessTokenLife + time.Minute)) {
-		t.Fatalf("session ends at %v, want no later than %s from now", session.ExpiresAt, maxGitHubAccessTokenLife)
+	status, session := h.signIn(map[string]any{"accessToken": "ghu_alice_renewed", "refreshToken": "ghr_alice", "expiresIn": 28800, "noHost": true})
+	if status != http.StatusCreated || !session.ExpiresAt.Equal(kept.UTC()) {
+		t.Fatalf("sign-in %d ends at %v, want with the kept link's token at %v", status, session.ExpiresAt, kept)
 	}
 
 	// A link that can refresh keeps the full session.
@@ -1022,7 +1012,7 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 type keptSignInCredentials struct{ expires time.Time }
 
 func (k keptSignInCredentials) HostCredential(context.Context, string, string, time.Duration) (credential.HostCredential, error) {
-	return credential.HostCredential{AccessToken: "ghu_alice", ExpiresAt: k.expires}, nil
+	return credential.HostCredential{AccessToken: "ghu_alice_renewed", ExpiresAt: k.expires}, nil
 }
 
 // GitHub failing to answer a membership check is retried, never taken as
