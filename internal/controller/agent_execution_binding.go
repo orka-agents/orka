@@ -1623,6 +1623,7 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	beforeBinding := task.DeepCopy()
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
 	if err == nil && firstBinding {
+		acpPreDispatch.mark(task, acpPreDispatchExecutionBound)
 		r.recordAgentExecutionSettings(task, candidate)
 	}
 	if err != nil {

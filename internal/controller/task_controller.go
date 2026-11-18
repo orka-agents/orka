@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -191,7 +192,21 @@ type TaskReconciler struct {
 	// webhookDeliveries sends the Task's webhook notices outside the
 	// reconcile worker.
 	webhookDeliveries *taskWebhookDispatcher
+	// MaxConcurrentReconciles is how many different Tasks the controller
+	// reconciles at once; one Task is never reconciled concurrently with
+	// itself. Zero selects DefaultTaskMaxConcurrentReconciles. Above one,
+	// --max-tasks-per-namespace and maxConcurrentChildren become best-effort
+	// under bursts, because each check counts Tasks in the informer cache
+	// before a concurrently admitted Task's transition lands there.
+	MaxConcurrentReconciles int
 }
+
+const (
+	// DefaultTaskMaxConcurrentReconciles keeps Task reconciliation serial.
+	DefaultTaskMaxConcurrentReconciles = 1
+	// MaxTaskMaxConcurrentReconciles bounds --task-max-concurrent-reconciles.
+	MaxTaskMaxConcurrentReconciles = 64
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
@@ -350,6 +365,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
 	}
+	if task.Status.Execution == nil && task.Spec.Schedule == "" && task.DeletionTimestamp.IsZero() &&
+		!task.Status.Phase.IsTerminal() {
+		acpPreDispatch.mark(task, acpPreDispatchObserved)
+	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
 		// Delegated work still stops while usage storage is down: the
 		// cascade needs none of it, and runs once the Task's own stop has.
@@ -424,6 +443,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
+		acpPreDispatch.mark(task, acpPreDispatchStatusInitialized)
 		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
@@ -4508,8 +4528,24 @@ func (r *trustedServiceReadCleanupRunnable) Start(ctx context.Context) error {
 
 func (*trustedServiceReadCleanupRunnable) NeedLeaderElection() bool { return true }
 
+// effectiveTaskMaxConcurrentReconciles applies the default to an unset
+// worker count and rejects one outside 1..MaxTaskMaxConcurrentReconciles.
+func effectiveTaskMaxConcurrentReconciles(configured int) (int, error) {
+	if configured == 0 {
+		return DefaultTaskMaxConcurrentReconciles, nil
+	}
+	if configured < 1 || configured > MaxTaskMaxConcurrentReconciles {
+		return 0, fmt.Errorf("task controller concurrent reconciles must be between 1 and %d, got %d", MaxTaskMaxConcurrentReconciles, configured)
+	}
+	return configured, nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	workers, err := effectiveTaskMaxConcurrentReconciles(r.MaxConcurrentReconciles)
+	if err != nil {
+		return err
+	}
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
@@ -4541,11 +4577,13 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1alpha1.Task{})
-	builder, err := registerACPTaskWakeWatches(context.Background(), mgr, builder)
+	builder, err = registerACPTaskWakeWatches(context.Background(), mgr, builder)
 	if err != nil {
 		return fmt.Errorf("register ACP workspace Task wakeups: %w", err)
 	}
-	return builder.Named("task").Complete(r)
+	return builder.Named("task").
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).
+		Complete(r)
 }
 
 const (
@@ -5009,7 +5047,12 @@ func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, d
 	current := &rbacv1.Role{}
 	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		// Concurrent reconciles of Tasks in one namespace ensure the same
+		// grant; one that loses the create compares the winner's object.
+		if err = r.Create(ctx, desired); !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		err = r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	}
 	if err != nil {
 		return err
@@ -5024,7 +5067,10 @@ func (r *TaskReconciler) createOrUpdateTrustedServiceRoleBinding(ctx context.Con
 	current := &rbacv1.RoleBinding{}
 	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		if err = r.Create(ctx, desired); !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		err = r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	}
 	if err != nil {
 		return err
