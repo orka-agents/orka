@@ -134,16 +134,34 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	}
 
 	resp := acc.usage()
+	if req.ResponsesInput {
+		// Responses keeps text and tool calls in the order the model wrote
+		// them, as completeViaStream does for a streamed turn.
+		resp.OutputItems = []llm.AssistantOutputItem{}
+	}
+	textItemOpen := false
 	for _, block := range acc.message.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
 			resp.Content += b.Text
+			if req.ResponsesInput && b.Text != "" {
+				if !textItemOpen {
+					resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{})
+					textItemOpen = true
+				}
+				resp.OutputItems[len(resp.OutputItems)-1].Content += b.Text
+			}
 		case anthropic.ToolUseBlock:
-			resp.ToolCalls = append(resp.ToolCalls, llm.ToolCall{
+			call := llm.ToolCall{
 				ID:        b.ID,
 				Name:      b.Name,
 				Arguments: b.Input,
-			})
+			}
+			resp.ToolCalls = append(resp.ToolCalls, call)
+			if req.ResponsesInput {
+				resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+				textItemOpen = false
+			}
 		}
 	}
 	return resp, nil

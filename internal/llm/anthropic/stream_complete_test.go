@@ -346,3 +346,45 @@ func TestCompleteRetriesStreamTimeoutEvent(t *testing.T) {
 		t.Errorf("error = %v, retry = %t; want a retried error", err, llm.ShouldRetry(err))
 	}
 }
+
+// A large max_tokens used to fail before sending and fall back to
+// completeViaStream, which keeps text and tool calls in order for Responses.
+func TestCompleteKeepsOutputOrderForResponses(t *testing.T) {
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = anthropictest.WriteMessage(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[
+			{"type":"text","text":"first "},{"type":"thinking","thinking":"","signature":"s"},{"type":"text","text":"look"},
+			{"type":"tool_use","id":"a","name":"search","input":{"q":"a"}},
+			{"type":"text","text":"then"},
+			{"type":"tool_use","id":"b","name":"search","input":{"q":"b"}}],
+			"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	})
+	for _, responses := range []bool{true, false} {
+		resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
+			Model: "m", MaxTokens: 64000, ResponsesInput: responses,
+			Messages: []llm.Message{{Role: "user", Content: "hi"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Content != "first lookthen" || len(resp.ToolCalls) != 2 {
+			t.Errorf("responses=%t: content = %q, %d tool calls", responses, resp.Content, len(resp.ToolCalls))
+		}
+		if !responses {
+			if resp.OutputItems != nil {
+				t.Errorf("OutputItems = %+v, want nil outside Responses", resp.OutputItems)
+			}
+			continue
+		}
+		var got []string
+		for _, item := range resp.OutputItems {
+			if item.ToolCall != nil {
+				got = append(got, "call:"+item.ToolCall.ID)
+			} else {
+				got = append(got, "text:"+item.Content)
+			}
+		}
+		if want := "[text:first look call:a text:then call:b]"; fmt.Sprint(got) != want {
+			t.Errorf("OutputItems = %v, want %s", got, want)
+		}
+	}
+}
