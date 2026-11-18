@@ -223,9 +223,14 @@ Core makes these unusable, asynchronously:
   because sharing is opt-in, limited to a dedicated and continuously verified install,
   hard-bounded in time, and revoked.
 - **Residual risk: a leaked sandbox.** If teardown failed, that sandbox's memory may
-  persist on the node until the worker Pod is gone, at most `maxWorkerLifetime` with a
-  responsive kubelet. That memory includes workspace data and the instance's
-  credentials, which Core makes unusable asynchronously as described above.
+  persist on the node until the worker Pod is gone. That memory includes workspace data
+  and the instance's credentials, which Core makes unusable asynchronously as
+  described above. The `maxWorkerLifetime` bound holds only while the provider's
+  bounds loop can reach the Kubernetes API to delete the pool and re-delete its Pod,
+  and while the kubelet honours that deletion. A provider or API server outage that
+  spans the retirement deadline extends the leak until both recover; the bounds loop
+  then retires the pool on its next pass, because the deadline is read from Kubernetes
+  state, not from memory.
 - **Residual risk: foreign tenants.** Isolation from other tenants rests on the
   operator's dedicated-install assertion. Verification detects a violation after it
   happens and then strongly retires the pool.
