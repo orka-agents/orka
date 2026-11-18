@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 160 authenticated external route registrations, including 64
+The table covers all 163 authenticated external route registrations, including 66
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -68,11 +68,12 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
-`update` on `tasks/approvals` and `patch` on the parent Task. Cancelling a Task
-requires `update` on `tasks/cancel`, not `patch` or `delete` on `tasks`, so an
-on-call role can stop Tasks without editing or deleting them; cancelling keeps
-everything the Task produced. Stopping a Session's turn requires `get` on the
-Session and `update` on `tasks/cancel`. A monitor run or
+`update` on `tasks/approvals` and `patch` on the parent Task; a permission request a
+built-in runtime holds for the Task's requester can be decided only by that requester.
+Cancelling a Task requires `update` on `tasks/cancel`, not `patch` or `delete` on
+`tasks`, so an on-call role can stop Tasks without editing or deleting them;
+cancelling keeps everything the Task produced. Stopping a Session's turn requires
+`get` on the Session and `update` on `tasks/cancel`. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs
@@ -369,6 +370,9 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
+| `POST` | `/api/v1/ahp-tokens` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `GET` | `/api/v1/ahp-tokens` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `DELETE` | `/api/v1/ahp-tokens/:id` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
 | `GET` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; returns only the caller's own agent host, found through their own Connections; context-token callers need a connector read scope |
 | `POST` | `/api/v1/agent-hosts/me/wake` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope; an operator-suspended host is not woken |
 | `DELETE` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope |

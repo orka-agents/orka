@@ -25,12 +25,22 @@ const externalMode = `${modeAnchor}    static readonly OrkaExternal = new AgentM
         {"type": "externalSandbox", networkAccess: "restricted"},
         "read-only",
     );
+    static readonly OrkaExternalAsk = new AgentMode(
+        "orka-external-ask",
+        "Orka external sandbox, ask",
+        "Execution is confined by the Orka RuntimeSession boundary; commands and file changes ask first.",
+        "standard",
+        "untrusted",
+        "user",
+        {"type": "externalSandbox", networkAccess: "restricted"},
+        "read-only",
+    );
 `;
 if (!source.includes(modeAnchor)) throw new Error("AgentFullAccess anchor not found");
 source = source.replace(modeAnchor, externalMode);
 
 const allAnchor = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess];`;
-const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal];`;
+const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal, AgentMode.OrkaExternalAsk];`;
 if (!source.includes(allAnchor)) throw new Error("AgentMode.all anchor not found");
 source = source.replace(allAnchor, allReplacement);
 

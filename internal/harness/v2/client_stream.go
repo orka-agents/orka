@@ -98,6 +98,7 @@ func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, re
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	httpRequest.Header.Set(OperationCapabilityHeader, capability)
+	httpRequest.Header.Set(LiveUpdatesHeader, "1")
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {

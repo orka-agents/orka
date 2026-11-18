@@ -15,7 +15,8 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 5` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 8` identifies this layout, which adds the Agent Host
+Protocol tables to the version 7 metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -26,20 +27,24 @@ adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
 the 170-to-171 transition makes a `retry_pending` work action own its dedupe
 key, the 171-to-172 transition adds the write stamp columns of results and
-artifacts, and the upgrade records an adopted identity. A store at an earlier
-schema version upgrades through numbered version steps under the same lock,
-backup and transaction: a version-1 store (the 159-object layout) gains the
-168-to-169, 169-to-170 and 170-to-171 objects and the 171-to-172 columns, a
-version-2 store gains the 169-to-170 columns, the 170-to-171 index and the
-171-to-172 columns, a version-3 store gains the 170-to-171 index and the
-171-to-172 columns, a version-4 store gains the 171-to-172 columns, and all
+artifacts, the 172-to-173 transition adds memory generations and consolidation
+proposal targets, the 173-to-174 transition adds memory consolidation runs, the
+174-to-175 transition adds the empty Agent Host Protocol tables, and the
+upgrade records an adopted identity. A store at an earlier schema version
+upgrades through numbered version steps under the same lock, backup and
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
+169-to-170 and 170-to-171 objects and every later step, a version-2 store gains
+the 169-to-170 columns and every later step, a version-3 store gains the
+170-to-171 index and every later step, a version-4 store gains the 171-to-172
+columns and every later step, a version-5 store gains the 172-to-173 columns
+and every later step, a version-6 store gains the 173-to-174 table and the
+174-to-175 tables, a version-7 store gains the empty 174-to-175 tables, and all
 keep their identity row, records and bootstrap state unchanged. Before the
 170-to-171 index is rebuilt, a `retry_pending` work action that shares its
 dedupe key with a queued, leased or running action, or with a newer
-`retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing
-results and artifacts get the write stamp (0, 0). An installation a version-2
-store's epoch advance recorded stays its owner, at switch generation 0 with no
-record. Missing or malformed
+`retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing results and artifacts get the write stamp (0, 0).
+An installation a version-2 store's epoch advance recorded stays its owner, at
+switch generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -103,6 +108,7 @@ Kubernetes authority remains separate from either boundary.
 | `SecurityStore` | Scan runs, ingestion receipts, slices, threat models, findings, dropped findings and patch proposals; state. | RepositoryScan reconciler and security APIs. Ingestion groups result application, run changes and receipt. Kubernetes RepositoryScan/Task identity remains authoritative. |
 | `RepositoryMonitorStore`, `tools.RepositoryValidationBindingStore` | Monitor snapshots/runs/items, actions, review/publication records, commands, implementation/repair jobs, GitHub mutation records and monitor events; state. | RepositoryMonitor reconciler, APIs and repository validation tools. The narrow binding interface uses monitor-event persistence; it is not a separate database. |
 | `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
+| `AHPStore` | Agent Host Protocol connection tokens (hashes only), client bindings, and each user's sequence, replay journal, channel states, session catalog and session backend records; state. | AHP host and its Orka session backend. Everything but tokens and clients is keyed by an opaque user key; a journal append is refused unless it continues the user's sequence. |
 | `TaskJobAuthorityStore`, `TaskDataFenceStore` | Job revocations and Task/namespace cleanup generations; state, also fencing colocated artifact writes. | Worker API and brokered tool access, Task finalization and cleanup. Authorization is checked against live Kubernetes identity with no store transaction open; each fenced data call then checks the cleanup generation and authorized Jobs in its own transaction. |
 | `ControllerEpochMirror` | A subordinate copy of the Kubernetes-acquired epoch for payload transaction fences; state. | Controller epoch manager and SQLite turn/outbox persistence. A mirror cannot elect or advance controller ownership. |
 | `ArtifactStore` | Public Task artifact bytes, filename, content type, size and timestamps in one record; artifacts. | Worker uploads/downloads, task APIs, scan workflows and cleanup. Metadata cannot be detached into state when selecting a future artifact backend. |
@@ -139,9 +145,9 @@ event vocabulary and two provider interfaces:
   data fences, execution events (including grouped appends), gateway records,
   security records (including scan Task ingestion), repository monitors,
   usage, memories with their proposals (creation, review, archiving and
-  application), SessionTurn records with their finalization, and sealed
-  execution snapshots, native session records and connector custody (see
-  "Key custody and sealing").
+  application), Agent Host Protocol state, SessionTurn records with their
+  finalization, and sealed execution snapshots, native session records and
+  connector custody (see "Key custody and sealing").
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -318,6 +324,7 @@ the observable parts.
   controller releases the run of a Task that ended, which abandons an
   unfinished run and clears its transcripts, and, once the Task is
   deleted, clears its report and removes the runs no cursor needs.
+  Revision 12 adds the Agent Host Protocol family (`AHPStore`) to `state.v1`.
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

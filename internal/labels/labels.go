@@ -284,6 +284,13 @@ func isAlphaNum(r rune) bool {
 // requester was verified by the API server.
 const RequestedBySourceAPI = "api"
 
+// LabelAHPTurn, set to LabelAHPTurnValue, marks a Task an Agent Host Protocol
+// turn created; the API shows it only to the person who sent the turn.
+const (
+	LabelAHPTurn      = "orka.ai/ahp-turn"
+	LabelAHPTurnValue = "true"
+)
+
 // LabelChatSessionEpoch pins the incarnation of the chat Session named by
 // LabelChatSession: its creation time as SessionEpoch formats it. A chat
 // deleted and recreated under its name gets another epoch.

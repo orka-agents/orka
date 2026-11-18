@@ -165,6 +165,9 @@ func providerCapabilities(provider, model string) harnessv2.ProviderCapabilities
 		SupportsTools:             true,
 		SupportsImages:            true,
 		SupportsEmbeddedResources: true,
+		// Each built-in projection launches the provider to ask in
+		// NativePermissionsAsk sessions; see ProviderSessionProjection.
+		SupportsNativePermissionAsk: acp.BuiltInRuntimeSupportsNativePermissionAsk(provider),
 	}
 	if isExternalACPProvider(provider) {
 		// These ACP adapters do not emit session/request_permission or

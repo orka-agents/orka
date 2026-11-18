@@ -121,8 +121,8 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
 	// The upgrade drops the empty harness v1 tables, adds an empty operation
-	// receipt table and gives existing results and artifacts the write stamp
-	// (0, 0); every other value is unchanged.
+	// receipt table and the empty AHP tables, and gives existing results and
+	// artifacts the write stamp (0, 0); every other value is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -131,6 +131,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
 	before = runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, before)))
+	addAHPTables(t, before)
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -303,6 +304,7 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		"version 4":                     `PRAGMA user_version=4`,
 		"version 5":                     `PRAGMA user_version=5`,
 		"version 6":                     `PRAGMA user_version=6`,
+		"version 7":                     `PRAGMA user_version=7`,
 		"unknown":                       `PRAGMA user_version=2147483647`,
 		"negative":                      `PRAGMA user_version=-1`,
 		"version reset":                 `PRAGMA user_version=0`,

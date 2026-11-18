@@ -54,6 +54,14 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			allowed: true,
 		},
 		{
+			// The mark only makes a Task more private; a delegated child a
+			// worker creates carries it from its parent.
+			name:    "untrusted create with the AHP turn mark allowed",
+			user:    untrustedUsername,
+			task:    withAHPTurn(newAdmissionTestTask()),
+			allowed: true,
+		},
+		{
 			name:     "untrusted create with requestedBy denied",
 			user:     untrustedUsername,
 			task:     withRequestedBy(newAdmissionTestTask()),
@@ -298,6 +306,34 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			allowed: true,
 		},
 		{
+			name:     "untrusted update removing the AHP turn mark denied",
+			user:     untrustedUsername,
+			oldTask:  withAHPTurn(oldTask.DeepCopy()),
+			newTask:  oldTask,
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:     "trusted worker update removing the AHP turn mark denied",
+			user:     trustedWorkerUser,
+			oldTask:  withAHPTurn(oldTask.DeepCopy()),
+			newTask:  oldTask,
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:     "untrusted update adding the AHP turn mark denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withAHPTurn(oldTask.DeepCopy()),
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:    "trusted controller can change the AHP turn mark",
+			user:    trustedControllerUser,
+			oldTask: withAHPTurn(oldTask.DeepCopy()),
+			newTask: oldTask,
+			allowed: true,
+		},
+		{
 			name:    "trusted controller can update provenance",
 			user:    trustedControllerUser,
 			oldTask: oldTask,
@@ -499,6 +535,14 @@ func withParentTaskNamespace(task *corev1alpha1.Task) *corev1alpha1.Task {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[labels.AnnotationParentTaskNamespace] = "parent-namespace"
+	return task
+}
+
+func withAHPTurn(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Labels == nil {
+		task.Labels = map[string]string{}
+	}
+	task.Labels[labels.LabelAHPTurn] = labels.LabelAHPTurnValue
 	return task
 }
 

@@ -7,13 +7,20 @@ MIT License - see LICENSE file for details.
 package aimockauthority
 
 import (
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
@@ -310,4 +317,111 @@ func TestFixtureInClusterSurfaceOmitsObserverRoutes(t *testing.T) {
 	if decodeErr != nil || len(canaries) != 1 {
 		t.Fatal("observer did not return the exchanged canary")
 	}
+}
+
+func TestFixtureIssuesVerifiableOIDCTokensFromItsOwnKey(t *testing.T) {
+	s, h := newFixture(t)
+	resp := observe(s, http.MethodPost, OIDCPath+"/issue", `{"subject":"ahp-person","username":"person"}`)
+	var issued struct {
+		Token string `json:"token"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&issued)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || decodeErr != nil || issued.Token == "" {
+		t.Fatal("fixture OIDC issue failed")
+	}
+	parts := strings.Split(issued.Token, ".")
+	if len(parts) != 3 {
+		t.Fatal("OIDC token is not a compact JWT")
+	}
+	var header struct {
+		Algorithm string `json:"alg"`
+		Type      string `json:"typ"`
+		KeyID     string `json:"kid"`
+	}
+	raw, _ := base64.RawURLEncoding.DecodeString(parts[0])
+	if json.Unmarshal(raw, &header) != nil || header.Algorithm != "RS256" || header.Type != "JWT" || header.KeyID == "" {
+		t.Fatal("OIDC token header differs")
+	}
+	var claims struct {
+		Issuer   string `json:"iss"`
+		Audience string `json:"aud"`
+		Subject  string `json:"sub"`
+		Username string `json:"preferred_username"`
+		Expires  int64  `json:"exp"`
+	}
+	raw, _ = base64.RawURLEncoding.DecodeString(parts[1])
+	if json.Unmarshal(raw, &claims) != nil || claims.Issuer != s.issuer+OIDCPath || claims.Audience != OIDCAudience ||
+		claims.Subject != "ahp-person" || claims.Username != "person" || claims.Expires <= time.Now().Unix() {
+		t.Fatal("OIDC token claims differ")
+	}
+	oidcKey := fetchFixtureKey(t, h.URL+OIDCPath+"/jwks", header.KeyID)
+	if oidcKey == nil || verifyFixtureSignature(oidcKey, parts) != nil {
+		t.Fatal("OIDC token does not verify with the OIDC JWKS")
+	}
+	if fetchFixtureKey(t, h.URL+"/.well-known/jwks.json", header.KeyID) != nil {
+		t.Fatal("the transaction-token JWKS serves the OIDC key")
+	}
+	if _, err := s.verify(issued.Token); err == nil {
+		t.Fatal("an OIDC token was accepted as a transaction token")
+	}
+	if strings.Contains(fmt.Sprint(s.state, s.canaries), issued.Token) {
+		t.Fatal("the fixture retained an OIDC token")
+	}
+	req, _ := http.NewRequest(http.MethodPost, h.URL+OIDCPath+"/issue", strings.NewReader(`{"subject":"x"}`))
+	inCluster, err := h.Client().Do(req)
+	if err != nil {
+		t.Fatal("in-cluster request failed")
+	}
+	_ = inCluster.Body.Close()
+	if inCluster.StatusCode != http.StatusNotFound {
+		t.Fatal("the in-cluster surface mints OIDC tokens")
+	}
+	for _, body := range []string{`{}`, `{"subject":" "}`, `{"subject":"a","extra":1}`} {
+		bad := observe(s, http.MethodPost, OIDCPath+"/issue", body)
+		_ = bad.Body.Close()
+		if bad.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid OIDC request %s was accepted", body)
+		}
+	}
+}
+
+func fetchFixtureKey(t *testing.T, jwksURL, kid string) *rsa.PublicKey {
+	t.Helper()
+	resp, err := http.Get(jwksURL)
+	if err != nil {
+		t.Fatal("JWKS request failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var set struct {
+		Keys []struct {
+			KeyID string `json:"kid"`
+			N     string `json:"n"`
+			E     string `json:"e"`
+		} `json:"keys"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&set) != nil {
+		t.Fatal("JWKS response invalid")
+	}
+	for _, key := range set.Keys {
+		if key.KeyID != kid {
+			continue
+		}
+		n, errN := base64.RawURLEncoding.DecodeString(key.N)
+		e, errE := base64.RawURLEncoding.DecodeString(key.E)
+		if errN != nil || errE != nil {
+			t.Fatal("JWKS key invalid")
+		}
+		return &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(new(big.Int).SetBytes(e).Int64())}
+	}
+	return nil
+}
+
+func verifyFixtureSignature(key *rsa.PublicKey, parts []string) error {
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature)
 }

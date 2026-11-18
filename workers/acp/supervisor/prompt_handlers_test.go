@@ -1147,6 +1147,39 @@ func TestProviderUpstreamSuccessKeepsPromptCompleted(t *testing.T) {
 	})
 }
 
+// A completed answer is stored as the Task's result, so a credential-shaped
+// value the session does not know gets the pattern redaction streamed text
+// gets, not only the exact-value replacement.
+func TestCompletedResultIsPatternRedacted(t *testing.T) {
+	server, cfg, _ := newTestServer(t, "immediate")
+	fence := cfg.Fence
+	fence.RuntimeSessionUID = "session-uid"
+	fence.RuntimeSessionGeneration = 1
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence), redactor: newCredentialRedactor()}
+	prompt.assistant.WriteString("found " + secret)
+	state := &sessionState{
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration,
+			State: harnessv2.RuntimeSessionStatePromptRunning,
+		},
+		operations:  make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:      prompt,
+	}
+	result := acp.PromptResult{
+		Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn,
+		Accepted: true, SettledAt: time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
+	}
+	completed := server.buildTerminalEventLocked(state, prompt, result, result.SettledAt)
+	if completed.Completed == nil || len(completed.Completed.Result.Content) != 1 {
+		t.Fatalf("completed event = %#v", completed)
+	}
+	if text := completed.Completed.Result.Content[0].Text; strings.Contains(text, secret) || !strings.HasPrefix(text, "found ") {
+		t.Fatalf("completed result = %q, want the credential-shaped value redacted", text)
+	}
+}
+
 func TestTerminalResultLimitIncludesFullSerializedEvent(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence

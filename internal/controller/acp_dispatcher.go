@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -33,10 +34,12 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -55,6 +58,10 @@ const (
 	attemptIDField      = "attemptID"
 )
 
+// ACPTaskTimeoutReason is the execution reason of a Task its deadline
+// cancelled.
+const ACPTaskTimeoutReason = "TaskTimeout"
+
 const (
 	DefaultACPDispatchInterval               = time.Second
 	DefaultACPDispatchWorkers                = 4
@@ -63,7 +70,7 @@ const (
 	DefaultACPRateLimitReconcileInterval     = time.Second
 	defaultACPTaskTimeout                    = taskwait.DefaultAgentTaskTimeout
 	defaultPromptLeaseDuration               = 90 * time.Second
-	acpTaskTimeoutReason                     = "TaskTimeout"
+	acpTaskTimeoutReason                     = ACPTaskTimeoutReason
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
 	acpCancelledReason                       = "Cancelled"
@@ -122,8 +129,10 @@ type ACPDispatcher struct {
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
-	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	// LiveEvents receives each running Task's events as they arrive. It may be nil.
+	LiveEvents            *liveevents.Broker
+	SubstrateRouter       *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -138,6 +147,11 @@ type ACPDispatcher struct {
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
+
+	// permissionHolds names the permission requests held for a requester.
+	permissionHolds            map[string]struct{}
+	permissionHoldWG           sync.WaitGroup
+	permissionHoldPollInterval time.Duration
 }
 
 // substrateRouteHTTPClient lazily builds the router-pinned transport for
@@ -815,7 +829,18 @@ func (d *ACPDispatcher) patchPoolCoordinatorCapacity(
 	return result, err
 }
 
-func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel context.CancelFunc, key types.NamespacedName) {
+// errACPTaskCancelRequested is the runtime context cause of a Task whose
+// cancellation was requested through the API.
+var errACPTaskCancelRequested = errors.New("task cancellation requested")
+
+// acpTaskCancelRequested reports a recorded API cancel request. Only the
+// controller identity may write the annotation.
+func acpTaskCancelRequested(task *corev1alpha1.Task) bool {
+	_, ok := task.Annotations[labels.AnnotationCancelRequested]
+	return ok
+}
+
+func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel context.CancelCauseFunc, key types.NamespacedName) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -826,19 +851,24 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 			task := &corev1alpha1.Task{}
 			if err := d.APIReader.Get(ctx, key, task); err != nil {
 				if apierrors.IsNotFound(err) {
-					cancel()
+					cancel(context.Canceled)
 				}
 				continue
 			}
 			// A recorded cancel request stops the run at once, as deletion
 			// does, whether or not the Task's Cancelled status was written:
 			// that write can keep failing while the agent's work would go on.
-			_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
-			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
+			deleted := !task.DeletionTimestamp.IsZero()
+			cancelRequested := acpTaskCancelRequested(task)
+			if deleted || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				_, _ = d.cancelPreparedPublication(cancelCtx, task, "")
 				stop()
-				cancel()
+				cause := context.Canceled
+				if cancelRequested && !deleted {
+					cause = errACPTaskCancelRequested
+				}
+				cancel(cause)
 				return
 			}
 		}
@@ -1029,12 +1059,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	runtimeCtx, cancelRuntime := d.newTaskRuntimeContext(ctx, task)
 	defer cancelRuntime()
+	// The cancellation watcher records why it stopped the runtime, so a
+	// requested cancel reaches the runtime as user_requested.
+	runtimeCtx, cancelWithCause := context.WithCancelCause(runtimeCtx)
+	defer cancelWithCause(nil)
 	runtimeCtx, cancelWorkspace, err := d.newWorkspaceRuntimeContext(runtimeCtx, target.pool)
 	if err != nil {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryWorkspaceLifetime, err)
 	}
 	defer cancelWorkspace()
-	go d.watchTaskCancellation(runtimeCtx, cancelRuntime, types.NamespacedName{Namespace: task.Namespace, Name: task.Name})
+	go d.watchTaskCancellation(runtimeCtx, cancelWithCause, types.NamespacedName{Namespace: task.Namespace, Name: task.Name})
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "InvalidAttempt", err.Error())
@@ -1059,15 +1093,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryRuntimeClient, authErr)
 	}
 	nativeSessionsSupported := false
+	nativePermissionAskSupported := false
 	if target.pool != nil {
 		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
 		if capabilityErr != nil {
 			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
 		}
 		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
+		nativePermissionAskSupported = capabilities.Provider.SupportsNativePermissionAsk
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
+	}
+	if bound.mcpConfiguration.NativePermissions == harnessv2.NativePermissionsAsk && !nativePermissionAskSupported {
+		// Never run a Requester Task on a runtime that would pre-approve its tools.
+		return d.rejectPermissionDecisionsRuntime(ctx, task, attemptID, fence)
 	}
 	runtimeProfileDigest, digestErr := harnessv2.CanonicalProfileDigest(profile)
 	if digestErr != nil || runtimeFence.RuntimeProfileDigest != bound.plan.Digest || runtimeProfileDigest != bound.plan.Digest {
@@ -1933,7 +1973,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 			promptLease,
 		)
+		live := acpLivePublisher{broker: d.LiveEvents, task: task}
 		emit := func(event harnessv2.Event) error {
+			live.observe(event)
 			switch event.Type {
 			case harnessv2.EventAccepted:
 				admitOnce.Do(func() { close(admitted) })
@@ -2018,7 +2060,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(
-					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
+					runtimeCtx, leaseCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
 				)
 			case harnessv2.EventCompleted, harnessv2.EventCancelled, harnessv2.EventFailed, harnessv2.EventOutcomeUnknown:
 				copy := event
@@ -6106,26 +6148,14 @@ func promptLeaseRenewalRetryable(err error) bool {
 	return true
 }
 
-func (d *ACPDispatcher) resolvePromptPermission(
+// resolvePermissionRequest delivers a sealed permission answer, retrying only
+// writes the runtime provably never received.
+func (d *ACPDispatcher) resolvePermissionRequest(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
 	sessionID harnessv2.RuntimeSessionID,
-	task *corev1alpha1.Task,
-	fence harnessv2.Fence,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
-	provider string,
-	event harnessv2.Event,
+	request harnessv2.ResolvePermissionRequest,
 ) error {
-	permission := event.PermissionRequested
-	if permission == nil {
-		return nil
-	}
-	decision := frozenMCPPermissionDecision(mcpConfiguration, provider, permission)
-	request := harnessv2.ResolvePermissionRequest{
-		Protocol:  harnessv2.ProtocolVersion,
-		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
-		RequestID: permission.RequestID, Decision: decision,
-	}
 	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
 		return err
 	}
@@ -6171,12 +6201,7 @@ func frozenMCPPermissionDecision(
 			}
 		}
 	}
-	for _, option := range permission.Options {
-		if option.Kind == harnessv2.PermissionOptionRejectOnce {
-			return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
-		}
-	}
-	return cancelled
+	return rejectPermissionDecision(permission)
 }
 
 // taskScopedRuntimeSessionCleanupUnconfirmed reports whether the Task still
@@ -6832,11 +6857,15 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		reason := harnessv2.CancelReasonControllerShutdown
 		terminalReason := corev1alpha1.TaskExecutionReason("Cancelled")
 		terminalMessage := "prompt cancellation settled"
-		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+		switch {
+		case errors.Is(runtimeContextErr, context.DeadlineExceeded):
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
 			terminalMessage = acpTaskTimeoutCancellationSettledMessage
-		} else if requested != "" {
+		case errors.Is(runtimeContextErr, errACPTaskCancelRequested):
+			reason = harnessv2.CancelReasonUserRequested
+			terminalMessage = cmp.Or(requested, acpRequestedCancellationMessage)
+		case requested != "":
 			terminalMessage = requested
 		}
 		if cancellation == nil {
@@ -7217,12 +7246,18 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		operation := acpCancelledOperation
 		reason := corev1alpha1.TaskExecutionReason("Cancelled")
 		message := "prompt cancelled"
-		if cancellationReason == harnessv2.CancelReasonTaskTimeout {
+		switch cancellationReason {
+		case harnessv2.CancelReasonTaskTimeout:
 			operation = "timeout-cancelled"
 			reason = acpTaskTimeoutReason
 			message = acpTaskTimeoutCancellationSettledMessage
-		} else if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
-			message = requested
+		default:
+			// The recorded request names who cancelled and why.
+			if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+				message = requested
+			} else if cancellationReason == harnessv2.CancelReasonUserRequested {
+				message = acpRequestedCancellationMessage
+			}
 		}
 		if err := d.transitionAttemptToCancelled(
 			ctx, attemptID, fence, operation, reason, message,
@@ -7731,4 +7766,38 @@ func runtimePoolToolboxUnavailableMessage(pool *corev1alpha1.RuntimePool) (strin
 		message = acpToolboxUnavailablePrefix + "the RuntimePool could not bind a declared toolbox"
 	}
 	return message, true
+}
+
+// acpLivePublisher shows one prompt's events to live consumers. A runtime
+// confirms on acceptance that it redacts every event before it leaves; an
+// older runtime's content is safe only once the journal redacts the complete
+// text, so none of its events are published.
+type acpLivePublisher struct {
+	broker    *liveevents.Broker
+	task      *corev1alpha1.Task
+	confirmed bool
+}
+
+func (p *acpLivePublisher) observe(event harnessv2.Event) {
+	if event.Type == harnessv2.EventAccepted && event.Accepted != nil {
+		p.confirmed = event.Accepted.LiveUpdates
+	}
+	if !p.confirmed {
+		return
+	}
+	// The final answer is whole, so the journal's pattern redaction applies
+	// to it before anyone sees it too. Streamed chunks carry only the
+	// runtime's exact-value redaction: no complete text exists to match yet.
+	if event.Type == harnessv2.EventCompleted && event.Completed != nil {
+		completed := *event.Completed
+		completed.Result.Content = make([]harnessv2.ContentBlock, len(event.Completed.Result.Content))
+		for i, block := range event.Completed.Result.Content {
+			block.Text = events.RedactExecutionEventText(block.Text)
+			completed.Result.Content[i] = block
+		}
+		event.Completed = &completed
+	}
+	p.broker.Publish(liveevents.Event{
+		Namespace: p.task.Namespace, Task: p.task.Name, TaskUID: string(p.task.UID), Runtime: &event,
+	})
 }

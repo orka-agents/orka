@@ -621,6 +621,23 @@ func TestAgentRuntimeSpecJSONPreservesExplicitEmptyAllowedTools(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeSpecJSONKeepsPermissionDecisions(t *testing.T) {
+	encoded, err := json.Marshal(AgentRuntimeSpec{PermissionDecisions: PermissionDecisionsRequester})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"permissionDecisions":"Requester"`) {
+		t.Fatalf("runtime JSON = %s, want permissionDecisions", encoded)
+	}
+	var roundTrip AgentRuntimeSpec
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.PermissionDecisions != PermissionDecisionsRequester {
+		t.Fatalf("round-trip permissionDecisions = %q, want Requester", roundTrip.PermissionDecisions)
+	}
+}
+
 func TestModelConfigTokenLimitsJSONRoundTrip(t *testing.T) {
 	contextWindow := int32(32768)
 	maxTokens := int32(4096)

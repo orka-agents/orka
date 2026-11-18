@@ -37,6 +37,8 @@ func TestProviderProxyConfigValidationAndRedaction(t *testing.T) {
 		{UpstreamBaseURL: "http://vekil.example/v1?token=query", UpstreamBearerToken: secret},
 		{UpstreamBaseURL: "http://vekil.example/../admin", UpstreamBearerToken: secret},
 		{UpstreamBaseURL: "http://vekil.example/v1", UpstreamBearerToken: "bad\nheader"},
+		// Too short to be redacted from events by its exact value.
+		{UpstreamBaseURL: "http://vekil.example/v1", UpstreamBearerToken: "short", ProviderKind: providerKindCodex, Model: "m"},
 	} {
 		if _, _, err := invalid.normalized(); err == nil {
 			t.Fatalf("unsafe provider proxy config unexpectedly validated: %#v", invalid)

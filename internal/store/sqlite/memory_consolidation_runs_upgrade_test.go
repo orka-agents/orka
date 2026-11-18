@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -52,13 +53,14 @@ func TestSchemaVersion6StoreUpgradesInPlace(t *testing.T) {
 			binding, err := readDatasetBinding(t.Context(), db)
 			require.NoError(t, err)
 			rows := runTableApplicationRows(applicationRows(t, db))
+			addAHPTables(t, rows)
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema174,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -111,9 +113,11 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	steps := versionUpgrades()
-	require.Equal(t, 6, steps[len(steps)-1].from)
+	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 6 })
+	require.GreaterOrEqual(t, first, 0)
+	// The final step fails, so every step from version 6 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 6, schema173, steps[len(steps)-1:]), "no_such_function",
+	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 6, schema173, steps[first:]), "no_such_function",
 		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
@@ -132,7 +136,7 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema174, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

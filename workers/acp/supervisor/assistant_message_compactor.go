@@ -13,15 +13,16 @@ import (
 
 const assistantMessageCoalesceWindow = 25 * time.Millisecond
 
-// assistantMessageCompactor batches only adjacent ACP assistant text deltas.
-// It runs before harness identity assignment so emitted sequences remain
-// contiguous while the protocol rate limiter still sees every meaningful
-// lifecycle update.
+// assistantMessageCompactor batches only adjacent ACP assistant text deltas,
+// and adjacent thought deltas, never one kind with the other. It runs before
+// harness identity assignment so emitted sequences remain contiguous while
+// the protocol rate limiter still sees every meaningful lifecycle update.
 type assistantMessageCompactor struct {
 	maxBytes      int
 	flushInterval time.Duration
 	pending       acp.PromptEvent
 	text          strings.Builder
+	kind          string
 	messageID     string
 	meta          json.RawMessage
 	deadline      time.Time
@@ -48,7 +49,7 @@ func (c *assistantMessageCompactor) push(event acp.PromptEvent, arrivedAt time.T
 		ready = append(ready, c.flush())
 	}
 
-	chunk, isAssistantText := decodeAssistantMessageChunk(event)
+	chunk, isAssistantText := decodeCoalescibleChunk(event)
 	if !isAssistantText {
 		if c.text.Len() > 0 {
 			ready = append(ready, c.flush())
@@ -59,7 +60,7 @@ func (c *assistantMessageCompactor) push(event acp.PromptEvent, arrivedAt time.T
 	if text == "" {
 		return ready
 	}
-	if c.text.Len() > 0 && (event.Update.SessionID != c.pending.Update.SessionID ||
+	if c.text.Len() > 0 && (event.Update.SessionID != c.pending.Update.SessionID || chunk.SessionUpdate != c.kind ||
 		chunk.MessageID != c.messageID || !bytes.Equal(chunk.Meta, c.meta)) {
 		ready = append(ready, c.flush())
 	}
@@ -67,6 +68,7 @@ func (c *assistantMessageCompactor) push(event acp.PromptEvent, arrivedAt time.T
 	for len(text) > 0 {
 		if c.text.Len() == 0 {
 			c.pending = event
+			c.kind = chunk.SessionUpdate
 			c.messageID = chunk.MessageID
 			c.meta = append(c.meta[:0], chunk.Meta...)
 			c.arm(arrivedAt)
@@ -105,8 +107,6 @@ func (c *assistantMessageCompactor) arm(now time.Time) {
 }
 
 func (c *assistantMessageCompactor) flush() acp.PromptEvent {
-	const acpUpdateAgentMessageChunk = "agent_message_chunk"
-
 	event := c.pending
 	encoded, err := json.Marshal(struct {
 		SessionUpdate string `json:"sessionUpdate"`
@@ -117,7 +117,7 @@ func (c *assistantMessageCompactor) flush() acp.PromptEvent {
 		} `json:"content"`
 		Meta json.RawMessage `json:"_meta,omitempty"`
 	}{
-		SessionUpdate: acpUpdateAgentMessageChunk,
+		SessionUpdate: c.kind,
 		MessageID:     c.messageID,
 		Content: struct {
 			Type string `json:"type"`
@@ -131,6 +131,7 @@ func (c *assistantMessageCompactor) flush() acp.PromptEvent {
 	event.Update = &acp.SessionNotification{SessionID: event.Update.SessionID, Update: encoded}
 	c.text.Reset()
 	c.pending = acp.PromptEvent{}
+	c.kind = ""
 	c.messageID = ""
 	c.meta = nil
 	c.deadline = time.Time{}
@@ -166,9 +167,23 @@ type assistantMessageChunk struct {
 	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
-func decodeAssistantMessageChunk(event acp.PromptEvent) (assistantMessageChunk, bool) {
-	const acpUpdateAgentMessageChunk = "agent_message_chunk"
+const acpUpdateAgentMessageChunk = "agent_message_chunk"
 
+// decodeCoalescibleChunk recognizes the text deltas the compactor batches:
+// assistant message and thought chunks.
+func decodeCoalescibleChunk(event acp.PromptEvent) (assistantMessageChunk, bool) {
+	var envelope assistantMessageChunk
+	if event.Type != acp.PromptEventUpdate || event.Update == nil {
+		return envelope, false
+	}
+	if json.Unmarshal(event.Update.Update, &envelope) != nil || envelope.Content.Type != acpContentTypeText ||
+		(envelope.SessionUpdate != acpUpdateAgentMessageChunk && envelope.SessionUpdate != acpUpdateAgentThoughtChunk) {
+		return assistantMessageChunk{}, false
+	}
+	return envelope, true
+}
+
+func decodeAssistantMessageChunk(event acp.PromptEvent) (assistantMessageChunk, bool) {
 	var envelope assistantMessageChunk
 	if event.Type != acp.PromptEventUpdate || event.Update == nil {
 		return envelope, false
