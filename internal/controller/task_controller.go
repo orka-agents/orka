@@ -352,6 +352,23 @@ func childTaskHoldsConcurrencySlot(task *corev1alpha1.Task) bool {
 	}
 }
 
+// taskOwnsJob reports, from a live read, whether any Job owned by task exists.
+func (r *TaskReconciler) taskOwnsJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	var jobs batchv1.JobList
+	if err := r.taskMetadataReader().List(ctx, &jobs, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
+		return false, err
+	}
+	for i := range jobs.Items {
+		for _, ref := range jobs.Items[i].OwnerReferences {
+			if ref.UID == task.UID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -1369,7 +1386,21 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		active := int32(0)
 		for i := range siblings.Items {
 			s := &siblings.Items[i]
-			if s.Name != task.Name && childTaskHoldsConcurrencySlot(s) {
+			if s.Name == task.Name {
+				continue
+			}
+			holdsSlot := childTaskHoldsConcurrencySlot(s)
+			if !holdsSlot && s.Status.Phase == corev1alpha1.TaskPhasePending {
+				// A Job is created before its Task records JobName, so a failed
+				// status write leaves a running child Pending without markers.
+				owns, err := r.taskOwnsJob(ctx, s)
+				if err != nil {
+					log.Error(err, "failed to list sibling task jobs")
+					return ctrl.Result{}, err, true
+				}
+				holdsSlot = owns
+			}
+			if holdsSlot {
 				active++
 			}
 		}

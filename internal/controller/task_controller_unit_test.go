@@ -1969,6 +1969,51 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *te
 
 // Children that are all Pending and waiting for admission must not block each
 // other; otherwise a burst of children never starts.
+// createTaskJob creates the Job before it records JobName and Running. If that
+// status write fails, the sibling runs while still looking Pending and
+// unadmitted; its owned Job must still hold the slot.
+func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
+	tests := []struct {
+		name     string
+		ownerUID types.UID
+		wantWait bool
+	}{
+		{name: "owned job", ownerUID: "sibling-uid", wantWait: true},
+		{name: "job of a deleted task with the same name", ownerUID: "previous-sibling-uid", wantWait: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			parentTask, parentAgent := coordinationConcurrencyFixture(1)
+			sibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			sibling.UID = "sibling-uid"
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sibling-job",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelTask: "sibling"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: corev1alpha1.GroupVersion.String(),
+						Kind:       "Task",
+						Name:       "sibling",
+						UID:        tt.ownerUID,
+					}},
+				},
+			}
+			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, job, childTask)
+			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+			if err != nil {
+				t.Fatalf("validateCoordinationConstraints() error = %v", err)
+			}
+			if done != tt.wantWait {
+				t.Fatalf("done = %t, want %t (result %+v)", done, tt.wantWait, result)
+			}
+		})
+	}
+}
+
 func TestValidateCoordinationConstraints_WaitingSiblingsDoNotBlockAdmission(t *testing.T) {
 	scheme := newTestScheme()
 	parentTask, parentAgent := coordinationConcurrencyFixture(1)
