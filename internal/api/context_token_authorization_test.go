@@ -1836,6 +1836,50 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 	}
 }
 
+// The controller MCP broker serves its built-ins to a built-in ACP runtime,
+// so an explicit allowlist naming one needs no Tool resource. A name the broker
+// does not serve still must resolve, and the token's tool context still bounds
+// the allowlist.
+func TestContextTokenTaskCreateAcceptsBrokeredBuiltInsInBuiltInRuntimeAllowlist(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "claude", Namespace: "team-a"},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	resolve := func(t *testing.T, name string) contextTokenTaskCreateAuthorizationContext {
+		t.Helper()
+		authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
+			Type:         corev1alpha1.TaskTypeAgent,
+			AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{name}},
+		}, "team-a")
+		require.NoError(t, err)
+		require.Contains(t, authzCtx.RuntimeAllowedTools, name)
+		return authzCtx
+	}
+	for _, name := range []string{"park_until", "delegate_task", "wait_for_tasks", "recall_memory", "remember", "web_fetch"} {
+		t.Run(name, func(t *testing.T) {
+			authzCtx := resolve(t, name)
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+
+			// Classification grants nothing: a token restricting tools
+			// elsewhere still refuses the brokered name.
+			restricted := &ContextToken{Scopes: token.Scopes, TransactionContext: map[string]any{"allowedTools": []any{"Read"}}}
+			require.Contains(t, strings.Join(contextTokenTaskCreateFailures(restricted, cfg, authzCtx), "\n"),
+				fmt.Sprintf("tool %q is not allowed by token context", name))
+		})
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, resolve(t, "read_incident"))
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "read_incident" is unresolved`}, failures)
+}
+
 func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSyntheticNativeBash(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
