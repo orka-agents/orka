@@ -171,8 +171,10 @@ Object counts alone do not establish compatibility.
 | 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
 | 162 objects, schema version 3 | Dataset binding layout | Rebuild the work action dedupe index so a `retry_pending` action owns its key, first cancelling any `retry_pending` action whose key another active action shares (reason `dedupe_superseded`); keep the dataset identity, binding, records and key bootstrap state. |
 | 162 objects, schema version 4 | Work action dedupe layout | Add the write stamp columns of results and artifacts, giving existing rows the stamp (0, 0); keep the dataset identity, binding, records, receipts and key bootstrap state. |
-| 162 objects, schema version 5 | Write stamp layout | Add the write watermark columns, starting at zero; keep the dataset identity, binding, records, receipts, controller epoch and key bootstrap state. |
-| 162 objects (current), schema version 6 | Write watermark layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+| 162 objects, schema version 5 | Write stamp layout | Add the memory generation and superseding-memory columns, starting existing memories at generation 1, and the consolidation proposal target and source columns; keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 162 objects, schema version 6 | Memory generation layout | Add the empty memory consolidation run table, its cursor index and the Session update index; keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 165 objects, schema version 7 | Memory consolidation run layout | Add the write watermark columns, starting at zero; keep the dataset identity, binding, records, receipts, controller epoch and key bootstrap state. |
+| 165 objects (current), schema version 8 | Write watermark layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -181,8 +183,8 @@ lineages. If either table holds records, or a Session lineage uses
 installation.
 
 The five historical source layouts have SQLite `user_version = 0` and upgrade
-to the current layout in one transaction, ending with the schema version 6
-objects. A schema version 1, 2, 3, 4 or 5 store keeps its identity row and
+to the current layout in one transaction, ending with the schema version 8
+objects. A schema version 1, 2, 3, 4, 5, 6 or 7 store keeps its identity row and
 upgrades in place through each later version, after the same automatic
 backup. A nonzero marker on any other layout is refused rather than adopted.
 
@@ -190,7 +192,7 @@ backup. A nonzero marker on any other layout is refused rather than adopted.
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 5` records this metadata layout; the controller also checks
+`PRAGMA user_version = 8` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 

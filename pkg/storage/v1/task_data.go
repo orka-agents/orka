@@ -83,7 +83,9 @@ type TaskDataFence struct {
 // GetGatewayEventForTask, GetGatewayMessageBudget, EnqueueGatewayMessage,
 // AppendExecutionEvent, AppendExecutionEventIfAbsent,
 // AppendExecutionEventWithPlanIfAbsent, AppendExecutionEventsIfAbsent,
-// ListExecutionEvents and CheckTaskJobAuthority. Other methods ignore a fence.
+// ListExecutionEvents, CheckTaskJobAuthority, BeginMemoryConsolidationRun,
+// CompleteMemoryConsolidationRun, GetMemoryConsolidationRun and
+// ListMemoryConsolidationSessions. Other methods ignore a fence.
 //
 // A provider checks a fence against the cleanup generations and revocations
 // it holds. Orka resolves every fence from state.v1, so a fenced SaveArtifact

@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *storageclient.Client) {
@@ -1421,5 +1422,191 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 			require.Contains(t, string(body), "current")
 			require.NotContains(t, string(body), "future")
 		})
+	}
+}
+
+// recallFixture serves the internal memory list route to callers that are
+// the verified worker of an active Task, or to any other identity given.
+func recallFixture(t *testing.T, memoryStore func(*storageclient.Client) store.MemoryStore, caller *UserInfo) (*fiber.App, *storageclient.Client) {
+	t.Helper()
+	scheme := internalCallerAuthScheme(t)
+	task := internalCallerAuthTask()
+	job := internalCallerAuthJob(task, "job-a", "job-uid")
+	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	backing := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	var memories store.MemoryStore = backing
+	if memoryStore != nil {
+		memories = memoryStore(backing)
+	}
+	h := NewInternalHandlers(backing, backing, backing, backing, backing, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient,
+		MemoryStore: memories, MemoryProposalStore: backing})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, caller)
+		return c.Next()
+	})
+	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
+	return app, backing
+}
+
+func TestInternalListMemoriesCountsOnlyRecalls(t *testing.T) {
+	app, ss := recallFixture(t, nil, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+	ctx := context.Background()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "deploy note " + id}))
+	}
+
+	list := func(query string) {
+		t.Helper()
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default"+query, nil))
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	counts := func() map[string]int {
+		t.Helper()
+		memories, err := ss.ListMemories(ctx, store.MemoryFilter{Namespace: "default"})
+		require.NoError(t, err)
+		out := map[string]int{}
+		for _, memory := range memories {
+			out[memory.ID] = memory.RecalledCount
+		}
+		return out
+	}
+
+	list("?limit=5")
+	list("?purpose=recall&query=mem-a")
+	require.Eventually(t, func() bool { return counts()["mem-a"] == 1 }, 5*time.Second, 5*time.Millisecond,
+		"a recall counts the memories it returned, in the background")
+	list("?purpose=recall&query=nothing-matches")
+	require.Equal(t, map[string]int{"mem-a": 1, "mem-b": 0}, counts(), "a prompt's memory context and an empty recall are not counted")
+
+	recalled, err := ss.GetMemory(ctx, "default", "mem-a")
+	require.NoError(t, err)
+	require.NotNil(t, recalled.LastRecalledAt)
+}
+
+func TestInternalListMemoriesDoesNotCountARecallTooLargeToReturn(t *testing.T) {
+	app, ss := recallFixture(t, nil, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+	ctx := context.Background()
+	require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: "mem-big", Namespace: "default",
+		Content: "big " + strings.Repeat("x", tools.MemoryRecallResultLimit)}))
+	require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: "mem-a", Namespace: "default", Content: "small"}))
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall&query=big", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var listed []store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&listed))
+	require.Len(t, listed, 1, "the response itself is unchanged")
+	require.Equal(t, "mem-big", listed[0].ID)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall&query=small", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Eventually(t, func() bool {
+		small, err := ss.GetMemory(ctx, "default", "mem-a")
+		return err == nil && small.RecalledCount == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	big, err := ss.GetMemory(ctx, "default", "mem-big")
+	require.NoError(t, err)
+	require.Zero(t, big.RecalledCount, "a response larger than the recall tool reads is not counted")
+}
+
+func TestInternalListMemoriesCountsRecallsOnlyFromTaskWorkers(t *testing.T) {
+	other := &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default", AuthType: AuthTypeTokenReview}
+	app, ss := recallFixture(t, nil, other)
+	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the listing itself is still served")
+	require.Never(t, func() bool {
+		memory, err := ss.GetMemory(context.Background(), "default", "mem-a")
+		return err == nil && memory.RecalledCount > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "a caller that is no Task's worker cannot mark a listing as a recall")
+}
+
+// slowRecallStore keeps a recall count from finishing until release is
+// closed, like a storage write that keeps retrying.
+type slowRecallStore struct {
+	store.MemoryStore
+	release <-chan struct{}
+	started chan<- struct{}
+}
+
+func (s slowRecallStore) RecordMemoryRecall(ctx context.Context, _ store.MemoryRecall) error {
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestInternalListMemoriesDoesNotWaitOnASlowCount(t *testing.T) {
+	previous := tools.MemoryRecallRecordTimeout
+	tools.MemoryRecallRecordTimeout = time.Minute
+	t.Cleanup(func() { tools.MemoryRecallRecordTimeout = previous })
+	release, started := make(chan struct{}), make(chan struct{}, 1)
+	app, ss := recallFixture(t, func(backing *storageclient.Client) store.MemoryStore {
+		return slowRecallStore{MemoryStore: backing, release: release, started: started}
+	}, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
+	require.NoError(t, ss.CreateMemory(context.Background(), &store.Memory{ID: "mem-a", Namespace: "default", Content: "note"}))
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default?purpose=recall", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the recall returns while its count is still blocked")
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the count never started")
+	}
+	close(release)
+}
+
+func TestInternalRoutesRefuseToReviewOrApplyConsolidationProposals(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/review", h.ReviewMemoryProposal)
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+	ctx := context.Background()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, ss.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "default", Content: "content of " + id}))
+	}
+	pending := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeRetire, Title: "Retire",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}}
+	require.NoError(t, ss.CreateMemoryProposal(ctx, pending))
+	accepted := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "Merge", Content: "merged",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}}}
+	require.NoError(t, ss.CreateMemoryProposal(ctx, accepted))
+	require.NoError(t, ss.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: "default", ID: accepted.ID, Status: "accepted", Reviewer: "reviewer"}))
+
+	post := func(path, body string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		return resp.StatusCode
+	}
+	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+pending.ID+"/review", `{"status":"accepted"}`))
+	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+accepted.ID+"/apply", `{}`))
+	// However a client pads the ID, the request is refused and changes nothing.
+	for _, path := range []string{"/internal/v1/memory-proposals/default/%20" + accepted.ID + "%20/apply",
+		"/internal/v1/memory-proposals/default/%20" + pending.ID + "/review"} {
+		status := post(path, `{"status":"accepted"}`)
+		require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, status, path)
+	}
+
+	reviewed, err := ss.GetMemoryProposal(ctx, "default", pending.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", reviewed.Status, "the internal route records no review")
+	memories, err := ss.ListMemories(ctx, store.MemoryFilter{Namespace: "default", IncludeDisabled: true})
+	require.NoError(t, err)
+	require.Len(t, memories, 2)
+	for _, memory := range memories {
+		require.False(t, memory.Disabled, "the internal route changes no memory")
 	}
 }

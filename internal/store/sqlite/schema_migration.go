@@ -27,7 +27,9 @@ const (
 	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
 	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
-	schema173 = "2b3b17daeb27e8b883923dc8252bde3078d640c27cfdbefaf7a0b0a98a2543ac" // schema version 6: write watermark
+	schema173 = "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b" // schema version 6: memory generations and consolidation proposal targets
+	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d" // schema version 7: memory consolidation runs
+	schema175 = "40bfd00f1a3fd192b99452fbc29f61b3c8826778dffef4a87e188686387c0ed3" // schema version 8: write watermark
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -64,6 +66,12 @@ var migration171To172 string
 //go:embed migrations/172-to-173.sql
 var migration172To173 string
 
+//go:embed migrations/173-to-174.sql
+var migration173To174 string
+
+//go:embed migrations/174-to-175.sql
+var migration174To175 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -83,6 +91,8 @@ func schemaMigrations() []schemaMigration {
 		{schema170, schema171, migration170To171, nil},
 		{schema171, schema172, migration171To172, nil},
 		{schema172, schema173, migration172To173, nil},
+		{schema173, schema174, migration173To174, nil},
+		{schema174, schema175, migration174To175, nil},
 	}
 }
 
@@ -104,6 +114,8 @@ func versionUpgrades() []versionUpgrade {
 		{from: 3, to: 4, fromLayout: schema170, sql: migration170To171, toLayout: schema171},
 		{from: 4, to: 5, fromLayout: schema171, sql: migration171To172, toLayout: schema172},
 		{from: 5, to: 6, fromLayout: schema172, sql: migration172To173, toLayout: schema173},
+		{from: 6, to: 7, fromLayout: schema173, sql: migration173To174, toLayout: schema174},
+		{from: 7, to: 8, fromLayout: schema174, sql: migration174To175, toLayout: schema175},
 	}
 }
 

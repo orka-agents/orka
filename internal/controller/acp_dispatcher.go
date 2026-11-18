@@ -6497,7 +6497,9 @@ func runtimeSessionStartFailureMessage(err error) string {
 		"runtime session failed during provider proxy setup",
 		"runtime session failed during MCP proxy setup",
 		"runtime session failed during provider environment setup",
-		"runtime session failed during provider adapter initialization":
+		"runtime session failed during provider adapter initialization",
+		acp.WorkspaceValidationFailedMessage,
+		acp.OpenCodeProjectConfigurationRejectedMessage:
 		return clientErr.Message
 	default:
 		return fallback

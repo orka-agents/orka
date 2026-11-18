@@ -234,6 +234,25 @@ func run(transcriptPath string) (err error) {
 	// concrete serving provider while still covering the whole logical model call.
 	llmProvider = llm.NewTracingProvider(llmProvider)
 
+	// A memory consolidation run registers no tools and loads no memory or
+	// skills: the controller supplies its inputs and validates its result.
+	if strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != "" {
+		result, err := runMemoryConsolidation(ctx, llmProvider, model, settings, prompt)
+		if err != nil {
+			return fmt.Errorf("memory consolidation failed: %w", err)
+		}
+		if err := writeResult(ctx, result); err != nil {
+			return fmt.Errorf("failed to write result: %w", err)
+		}
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("Memory consolidation run submitted its report"),
+			common.WithEventContent(eventContent(map[string]any{logFieldResultLength: len(result)})),
+		)
+		fmt.Printf("Memory consolidation run %s/%s completed%s\n", taskNamespace, taskName, transactionLogFields)
+		return nil
+	}
+
 	// Parse enabled tools
 	enabledTools := normalizeEnabledTools(workerEnv.Tools)
 
@@ -399,7 +418,10 @@ func prepareAIWorkerInput(
 	if err != nil {
 		return nil, modelSettings{}, err
 	}
-	if err := workerEnv.ValidateRequired(promptIncluded); err != nil {
+	// A memory consolidation run's prompt is only an optional focus: the run
+	// has a fixed instruction of its own.
+	consolidation := strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != ""
+	if err := workerEnv.ValidateRequired(promptIncluded || consolidation); err != nil {
 		return nil, modelSettings{}, err
 	}
 	settings, err := parseModelSettings(workerEnv)
