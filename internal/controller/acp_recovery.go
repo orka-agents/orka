@@ -797,7 +797,7 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	}
 	switch attempt.ExecutionState {
 	case store.PromptExecutionQueued, store.PromptExecutionReserved:
-		return d.patchRecoveredTaskReserved(ctx, task, fence.Epoch, attempt.ExecutionState == store.PromptExecutionQueued)
+		return d.patchRecoveredTaskReserved(ctx, task, attempt, fence.Epoch, attempt.ExecutionState == store.PromptExecutionQueued)
 	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 		digest, err := acpDomainDigest("pre-submission-recovery", map[string]any{
 			attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
@@ -811,7 +811,7 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		}); err != nil {
 			return err
 		}
-		return d.patchRecoveredTaskReserved(ctx, task, fence.Epoch, false)
+		return d.patchRecoveredTaskReserved(ctx, task, attempt, fence.Epoch, false)
 	case store.PromptExecutionSubmitting, store.PromptExecutionSubmittedUnknown,
 		store.PromptExecutionAccepted, store.PromptExecutionRunning, store.PromptExecutionSettling:
 		if recovered, err := d.recoverJournaledPromptTerminal(ctx, task, attempt, fence); err != nil {
@@ -2227,7 +2227,13 @@ func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *c
 	})
 }
 
-func (d *ACPDispatcher) patchRecoveredTaskReserved(ctx context.Context, task *corev1alpha1.Task, epoch int64, keepQueued bool) error {
+// patchRecoveredTaskReserved returns a recovered Task to admission on the new
+// epoch. attempt is the PromptAttempt as recovery found it. The Task's
+// RuntimeSession binding is cleared, except for a task-scoped RuntimeSession
+// that the attempt had already released without a cleanup receipt, as after a
+// rate-limited prompt whose session delete failed: the Task is then the only
+// record of that cleanup obligation, and the next dispatch retires it first.
+func (d *ACPDispatcher) patchRecoveredTaskReserved(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, epoch int64, keepQueued bool) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
@@ -2244,9 +2250,11 @@ func (d *ACPDispatcher) patchRecoveredTaskReserved(ctx context.Context, task *co
 			latest.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
 		}
 		latest.Status.Execution.ControllerEpoch = epoch
-		latest.Status.Execution.RuntimeInstanceID = ""
-		latest.Status.Execution.RuntimeSessionUID = ""
-		latest.Status.Execution.RuntimeSessionGeneration = 0
+		if latest.Spec.SessionRef != nil || !taskScopedRuntimeSessionReleasedUnretired(latest, attempt) {
+			latest.Status.Execution.RuntimeInstanceID = ""
+			latest.Status.Execution.RuntimeSessionUID = ""
+			latest.Status.Execution.RuntimeSessionGeneration = 0
+		}
 		latest.Status.Execution.Reason = acpControllerRestartRecoveredReason
 		latest.Status.Execution.Message = acpControllerRestartRecoveredMessage
 		latest.Status.Execution.LastTransitionTime = nowMeta()
