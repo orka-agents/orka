@@ -320,8 +320,10 @@ A cached permission may only make automation more cautious, never less:
   a collaborator, is looked up again by each evaluation, so readiness
   concludes that someone lacks authority only from a lookup it made itself.
   A lookup the budget refuses leaves authority unknown, which gives
-  `incomplete_retry`, never success. This spends more lookups on reviewers
-  without authority, which the budget's fairness accepts.
+  `incomplete_retry`, never success. A snapshot waiting for budget reserves
+  a lookup per evaluation for each such reviewer, and the longest-waiting
+  snapshot is reserved even past half the budget, so readiness still
+  completes in turn when every pull request is evaluated more than once.
 
 ### Budgets and maxRounds
 

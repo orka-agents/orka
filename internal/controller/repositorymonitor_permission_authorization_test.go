@@ -356,3 +356,40 @@ func TestRepositoryMonitorReviewFeedbackProjectionBacklogRotates(t *testing.T) {
 		t.Fatalf("passes did not wrap around: %v", backlog.listed)
 	}
 }
+
+// Reviewers without authority are looked up by each evaluation, so a waiting
+// pull request reserves a lookup per evaluation: with more pull requests
+// than the budget serves, each checked by repair admission and then
+// readiness, every readiness evaluation still completes within a few polls
+// of unchanged data. (Autoreview finding on d1ac73ed6.)
+func TestRepositoryMonitorPermissionReservationsCoverEveryEvaluation(t *testing.T) {
+	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.github.mu.Lock()
+	f.github.defaultPermission = "read"
+	f.github.mu.Unlock()
+	writer := func(permission string) bool { return repositoryMonitorPermissionMeets("write", nil, permission) }
+	prs := repositoryMonitorPermissionLookupBudget/2 + 1
+	readinessComplete := map[int]int{}
+	for poll := 1; poll <= 8; poll++ {
+		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
+		for pr := range prs {
+			scoped := withRepositoryMonitorPermissionScope(ctx, fmt.Sprintf("pull_request:%d", pr))
+			login := fmt.Sprintf("pr%d-reader", pr)
+			for evaluation := range 2 {
+				_, err := f.reconciler.repositoryMonitorSchedulingPermission(scoped, f.reconciler.GitHubAPIBaseURL, "orka-agents", "orka", "forge-token", login, writer)
+				switch {
+				case err == nil && evaluation == 1:
+					readinessComplete[pr] = poll
+				case err != nil && !errors.Is(err, errRepositoryMonitorPermissionLookupBudget):
+					t.Fatal(err)
+				}
+			}
+		}
+		end()
+	}
+	for pr := range prs {
+		if readinessComplete[pr] < 5 {
+			t.Errorf("pull request %d readiness last completed in poll %d of 8, want it served every few polls", pr, readinessComplete[pr])
+		}
+	}
+}

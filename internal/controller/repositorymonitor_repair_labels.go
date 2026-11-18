@@ -297,20 +297,23 @@ const repositoryMonitorPermissionWaitingExpiry = 15 * time.Minute
 //
 // The budget is shared fairly across polls by scope: the lookups one
 // feedback snapshot of a pull request needs, or one account looked up on
-// its own. A scope this poll's budget cut short waits, with every account it
-// needs, and later polls reserve whole waiting scopes, the longest-waiting
-// first, within half their budget. All of a reserved scope's accounts are
-// looked up in the same poll, so its snapshot completes even when
-// remembered permissions expire between polls.
+// its own. A scope this poll's budget cut short waits, with every lookup it
+// needs: one per account with authority, and one per evaluation for any
+// other, since each evaluation reads an absence of authority itself. Later
+// polls reserve whole waiting scopes, the longest-waiting first, within half
+// their budget, or the longest-waiting alone past half. All of a reserved
+// scope's lookups are made in the same poll, so its snapshot completes even
+// when remembered permissions expire between polls.
 type repositoryMonitorPermissionCache struct {
 	mu      sync.Mutex
 	entries map[string]repositoryMonitorPermissionResult
 	lookups int
 	// memory is the monitor's permission memory, nil outside a poll.
 	memory *repositoryMonitorPermissionMemory
-	// reserved are the accounts of the waiting scopes this poll reserves
-	// that it has not looked up yet.
-	reserved map[string]bool
+	// reserved counts, by scope and account, the lookups this poll reserves
+	// for waiting scopes and has not made yet, and reservedTotal sums them.
+	reserved      map[repositoryMonitorPermissionReservation]int
+	reservedTotal int
 	// scopes are the scopes this poll looked up accounts for.
 	scopes map[string]*repositoryMonitorPermissionPollScope
 }
@@ -320,11 +323,34 @@ type repositoryMonitorPermissionResult struct {
 	err        error
 }
 
-// repositoryMonitorPermissionPollScope is what one poll saw of a scope: the
-// accounts it needed, and whether the budget refused any of them.
+// repositoryMonitorPermissionPollScope is what one poll saw of a scope: how
+// often it asked for each account, which accounts had authority, and whether
+// the budget refused any lookup.
 type repositoryMonitorPermissionPollScope struct {
-	keys    map[string]bool
-	refused bool
+	calls      map[string]int
+	authorized map[string]bool
+	refused    bool
+}
+
+// needs returns the lookups the scope needs in a later poll: one for an
+// account with authority, which the poll's cache answers again, and one per
+// request for any other, which each evaluation looks up itself.
+func (s *repositoryMonitorPermissionPollScope) needs() map[string]int {
+	needs := make(map[string]int, len(s.calls))
+	for key, calls := range s.calls {
+		if s.authorized[key] {
+			calls = 1
+		}
+		needs[key] = calls
+	}
+	return needs
+}
+
+// repositoryMonitorPermissionReservation is one scope's reserved lookups of
+// one account. A reservation is the scope's own: the same account looked up
+// for another scope does not use it.
+type repositoryMonitorPermissionReservation struct {
+	scope, key string
 }
 
 // repositoryMonitorPermissionMemory is what one monitor's polls carry
@@ -417,10 +443,11 @@ type repositoryMonitorRememberedPermission struct {
 }
 
 // repositoryMonitorPermissionWaiting is a scope waiting for budget: the poll
-// that first cut it short, the accounts it needs, and when a poll last did.
+// that first cut it short, the lookups it needs by account, and when a poll
+// last did.
 type repositoryMonitorPermissionWaiting struct {
 	since int
-	keys  map[string]bool
+	needs map[string]int
 	seen  time.Time
 }
 
@@ -466,25 +493,28 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 		return strings.Compare(a, b)
 	})
 	// A scope that does not fit what is left of the reservation is passed
-	// over for this poll, so it cannot keep later scopes from being served.
-	// It is still served when the poll's budget allows, and a snapshot never
-	// needs more lookups than its own limit, which fits the reservation.
-	reserved := map[string]bool{}
+	// over for this poll, so it cannot keep later scopes from being served;
+	// it is still served when the poll's budget allows. The longest-waiting
+	// scope is always reserved when the whole budget holds it, even past
+	// half, so every waiting scope completes in turn.
+	reserved := map[repositoryMonitorPermissionReservation]int{}
+	reservedTotal := 0
 	for _, scope := range waiting {
-		keys := memory.waiting[scope].keys
+		needs := memory.waiting[scope].needs
 		added := 0
-		for key := range keys {
-			if !reserved[key] {
-				added++
-			}
+		for _, n := range needs {
+			added += n
 		}
-		if len(reserved)+added > repositoryMonitorPermissionLookupBudget/2 {
+		if reservedTotal+added > repositoryMonitorPermissionLookupBudget/2 && (reservedTotal > 0 || added > repositoryMonitorPermissionLookupBudget) {
 			continue
 		}
-		maps.Copy(reserved, keys)
+		for key, n := range needs {
+			reserved[repositoryMonitorPermissionReservation{scope: scope, key: key}] = n
+		}
+		reservedTotal += added
 	}
 	memory.mu.Unlock()
-	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, scopes: map[string]*repositoryMonitorPermissionPollScope{}}
+	cache := &repositoryMonitorPermissionCache{entries: map[string]repositoryMonitorPermissionResult{}, memory: memory, reserved: reserved, reservedTotal: reservedTotal, scopes: map[string]*repositoryMonitorPermissionPollScope{}}
 	return context.WithValue(ctx, repositoryMonitorPermissionCacheKey{}, cache), func() {
 		cache.mu.Lock()
 		scopes := cache.scopes
@@ -498,14 +528,14 @@ func (r *RepositoryMonitorReconciler) withRepositoryMonitorPermissionPoll(ctx co
 				delete(memory.waiting, scope)
 				continue
 			}
-			// The scope now needs the accounts this poll saw, its snapshot's
-			// current reviewers, not ones it needed before.
+			// The scope now needs the lookups this poll saw, of its
+			// snapshot's current reviewers, not ones it needed before.
 			entry := memory.waiting[scope]
 			if entry == nil {
 				entry = &repositoryMonitorPermissionWaiting{since: poll}
 				memory.waiting[scope] = entry
 			}
-			entry.keys = maps.Clone(seen.keys)
+			entry.needs = seen.needs()
 			entry.seen = now
 		}
 		for scope, entry := range memory.waiting {
@@ -581,35 +611,48 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSchedulingPermission(ctx 
 	cache.mu.Lock()
 	seen := cache.scopes[scope]
 	if seen == nil {
-		seen = &repositoryMonitorPermissionPollScope{keys: map[string]bool{}}
+		seen = &repositoryMonitorPermissionPollScope{calls: map[string]int{}, authorized: map[string]bool{}}
 		cache.scopes[scope] = seen
 	}
-	seen.keys[key] = true
+	seen.calls[key]++
 	cache.mu.Unlock()
 	if permission, ok := cache.remembered(key); ok && authorizes(permission) {
+		cache.mu.Lock()
+		seen.authorized[key] = true
+		cache.mu.Unlock()
 		return permission, nil
 	}
 	cache.mu.Lock()
 	if cached, ok := cache.entries[key]; ok && (cached.err != nil || authorizes(cached.permission)) {
+		if cached.err == nil {
+			seen.authorized[key] = true
+		}
 		cache.mu.Unlock()
 		return cached.permission, cached.err
 	}
-	// The accounts of reserved scopes keep budget of their own.
-	reserved := len(cache.reserved)
-	if cache.reserved[key] {
-		reserved--
+	// Reserved scopes keep budget of their own for each lookup they need.
+	reservation := repositoryMonitorPermissionReservation{scope: scope, key: key}
+	others := cache.reservedTotal
+	if cache.reserved[reservation] > 0 {
+		others--
 	}
-	if cache.lookups+reserved >= repositoryMonitorPermissionLookupBudget {
+	if cache.lookups+others >= repositoryMonitorPermissionLookupBudget {
 		seen.refused = true
 		cache.mu.Unlock()
 		return "", errRepositoryMonitorPermissionLookupBudget
 	}
 	cache.lookups++
-	delete(cache.reserved, key)
+	if cache.reserved[reservation] > 0 {
+		cache.reserved[reservation]--
+		cache.reservedTotal--
+	}
 	cache.mu.Unlock()
 	permission, err := r.lookUpRepositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repo, token, actor)
 	cache.mu.Lock()
 	cache.entries[key] = repositoryMonitorPermissionResult{permission: permission, err: err}
+	if err == nil && authorizes(permission) {
+		seen.authorized[key] = true
+	}
 	cache.mu.Unlock()
 	if cache.memory != nil {
 		cache.memory.mu.Lock()
