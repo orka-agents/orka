@@ -57,7 +57,9 @@ func trackedFiles(t *testing.T, root string) []trackedFile {
 		t.Fatal("git ls-files listed no files")
 	}
 	// The test cache tracks only files a test opens or stats. Stat the
-	// index so staging a file invalidates a cached pass.
+	// index so staging a file invalidates a cached pass. Go skips inputs
+	// outside the module root, such as a linked worktree's index, so the
+	// documented command also passes -count=1.
 	cmd = exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", "index")
 	cmd.Dir = root
 	index, err := cmd.Output()

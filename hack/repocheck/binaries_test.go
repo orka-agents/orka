@@ -35,6 +35,10 @@ func binaryFormat(r io.ReaderAt) (string, error) {
 		return "Mach-O", nil
 	case bytes.HasPrefix(head, []byte{0xca, 0xfe, 0xba, 0xbe}):
 		return "Mach-O universal or Java class", nil
+	case bytes.HasPrefix(head, []byte{0xca, 0xfe, 0xba, 0xbf}),
+		bytes.HasPrefix(head, []byte{0xbe, 0xba, 0xfe, 0xca}),
+		bytes.HasPrefix(head, []byte{0xbf, 0xba, 0xfe, 0xca}):
+		return "Mach-O universal", nil
 	case bytes.HasPrefix(head, []byte("\x00asm")):
 		return "WebAssembly", nil
 	case bytes.HasPrefix(head, []byte("!<arch>\n")):
@@ -76,6 +80,9 @@ func TestBinaryFormat(t *testing.T) {
 	}{
 		{"elf", []byte("\x7fELF\x02\x01\x01"), "ELF"},
 		{"mach-o 64", []byte{0xcf, 0xfa, 0xed, 0xfe, 0x07}, "Mach-O"},
+		{"mach-o universal 64", []byte{0xca, 0xfe, 0xba, 0xbf, 0x00}, "Mach-O universal"},
+		{"mach-o universal swapped", []byte{0xbe, 0xba, 0xfe, 0xca, 0x02}, "Mach-O universal"},
+		{"mach-o universal 64 swapped", []byte{0xbf, 0xba, 0xfe, 0xca, 0x02}, "Mach-O universal"},
 		{"pe", pe(0x80), "Windows PE"},
 		{"pe with a large DOS stub", pe(0x2000), "Windows PE"},
 		{"pe signature past the end", truncatedPE, ""},
