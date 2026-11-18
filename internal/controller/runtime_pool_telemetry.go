@@ -1,11 +1,11 @@
 package controller
 
 import (
+	"cmp"
 	"fmt"
 	"net/url"
 	"path"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -36,13 +36,6 @@ const (
 // supervisor accepts for each signal.
 var runtimePoolTelemetryScalarSuffixes = []string{otlpProtocolSuffix, "INSECURE", "COMPRESSION"}
 
-// runtimePoolTelemetryEnvBudget is how many environment entries supervisor
-// telemetry may use. The native backend admits 32 environment entries per
-// container and a native supervisor that cannot suspend already needs 29. A
-// native runtime that needs more, such as a suspendable one, re-fits telemetry
-// to what remains with fitNativeRuntimeTelemetry.
-const runtimePoolTelemetryEnvBudget = 3
-
 // nativeRuntimeEnvironmentLimit is the native backend's (Agent Substrate's)
 // per-container environment limit. A larger request is refused by the
 // provider and the runtime never starts.
@@ -66,8 +59,10 @@ type runtimePoolOTLPSignal struct {
 // runtimePoolTelemetryEnv follows the native AI worker scalar allowlist for
 // supervisor traces and GenAI metrics. Traces gate the projection: a
 // metrics-only controller configuration enables nothing. Settings are encoded
-// with as few entries as keep their SDK meaning, and metrics are dropped when
-// they would take supervisor telemetry past runtimePoolTelemetryEnvBudget.
+// with as few entries as keep their SDK meaning. Every configured signal is
+// projected: a Pod-backed runtime has no environment limit, and a native
+// runtime re-fits telemetry to the room its other settings leave with
+// fitNativeRuntimeTelemetry.
 // Collector egress is operator-owned unless --runtime-telemetry-collector-egress
 // admits the projected origins for gateway-enforced runtimes. Never copy
 // headers, certificate paths, resource attributes or Task context.
@@ -76,21 +71,7 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	if !ok {
 		return nil
 	}
-	if metrics == nil {
-		// Dropped metrics need no disable entry: no generic endpoint is
-		// projected, so the supervisor resolves no metrics collector.
-		return encodeRuntimePoolTelemetryEnv(traces, nil)
-	}
-	env := encodeRuntimePoolTelemetryEnv(traces, metrics)
-	if len(env) > runtimePoolTelemetryEnvBudget {
-		// Traces take precedence over metrics for the native budget. Metrics
-		// are dropped only when that brings telemetry within it; trace
-		// settings that exceed it on their own already exceed the limit.
-		if traceOnly := encodeRuntimePoolTelemetryEnv(traces, nil); len(traceOnly) <= runtimePoolTelemetryEnvBudget {
-			return traceOnly
-		}
-	}
-	return env
+	return encodeRuntimePoolTelemetryEnv(traces, metrics)
 }
 
 // isRuntimePoolTelemetryEnvName reports an environment name supervisor
@@ -376,20 +357,9 @@ func runtimePoolTelemetryCollectorEndpoints(enabled bool, getenv func(string) st
 }
 
 // runtimePoolConfiguredCollectorEndpoints returns every collector endpoint a
-// runtime may receive: the Pod projection, or a native runtime with room for
-// every configured signal.
+// runtime may receive: the full projection, which a native runtime may narrow.
 func runtimePoolConfiguredCollectorEndpoints(getenv func(string) string) []string {
-	traces, metrics, ok := runtimePoolTelemetrySignals(true, getenv)
-	if !ok {
-		return nil
-	}
-	endpoints := runtimePoolTelemetryCollectorEndpoints(true, getenv)
-	for _, endpoint := range telemetryCollectorEndpoints(encodeRuntimePoolTelemetryEnv(traces, metrics)) {
-		if !slices.Contains(endpoints, endpoint) {
-			endpoints = append(endpoints, endpoint)
-		}
-	}
-	return endpoints
+	return runtimePoolTelemetryCollectorEndpoints(true, getenv)
 }
 
 // validateRuntimeTelemetryCollectorOrigin validates one projected OTLP endpoint for
@@ -430,6 +400,40 @@ func ValidateRuntimeTelemetryCollectorEgress(telemetryEnabled, collectorEgress b
 	for _, endpoint := range endpoints {
 		if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
 			return err
+		}
+		// The opt-in admits collectors only for gateway-enforced runtimes,
+		// whose admission refuses a short Service name: refuse it here
+		// rather than leave every such RuntimePool Degraded.
+		host, _, _, _ := externalEgressOrigin(endpoint)
+		if err := externalEgressHostResolvable("the OTLP collector endpoint", host); err != nil {
+			return fmt.Errorf("runtime telemetry collector egress: %w", err)
+		}
+	}
+	return runtimePoolTelemetryTransportConflict(runtimePoolTelemetryEnv(true, getenv))
+}
+
+// runtimePoolTelemetryTransportConflict refuses a projected signal whose
+// INSECURE setting contradicts its endpoint scheme. Collector egress rules
+// follow the scheme, an http origin as HTTP and an https origin as TLS
+// passthrough, but the OTLP exporters apply INSECURE after it: an https
+// endpoint with INSECURE=true exports cleartext, and an http one with
+// INSECURE=false exports TLS, which the derived rule does not carry.
+func runtimePoolTelemetryTransportConflict(env []corev1.EnvVar) error {
+	values := runtimePoolLiteralEnvironment(env)
+	for _, signal := range []string{"traces", "metrics"} {
+		prefix := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(signal) + "_"
+		endpoint := cmp.Or(values[prefix+otlpEndpointSuffix], values[runtimePoolTelemetryEndpointEnv])
+		insecure := cmp.Or(values[prefix+"INSECURE"], values["OTEL_EXPORTER_OTLP_INSECURE"])
+		if endpoint == "" || insecure == "" {
+			continue
+		}
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			continue
+		}
+		if cleartext := strings.EqualFold(parsed.Scheme, urlSchemeHTTP); strings.EqualFold(insecure, "true") != cleartext {
+			return fmt.Errorf("runtime telemetry collector egress: the %s collector endpoint %q uses %s but its OTLP INSECURE setting is %q; "+
+				"the egress rule follows the scheme, so make them agree", signal, endpoint, parsed.Scheme, insecure)
 		}
 	}
 	return nil
