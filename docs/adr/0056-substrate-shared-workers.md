@@ -176,11 +176,16 @@ Core makes these unusable, asynchronously:
   persisted, apart from a retried journal write conflict. That covers an unreadable
   Actor, failed egress revocation, failed template verification, invalid snapshot
   evidence, any Tag-capture failure, and a suspend issued whose effect is unresolved.
-  A persisted strong marker, a hosted journal's recorded failure, or a pool ledger
-  saved as `Retiring` or `Quarantined` always drives the pool's deletion and the
-  absence proof to completion. This happens from every retirement pass and from the
-  provider's Kubernetes-only bounds loop, even after a crash right after the intent
-  was saved. A rejected or timed-out evidence-only Stop suspend is doubt too.
+  These always drive the pool's deletion and the absence proof to completion, from
+  every retirement pass and from the provider's Kubernetes-only bounds loop, even after
+  a crash right after the intent was saved or while the native API is down:
+  - a persisted strong marker;
+  - a hosted journal's recorded failure;
+  - a hosted workspace that is tainted, quarantined or `Failed`;
+  - a pool ledger saved as `Retiring` or `Quarantined`.
+
+  Strong triggers are persisted under a fresh bounded context detached from the
+  request's deadline. A rejected or timed-out evidence-only Stop suspend is doubt too.
 - **No replay.** An unresolved suspend is never replayed. Once the worker Pod is proven
   absent, the instance is reported lost and retires through Stop with its last
   checkpoint.
