@@ -14,6 +14,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -95,7 +96,7 @@ func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID strin
 		switch denial.Code {
 		case acpApprovalCodeDeclined, acpApprovalCodeExpired, acpApprovalCodeCancelled, acpApprovalCodeStale:
 			return acpApprovalNotStarted, denial.Code, result, nil
-		case acpApprovalCodeNoEffect:
+		case acpApprovalCodeNoEffect, harnessv2.MCPToolErrorCodeConnectionRequired:
 			if strings.TrimSpace(denial.Error) == "" {
 				return "", "", nil, errors.New("approval failure receipt is invalid")
 			}

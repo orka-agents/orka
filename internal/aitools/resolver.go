@@ -243,6 +243,12 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		return nil
 	}
+	// A memory consolidation run (ADR 0051) calls no tools, whatever its
+	// Agent or Task lists, so it never freezes or dispatches connector tools
+	// it cannot use.
+	if task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil {
+		return nil
+	}
 
 	tools := make([]string, 0)
 	seen := make(map[string]struct{})

@@ -92,43 +92,6 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	return nil
 }
 
-// MissingArtifacts returns required artifact filenames that do not exist yet
-// or are present but empty.
-func MissingArtifacts(filenames []string) ([]string, error) {
-	missing := make([]string, 0, len(filenames))
-	localNames := make([]string, 0, len(filenames))
-	for _, filename := range filenames {
-		localName, err := artifactFilename(filename)
-		if err != nil {
-			return nil, err
-		}
-		localNames = append(localNames, localName)
-	}
-	artifactRoot := artifactsDir()
-	root, err := os.OpenRoot(artifactRoot)
-	if os.IsNotExist(err) {
-		return append(missing, filenames...), nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to open artifacts directory: %w", err)
-	}
-	defer root.Close() //nolint:errcheck
-
-	for i, filename := range filenames {
-		localName := localNames[i]
-		info, err := root.Stat(localName)
-		switch {
-		case os.IsNotExist(err):
-			missing = append(missing, filename)
-		case err != nil:
-			return nil, fmt.Errorf("failed to stat artifact %s: %w", filename, err)
-		case info.IsDir() || info.Size() == 0:
-			missing = append(missing, filename)
-		}
-	}
-	return missing, nil
-}
-
 // WriteArtifactFile writes an artifact file into the shared upload directory.
 func WriteArtifactFile(filename string, data []byte) error {
 	rawFilename := filename

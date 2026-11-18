@@ -134,6 +134,21 @@ upgrading:
 - The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
   fields are unchanged.
 
+## The class admin role no longer grants every verb {#class-admin-role}
+
+This affects installs from the raw installer (`deploy/orka.yaml`); the Helm chart does
+not ship this role.
+
+`orka-workspace-executionworkspaceclass-admin-role` used to grant `*` on
+ExecutionWorkspaceClasses. It now lists its verbs: `create`, `delete`,
+`deletecollection`, `get`, `list`, `patch`, `update`, `watch`, and `use`. Anyone bound
+to it can still manage classes and select them for Tasks.
+
+The role no longer grants `operator-access`, the verb required to opt a class into
+`orka task exec` and `orka task cp`. Grant that verb separately to whoever should
+enable operator access; see
+[Operator workspace access](../guides/operator-workspace-access.md).
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database
@@ -157,7 +172,8 @@ compatibility.
 | 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns; keep the dataset identity, records and key bootstrap state. |
 | 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
 | 162 objects, schema version 3 | Dataset binding layout | Rebuild the work action dedupe index so a `retry_pending` action owns its key, first cancelling any `retry_pending` action whose key another active action shares (reason `dedupe_superseded`); keep the dataset identity, binding, records and key bootstrap state. |
-| 162 objects (current), schema version 4 | Work action dedupe layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+| 162 objects, schema version 4 | Work action dedupe layout | Add the write stamp columns of results and artifacts, giving existing rows the stamp (0, 0); keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 162 objects (current), schema version 5 | Write stamp layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -166,8 +182,8 @@ lineages. If either table holds records, or a Session lineage uses
 installation.
 
 The five historical source layouts have SQLite `user_version = 0` and upgrade
-to the current layout in one transaction, ending with the schema version 4
-objects. A schema version 1, 2 or 3 store keeps its identity row and upgrades in
+to the current layout in one transaction, ending with the schema version 5
+objects. A schema version 1, 2, 3 or 4 store keeps its identity row and upgrades in
 place through each later version, after the same automatic backup. A nonzero marker on any other layout is
 refused rather than adopted.
 
@@ -175,7 +191,7 @@ refused rather than adopted.
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 4` records this metadata layout; the controller also checks
+`PRAGMA user_version = 5` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 
@@ -327,6 +343,15 @@ Sandbox/Substrate ACP flags are removed. Install the selected provider's own
 config/profile kinds instead. Native MCP Tools remain separate and use
 `--substrate-mcp-tools-enabled`; their control credentials are not external ACP
 provider credentials.
+
+Substrate-native workspaces need fully qualified Service names in
+`--controller-url` and `--acp-provider-proxy-base-url`
+(`<service>.<namespace>.svc.<cluster domain>`). The chart and kustomize
+manifests now render them (chart value `clusterDomain`, default
+`cluster.local`). An installation that sets either flag itself to a short
+`<service>.<namespace>.svc` name must change it before using Substrate-native
+workspaces; Core refuses the short form for them and the RuntimePool reports
+`Degraded`. See [Agent Substrate](../concepts/substrate.md#upgrades-and-proof-limits).
 
 The [local upgrade proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-workspace-upgrade-e2e.sh)
 uses actual API objects and a released stock core image. It covers old-shaped

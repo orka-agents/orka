@@ -77,12 +77,15 @@ type TaskDataFence struct {
 // in their context in the same transaction as their reads and writes, so an
 // operation either completes before the cleanup that would invalidate it, and
 // the cleanup then removes its effect, or is refused: SaveResult,
-// SaveArtifact, SavePlan, GetPlan, SendMessage, GetMessages, GetSession,
-// GetSessionType, LoadTranscript, LoadTranscriptThrough, SearchTranscript,
-// ReadSessionSoul, GetGatewayEventForTask, GetGatewayMessageBudget,
-// EnqueueGatewayMessage, AppendExecutionEvent, AppendExecutionEventIfAbsent,
+// SaveArtifact, SavePlan, GetPlan, SendMessage, ListUnreadMessages,
+// ConsumeMessages, GetSession, GetSessionType, LoadTranscript,
+// LoadTranscriptThrough, SearchTranscript, ReadSessionSoul,
+// GetGatewayEventForTask, GetGatewayMessageBudget, EnqueueGatewayMessage,
+// AppendExecutionEvent, AppendExecutionEventIfAbsent,
 // AppendExecutionEventWithPlanIfAbsent, AppendExecutionEventsIfAbsent,
-// ListExecutionEvents and CheckTaskJobAuthority. Other methods ignore a fence.
+// ListExecutionEvents, CheckTaskJobAuthority, BeginMemoryConsolidationRun,
+// CompleteMemoryConsolidationRun, GetMemoryConsolidationRun and
+// ListMemoryConsolidationSessions. Other methods ignore a fence.
 //
 // A provider checks a fence against the cleanup generations and revocations
 // it holds. Orka resolves every fence from state.v1, so a fenced SaveArtifact

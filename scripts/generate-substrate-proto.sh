@@ -12,10 +12,10 @@ trap 'rm -rf "${task_generate_dir}"' EXIT
 if [[ -n "${SUBSTRATE_SOURCE_DIR:-}" ]]; then
   source_commit="$(git -C "${SUBSTRATE_SOURCE_DIR}" rev-parse HEAD)"
   [[ "${source_commit}" == "${SUBSTRATE_UPSTREAM_COMMIT}" ]] || { printf 'Substrate source commit does not match the pinned upstream commit\n' >&2; exit 1; }
-  cp "${SUBSTRATE_SOURCE_DIR}/pkg/proto/ateapipb/ateapi.proto" "${task_generate_dir}/ateapi.proto"
+  cp "${SUBSTRATE_SOURCE_DIR}/${SUBSTRATE_UPSTREAM_PROTO_PATH}" "${task_generate_dir}/ateapi.proto"
 else
   curl --fail --show-error --silent --location \
-    "https://raw.githubusercontent.com/agent-substrate/substrate/${SUBSTRATE_UPSTREAM_COMMIT}/pkg/proto/ateapipb/ateapi.proto" \
+    "https://raw.githubusercontent.com/agent-substrate/substrate/${SUBSTRATE_UPSTREAM_COMMIT}/${SUBSTRATE_UPSTREAM_PROTO_PATH}" \
     --output "${task_generate_dir}/ateapi.proto"
 fi
 source_digest="$(shasum -a 256 "${task_generate_dir}/ateapi.proto" | awk '{print $1}')"

@@ -1620,3 +1620,24 @@ func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
 		t.Fatalf("terminalResultText() = %q, want the whole resumed message", got)
 	}
 }
+
+func TestWorkspaceDeltaPathViolationReportsControlPathBeforeAllowlist(t *testing.T) {
+	limits := harnessv2.WorkspaceDeltaLimits{AllowedPaths: []string{"internal/**", "docs/**"}, DenyRepositoryControlPaths: true}
+	cases := []struct {
+		path string
+		want string
+	}{
+		{path: ".github/workflows/ci.yml", want: harnessv2.WorkspaceDeltaRepositoryControlPathMessage},
+		{path: "cmd/main.go", want: harnessv2.WorkspaceDeltaDisallowedPathMessage},
+		{path: "internal/x.go", want: ""},
+	}
+	for _, tc := range cases {
+		if got := workspaceDeltaPathViolation("", tc.path, limits); got != tc.want {
+			t.Errorf("workspaceDeltaPathViolation(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	limits.DenyRepositoryControlPaths = false
+	if got := workspaceDeltaPathViolation("", ".github/workflows/ci.yml", limits); got != harnessv2.WorkspaceDeltaDisallowedPathMessage {
+		t.Errorf("without control-path denial, got %q", got)
+	}
+}

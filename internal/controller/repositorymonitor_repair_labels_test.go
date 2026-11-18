@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -115,7 +116,38 @@ type repositoryMonitorRepairLabelsGitHub struct {
 	partialStatuses map[string]bool
 	// checkReads counts check-run reads per commit SHA.
 	checkReads map[string]int
+	// runs replaces checks for a commit with full check run objects.
+	runs map[string][]map[string]any
+	// statusObjects replaces statuses for a commit with full status objects.
+	statusObjects map[string][]map[string]any
+	// annotations serves check run annotations by check run ID; a check run
+	// in annotationFailures answers with that status code instead.
+	annotations        map[int64][]map[string]any
+	annotationFailures map[int64]int
+	// annotationReads records each annotation page read as "id:page".
+	annotationReads []string
+	// checkRunFailure answers every check-run read with this status code.
+	checkRunFailure int
 }
+
+// repositoryMonitorRepairLabelsGitHubFailure writes a GitHub error.
+// repositoryMonitorRepairLabelsRateLimited writes GitHub's 403 rate limit.
+func repositoryMonitorRepairLabelsGitHubFailure(w http.ResponseWriter, status int) {
+	switch status {
+	case repositoryMonitorRepairLabelsRateLimited:
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for installation"}`))
+	case http.StatusTooManyRequests:
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for installation"}`))
+	default:
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+	}
+}
+
+// repositoryMonitorRepairLabelsRateLimited marks a fake 403 rate limit.
+const repositoryMonitorRepairLabelsRateLimited = 1403
 
 func (g *repositoryMonitorRepairLabelsGitHub) labeled(actor, label string) *repositoryMonitorRepairLabelsGitHub {
 	g.events = append(g.events, map[string]any{"event": "labeled", "actor": map[string]any{"login": actor}, "label": map[string]any{"name": label}})
@@ -131,15 +163,40 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 	w.Header().Set("Content-Type", "application/json")
 	path := req.URL.Path
 	switch {
+	case strings.HasPrefix(path, "/repos/orka-agents/orka/check-runs/") && strings.HasSuffix(path, "/annotations"):
+		id, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/check-runs/"), "/annotations"), 10, 64)
+		if err != nil {
+			http.Error(w, "bad check run", http.StatusBadRequest)
+			return
+		}
+		page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+		perPage, _ := strconv.Atoi(req.URL.Query().Get("per_page"))
+		g.annotationReads = append(g.annotationReads, fmt.Sprintf("%d:%d", id, page))
+		if status := g.annotationFailures[id]; status != 0 {
+			repositoryMonitorRepairLabelsGitHubFailure(w, status)
+			return
+		}
+		all := g.annotations[id]
+		start, end := min((page-1)*perPage, len(all)), min(page*perPage, len(all))
+		_ = json.NewEncoder(w).Encode(all[start:end])
 	case strings.HasSuffix(path, "/check-runs"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/commits/"), "/check-runs")
 		if g.checkReads == nil {
 			g.checkReads = map[string]int{}
 		}
 		g.checkReads[sha]++
+		if g.checkRunFailure != 0 {
+			repositoryMonitorRepairLabelsGitHubFailure(w, g.checkRunFailure)
+			return
+		}
 		runs := make([]map[string]any, 0, len(g.checks[sha]))
 		total := len(g.checks[sha])
-		if page := req.URL.Query().Get("page"); page == "" || page == "1" {
+		if full, ok := g.runs[sha]; ok {
+			total = len(full)
+			if page := req.URL.Query().Get("page"); page == "" || page == "1" {
+				runs = full
+			}
+		} else if page := req.URL.Query().Get("page"); page == "" || page == "1" {
 			for name, conclusion := range g.checks[sha] {
 				runs = append(runs, map[string]any{"id": len(runs) + 1, "name": name, "status": "completed", "conclusion": conclusion})
 			}
@@ -153,6 +210,9 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 		statuses := make([]map[string]any, 0, len(g.statuses[sha]))
 		for name, state := range g.statuses[sha] {
 			statuses = append(statuses, map[string]any{"id": len(statuses) + 1, "context": name, "state": state})
+		}
+		if full, ok := g.statusObjects[sha]; ok {
+			statuses = full
 		}
 		total := len(statuses)
 		if g.partialStatuses[sha] {
@@ -600,7 +660,7 @@ func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *tes
 	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt")
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
 	pr := repositoryMonitorPullRequest{Number: 31, BaseSHA: "base31", HeadSHA: "head31"}
-	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, pr, &store.MonitorItem{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,6 +682,23 @@ func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *tes
 	}
 	if !strings.Contains(prompt, "Fix only the checks in failingChecks") {
 		t.Fatalf("prompt does not limit the repair to failingChecks: %s", prompt)
+	}
+	// Evidence describes only the checks the pull request broke, and the
+	// prompt marks CI output as its own untrusted source.
+	evidence := repositoryMonitorRepairPromptPayload(t, prompt)
+	names := make([]string, 0, len(evidence.FailingCheckEvidence.Checks))
+	for _, check := range evidence.FailingCheckEvidence.Checks {
+		names = append(names, check.Kind+":"+check.Name)
+		if check.Availability == "" || check.ID == "" {
+			t.Fatalf("evidence entry has no identity or availability: %+v", check)
+		}
+	}
+	slices.Sort(names)
+	if fmt.Sprint(names) != "[check_run:lint commit_status:jenkins]" || evidence.FailingCheckEvidence.HeadSHA != "head31" || evidence.FailingCheckEvidence.BaseSHA != "base31" {
+		t.Fatalf("failingCheckEvidence = %+v, want lint and jenkins on head31", evidence.FailingCheckEvidence)
+	}
+	if !strings.HasPrefix(evidence.FailingCheckEvidenceDigest, "sha256:") || !strings.Contains(prompt, "CI output in failingCheckEvidence") || !strings.Contains(prompt, "not Orka instructions") {
+		t.Fatalf("prompt does not mark CI output as untrusted evidence: %s", prompt)
 	}
 }
 
@@ -836,7 +913,7 @@ func TestRepositoryMonitorCIRepairPromptQualifiesChecksSharingAName(t *testing.T
 	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt-shared")
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
 	pr := repositoryMonitorPullRequest{Number: 32, BaseSHA: "base32", HeadSHA: "head32"}
-	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, pr, &store.MonitorItem{})
 	if err != nil {
 		t.Fatal(err)
 	}

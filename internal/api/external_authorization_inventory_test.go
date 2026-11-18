@@ -46,18 +46,25 @@ POST /api/v1/tasks | create core.orka.ai:tasks
 GET /api/v1/tasks | list core.orka.ai:tasks
 GET /api/v1/tasks/:id | get core.orka.ai:tasks protected
 DELETE /api/v1/tasks/:id | delete core.orka.ai:tasks protected
+POST /api/v1/tasks/:id/cancel | update core.orka.ai:tasks/cancel protected
 GET /api/v1/tasks/:id/logs | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/events | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/stream | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/trace | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/approvals | get core.orka.ai:tasks protected
+GET /api/v1/attention | list core.orka.ai:tasks
+GET /api/v1/approvals | list core.orka.ai:tasks
 POST /api/v1/tasks/:id/approvals/:approvalID/decision | update core.orka.ai:tasks/approvals protected; patch core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/fork | get core.orka.ai:tasks protected; create core.orka.ai:tasks
 GET /api/v1/tasks/:id/result | get core.orka.ai:tasks protected
+GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories
 GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/children | get core.orka.ai:tasks protected; list core.orka.ai:tasks
 GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/artifacts/:filename | get core.orka.ai:tasks protected
+GET /api/v1/tasks/:id/exec | create core.orka.ai:tasks/exec protected; get core.orka.ai:tasks protected
+GET /api/v1/tasks/:id/files | get core.orka.ai:tasks/files protected; get core.orka.ai:tasks protected
+PUT /api/v1/tasks/:id/files | update core.orka.ai:tasks/files protected; get core.orka.ai:tasks protected
 POST /api/v1/remediations | create core.orka.ai:remediations
 GET /api/v1/remediations/:id | get core.orka.ai:remediations protected
 POST /api/v1/remediations/:id/cancel | update core.orka.ai:remediations/cancel protected
@@ -69,6 +76,7 @@ POST /api/v1/sessions/:id/native | create core.orka.ai:sessions; get core.orka.a
 GET /api/v1/sessions/:id/events | get core.orka.ai:sessions protected
 GET /api/v1/sessions/:id/stream | get core.orka.ai:sessions protected
 DELETE /api/v1/sessions/:id | delete core.orka.ai:sessions protected
+POST /api/v1/sessions/:id/cancel | get core.orka.ai:sessions protected; update core.orka.ai:tasks/cancel
 GET /api/v1/gatewayclasses | list gateway.orka.ai:gatewayclasses
 GET /api/v1/gatewayclasses/:name | get gateway.orka.ai:gatewayclasses protected
 GET /api/v1/gateways | list gateway.orka.ai:gateways
@@ -103,6 +111,8 @@ POST /api/v1/tools | create core.orka.ai:tools
 GET /api/v1/tools/:name | get core.orka.ai:tools protected
 PUT /api/v1/tools/:name | update core.orka.ai:tools protected
 DELETE /api/v1/tools/:name | delete core.orka.ai:tools protected
+POST /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
+DELETE /api/v1/tools/:name/mcp | get core.orka.ai:tools protected
 GET /api/v1/runtime-pools | list core.orka.ai:runtimepools
 GET /api/v1/runtime-pools/:name | get core.orka.ai:runtimepools protected
 GET /api/v1/agent-runtimes | list core.orka.ai:agentruntimes
@@ -115,6 +125,7 @@ GET /api/v1/agents | list core.orka.ai:agents
 GET /api/v1/agents/:name | get core.orka.ai:agents protected
 GET /api/v1/agents/:name/system-prompt | get core.orka.ai:agents protected
 PUT /api/v1/agents/:name | patch core.orka.ai:agents protected
+PUT /api/v1/agents/:name/spec | patch core.orka.ai:agents protected
 DELETE /api/v1/agents/:name | delete core.orka.ai:agents protected
 POST /api/v1/skills | create core.orka.ai:skills
 GET /api/v1/skills | list core.orka.ai:skills
@@ -191,6 +202,7 @@ POST /openai/v1/responses | create core.orka.ai:chats
 GET /openai/v1/models | list core.orka.ai:providers
 POST /anthropic/v1/messages | create core.orka.ai:chats
 GET /anthropic/v1/models | list core.orka.ai:providers
+POST /mcp | identity
 `
 
 type externalAuthorizationCase struct {
@@ -240,6 +252,7 @@ type externalAuthorizationFixture struct {
 	reviews       []authorizationv1.SubjectAccessReviewSpec
 	review        func(*authorizationv1.SubjectAccessReview) error
 	sequence      int
+	config        ServerConfig
 }
 
 func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture {
@@ -334,13 +347,15 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	f.store = testStorageClient(sqlite.NewStore(f.db, ":memory:"))
 	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "protected", Namespace: "default", Content: "protected-content"}))
 	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "protected", Namespace: "default", Type: "memory", Title: "protected-content", Content: "protected-content"}))
-	f.server = NewServer(f.kube, nil, ServerConfig{
+	f.config = ServerConfig{
 		WatchNamespace: "default", EnforceNamespaceIsolation: true, Clientset: f.clientset, APIReader: f.kube,
 		MemoryStore: f.store, MemoryProposalStore: f.store, SecurityStore: f.store, RepositoryMonitorStore: f.store,
-		SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
+		MemoryConsolidationStore: f.store, SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
 		ExecutionEventStore: f.store, GatewayEventStore: f.store, GatewayDeliveryStore: f.store,
 		Chat: ChatConfig{Enabled: true, Provider: "protected", Model: "fixture", MaxDuration: time.Second, MaxIterations: 1, MaxConcurrent: 2},
-	})
+		MCP:  MCPServerConfig{Enabled: true},
+	}
+	f.server = NewServer(f.kube, nil, f.config)
 	return f
 }
 
@@ -396,7 +411,8 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 	}
 	registered := map[string]bool{}
 	for _, route := range f.server.app.GetRoutes(true) {
-		if route.Method == http.MethodHead || (!strings.HasPrefix(route.Path, "/api/v1/") && !strings.HasPrefix(route.Path, "/openai/v1/") && !strings.HasPrefix(route.Path, "/anthropic/v1/")) {
+		if route.Method == http.MethodHead || (!strings.HasPrefix(route.Path, "/api/v1/") && !strings.HasPrefix(route.Path, "/openai/v1/") &&
+			!strings.HasPrefix(route.Path, "/anthropic/v1/") && route.Path != mcpEndpointPath && !strings.HasPrefix(route.Path, mcpEndpointPath+"/")) {
 			continue
 		}
 		key := route.Method + " " + route.Path

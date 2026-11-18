@@ -731,3 +731,30 @@ func TestMCPApprovalRevocationSettlesWhenCallerContextEnds(t *testing.T) {
 		t.Fatal("caller cancellation lost the saved review decision or denial outcome")
 	}
 }
+
+func TestMCPApprovalForwardedWriteNamesTheRequest(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	request := f.request
+	request.Call.ToolName = "azure-arm:write"
+	request.Call.Arguments = json.RawMessage(`{"method":"PUT","path":"/subscriptions/s/resourceGroups/rg","query":"api-version=2021-04-01","body":{"location":"westus3","properties":{"adminPassword":"private-test-password"}}}`)
+	descriptor := request.Authorization.ToolPolicy.Tools[0]
+	descriptor.Name = request.Call.ToolName
+	descriptor.Forward = &harnessv2.MCPToolForward{
+		Protocol: harnessv2.MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com", Write: true,
+	}
+	call, _, err := f.broker.persistApprovalCall(t.Context(), request, descriptor, ACPMCPAuthenticatedTask{
+		Name: "approval-task", Namespace: request.Namespace, UID: string(request.Metadata.TaskUID),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.broker.requestToolApproval(t.Context(), call); err != nil {
+		t.Fatal(err)
+	}
+	preview := f.pending()
+	if preview.Action != "Send PUT /subscriptions/s/resourceGroups/rg via azure-arm:write" ||
+		!strings.Contains(string(preview.TargetArgsPreview), `"location":"westus3"`) ||
+		strings.Contains(string(preview.TargetArgsPreview), "private-test-password") || f.count.Load() != 0 {
+		t.Fatalf("forwarded write approval = %q", preview.Action)
+	}
+}

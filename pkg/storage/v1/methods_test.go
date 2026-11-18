@@ -27,7 +27,7 @@ var catalogInterfaces = map[string]reflect.Type{
 var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck"}
 
 // writesNamedLikeReads are writes whose names start with a read prefix.
-var writesNamedLikeReads = []string{"GetMessages", "IsLocked", "GetPatchVerificationRun", "GetPatchVerificationBlob"}
+var writesNamedLikeReads = []string{"IsLocked", "GetPatchVerificationRun", "GetPatchVerificationBlob"}
 
 // readsNamedLikeWrites are reads whose names start with no read prefix.
 var readsNamedLikeWrites = []string{"PreviewScanTaskIngestion", "ResolveMemoryProposalApplication", "ResolveTaskDataFence"}
@@ -101,7 +101,8 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"UpdateBindingKeyFingerprint": storagev1.MethodAdmin,
 		"CompleteDatasetBootstrap":    storagev1.MethodAdmin,
 		"GetDatasetBinding":           storagev1.MethodRead,
-		"GetMessages":                 storagev1.MethodWrite,
+		"ConsumeMessages":             storagev1.MethodWrite,
+		"ListUnreadMessages":          storagev1.MethodRead,
 		"IsLocked":                    storagev1.MethodWrite,
 		"Describe":                    storagev1.MethodRead,
 		"SaveArtifact":                storagev1.MethodWrite,
@@ -153,6 +154,8 @@ var classified = map[string]storagev1.CallClass{
 	"MaintainGatewayRecords":              storagev1.CallBackground,
 	"PruneOperationReceipts":              storagev1.CallBackground,
 	"PruneUsage":                          storagev1.CallBackground,
+	// A memory consolidation run lists the Sessions that changed in its window.
+	"ListMemoryConsolidationSessions": storagev1.CallBackground,
 
 	// Snapshot retention scans references and deletes snapshots that no
 	// longer have any.

@@ -35,6 +35,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -312,6 +313,22 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			r.recordRetention(workspace, "InvalidDurableCapability",
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+		operatorTainted := false
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+			// The workspace marker and the marker of every Task linked to this
+			// exact incarnation both count; an unreadable Task holds retention.
+			tainted, err := acpWorkspaceOperatorTainted(ctx, r.quotaReader(), workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			operatorTainted = tainted
+		}
+		if operatorTainted {
+			// Operator access forfeits retention: a tainted workspace is never
+			// captured into a data checkpoint for continuation or forks.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "OperatorTaintedIdleExpired",
+				"class idleTimeout elapsed for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", true)
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
@@ -1324,6 +1341,16 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
+	// Backstop for every suspension path: a workspace tainted through its own
+	// marker or the marker of any Task linked to this exact incarnation is
+	// never checkpointed, and an unreadable Task refuses the suspension.
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	if err != nil {
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, err)
+	}
+	if tainted {
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
 	if settledTaskUID != "" &&
 		!acpWorkspaceResumeDemandBelongsToTask(
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], settledTaskUID,

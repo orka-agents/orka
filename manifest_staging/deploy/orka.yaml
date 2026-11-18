@@ -292,6 +292,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agents
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connections
   - connectorproviders
   verbs:
@@ -453,6 +459,13 @@ rules:
   - create
   - update
   - delete
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -636,6 +649,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 - apiGroups:
@@ -1133,13 +1147,11 @@ rules:
   resources:
   - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -1221,6 +1233,26 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  - providers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connectorproviders
   verbs:
   - get
@@ -1228,6 +1260,18 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryproposals
+  verbs:
+  - create
 - apiGroups:
   - core.orka.ai
   resources:
@@ -1515,6 +1559,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1556,6 +1601,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1823,6 +1869,13 @@ rules:
   - create
   - update
   - delete
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -1994,7 +2047,15 @@ rules:
   resources:
   - executionworkspaceclasses
   verbs:
-  - '*'
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
 - apiGroups:
   - workspace.orka.ai
   resources:
@@ -2621,6 +2682,7 @@ spec:
         - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
+        - --worker-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
         command:
         - /orka-admission
         image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -2728,7 +2790,7 @@ spec:
         - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
         - --agent-execution-snapshot-retention=720h
         - --agent-execution-snapshot-retention-interval=1h
-        - --controller-url=http://orka-api.orka-system.svc:8080
+        - --controller-url=http://orka-api.orka-system.svc.cluster.local:8080
         - --controller-mode=harness-v2
         - --watch-namespace=orka-system
         - --enforce-namespace-isolation=true
@@ -2738,7 +2800,7 @@ spec:
         - --acp-upgrade-drain-poll-interval=1s
         - --acp-upgrade-drain-trigger-timeout=5m15s
         - --acp-upgrade-drain-marker-namespace=orka-system
-        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080
+        - --acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc.cluster.local:8080
         - --acp-provider-proxy-namespace=orka-system
         - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
@@ -2755,8 +2817,7 @@ spec:
         - --gateway-delivery-max-attempts=10
         - --substrate-mcp-tools-enabled=false
         - --substrate-api-endpoint=api.ate-system.svc:443
-        - --substrate-router-url=http://atenet-router.ate-system.svc
-        - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+        - --substrate-router-url=https://atenet-router.ate-system.svc:443
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete
@@ -3238,8 +3299,9 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConditions:
-  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
-      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+  - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
@@ -3278,6 +3340,32 @@ spec:
         'system:serviceaccount:kube-system:namespace-controller',
         'system:kube-controller-manager']
     name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agents
+  validations:
+  - expression: |-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) || (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) && oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) || authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3550,6 +3638,15 @@ spec:
     message: only the Orka core controller may set or change ExecutionWorkspace attachment
       intent (attachment and attachmentEpoch)
     reason: Forbidden
+  - expression: |-
+      oldObject == null || !has(oldObject.metadata.annotations) || !('acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations) || (has(object.metadata.annotations) &&
+
+       'acp.workspace.orka.ai/operator-tainted' in object.metadata.annotations &&
+       object.metadata.annotations['acp.workspace.orka.ai/operator-tainted'] ==
+         oldObject.metadata.annotations['acp.workspace.orka.ai/operator-tainted'])
+    message: the operator access taint of an ExecutionWorkspace is permanent; no identity
+      may remove or change it
+    reason: Forbidden
   variables:
   - expression: 'has(object.metadata.labels) && ''workspace.orka.ai/controller-name''
       in object.metadata.labels ? object.metadata.labels[''workspace.orka.ai/controller-name'']
@@ -3608,6 +3705,47 @@ spec:
        (!has(object.spec.attachment) ||
         object.spec.attachment == oldObject.spec.attachment))
     name: attachmentIntentUnchanged
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-executionworkspaceclass-operator-access.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - workspace.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - executionworkspaceclasses
+  validations:
+  - expression: |-
+      variables.newValue == variables.oldValue || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('operator-access').allowed()
+    message: only an administrator with the operator-access verb on executionworkspaceclasses
+      may set or change the acp.workspace.orka.ai/operator-access annotation
+    reason: Forbidden
+  - expression: variables.newValue in ['<absent>', 'read', 'exec']
+    message: acp.workspace.orka.ai/operator-access must be "read" or "exec"
+    reason: Invalid
+  variables:
+  - expression: 'has(object.metadata.annotations) && ''acp.workspace.orka.ai/operator-access''
+      in object.metadata.annotations ? object.metadata.annotations[''acp.workspace.orka.ai/operator-access'']
+      : ''<absent>'''
+    name: newValue
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''acp.workspace.orka.ai/operator-access''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''acp.workspace.orka.ai/operator-access'']
+      : ''<absent>'''
+    name: oldValue
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3730,6 +3868,43 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: '!variables.checkedRun || (authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''list'').allowed()
+      && authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''get'').allowed())'
+    message: caller is not authorized to list and get Sessions, which a memory consolidation
+      run reads
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memories, which a memory consolidation
+      run reads and reports on
+    reason: Forbidden
+  - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
+      != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'
+    message: caller is not authorized to create memory proposals, which a Propose
+      memory consolidation run creates
+    reason: Forbidden
+  variables:
+  - expression: has(object.spec.ai) && has(object.spec.ai.memoryConsolidation) &&
+      (oldObject == null || object.spec != oldObject.spec)
+    name: checkedRun
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-task-workspace-class-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3791,6 +3966,18 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.substrateActor) || !has(object.spec.mcp.substrateActor.egress) || object.spec.mcp.substrateActor.egress.all(rule,
+
+        !has(rule.credential) ||
+        authorizer.group('')
+          .resource('secrets')
+          .namespace(request.namespace)
+          .name(rule.credential.secretRef.name)
+          .check('get').allowed())
+    message: caller is not authorized to get a Secret referenced by an MCP actor egress
+      credential
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -3798,6 +3985,15 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  policyName: orka-agent-identity-bind.orka.ai
   validationActions:
   - Deny
 ---
@@ -3840,6 +4036,15 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
+  name: orka-executionworkspaceclass-operator-access.orka.ai
+spec:
+  policyName: orka-executionworkspaceclass-operator-access.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
@@ -3852,6 +4057,15 @@ metadata:
   name: orka-namespace-mode-protection
 spec:
   policyName: orka-namespace-mode-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  policyName: orka-task-memory-consolidation.orka.ai
   validationActions:
   - Deny
 ---

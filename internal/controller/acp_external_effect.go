@@ -115,6 +115,27 @@ func runExternalEffectWithReplay[T any](
 	)
 }
 
+// errExternalEffectAlreadyStarted reports an effect a previous delivery
+// already claimed, which a run that never reclaims refuses to execute again.
+var errExternalEffectAlreadyStarted = errors.New("external effect was already started")
+
+// runExternalEffectOnceWithReplay is runExternalEffectWithReplay for an
+// effect that is not idempotent: an identity a previous delivery claimed is
+// never claimed again, even after its lease expires, so a request that may
+// have been delivered is never sent twice.
+func runExternalEffectOnceWithReplay[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayMode(
+		ctx, effects, fence, identity, request, externalEffectCallTimeout(identity), false, call,
+	)
+}
+
 // runExternalEffectWithReplayCallTimeout runs one external effect with an
 // explicit bounded call duration. Callers that know the operation's real
 // configured deadline (for example a brokered Tool's spec.http.timeout) use it
@@ -128,6 +149,19 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	identity store.ExternalEffectIdentity,
 	request any,
 	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayMode(ctx, effects, fence, identity, request, callTimeout, true, call)
+}
+
+func runExternalEffectWithReplayMode[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	reclaim bool,
 	call func(context.Context) (T, error),
 ) (T, bool, error) {
 	var zero T
@@ -157,8 +191,19 @@ func runExternalEffectWithReplayCallTimeout[T any](
 		}
 		return response, true, nil
 	}
+	if !reclaim && effect.State == store.ExternalEffectFailed && len(effect.Response) > 0 {
+		// A run that never reclaims settles a definite failure with its
+		// answer, so a redelivery replays that answer.
+		var response T
+		if json.Unmarshal(effect.Response, &response) == nil {
+			return response, true, nil
+		}
+	}
 	if effect.State == store.ExternalEffectFailed || effect.State == store.ExternalEffectOutcomeUnknown {
 		return zero, false, fmt.Errorf("external effect %s is terminal in state %s", effect.ID, effect.State)
+	}
+	if !reclaim && effect.State == store.ExternalEffectInFlight {
+		return zero, false, errExternalEffectAlreadyStarted
 	}
 	// Size the lease from this effect's bounded call duration so the outcome of
 	// a call that runs to its deadline can still be committed under a valid
@@ -424,23 +469,12 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tas
 	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }
 
-// RunExternalEffectWithReplay runs one idempotent external effect from outside
-// the ACP dispatcher, such as the controller's connector-tool endpoint, with
-// the same reservation, lease, and replay semantics the ACP broker uses.
-func RunExternalEffectWithReplay[T any](
-	ctx context.Context,
-	effects store.ExternalEffectStore,
-	fence store.ControllerEpochFence,
-	identity store.ExternalEffectIdentity,
-	request any,
-	call func(context.Context) (T, error),
-) (T, bool, error) {
-	return runExternalEffectWithReplay(ctx, effects, fence, identity, request, call)
-}
-
-// RunExternalEffectWithReplayCallTimeout is RunExternalEffectWithReplay with
-// the caller's real operation deadline, so the effect call and its ledger
-// lease cover a legitimately long tool timeout instead of the per-kind clamp.
+// RunExternalEffectWithReplayCallTimeout runs one idempotent external effect
+// from outside the ACP dispatcher, such as the controller's connector-tool
+// endpoint, with the same reservation, lease, and replay semantics the ACP
+// broker uses. callTimeout is the caller's real operation deadline, so the
+// effect call and its ledger lease cover a legitimately long tool timeout
+// instead of the per-kind clamp.
 func RunExternalEffectWithReplayCallTimeout[T any](
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -511,8 +545,9 @@ func SettlePendingExternalEffect(
 	return nil
 }
 
-// ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
-// reserves an effect, so a caller can recognize its own committed record.
+// ExternalEffectRequestDigest is the digest under which
+// RunExternalEffectWithReplayCallTimeout reserves an effect, so a caller can
+// recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
 	return acpDomainDigest("external-effect-request", map[string]any{
 		identityKey: identity, requestKey: request,

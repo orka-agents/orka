@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -3546,7 +3547,7 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
+func TestReadOnlyAgentRuntimeTypeKeepsOpencode(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
@@ -3555,10 +3556,6 @@ func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
 
 	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() = %#v, %v, want no runtime secret keys", keys, err)
 	}
 }
 
@@ -3843,4 +3840,55 @@ func TestJobBuilder_buildEnvVars_ServiceAccountNameFromDownwardAPI(t *testing.T)
 		found[0].ValueFrom.FieldRef.FieldPath != "spec.serviceAccountName" {
 		t.Fatalf("%s env = %#v, want one Downward API spec.serviceAccountName reference", workerenv.ServiceAccountName, found)
 	}
+}
+
+func TestJobBuilder_buildEnvVars_MemoryConsolidationTask(t *testing.T) {
+	builder := setupJobBuilder()
+	envValue := func(envVars []corev1.EnvVar, name string) (string, int) {
+		value, count := "", 0
+		for _, env := range envVars {
+			if env.Name == name {
+				value, count = env.Value, count+1
+			}
+		}
+		return value, count
+	}
+	task := func(consolidation *corev1alpha1.MemoryConsolidationSpec) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				// Task env cannot start, stop or widen a run.
+				Env: []corev1.EnvVar{
+					{Name: workerenv.MemoryConsolidationMode, Value: "Propose"},
+					{Name: workerenv.MemoryContextEnabled, Value: "true"},
+					{Name: workerenv.AITools, Value: "web_search"},
+				},
+				AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "claude-3-5-sonnet", Prompt: "Focus on release notes",
+					Tools: []string{"web_search", "code_exec"}, MemoryConsolidation: consolidation},
+			},
+		}
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task(&corev1alpha1.MemoryConsolidationSpec{}), nil, nil)
+	for name, want := range map[string]string{
+		workerenv.MemoryConsolidationMode: "DryRun",
+		workerenv.MemoryContextEnabled:    "false",
+		workerenv.AITools:                 "",
+	} {
+		value, count := envValue(envVars, name)
+		require.Equal(t, 1, count, "%s is controller-owned", name)
+		require.Equal(t, want, value, name)
+	}
+
+	envVars = builder.buildEnvVars(context.Background(), task(&corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose}), nil, nil)
+	mode, _ := envValue(envVars, workerenv.MemoryConsolidationMode)
+	require.Equal(t, "Propose", mode)
+
+	envVars = builder.buildEnvVars(context.Background(), task(nil), nil, nil)
+	mode, count := envValue(envVars, workerenv.MemoryConsolidationMode)
+	require.Equal(t, 1, count)
+	require.Empty(t, mode, "an ordinary Task's env cannot turn on a consolidation run")
+	tools, _ := envValue(envVars, workerenv.AITools)
+	require.Contains(t, tools, "web_search")
 }

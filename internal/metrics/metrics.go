@@ -8,6 +8,7 @@ package metrics
 
 import (
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -33,6 +34,7 @@ const (
 	labelRuntimePool = "runtime_pool"
 	labelEventType   = "event_type"
 	labelScope       = "scope"
+	labelState       = "state"
 	labelAccepting   = "accepting"
 )
 
@@ -183,7 +185,7 @@ var (
 			Name: "orka_acp_runtime_pool_admission_state",
 			Help: "Authoritative RuntimePool admission state as a one-hot gauge",
 		},
-		[]string{labelNamespace, labelRuntimePool, "state"},
+		[]string{labelNamespace, labelRuntimePool, labelState},
 	)
 
 	ACPRuntimePoolScaleToZeroTotal = prometheus.NewCounterVec(
@@ -335,6 +337,43 @@ var (
 		},
 		[]string{labelStreamType, labelEventType},
 	)
+
+	// Parked-turn metrics. Labels are the bounded wait kind and state; Task,
+	// Session, and approval identifiers never appear.
+	TaskWaitTransitionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_task_wait_transitions_total",
+			Help: "Parked agent turn transitions by wait kind and new state",
+		},
+		[]string{"kind", labelState},
+	)
+
+	TaskWaitDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_task_wait_duration_seconds",
+			Help:    "Time a parked agent turn held no runtime capacity, from arming to its final state",
+			Buckets: []float64{5, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 86400},
+		},
+		[]string{"kind", labelState},
+	)
+
+	TaskWaitRuntimeReleasesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_task_wait_runtime_releases_total",
+			Help: "Resident RuntimeSessions retired because their turn parked, by result",
+		},
+		[]string{labelResult},
+	)
+
+	// WaitingForCapacityTotal counts transitions into a capacity wait. The
+	// resource label is task, substrate_actor_pool, or tool.
+	WaitingForCapacityTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_waiting_for_capacity_total",
+			Help: "Transitions into a retryable wait for runtime or provider capacity, by resource and reason",
+		},
+		[]string{"resource", labelReason},
+	)
 )
 
 func init() {
@@ -374,6 +413,10 @@ func init() {
 		ExecutionEventStreamErrorsTotal,
 		ExecutionEventRedactionsTotal,
 		ExecutionEventTruncationsTotal,
+		TaskWaitTransitionsTotal,
+		TaskWaitDuration,
+		TaskWaitRuntimeReleasesTotal,
+		WaitingForCapacityTotal,
 	)
 }
 
@@ -590,6 +633,25 @@ func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 // (suspend or delete) with its bounded reason.
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordTaskWaitTransition records a parked-turn state transition. A
+// positive waited duration is observed when the wait reaches a final state.
+func RecordTaskWaitTransition(kind, state string, waited time.Duration) {
+	TaskWaitTransitionsTotal.WithLabelValues(normalizeMetricLabel(kind), normalizeMetricLabel(state)).Inc()
+	if waited > 0 {
+		TaskWaitDuration.WithLabelValues(normalizeMetricLabel(kind), normalizeMetricLabel(state)).Observe(waited.Seconds())
+	}
+}
+
+// RecordTaskWaitRuntimeRelease records one parked-turn RuntimeSession retirement.
+func RecordTaskWaitRuntimeRelease(result string) {
+	TaskWaitRuntimeReleasesTotal.WithLabelValues(normalizeMetricLabel(result)).Inc()
+}
+
+// RecordWaitingForCapacity records one transition into a capacity wait.
+func RecordWaitingForCapacity(resource, reason string) {
+	WaitingForCapacityTotal.WithLabelValues(normalizeMetricLabel(resource), normalizeMetricLabel(reason)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {

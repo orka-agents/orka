@@ -28,27 +28,29 @@ import (
 )
 
 const (
-	maxResultSize                        = 10 << 20 // 10MB
+	maxResultSize                        = store.MaxResultBytes
 	defaultInternalTranscriptSearchLimit = 10
 	maxInternalTranscriptSearchLimit     = 50
 )
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	k8sClient               client.Client
-	apiReader               client.Reader
-	resultStore             store.ResultStore
-	sessionStore            store.SessionStore
-	planStore               store.PlanStore
-	messageStore            store.MessageStore
-	artifactStore           store.ArtifactStore
-	executionEventStore     store.ExecutionEventStore
-	gatewayEventStore       store.GatewayEventStore
-	gatewayService          *gatewayruntime.Service
-	memoryStore             store.MemoryStore
-	memoryProposalStore     store.MemoryProposalStore
-	taskProvenanceProtected bool
-	connectorTools          ConnectorToolExecutionConfig
+	k8sClient           client.Client
+	apiReader           client.Reader
+	resultStore         store.ResultStore
+	sessionStore        store.SessionStore
+	planStore           store.PlanStore
+	messageStore        store.MessageStore
+	artifactStore       store.ArtifactStore
+	executionEventStore store.ExecutionEventStore
+	gatewayEventStore   store.GatewayEventStore
+	gatewayService      *gatewayruntime.Service
+	memoryStore         store.MemoryStore
+	memoryProposalStore store.MemoryProposalStore
+	// memoryConsolidationStore records memory consolidation runs.
+	memoryConsolidationStore store.MemoryConsolidationStore
+	taskProvenanceProtected  bool
+	connectorTools           ConnectorToolExecutionConfig
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
@@ -57,9 +59,11 @@ type InternalHandlersConfig struct {
 	APIReader           client.Reader
 	MemoryStore         store.MemoryStore
 	MemoryProposalStore store.MemoryProposalStore
-	ExecutionEventStore store.ExecutionEventStore
-	GatewayEventStore   store.GatewayEventStore
-	GatewayService      *gatewayruntime.Service
+	// MemoryConsolidationStore records memory consolidation runs.
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayService           *gatewayruntime.Service
 	// TaskProvenanceProtected permits cross-task coordination only when the
 	// Task provenance admission webhook protects coordination ancestry.
 	TaskProvenanceProtected bool
@@ -81,6 +85,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.apiReader = configs[0].APIReader
 		h.memoryStore = configs[0].MemoryStore
 		h.memoryProposalStore = configs[0].MemoryProposalStore
+		h.memoryConsolidationStore = configs[0].MemoryConsolidationStore
 		h.executionEventStore = configs[0].ExecutionEventStore
 		h.gatewayEventStore = configs[0].GatewayEventStore
 		h.gatewayService = configs[0].GatewayService

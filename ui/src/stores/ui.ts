@@ -13,7 +13,6 @@ interface UIState {
   theme: ThemePreference
   namespace: string
   toggleSidebar: () => void
-  setSidebarCollapsed: (collapsed: boolean) => void
   setMobileSidebarOpen: (open: boolean) => void
   setTheme: (theme: ThemePreference) => void
   setNamespace: (namespace: string) => void
@@ -46,7 +45,6 @@ export const useUIStore = create<UIState>()(
       theme: 'system',
       namespace: 'orka-system',
       toggleSidebar: () => set({ sidebarCollapsed: !get().sidebarCollapsed }),
-      setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
       setMobileSidebarOpen: (mobileSidebarOpen) => set({ mobileSidebarOpen }),
       setTheme: (theme) => set({ theme }),
       setNamespace: (namespace) => set({ namespace }),

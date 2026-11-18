@@ -36,7 +36,8 @@ func TestSessionRuntimeCleanupRetiresFinalizedOutcomeUnknown(t *testing.T) {
 				})
 				completed := fixture.dispatch(t, queued)
 				if completed.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved &&
-					completed.Status.Execution.Reason == corev1alpha1.TaskExecutionReasonAtCapacity {
+					(completed.Status.Execution.Reason == corev1alpha1.TaskExecutionReasonAtCapacity ||
+						completed.Status.Execution.Reason == corev1alpha1.TaskExecutionReasonWaitingForCapacity) {
 					completed = fixture.dispatch(t, completed)
 				}
 				want := corev1alpha1.TaskExecutionOutcomeSucceeded

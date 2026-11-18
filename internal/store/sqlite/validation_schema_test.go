@@ -102,7 +102,7 @@ func TestValidationSchemaVersionedUpgradePreservesOptionalState(t *testing.T) {
 	core, retained, err := splitOptionalValidationSchema(schema)
 	require.NoError(t, err)
 	require.Equal(t, optional, retained)
-	require.Equal(t, schema171, schemaFingerprint(core))
+	require.Equal(t, schema174, schemaFingerprint(core))
 	currentIdentity, err := readDataset(upgraded.db)
 	require.NoError(t, err)
 	require.Equal(t, identity, currentIdentity)

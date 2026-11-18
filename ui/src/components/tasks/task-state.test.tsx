@@ -27,6 +27,18 @@ describe('task state flags', () => {
     expect(isWaitingForApproval(task({ status: { phase: 'Failed', message: 'waiting for approval ap-1 for bash at iteration 2' } }))).toBe(false)
   })
 
+  it('reports a parked turn whose sign-off still takes a decision', () => {
+    const parked = { kind: 'Approval', state: 'Waiting', references: ['ap-1'] }
+    expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: parked } }))).toBe(true)
+    expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: { ...parked, state: 'Requested' } } }))).toBe(true)
+    // A requested wait after a failed turn is abandoned, and a resumed one is settled.
+    expect(isWaitingForApproval(task({ status: { phase: 'Failed', wait: { ...parked, state: 'Requested' } } }))).toBe(false)
+    expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: { ...parked, state: 'Resumed' } } }))).toBe(false)
+    expect(isWaitingForApproval(task({ metadata: { deletionTimestamp: '2026-10-14T00:00:00Z' }, status: { phase: 'Succeeded', wait: parked } }))).toBe(false)
+    render(<TaskStateBadges task={task({ status: { phase: 'Succeeded', wait: parked } })} />)
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
   it('reports a Running task whose Pod is stuck waiting, and nothing once it is terminal', () => {
     const message = 'pod waiting: ErrImagePull - pull access denied'
     expect(podWaitingMessage(task({ status: { phase: 'Running', message } }))).toBe(message)

@@ -31,7 +31,12 @@ func (transport nativeRecycleClosedBootstrap) RoundTrip(request *http.Request) (
 
 func nativeRecycleReviewFixture(t *testing.T) (*externalRuntimePoolFixture, *workspacev1alpha1.ExecutionWorkspace, corev1.Pod, corev1.Pod) {
 	t.Helper()
-	f, _, _, worker := nativeIngressReviewFixture(t)
+	return nativeRecycleReviewFixtureWith(t, nil)
+}
+
+func nativeRecycleReviewFixtureWith(t *testing.T, prepare func(*externalRuntimePoolFixture)) (*externalRuntimePoolFixture, *workspacev1alpha1.ExecutionWorkspace, corev1.Pod, corev1.Pod) {
+	t.Helper()
+	f, _, _, worker := nativeIngressReviewFixtureWith(t, prepare)
 	f.r.HTTPClient = &http.Client{Transport: nativeRecycleClosedBootstrap{t: t}}
 	w := f.currentWorkspace(t)
 	pod, err := f.r.attestExternalWorkspaceStartup(t.Context(), w.Spec.Workload, w.Status.Allocation.Startup)

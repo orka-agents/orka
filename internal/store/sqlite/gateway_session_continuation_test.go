@@ -288,7 +288,7 @@ func TestGatewaySessionContinuationPreservesReservedCompletions(t *testing.T) {
 				record := &store.SessionRecord{Namespace: event.Namespace, Name: event.SessionName, SessionType: "chat", CreatedAt: now, UpdatedAt: now}
 				var err error
 				if chat {
-					_, err = s.AcquireChatTurn(t.Context(), record, "new-chat-turn", now.Add(time.Hour))
+					_, err = s.AcquireChatTurn(t.Context(), store.AcquireChatTurnRequest{Session: record, TurnID: "new-chat-turn", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Hour)})
 				} else {
 					err = s.CreateSession(t.Context(), record)
 				}
@@ -312,7 +312,7 @@ func TestGatewaySessionContinuationPreservesReservedCompletions(t *testing.T) {
 			record := &store.SessionRecord{Namespace: event.Namespace, Name: event.SessionName, SessionType: "chat", CreatedAt: now, UpdatedAt: now}
 			var err error
 			if chat {
-				_, err = s.AcquireChatTurn(t.Context(), record, "new-chat-turn", now.Add(time.Hour))
+				_, err = s.AcquireChatTurn(t.Context(), store.AcquireChatTurnRequest{Session: record, TurnID: "new-chat-turn", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Hour)})
 			} else {
 				err = s.CreateSession(t.Context(), record)
 			}

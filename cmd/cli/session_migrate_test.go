@@ -158,8 +158,13 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	marker := filepath.Join(bin, "invoked")
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	kubeFixture := newMigrationKubeFixture(t, server.URL)
-	kube := httptest.NewTLSServer(kubeFixture)
+	// Migration must not contact the selected Kubernetes cluster at all.
+	kubeRequests := 0
+	kube := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kubeRequests++
+		t.Errorf("migration contacted the Kubernetes API: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusForbidden)
+	}))
 	defer kube.Close()
 	kubeconfig := filepath.Join(t.TempDir(), "config")
 	writeKubeconfig := func(cluster string) {
@@ -186,7 +191,7 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	}
 	require.ErrorContains(t, run(), "explicit --server")
 	require.Zero(t, calls)
-	require.Zero(t, kubeFixture.tunnelCount())
+	require.Zero(t, kubeRequests)
 	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 	require.NoFileExists(t, filepath.Join(journal, "import-receipt.json"))
 	require.NoFileExists(t, marker)
@@ -412,6 +417,7 @@ func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
 	cmd := newRootCmd()
 	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
 	require.NoError(t, cmd.PersistentFlags().Set("token", "test-only"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
 	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
 	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
 	c, target, cleanup, err := newMigrationClient(cmd)
@@ -440,6 +446,7 @@ func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
 	require.NoError(t, cmd.PersistentFlags().Set("server", "http://explicit.example"))
 	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
 	require.NoError(t, cmd.PersistentFlags().Set("txn-token", "test-only-transaction"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
 	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
 	c, target, cleanup, err := newMigrationClient(cmd)
 	require.NoError(t, err)
@@ -447,4 +454,36 @@ func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
 	require.Empty(t, c.Token)
 	require.NotEmpty(t, c.TxnToken)
 	require.Equal(t, "http://explicit.example", target)
+}
+
+// ORKA_SERVER names the endpoint as explicitly as --server does.
+func TestMigrationTargetAcceptsServerFromEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envServer, "http://env.example")
+	cmd := newRootCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("token", "test-only"))
+	require.NoError(t, cmd.PersistentFlags().Set("namespace", "test"))
+	require.NoError(t, cmd.PersistentFlags().Set("kubeconfig", "/missing/config"))
+	cmd.Flags().AddFlagSet(cmd.PersistentFlags())
+	c, target, cleanup, err := newMigrationClient(cmd)
+	require.NoError(t, err)
+	defer cleanup()
+	require.Equal(t, "http://env.example", target)
+	require.Equal(t, target, c.BaseURL)
+}
+
+// The journal and import receipt are bound to a namespace, so migration does
+// not leave it to the server to choose one.
+func TestMigrateImportRequiresNamespaceBeforeCapture(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home, journal := t.TempDir(), t.TempDir()
+	require.NoError(t, os.Chmod(journal, 0o700))
+	cmd := newRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--server", "http://explicit.example", "--token", "test-only", "--kubeconfig", "/missing/config",
+		"session", "migrate", "import", "private",
+		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+	require.ErrorContains(t, cmd.Execute(), "requires a namespace")
+	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 }

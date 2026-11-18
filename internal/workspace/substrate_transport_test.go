@@ -52,10 +52,10 @@ func (s *substrateTLSServer) GetActor(ctx context.Context, req *ateapipb.GetActo
 }
 
 func (s *substrateTLSServer) ListActorTemplates(_ context.Context, req *ateapipb.ListActorTemplatesRequest) (*ateapipb.ListActorTemplatesResponse, error) {
-	if req.PageToken == "" {
+	if req.GetOptions().GetPageToken() == "" {
 		return &ateapipb.ListActorTemplatesResponse{NextPageToken: "second"}, nil
 	}
-	if req.PageToken != "second" {
+	if req.GetOptions().GetPageToken() != "second" {
 		return nil, status.Error(codes.InvalidArgument, "unknown test page")
 	}
 	page := &ateapipb.ListActorTemplatesResponse{ActorTemplates: []*ateapipb.ActorTemplate{{Metadata: &ateapipb.ResourceMetadata{Atespace: req.Atespace, Name: "template"}}}}

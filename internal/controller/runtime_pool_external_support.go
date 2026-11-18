@@ -71,6 +71,12 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 				// supervisor never reads the Pod name or namespace; dropping
 				// them keeps headroom under the backend's 32-entry limit.
 				continue
+			case "ORKA_ACP_MODEL_CONTEXT_LIMIT", "ORKA_ACP_MODEL_OUTPUT_LIMIT":
+				// Both readers treat an empty limit as unset, so an empty
+				// entry only spends the backend's environment budget.
+				if variable.Value == "" && variable.ValueFrom == nil {
+					continue
+				}
 			case "ORKA_ACP_LISTEN_ADDRESS":
 				variable = corev1.EnvVar{Name: variable.Name, Value: ":80"}
 			}
@@ -484,7 +490,7 @@ func (r *RuntimePoolReconciler) validateExternalNativeRetirement(ctx context.Con
 	if err := workspacev1alpha1.ValidateStartup(*request, *a); err != nil {
 		return fmt.Errorf("external native runtime retirement has invalid startup evidence: %w", err)
 	}
-	observed, err := r.attestExternalWorkspaceStartup(ctx, request, a.Startup)
+	observed, err := r.attestExternalRetiringWorkspaceStartup(ctx, request, a.Startup)
 	if err != nil || observed.UID != pod.UID || observed.Namespace != pod.Namespace || observed.Name != pod.Name {
 		return fmt.Errorf("external native runtime retirement failed independent materialization verification")
 	}

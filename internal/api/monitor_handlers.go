@@ -688,6 +688,10 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "createRepositoryMonitor", namespace, req.Spec); err != nil {
 		return err
 	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositorymonitor", name,
+		repositoryMonitorSpecAgentRefs(req.Spec), nil); err != nil {
+		return err
+	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
@@ -813,6 +817,10 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeContextTokenRepositoryMonitorCredentialSecrets(c, "updateRepositoryMonitor", namespace, req.Spec); err != nil {
+		return err
+	}
+	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositorymonitor", monitor.Name,
+		repositoryMonitorSpecAgentRefs(req.Spec), repositoryMonitorAgentRefs(monitor)); err != nil {
 		return err
 	}
 	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {

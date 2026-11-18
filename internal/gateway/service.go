@@ -122,6 +122,9 @@ func (e *HTTPError) Error() string { return e.Message }
 
 // Service owns durable admission, dispatch, terminal projection, and delivery.
 type Service struct {
+	// TaskPassCredentials are controller-mounted, per-Gateway UID credentials,
+	// never delivery bearers or Task/Tool namespace Secrets.
+	TaskPassCredentials      map[string]TaskPassCredential
 	Client                   client.Client
 	APIReader                client.Reader
 	EventStore               store.GatewayEventStore
@@ -691,6 +694,9 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		return nil, fmt.Errorf("resolve bound Agent: %w", err)
 	}
 	baseEvent.AgentUID = string(agent.UID)
+	if eventEnvelope.EventType == protocol.EventTypeDelegatedText && agent.Spec.Runtime == nil {
+		return s.admitRejectedEvent(ctx, baseEvent, "delegatedText requires controller-brokered agent execution")
+	}
 
 	sessionName, err := deriveSessionName(object, binding, eventEnvelope)
 	if err != nil {
@@ -1888,6 +1894,9 @@ func (s *Service) materializedTaskForGatewayEvent(
 ) (*corev1alpha1.Task, error) {
 	task := taskForGatewayEvent(event, binding, now)
 	if taskType == corev1alpha1.TaskTypeAI {
+		if event.EventType == protocol.EventTypeDelegatedText {
+			return nil, fmt.Errorf("delegatedText requires controller-brokered agent execution")
+		}
 		if event.TaskPolicyFrozen {
 			return nil, fmt.Errorf("native AI Tasks cannot discard a frozen runtime policy")
 		}

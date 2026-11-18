@@ -2357,8 +2357,32 @@ func TestHandleScheduledTask_InvalidCron(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Errorf("expected phase Failed for invalid cron, got %s", task.Status.Phase)
+	assertInvalidCronTerminalStatus(t, r, task)
+}
+
+// assertInvalidCronTerminalStatus checks that an invalid schedule ends the
+// Task through the standard terminal-failure path, both in memory and in the
+// persisted status.
+func assertInvalidCronTerminalStatus(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) {
+	t.Helper()
+	persisted := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), persisted); err != nil {
+		t.Fatalf("get persisted task: %v", err)
+	}
+	for name, got := range map[string]*corev1alpha1.Task{"in-memory": task, "persisted": persisted} {
+		if got.Status.Phase != corev1alpha1.TaskPhaseFailed {
+			t.Errorf("%s: expected phase Failed for invalid cron, got %s", name, got.Status.Phase)
+		}
+		if !strings.Contains(got.Status.Message, "invalid cron expression") {
+			t.Errorf("%s: expected invalid cron message, got %q", name, got.Status.Message)
+		}
+		if got.Status.CompletionTime == nil || got.Status.CompletionTime.IsZero() {
+			t.Errorf("%s: expected CompletionTime to be set", name)
+		}
+	}
+	complete := meta.FindStatusCondition(persisted.Status.Conditions, ConditionTypeComplete)
+	if complete == nil || complete.Status != metav1.ConditionFalse || complete.Reason != eventReasonTaskFailed {
+		t.Errorf("expected Complete=False/%s condition, got %#v", eventReasonTaskFailed, complete)
 	}
 }
 
@@ -2612,8 +2636,38 @@ func TestHandleScheduled_InvalidCron(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Errorf("expected Failed phase, got %s", task.Status.Phase)
+	assertInvalidCronTerminalStatus(t, r, task)
+}
+
+func TestHandleScheduled_InvalidCronReturnsStatusUpdateError(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "sched-bad-write", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "invalid",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	statusErr := errors.New("injected invalid schedule status update failure")
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegate client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				if current, ok := obj.(*corev1alpha1.Task); ok && current.Name == task.Name {
+					return statusErr
+				}
+			}
+			return delegate.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	if _, err := r.handleScheduled(context.Background(), task); !errors.Is(err, statusErr) {
+		t.Fatalf("handleScheduled() error = %v, want status update error", err)
 	}
 }
 
@@ -2649,6 +2703,39 @@ func TestResolveProvider_NamespaceIsolation(t *testing.T) {
 	_, err := r.resolveProvider(context.Background(), task, nil)
 	if err == nil {
 		t.Error("expected error for cross-namespace provider with isolation")
+	}
+}
+
+func TestResolveProvider_ProviderUseRefusesTaskRelativeProvidersOfARemoteAgent(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: "default"},
+		Status:     corev1alpha1.ProviderStatus{Ready: true},
+	}
+	r := newUnitReconciler(scheme, provider)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer", Namespace: "agents"},
+			AI:       &corev1alpha1.AISpec{Prompt: "hi"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: "agents"},
+		Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: "primary"}},
+	}
+
+	resolved, err := r.resolveProvider(context.Background(), task, agent)
+	if err != nil || resolved == nil || resolved.Name != "primary" {
+		t.Fatalf("without Provider use the relative Provider resolves in the Task namespace, got (%v, %v)", resolved, err)
+	}
+
+	// The Agent may have changed since the API checked it, and a direct write
+	// was never checked, so each run refuses it.
+	r.ProviderUseAuthorization = true
+	if _, err := r.resolveProvider(context.Background(), task, agent); err == nil || !strings.Contains(err.Error(), "primary") {
+		t.Fatalf("expected a refusal naming the Provider, got %v", err)
 	}
 }
 
@@ -5967,16 +6054,31 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 	})
 	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
 	r.WebhookNotifier = notifier
+	deliveries := attachTestWebhookDispatcher(t, r)
+	// The reconcile hands the due notice to the delivery runnable and does
+	// not send it itself.
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should requeue for webhook retry after the first backoff step.
-	if result.RequeueAfter != defaultWebhookInitialBackoff {
-		t.Errorf("expected %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
+	if result.RequeueAfter != webhookDeliveryRecheckInterval || deliveries.queue.Len() != 1 {
+		t.Fatalf("handleCompleted() requeue = %v with %d queued, want %v with the notice queued",
+			result.RequeueAfter, deliveries.queue.Len(), webhookDeliveryRecheckInterval)
+	}
+	deliveries.drain(context.Background())
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
 	}
 	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
-		t.Errorf("unexpected webhook delivery state %#v", delivery)
+		t.Fatalf("unexpected webhook delivery state %#v", delivery)
+	}
+	// Should requeue for webhook retry after the first backoff step.
+	result, err = r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > defaultWebhookInitialBackoff {
+		t.Errorf("expected at most %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
 	}
 }
 
@@ -6413,6 +6515,35 @@ func TestCompleteTask_WithPlanStore(t *testing.T) {
 	}
 }
 
+func TestCompleteTask_CancelledKeepsPlan(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cancel-plan", Namespace: "default",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	if err := r.PlanStore.SavePlan(context.Background(), "default", "cancel-plan", &store.PlanState{
+		Summary: "step 2 of 4", ProgressPct: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message, ok := requestedTaskCancellation(task)
+	if !ok {
+		t.Fatal("the cancel request was not recognized")
+	}
+	if _, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseCancelled, message); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	plan, err := r.PlanStore.GetPlan(context.Background(), "default", "cancel-plan")
+	if err != nil || plan.Summary != "step 2 of 4" || plan.ProgressPct != 50 {
+		t.Fatalf("plan = %+v, %v; want the plan kept after cancellation", plan, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleCompleted — webhook success path
 // ---------------------------------------------------------------------------
@@ -6437,15 +6568,23 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 	}
 	r := newUnitReconciler(scheme, task)
 	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	deliveries := attachTestWebhookDispatcher(t, r)
+	if _, err := r.handleCompleted(context.Background(), task); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	deliveries.drain(context.Background())
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if !task.Status.WebhookDelivered {
+		t.Fatal("expected WebhookDelivered to be true")
+	}
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("expected no requeue after successful webhook, got %v", result.RequeueAfter)
-	}
-	if !task.Status.WebhookDelivered {
-		t.Error("expected WebhookDelivered to be true")
+	if result.RequeueAfter != 0 || deliveries.queue.Len() != 0 {
+		t.Errorf("expected no requeue or delivery after successful webhook, got %v with %d queued", result.RequeueAfter, deliveries.queue.Len())
 	}
 }
 

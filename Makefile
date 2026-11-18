@@ -178,13 +178,13 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
-	bash scripts/repository-monitor-completion-audit.sh
+# GO_TEST_TIMEOUT bounds each test package. The controller package alone runs
+# for about ten minutes, which is Go's default limit.
+GO_TEST_TIMEOUT ?= 20m
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -timeout $(GO_TEST_TIMEOUT) -coverprofile cover.out
 
 .PHONY: test-remediation-worker
 test-remediation-worker: ## Run the native Git launcher and validation supervisor/guard in bounded offline containers.
