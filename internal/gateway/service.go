@@ -122,6 +122,9 @@ func (e *HTTPError) Error() string { return e.Message }
 
 // Service owns durable admission, dispatch, terminal projection, and delivery.
 type Service struct {
+	// TaskPassCredentials are controller-mounted, per-Gateway UID credentials,
+	// never delivery bearers or Task/Tool namespace Secrets.
+	TaskPassCredentials      map[string]TaskPassCredential
 	Client                   client.Client
 	APIReader                client.Reader
 	EventStore               store.GatewayEventStore
@@ -336,7 +339,7 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) ||
-			!isTerminalTaskPhase(task.Status.Phase) {
+			!task.Status.Phase.IsTerminal() {
 			continue
 		}
 		owner, gatewayOwned := TaskOwner(task)
@@ -691,6 +694,9 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		return nil, fmt.Errorf("resolve bound Agent: %w", err)
 	}
 	baseEvent.AgentUID = string(agent.UID)
+	if eventEnvelope.EventType == protocol.EventTypeDelegatedText && agent.Spec.Runtime == nil {
+		return s.admitRejectedEvent(ctx, baseEvent, "delegatedText requires controller-brokered agent execution")
+	}
 
 	sessionName, err := deriveSessionName(object, binding, eventEnvelope)
 	if err != nil {
@@ -709,6 +715,11 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
+		}
+		// A replaced controller's write is fenced, which also matches
+		// ErrConflict; it says nothing about Session ownership.
+		if errors.Is(err, store.ErrFenced) {
+			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
@@ -1323,7 +1334,7 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 			}
 			continue
 		}
-		if isTerminalTaskPhase(task.Status.Phase) {
+		if task.Status.Phase.IsTerminal() {
 			projected, err := s.projectTerminal(ctx, event, task)
 			if errors.Is(err, errGatewayResultNotReady) {
 				s.deferProjection(ctx, event, now)
@@ -1883,6 +1894,9 @@ func (s *Service) materializedTaskForGatewayEvent(
 ) (*corev1alpha1.Task, error) {
 	task := taskForGatewayEvent(event, binding, now)
 	if taskType == corev1alpha1.TaskTypeAI {
+		if event.EventType == protocol.EventTypeDelegatedText {
+			return nil, fmt.Errorf("delegatedText requires controller-brokered agent execution")
+		}
 		if event.TaskPolicyFrozen {
 			return nil, fmt.Errorf("native AI Tasks cannot discard a frozen runtime policy")
 		}
@@ -2350,10 +2364,6 @@ func terminalErrorText(phase corev1alpha1.TaskPhase, statusMessage string) strin
 		return "The conversation is too long for the configured model. Please shorten the request and try again."
 	}
 	return "The task could not be completed."
-}
-
-func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	return phase == corev1alpha1.TaskPhaseSucceeded || phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func eventBackoff(attempt int) time.Duration {

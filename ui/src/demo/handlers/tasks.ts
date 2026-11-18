@@ -1,6 +1,7 @@
 import { http, HttpResponse, type RequestHandler } from 'msw'
 import type { Task, TaskPhase } from '@/schemas/task'
 import type { Approval, ExecutionEvent, ForkTaskRequest, TaskTrace } from '@/schemas/execution-event'
+import type { AttentionItem, AttentionResponse } from '@/schemas/attention'
 import type { ArtifactMetadata } from '@/schemas/artifact'
 import type { TranscriptMessage } from '@/schemas/session'
 import {
@@ -380,14 +381,6 @@ function finishTask(rec: TaskRecord) {
   if (phase === 'Succeeded') emit(rec, { type: 'TaskSucceeded', summary: `Task succeeded in ${took}` }, rec.end)
   else if (phase === 'Failed') emit(rec, { type: 'TaskFailed', severity: 'error', summary: message ?? 'Task failed' }, rec.end)
   else emit(rec, { type: 'TaskCancelled', severity: 'warning', summary: message ?? 'Task cancelled' }, rec.end)
-  if (rec.outcome.pr) {
-    const pr = rec.outcome.pr
-    Object.assign(rec.annotations, {
-      'orka.ai/pr-url': `${REPOS[rec.repo ?? 'checkout'].url}/pull/${pr.number}`,
-      'orka.ai/pr-number': String(pr.number),
-      'orka.ai/pr-status': pr.status,
-    })
-  }
 }
 
 function advance(rec: TaskRecord, now: number) {
@@ -539,6 +532,8 @@ export interface DemoTaskInput {
   repo?: RepoKey
   /** session the task belongs to (e.g. the chat session that created it) */
   session?: string
+  /** delegating parent Task */
+  parent?: string
   createdBy?: 'chat' | 'gateway' | 'monitor'
 }
 
@@ -558,6 +553,7 @@ export function createDemoTask(input: DemoTaskInput): string {
     repo: input.repo,
     prompt: input.prompt,
     session: input.session,
+    parent: input.parent,
     createdBy: input.createdBy ?? 'chat',
   })
   return name
@@ -565,15 +561,29 @@ export function createDemoTask(input: DemoTaskInput): string {
 
 /**
  * Cancels a pending or running task now, the way a controller-side
- * cancellation (such as a repository monitor Stop command) does. Finished and
- * scheduled tasks are left alone.
+ * cancellation (such as a repository monitor Stop command) does, together
+ * with its unfinished delegated descendants. Finished and scheduled tasks
+ * are left alone.
  */
 export function cancelDemoTask(name: string, reason: string) {
   const rec = tasks.get(name)
+  if (rec && cancelDemoRecord(rec, reason)) cancelDemoDescendants(name, reason)
+}
+
+/** Cancels every unfinished, nonscheduled descendant, through finished ones too. */
+function cancelDemoDescendants(name: string, reason: string) {
+  for (const child of children(name)) {
+    if (child.schedule) continue
+    cancelDemoRecord(child, reason)
+    cancelDemoDescendants(child.name, reason)
+  }
+}
+
+/** Cancels one unfinished, nonscheduled task; reports whether it did. */
+function cancelDemoRecord(rec: TaskRecord, reason: string): boolean {
   const now = Date.now()
-  if (!rec) return
   advance(rec, now)
-  if (rec.finished || rec.schedule) return
+  if (rec.finished || rec.schedule) return false
   for (const approval of rec.approvals) {
     if (approval.status !== 'pending') continue
     Object.assign(approval, { status: 'cancelled', decisionTime: iso(now), decisionReason: reason })
@@ -585,6 +595,7 @@ export function cancelDemoTask(name: string, reason: string) {
   rec.end = now
   rec.outcome = { phase: 'Cancelled', message: reason }
   finishTask(rec)
+  return true
 }
 
 // ---- views ------------------------------------------------------------------------
@@ -823,7 +834,8 @@ function deliveryStatus(rec: TaskRecord, phase: TaskPhase): NonNullable<Task['st
       id: `PR_kwDO${digest(`pr:${rec.name}`, 14)}`,
       number: pr.number,
       url: `${repo?.url}/pull/${pr.number}`,
-      state: pr.status === 'merged' ? 'merged' : pr.status,
+      // The controller records the forge state as Open, Closed or Merged.
+      state: pr.status[0].toUpperCase() + pr.status.slice(1),
       baseBranch: 'main',
       headBranch: pr.branch,
       headSHA: head,
@@ -1060,7 +1072,62 @@ interface CreateTaskBody {
 const agentKeyByName = (name?: string) => (Object.keys(AGENTS) as AgentKey[]).find((key) => AGENTS[key].name === name)
 const repoKeyByUrl = (url?: string) => (Object.keys(REPOS) as RepoKey[]).find((key) => url?.replace(/\.git$/, '') === REPOS[key].url)
 
+// ---- attention read models --------------------------------------------------------
+
+/** The demo's "Needs you" ranking: pending approvals first, then recent failures. */
+function attentionItems(includeFailures: boolean, now = Date.now()): AttentionItem[] {
+  const approvals: AttentionItem[] = []
+  const failures: AttentionItem[] = []
+  for (const rec of tasks.values()) {
+    const task = toTask(rec, now)
+    const ref = { namespace: DEMO_NAMESPACE, name: rec.name, uid: task.metadata.uid ?? rec.name, phase: task.status?.phase }
+    if (isWaiting(rec)) {
+      for (const approval of rec.approvals.filter((a) => a.status === 'pending')) {
+        const tool = approval.targetTool && /^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/.test(approval.targetTool) ? approval.targetTool : undefined
+        approvals.push({
+          id: `approval:${ref.uid}:${approval.id}`, kind: 'approval', rank: 1, since: approval.createdAt,
+          deadline: approval.expiresAt, summary: tool ? `Approval requested for ${tool}` : 'Approval requested', task: ref,
+          approval: { id: approval.id, source: 'worker', targetTool: tool, expiresAt: approval.expiresAt, canApprove: true, canDecline: true },
+        })
+      }
+    }
+    const completed = task.status?.completionTime ? Date.parse(task.status.completionTime) : 0
+    if (includeFailures && task.status?.phase === 'Failed' && now - completed <= 24 * 3600_000) {
+      failures.push({ id: `failed:${ref.uid}`, kind: 'failed', rank: 3, since: task.status.completionTime ?? iso(now), summary: 'Task failed', task: ref })
+    }
+  }
+  const byTime = (a: AttentionItem, b: AttentionItem) => (a.deadline ?? '~').localeCompare(b.deadline ?? '~') || a.since.localeCompare(b.since) || a.id.localeCompare(b.id)
+  return [...approvals.sort(byTime), ...failures.sort(byTime)]
+}
+
+function attentionResponse(items: AttentionItem[], limit: number, monitors: AttentionResponse['sources']['monitors']): AttentionResponse {
+  const counts: AttentionResponse['counts'] = {}
+  for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1
+  return {
+    namespace: DEMO_NAMESPACE, generatedAt: iso(Date.now()), items: items.slice(0, limit), total: items.length, counts,
+    incomplete: false, sources: { approvals: 'included', monitors }, metadata: {},
+  }
+}
+
+function attentionLimit(request: Request): number {
+  const limit = Number(new URL(request.url).searchParams.get('limit') ?? 50)
+  return Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 50
+}
+
 export const taskHandlers: RequestHandler[] = [
+  http.get(api('/attention'), ({ request }) => {
+    // Like the task list, another namespace is simply empty.
+    if (!inDemoNamespace(request)) return HttpResponse.json(attentionResponse([], 1, 'unavailable'))
+    advanceAll()
+    return HttpResponse.json(attentionResponse(attentionItems(true), attentionLimit(request), 'unavailable'))
+  }),
+
+  http.get(api('/approvals'), ({ request }) => {
+    if (!inDemoNamespace(request)) return HttpResponse.json(attentionResponse([], 1, 'notRequested'))
+    advanceAll()
+    return HttpResponse.json(attentionResponse(attentionItems(false), attentionLimit(request), 'notRequested'))
+  }),
+
   http.get(api('/tasks'), ({ request }) => {
     if (!inDemoNamespace(request)) return list([])
     advanceAll()
@@ -1110,6 +1177,29 @@ export const taskHandlers: RequestHandler[] = [
     const name = nameParam(params)
     if (!tasks.delete(name)) return notFound(`tasks.orka.ai "${name}"`)
     return noContent()
+  }),
+
+  http.post(api('/tasks/:id/cancel'), async ({ request, params }) => {
+    if (!inDemoNamespace(request)) return forbiddenNamespace()
+    const name = nameParam(params)
+    const rec = tasks.get(name)
+    if (!rec) return notFound(`tasks.orka.ai "${name}"`)
+    // As in the API, a stale confirmation is refused before any phase check.
+    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
+    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
+    const now = Date.now()
+    advance(rec, now)
+    const phase = phaseOf(rec, now)
+    if (phase === 'Cancelled') {
+      return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase, requested: false, message: 'cancelled' })
+    }
+    if (TERMINAL.has(phase) || rec.schedule) {
+      return apiError(409, `task cannot be cancelled: the task is ${phase}`)
+    }
+    const reason = body.reason?.trim()
+    const message = reason ? `cancelled by demo-user: ${reason}` : 'cancelled by demo-user'
+    cancelDemoTask(name, message)
+    return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase: 'Cancelled', requested: true, message })
   }),
 
   http.get(api('/tasks/:id/result'), ({ request, params }) => {

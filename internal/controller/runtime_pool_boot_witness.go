@@ -272,7 +272,7 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 }
 
 // runtimePoolBootTopologySpec returns the Pod spec the shared recovery
-// topology check sees. Toolbox init containers are controller-rendered, run to
+// topology check sees. Toolbox and skill init containers are controller-rendered, run to
 // completion before the runtime container starts, and never share its process
 // namespace, so they and their read-only image volumes are removed from the
 // copy. Any other init container, including a restartable sidecar, still
@@ -280,9 +280,9 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
 	topology := *spec.DeepCopy()
 	for _, container := range spec.InitContainers {
-		toolboxInit := container.Name == runtimePoolToolboxHandoffContainer || strings.HasPrefix(container.Name, runtimePoolToolboxCopyPrefix)
+		toolboxInit := container.Name == runtimePoolToolboxHandoffContainer || runtimePoolBoundImageCopyContainer(container.Name)
 		if !toolboxInit || container.RestartPolicy != nil {
-			return corev1.PodSpec{}, errors.New("runtime recovery permits only controller-rendered toolbox init containers")
+			return corev1.PodSpec{}, errors.New("runtime recovery permits only controller-rendered toolbox and skill init containers")
 		}
 		if err := validateRecoveryContainer(container); err != nil {
 			return corev1.PodSpec{}, err
@@ -290,7 +290,7 @@ func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
 	}
 	topology.InitContainers = nil
 	topology.Volumes = slices.DeleteFunc(topology.Volumes, func(volume corev1.Volume) bool {
-		return volume.Image != nil && strings.HasPrefix(volume.Name, runtimePoolToolboxVolumePrefix)
+		return volume.Image != nil && (strings.HasPrefix(volume.Name, runtimePoolToolboxVolumePrefix) || strings.HasPrefix(volume.Name, runtimePoolSkillVolumePrefix))
 	})
 	return topology, nil
 }
@@ -603,6 +603,23 @@ func runtimePoolPreparedContainerChanged(w runtimePoolBootWitness, pod *corev1.P
 	return false
 }
 
+// runtimePoolTaskBootMatches reports whether a Task ran on the RuntimePool boot
+// named by instanceID and bootID. The dispatcher records the instance and
+// RuntimeSession identity before it creates the RuntimeSession, and the
+// supervisor boot only after creation succeeds, so a Task whose RuntimeSession
+// never started has no boot. Its instance ID still names this exact boot,
+// because a RuntimePool instance ID is derived from the Pod UID and boot ID. A
+// recorded boot must match exactly.
+func runtimePoolTaskBootMatches(e *corev1alpha1.TaskExecutionStatus, podUID types.UID, instanceID string, bootID harnessv2.SupervisorBootID) bool {
+	if e == nil || e.RuntimeInstanceID != instanceID {
+		return false
+	}
+	if e.RuntimeSessionSupervisorBootID == "" {
+		return bootID != "" && instanceID == runtimePoolRuntimeInstanceID(podUID, bootID)
+	}
+	return e.RuntimeSessionSupervisorBootID == string(bootID)
+}
+
 // runtimePoolTaskWitnessMatches is shared by read-only historical cleanup and
 // eager Task receipts. It never compares old proof with the replacement pool.
 func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w runtimePoolBootWitness) error {
@@ -610,8 +627,9 @@ func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w
 	binding := executionBinding(task)
 	if e == nil || binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
 		task.Namespace != w.PoolNamespace || e.RuntimePoolName != w.PoolName || e.RuntimePoolUID != string(w.PoolUID) ||
-		e.AgentRuntimeName != "" || e.AgentRuntimeUID != "" || e.RuntimeInstanceID != string(w.Fence.RuntimeInstanceID) ||
-		e.RuntimeSessionSupervisorBootID != string(w.Fence.SupervisorBootID) || e.Attempt < 1 || strings.TrimSpace(e.RuntimeSessionUID) == "" || e.RuntimeSessionGeneration < 1 ||
+		e.AgentRuntimeName != "" || e.AgentRuntimeUID != "" ||
+		!runtimePoolTaskBootMatches(e, w.PodUID, string(w.Fence.RuntimeInstanceID), w.Fence.SupervisorBootID) ||
+		e.Attempt < 1 || strings.TrimSpace(e.RuntimeSessionUID) == "" || e.RuntimeSessionGeneration < 1 ||
 		binding.RuntimeProfileDigest != string(w.Fence.RuntimeProfileDigest) ||
 		(e.RuntimeSessionProfileDigest != string(w.Fence.RuntimeProfileDigest) && (task.Spec.SessionRef != nil || e.RuntimeSessionProfileDigest != "")) {
 		return fmt.Errorf("%w: Task does not match the exact retired RuntimePool boot", store.ErrConflict)

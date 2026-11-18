@@ -8,14 +8,7 @@ import { executionEventApi, mergeEventsBySeq, maxSeq } from '@/lib/execution-eve
 import { ApiError } from '@/lib/api-client'
 import type { ExecutionEvent } from '@/schemas/execution-event'
 import type { TaskPhase } from '@/schemas/task'
-
-function isRunning(phase?: TaskPhase): boolean {
-  return phase === 'Running' || phase === 'Finalizing' || phase === 'Pending'
-}
-
-function isTerminal(phase?: TaskPhase): boolean {
-  return phase === 'Succeeded' || phase === 'Failed' || phase === 'Cancelled'
-}
+import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 const TERMINAL_EVENT_TYPES = new Set(['TaskSucceeded', 'TaskFailed', 'TaskCancelled'])
 
@@ -49,7 +42,7 @@ export function TaskEventTimeline({ taskId, taskPhase, taskUid }: TaskEventTimel
   // still respected. Deriving this (rather than syncing via an effect) keeps it
   // lint-clean and avoids a stale initial value.
   const [followOverride, setFollowOverride] = useState<boolean | null>(null)
-  const following = followOverride ?? isRunning(taskPhase)
+  const following = followOverride ?? isTaskInFlight(taskPhase)
   // Fork-from-checkpoint dialog state, launched from an event row.
   const [forkEvent, setForkEvent] = useState<ExecutionEvent | null>(null)
 
@@ -108,7 +101,7 @@ export function TaskEventTimeline({ taskId, taskPhase, taskUid }: TaskEventTimel
   const awaitingTerminalFrame =
     wasFollowing &&
     initial.isSuccess &&
-    isTerminal(taskPhase) &&
+    isTaskTerminal(taskPhase) &&
     followOverride !== false &&
     !terminalFrameSeen &&
     !hasLoadedTerminalEvent
@@ -150,7 +143,7 @@ export function TaskEventTimeline({ taskId, taskPhase, taskUid }: TaskEventTimel
   // already-settled task that genuinely has no terminal event (events disabled,
   // or recorded before this feature) from polling forever.
   const needsTerminalCatchUp =
-    isTerminal(taskPhase) &&
+    isTaskTerminal(taskPhase) &&
     initial.isSuccess &&
     !hasLoadedTerminalEvent &&
     terminalRefetchAttempts < TERMINAL_REFETCH_MAX_ATTEMPTS

@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
-import type { Task, PlanState, TaskPhase } from '@/schemas/task'
+import type { Task, PlanState } from '@/schemas/task'
+import { isTaskTerminal } from '@/lib/task-phase'
 
 interface TimelineEvent {
   key: string
@@ -16,11 +17,6 @@ interface TimelineEvent {
    */
   bucket: number
   status: 'done' | 'active' | 'pending' | 'failed' | 'cancelled'
-}
-
-/** The backend's terminal task phases — no further iterations follow these. */
-function isTerminalPhase(phase?: TaskPhase | string): boolean {
-  return phase === 'Succeeded' || phase === 'Failed' || phase === 'Cancelled'
 }
 
 /** A condition as carried on task.status.conditions[]. */
@@ -83,7 +79,7 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   // sorts after the work that led to it rather than floating to the end.
   const iteration = task.status?.iteration ?? 0
   if (iteration > 0) {
-    const terminal = isTerminalPhase(phase)
+    const terminal = isTaskTerminal(phase)
     const startMs = task.status?.startTime
       ? new Date(task.status.startTime).getTime()
       : NaN
@@ -106,7 +102,7 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   // Terminal marker — pinned to the last bucket so it always renders last,
   // with phase-correct styling. Cancelled is terminal too (a user-stopped run),
   // shown neutrally rather than as a failure.
-  if (isTerminalPhase(phase)) {
+  if (isTaskTerminal(phase)) {
     events.push({
       key: 'terminal',
       label: phase as string,

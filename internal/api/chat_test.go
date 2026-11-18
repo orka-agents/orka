@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +48,7 @@ type chatMockProvider struct {
 	beforeReturn func()
 	streamCh     chan llm.StreamChunk
 	streamErr    error
+	sent         [][]llm.Message // the messages of each Complete call
 }
 
 type cancellableChatProvider struct {
@@ -92,17 +94,18 @@ type blockingDeleteSessionStore struct {
 	allowDelete   chan struct{}
 }
 
-func (s *blockingDeleteSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (s *blockingDeleteSessionStore) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	close(s.deleteStarted)
 	select {
 	case <-s.allowDelete:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.SessionStore.DeleteSession(ctx, namespace, name)
+	return s.SessionStore.DeleteSession(ctx, namespace, name, now)
 }
 
-func (m *chatMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *chatMockProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	m.sent = append(m.sent, slices.Clone(req.Messages))
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -144,9 +147,7 @@ type observingChatTurnCommitter struct {
 	) error
 }
 
-func (*observingChatTurnCommitter) AcquireChatTurn(
-	context.Context, *store.SessionRecord, string, time.Time,
-) (bool, error) {
+func (*observingChatTurnCommitter) AcquireChatTurn(context.Context, store.AcquireChatTurnRequest) (bool, error) {
 	return false, nil
 }
 
@@ -154,15 +155,9 @@ func (*observingChatTurnCommitter) ReleaseChatTurn(context.Context, string, stri
 	return nil
 }
 
-func (c *observingChatTurnCommitter) CommitSessionTurn(
-	ctx context.Context,
-	session *store.SessionRecord,
-	turnID string,
-	expectedMessageCount int,
-	messages []store.SessionMessage,
-	inputTokens, outputTokens int,
-) error {
-	return c.commit(ctx, session, turnID, expectedMessageCount, messages, inputTokens, outputTokens)
+func (c *observingChatTurnCommitter) CommitSessionTurn(ctx context.Context, request store.CommitSessionTurnRequest) error {
+	return c.commit(ctx, request.Session, request.TurnID, request.ExpectedMessageCount, request.Messages,
+		request.InputTokens, request.OutputTokens)
 }
 
 func newTestScheme() *runtime.Scheme {
@@ -210,14 +205,14 @@ func newTestSessionStore(t *testing.T) store.SessionStore {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func newTestResultStore(t *testing.T) store.ResultStore {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs store.ResultStore, cfg ChatConfig) *ChatHandler {
@@ -893,12 +888,12 @@ func TestAcquireChatSessionFencesDeletionUntilRelease(t *testing.T) {
 	require.NotEmpty(t, active.turnID)
 	_, err = ss.GetSession(ctx, "default", "locked-chat")
 	require.NoError(t, err)
-	if err := ss.DeleteSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrConflict) {
+	if err := ss.DeleteSession(ctx, "default", "locked-chat", time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession(locked chat) error = %v, want ErrConflict", err)
 	}
 	active.finish()
 	active.finish() // idempotent close for overlapping handler/stream cleanup paths.
-	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat"))
+	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat", time.Now().UTC()))
 	if _, err := ss.GetSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
 	}
@@ -917,7 +912,7 @@ func TestBeginActiveChatRejectsConcurrentRequestAndRemovesNewEmptySession(t *tes
 	if _, err := ss.GetSession(ctx, "default", "concurrent-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession(empty failed chat) error = %v, want ErrNotFound", err)
 	}
-	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat"))
+	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat", time.Now().UTC()))
 }
 
 func TestChatCancellationGateBlocksReplacementUntilDeletionCompletes(t *testing.T) {
@@ -1720,6 +1715,81 @@ func TestRunToolLoopPreservesContinuationAndProgressAcrossTruncation(t *testing.
 	assert.Equal(t, want, stored)
 }
 
+// TestRunToolLoopKeepsTruncatedPrefixStable checks that a chat over its
+// session budget sends each step the previous step's messages plus the new
+// ones, so a provider's prompt cache matches, until the cut has to move.
+func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
+	ctx := context.Background()
+	const sessionID = "stable-prefix-session"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "running-task", Namespace: "default",
+			Labels: map[string]string{labels.LabelChatSession: sessionID},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).
+		WithStatusSubresource(task).Build()
+	cfg := DefaultChatConfig()
+	cfg.MaxIterations = 12
+	cfg.MaxSessionSize = 8000 // a 2000-token budget
+	ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), cfg)
+	turnID := reserveTestChatTurn(t, ch, sessionID)
+	provider := &chatMockProvider{}
+	exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, newTestResultStore(t))
+	exec.tasksCreated = 1
+
+	history := make([]llm.Message, 0, 81)
+	history = append(history, llm.Message{Role: "user", Content: "start"})
+	for i := range 80 {
+		history = append(history, llm.Message{Role: "assistant", Content: fmt.Sprintf("earlier %02d %s", i, strings.Repeat("x", 80))})
+	}
+	_, _, _, err := ch.runToolLoop(
+		ctx, provider, history, "system prompt", nil, exec,
+		sessionID, "default", "test-model", 0.7, 4096, 0, nil, turnID,
+	)
+	require.NoError(t, err)
+
+	require.Greater(t, len(provider.sent), 5)
+	moves := 0
+	for i := 1; i < len(provider.sent); i++ {
+		prev, next := provider.sent[i-1], provider.sent[i]
+		require.Less(t, len(next), len(history)+2*cfg.MaxIterations, "step %d was not truncated", i)
+		if len(prev) > len(next) || !assert.ObjectsAreEqual(prev, next[:len(prev)]) {
+			moves++
+		}
+	}
+	assert.LessOrEqual(t, moves, 2, "the truncation cut moved on %d of %d steps", moves, len(provider.sent)-1)
+
+	// The next turn reloads the whole transcript and truncates it afresh: it
+	// must cut where the last step did, or the next request misses the cache.
+	stored, err := ch.loadChatSession(ctx, "default", sessionID)
+	require.NoError(t, err)
+	last, next := provider.sent[len(provider.sent)-1], ch.sessionView(stored)
+	require.GreaterOrEqual(t, len(next), len(last))
+	assert.Equal(t, last, next[:len(last)], "the next turn cuts the transcript elsewhere")
+}
+
+// Chat usage counts the whole prompt: Anthropic's input count leaves out the
+// tokens read from and written to its cache.
+func TestRunToolLoopCountsCachedPromptTokens(t *testing.T) {
+	const sessionID = "cached-usage-session"
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), DefaultChatConfig())
+	turnID := reserveTestChatTurn(t, ch, sessionID)
+	read, write := int64(100), int64(20)
+	provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+		Content: "done", InputTokens: 5, OutputTokens: 3, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
+	}}}
+	exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, newTestResultStore(t))
+	_, usage, _, err := ch.runToolLoop(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "hi"}}, "system prompt", nil, exec,
+		sessionID, "default", "test-model", 0.7, 4096, 0, nil, turnID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 125, usage.InputTokens)
+}
+
 // --- HandleChat ---
 
 func TestHandleChat(t *testing.T) {
@@ -2023,7 +2093,7 @@ func TestLoadChatSessionRejectsGatewaySession(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
 		Namespace: "default", Name: "gateway-private", SessionType: store.SessionTypeGateway,
 	}))
@@ -2079,9 +2149,9 @@ func TestHandleChatRejectsConcurrentSessionTurnBeforeProviderInvocation(t *testi
 	committer, ok := ss.(store.SessionTurnCommitter)
 	require.True(t, ok)
 	now := time.Now().UTC()
-	_, err := committer.AcquireChatTurn(context.Background(), &store.SessionRecord{
+	_, err := committer.AcquireChatTurn(context.Background(), store.AcquireChatTurnRequest{Session: &store.SessionRecord{
 		Namespace: testDefaultNamespace, Name: "busy-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
-	}, "held-turn", now.Add(time.Minute))
+	}, TurnID: "held-turn", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = committer.ReleaseChatTurn(context.Background(), testDefaultNamespace, "busy-chat", "held-turn", false)
@@ -2296,7 +2366,7 @@ type cancelableChatTurnStore struct {
 	once    sync.Once
 }
 
-func (s *cancelableChatTurnStore) AcquireChatTurn(ctx context.Context, _ *store.SessionRecord, _ string, _ time.Time) (bool, error) {
+func (s *cancelableChatTurnStore) AcquireChatTurn(ctx context.Context, _ store.AcquireChatTurnRequest) (bool, error) {
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
 	return false, ctx.Err()

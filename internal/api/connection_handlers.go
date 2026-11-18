@@ -166,6 +166,9 @@ type ConnectorProviderResponse struct {
 	Ready       bool                         `json:"ready"`
 	Scopes      corev1alpha1.ConnectorScopes `json:"scopes"`
 	Tools       []ConnectorToolResponse      `json:"tools"`
+	// AgentHost says that linking the provider gives the person an agent
+	// host, where code can read the linked token whatever the link's mode.
+	AgentHost bool `json:"agentHost,omitempty"`
 }
 
 // ConnectorToolResponse names one tool and its class.
@@ -196,10 +199,22 @@ type ConnectionResponse struct {
 	GrantSequence int64 `json:"grantSequence"`
 }
 
+// connectionGetsAgentHost says whether linking connection to provider gives
+// its person an agent host: the provider serves them, and the person has not
+// declined one for this link, which the provisioner honors.
+func connectionGetsAgentHost(provider *corev1alpha1.ConnectorProvider, connection *corev1alpha1.Connection) bool {
+	return provider.Spec.AgentHost != nil &&
+		connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] != corev1alpha1.ConnectionAgentHostDeclined
+}
+
 // ConnectionAuthorizeResponse returns the consent URL alongside the Connection.
 type ConnectionAuthorizeResponse struct {
 	Connection   ConnectionResponse `json:"connection"`
 	AuthorizeURL string             `json:"authorizeURL"`
+	// AgentHost says that linking gives the person an agent host: the
+	// provider serves them and the person has not declined one for this link.
+	// Clients disclose it before the person consents, and wait for the host.
+	AgentHost bool `json:"agentHost,omitempty"`
 }
 
 type createConnectionRequest struct {
@@ -231,6 +246,7 @@ func connectorProviderResponse(provider *corev1alpha1.ConnectorProvider) Connect
 		Ready:       connectors.ProviderAccepted(provider),
 		Scopes:      provider.Spec.OAuth.Scopes,
 		Tools:       tools,
+		AgentHost:   provider.Spec.AgentHost != nil,
 	}
 }
 
@@ -597,7 +613,8 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AuthorizeURL: authorizeURL}
+	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AuthorizeURL: authorizeURL,
+		AgentHost: connectionGetsAgentHost(provider, connection)}
 	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) ||
 		!connectors.ConsentMatchesProvider(connection, provider) {
 		// A reused link whose grant does not cover the requested mode is
@@ -647,7 +664,8 @@ func (h *Handlers) AuthorizeConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AuthorizeURL: authorizeURL})
+	return c.JSON(ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AuthorizeURL: authorizeURL,
+		AgentHost: connectionGetsAgentHost(provider, connection)})
 }
 
 // UpdateConnection changes the mode. Widening to readWrite requests the write
@@ -686,7 +704,7 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection mode")
 		}
 	}
-	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection)}
+	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AgentHost: connectionGetsAgentHost(provider, connection)}
 	// Consent is needed whenever the granted scopes do not cover the mode or
 	// the provider's OAuth client changed, not only on the request that
 	// changed the mode, so a retry after a failed consent start still

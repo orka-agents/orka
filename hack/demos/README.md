@@ -1,12 +1,11 @@
 # Demo Magic Scenarios
 
-This directory contains a small `demo-magic` kit for showing Orka in six ways:
+This directory contains a small `demo-magic` kit for showing Orka in five ways:
 
 - `10-chat-pr.sh`: Claude Code -> Orka's Anthropic-compatible API -> prepared coordinator -> coder/reviewer/CI loops -> PR
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current Orka harness v2 path
 - `70-agent-substrate.sh`: archived Substrate prototype; requires an Actor-backed v2 supervisor before it is supported again
 
 There is also:
@@ -21,7 +20,7 @@ There is also:
 - Optional: an upstream `demo-magic.sh` if you want to override the vendored fallback
 - Demo resources live in the controller's watched namespace (`orka-system` for `make deploy` and the Helm chart): the static harness-v2 controller reconciles exactly one namespace, so `DEMO_NAMESPACE` must equal `--watch-namespace`
 - A Provider CRD and runtime credential Secret in that namespace
-- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 60/70 scripts still assume one broad Git Secret and must be migrated before use.
+- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 70 script still assumes one broad Git Secret and must be migrated before use.
 
 The demo scripts include a lightweight `demo-magic.sh` fallback at `hack/demos/lib/demo-magic.sh`, so no separate checkout is required. If you prefer the upstream `demo-magic` behavior, set `DEMO_MAGIC_PATH` to your local checkout. If `DEMO_MAGIC_PATH` points at a missing file, the scripts ignore it and use the vendored fallback.
 
@@ -269,7 +268,7 @@ source hack/demos/cluster/demo-env.sh
 make demo-cluster-up-all-down     # tear it all down
 ```
 
-Demos 60/70 and their runtime assets are retained for prototype archaeology.
+Demo 70 and the agent-sandbox runtime assets are retained for prototype archaeology.
 Reviving them requires the external provider installation and class/profile setup
 described in the [workspace provider guide](../../docs/development/workspace-provider-authoring.md),
 the generic `--enable-workspace-provider-api` and
@@ -317,8 +316,8 @@ An explicit `DEMO_CHAT_REQUEST` / `DEMO_MANUAL_REQUEST` env var or
 
 ### Bootstrapping a demo cluster
 
-For Demo 60 (and a clean rerun of 10–40) you can spin up a dedicated kind
-cluster and load the sandbox runtime image:
+For a clean rerun of 10–40 you can spin up a dedicated kind cluster and load
+the sandbox runtime image:
 
 ```bash
 make demo-cluster-up

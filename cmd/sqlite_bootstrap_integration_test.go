@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
@@ -76,10 +77,11 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 				case "right":
 					setKey(material)
 				}
-				s, key, err := openControllerSQLiteStore(path, load)
+				s, appStorage, key, err := openControllerSQLiteStore(path, load)
 				if candidate != "right" {
 					require.Error(t, err)
 					require.Nil(t, s)
+					require.Nil(t, appStorage)
 					require.Empty(t, key)
 					continue
 				}
@@ -89,15 +91,18 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 				require.NoError(t, err)
 				identity = info.ID
 				body := []byte(`{"prompt":"retained encrypted prompt"}`)
-				snapshot, err := s.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{
+				// An earlier release sealed this snapshot; the storage client
+				// opens it unchanged.
+				snapshot, err := appStorage.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{
 					TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body),
 				})
 				require.NoError(t, err)
 				require.True(t, bytes.Equal(body, snapshot.Body), "snapshot changed")
-				require.NoError(t, s.SaveResult(t.Context(), "ns", "new", []byte("after adoption")))
+				client := storageclienttest.NewEmbedded(t, s)
+				require.NoError(t, client.SaveResult(t.Context(), "ns", "new", []byte("after adoption")))
 				require.NoError(t, s.Close())
 			}
-			s, _, err := openControllerSQLiteStore(path, load)
+			s, _, _, err := openControllerSQLiteStore(path, load)
 			require.NoError(t, err)
 			defer func() { _ = s.Close() }()
 			info, err := s.DatasetInfo()
@@ -126,7 +131,7 @@ func TestControllerSQLiteBootstrapRealProcessLockAndCrash(t *testing.T) {
 	}
 	command("crash") // Schema+identity committed, key loading interrupted without cleanup.
 	var identity string
-	s, _, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
+	s, _, _, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 		identity = info.ID
 		require.True(t, info.CanBootstrapSnapshotKey)
 		return bytes.Repeat([]byte{0x42}, 32), nil
@@ -134,7 +139,7 @@ func TestControllerSQLiteBootstrapRealProcessLockAndCrash(t *testing.T) {
 	require.NoError(t, err)
 	command("locked") // An actual second process must not enter its key loader.
 	require.NoError(t, s.Close())
-	s, _, err = openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
+	s, _, _, err = openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 		require.Equal(t, identity, info.ID)
 		require.False(t, info.CanBootstrapSnapshotKey)
 		return bytes.Repeat([]byte{0x42}, 32), nil
@@ -150,7 +155,7 @@ func TestControllerSQLiteBootstrapChildProcess(t *testing.T) {
 	}
 	mode := os.Getenv("ORKA_TEST_BOOTSTRAP_MODE")
 	called := false
-	s, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+	s, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
 		called = true
 		if mode == "crash" {
 			os.Exit(31)
@@ -207,12 +212,12 @@ func TestControllerSQLiteBootstrapSecretConflictWithAPIServer(t *testing.T) {
 		return ensureAgentExecutionSnapshotKey(t.Context(), api, writer, "bootstrap-test",
 			agentExecutionSnapshotSecretOptions{Name: "snapshot", Key: "key"}, info.CanBootstrapSnapshotKey)
 	}
-	s, key, err := openControllerSQLiteStore(path, load)
+	s, _, key, err := openControllerSQLiteStore(path, load)
 	require.NoError(t, err)
 	require.Equal(t, 1, writer.conflicts, "must exercise real resourceVersion conflict")
 	require.True(t, bytes.Equal(winner, key), "loser must use API-committed winner key")
 	require.NoError(t, s.Close())
-	s, key, err = openControllerSQLiteStore(path, load)
+	s, _, key, err = openControllerSQLiteStore(path, load)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 	require.True(t, bytes.Equal(winner, key), "reopen replaced winner key")

@@ -262,6 +262,11 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "get", "core.orka.ai", "memories", id)
 		}
+		// A consolidation proposal changes the memories it targets.
+		apply.AuthorizeMemoryChange = func(ctx context.Context, namespace, id string) error {
+			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
+				namespace, "update", "core.orka.ai", "memories", id)
+		}
 	}
 	return applyNamespaceMemoryProposal(c, h.memoryProposalStore, apply)
 }
@@ -287,6 +292,9 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
+	// Only applying a proposal links a memory to it. A memory created with a
+	// proposal's ID would be returned as that proposal's application, or,
+	// for a consolidation proposal, would block it from ever applying.
 	if err := rejectClientProposalProvenance(memory); err != nil {
 		return err
 	}
@@ -295,10 +303,6 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	}
 	return c.Status(fiber.StatusCreated).JSON(memory)
 }
-
-// memorySourceProposal is the source recorded on a memory created by applying
-// a proposal.
-const memorySourceProposal = "memory_proposal"
 
 // rejectClientProposalProvenance keeps proposal provenance server-owned: only
 // applying a reviewed proposal records a memory_proposal source and the
@@ -334,11 +338,11 @@ func rejectClientProposalSourceUpdate(stored *store.Memory, req store.Memory) er
 }
 
 func isProposalSource(source string) bool {
-	return strings.EqualFold(strings.TrimSpace(source), memorySourceProposal)
+	return strings.EqualFold(strings.TrimSpace(source), store.MemorySourceProposal)
 }
 
 func errClientProposalSource() error {
-	return fiber.NewError(fiber.StatusBadRequest, "source "+memorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
+	return fiber.NewError(fiber.StatusBadRequest, "source "+store.MemorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
 }
 
 func getNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace string) error {
@@ -403,6 +407,9 @@ func createNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryPropos
 	proposal.Namespace = namespace
 	if strings.TrimSpace(proposal.Title) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "title is required")
+	}
+	if err := rejectClientProposalDecision(proposal); err != nil {
+		return err
 	}
 	if err := proposalStore.CreateMemoryProposal(c.Context(), &proposal); err != nil {
 		return memoryStoreError("create memory proposal", "memory proposal", err)
@@ -663,7 +670,37 @@ func rejectClientRecordedIdentity(body []byte, field string) error {
 	return nil
 }
 
+// rejectClientProposalDecision keeps a new proposal pending: only the review
+// and apply endpoints record a decision and the identity that made it, so a
+// create request cannot skip review or name its own reviewer or applier.
+// Empty values are accepted because older clients send every key.
+func rejectClientProposalDecision(proposal store.MemoryProposal) error {
+	if status := strings.TrimSpace(proposal.Status); status != "" && !strings.EqualFold(status, "pending") {
+		return fiber.NewError(fiber.StatusBadRequest, "status cannot be set by clients; new proposals start pending")
+	}
+	for _, decision := range []struct {
+		field string
+		set   bool
+	}{
+		{"reviewer", strings.TrimSpace(proposal.Reviewer) != ""},
+		{"reviewNote", strings.TrimSpace(proposal.ReviewNote) != ""},
+		{"reviewedAt", proposal.ReviewedAt != nil},
+		// The store treats any nonempty ID, even whitespace, as applied.
+		{"appliedMemoryId", proposal.AppliedMemoryID != ""},
+		{"appliedBy", strings.TrimSpace(proposal.AppliedBy) != ""},
+		{"appliedAt", proposal.AppliedAt != nil},
+	} {
+		if decision.set {
+			return fiber.NewError(fiber.StatusBadRequest, decision.field+" cannot be set by clients; it is recorded by review and apply")
+		}
+	}
+	return nil
+}
+
 func memoryStoreError(action, resource string, err error) error {
+	if temporary := temporaryStorageHTTPError(err); temporary != nil {
+		return temporary
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, fmt.Sprintf("%s not found", resource))
 	}

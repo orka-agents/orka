@@ -1,8 +1,10 @@
 package supervisor
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,6 +85,8 @@ const (
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvDurableWorkspaceDir       = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
 	EnvDurableWorkspaceKey       = "ORKA_ACP_DURABLE_WORKSPACE_KEY"
+	EnvMaxResidentSessions       = "ORKA_ACP_MAX_RESIDENT_SESSIONS"
+	EnvMaxConcurrentPrompts      = "ORKA_ACP_MAX_CONCURRENT_PROMPTS"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
@@ -93,6 +97,9 @@ const (
 	// EnvToolboxMountMethod names how the controller bound the toolboxes
 	// (copy or imageVolume). It is not part of the profile.
 	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
+	// EnvSkills carries the frozen skill list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvSkills = "ORKA_ACP_SKILLS"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -155,6 +162,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	skills, err := skillsFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               harnessv2.ACPProfileV1,
 		ProviderKind:             providerKind,
@@ -169,6 +180,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
 		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -215,6 +227,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	limits := defaultProtocolLimits()
 	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
+	if err := applyCapacityFromEnv(&limits); err != nil {
+		return Config{}, err
+	}
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -327,8 +342,12 @@ func LoadConfigFromEnv() (Config, error) {
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
 		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
-		Provider:                          providerCaps,
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		// Built-in supervisors serve operator access; whether a session may
+		// use it is decided by the controller-side API's class opt-in,
+		// SubjectAccessReview, and session-state gates.
+		SupportsOperatorAccess: operatorAccessSupported(providerKind, os.Geteuid()),
+		Provider:               providerCaps,
+		WorkspaceGovernance:    harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envutil.String(EnvListenAddress, ":8080"),
@@ -355,6 +374,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		Skills:                        harnessv2.CloneRuntimeSkills(skills),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -375,6 +395,9 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
+
+// claudeSkillToolName is Claude Code's tool that loads a skill's instructions.
+const claudeSkillToolName = "Skill"
 
 // codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
@@ -554,7 +577,7 @@ func codexReadOnlySessionPolicy(request harnessv2.CreateRuntimeSessionRequest, p
 
 func claudeSessionProjection(
 	request harnessv2.CreateRuntimeSessionRequest,
-	_ acp.SessionPaths,
+	paths acp.SessionPaths,
 	_ ProviderProxyBinding,
 	model string,
 ) (ProviderSessionProjection, error) {
@@ -562,7 +585,17 @@ func claudeSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	options := map[string]any{"maxTurns": request.AgentConfiguration.MaxTurns}
+	options := map[string]any{
+		"maxTurns": request.AgentConfiguration.MaxTurns,
+		// claude-agent-acp otherwise loads user, project, and local settings.
+		// Project settings come from the cloned repository and can define
+		// hooks that run shell commands outside the tool policy and env that
+		// redirects ANTHROPIC_BASE_URL with the provider credential; user
+		// settings live in the agent-writable session home. Orka projects
+		// every option it needs through this metadata instead, including its
+		// skills, which arrive as a plugin rather than as user skills.
+		"settingSources": []string{},
+	}
 	var environment map[string]string
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
@@ -574,10 +607,38 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	skills := harnessv2.RuntimeSkillNames(request.Profile.Skills)
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
+		if len(skills) > 0 {
+			// The Skill tool only loads the instructions of the skills listed
+			// below; it can't run anything the policy doesn't already allow.
+			// Listing it here only makes it available: the SDK (0.3.293)
+			// turns the skills option into Skill(<name>) allowedTools rules,
+			// so those skills load without a permission callback, which the
+			// frozen policy would reject.
+			allowed = append(allowed, claudeSkillToolName)
+		}
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
+	}
+	if len(skills) > 0 {
+		if !filepath.IsAbs(paths.Root) {
+			return ProviderSessionProjection{}, fmt.Errorf("claude skills require an absolute session root")
+		}
+		// The skills come from Orka's read-only plugin folder. Its MCP
+		// discovery is skipped, so the plugin can only add skills.
+		options["plugins"] = []map[string]any{{"type": "local", "path": claudeSkillPluginRoot(paths), "skipMcpDiscovery": true}}
+		// Expose exactly the Orka skills, by their plugin-qualified names: the
+		// SDK hides every other skill and its Skill tool rejects them. Inline
+		// shell execution in skills and slash commands from any source is
+		// turned off as well.
+		qualified := make([]string, 0, len(skills))
+		for _, name := range skills {
+			qualified = append(qualified, claudeSkillPluginName+":"+name)
+		}
+		options["skills"] = qualified
+		options["settings"] = map[string]any{"disableSkillShellExecution": true}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -840,7 +901,8 @@ func providerProfile(
 					openCodeProviderEnvName:                     proxy.Credential,
 				}, nil
 			},
-			PrepareSession: prepareOpenCodeConfig,
+			ValidateWorkspace: validateOpenCodeSession,
+			PrepareSession:    prepareOpenCodeConfig,
 		}, nil
 	case providerKindAgentKit, providerKindFoundry:
 		adapter, _ := externalACPAdapterFor(kind)
@@ -850,12 +912,150 @@ func providerProfile(
 	}
 }
 
-func prepareOpenCodeConfig(paths acp.SessionPaths) error {
-	configDir := filepath.Join(paths.Config, "opencode")
-	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+// openCodeProjectConfigNames are the entries OpenCode's location config loader
+// discovers while walking up from the session directory. That loader honors
+// neither OPENCODE_DISABLE_PROJECT_CONFIG nor --pure, and it imports plugin
+// modules named by these files or placed in .opencode/plugin(s), so their
+// presence would run repository code outside the Orka tool policy.
+var openCodeProjectConfigNames = []string{".opencode", "opencode.json", "opencode.jsonc"}
+
+// rejectOpenCodeProjectConfiguration fails closed when the session directory
+// or any ancestor holds OpenCode project configuration. Rewriting the
+// workspace would alter repository content that may later be published, so
+// such workspaces are refused. Every session open, including a cold resume
+// of a durable workspace, passes through this check before OpenCode starts.
+func rejectOpenCodeProjectConfiguration(paths acp.SessionPaths) error {
+	if strings.TrimSpace(paths.Workspace) == "" {
+		return fmt.Errorf("OpenCode workspace path is required")
+	}
+	// Once the child has run it owns the session root, so before an adapter
+	// restart it could have swapped the workspace for a link to a tree whose
+	// ancestors this walk would never see. No child process runs between this
+	// check and the launch, so the answer cannot change in between.
+	if info, err := os.Lstat(paths.Workspace); err != nil {
+		return fmt.Errorf("inspect OpenCode workspace: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("OpenCode workspace is not a directory")
+	}
+	var found []string
+	for directory := filepath.Clean(paths.Workspace); ; directory = filepath.Dir(directory) {
+		for _, name := range openCodeProjectConfigNames {
+			candidate := filepath.Join(directory, name)
+			if _, err := os.Lstat(candidate); err == nil {
+				found = append(found, candidate)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect OpenCode project configuration: %w", err)
+			}
+		}
+		if parent := filepath.Dir(directory); parent == directory {
+			break
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	for index, candidate := range found {
+		if relative, err := filepath.Rel(paths.Workspace, candidate); err == nil && filepath.IsLocal(relative) {
+			found[index] = relative
+		}
+	}
+	return &workspaceRejectedError{
+		publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage,
+		detail: fmt.Sprintf(
+			"OpenCode %s loads project plugins even when project configuration is disabled; found %s",
+			acp.OpenCodeVersion, strings.Join(found, ", "),
+		),
+	}
+}
+
+// validateOpenCodeSession is OpenCode's workspace check. Session creation
+// runs it before the session tree exists for the child, and an idle adapter
+// restart runs it again, as the child, before the replacement starts.
+func validateOpenCodeSession(paths acp.SessionPaths) error {
+	if err := rejectOpenCodeProjectConfiguration(paths); err != nil {
 		return err
 	}
-	files := map[string][]byte{
+	return rejectOpenCodeSessionConfiguration(paths)
+}
+
+// rejectOpenCodeSessionConfiguration refuses OpenCode configuration the agent
+// could have written into its own session tree since creation. OpenCode 1.19
+// treats OPENCODE_CONFIG_DIR as its global configuration folder: it loads
+// opencode.json and opencode.jsonc there and imports plugin(s)/*.{js,ts}
+// from it even in pure mode, and it also reads $HOME/.opencode. Only what
+// prepareOpenCodeConfig writes, OpenCode's own .gitignore and dependency
+// folder, and Orka's skills may be there. At creation the folder does not
+// exist yet.
+func rejectOpenCodeSessionConfiguration(paths acp.SessionPaths) error {
+	if _, err := os.Lstat(filepath.Join(paths.Home, ".opencode")); err == nil {
+		return fmt.Errorf("OpenCode home configuration folder exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect OpenCode home configuration: %w", err)
+	}
+	dir := filepath.Join(paths.Config, "opencode")
+	relative, err := filepath.Rel(paths.Root, dir)
+	if strings.TrimSpace(paths.Root) == "" || err != nil || !filepath.IsLocal(relative) {
+		return fmt.Errorf("OpenCode configuration folder must be inside the session root")
+	}
+	// The child owns the session root, so each folder down to the
+	// configuration folder must still be a real folder, not a link.
+	current := paths.Root
+	for part := range strings.SplitSeq(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration folder: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("OpenCode configuration path is not a directory")
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list OpenCode configuration folder: %w", err)
+	}
+	expected := openCodeConfigFiles()
+	for _, entry := range entries {
+		name := entry.Name()
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration entry: %w", err)
+		}
+		switch want, prepared := expected[name]; {
+		case prepared:
+			if !info.Mode().IsRegular() || info.Size() != int64(len(want)) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return fmt.Errorf("read OpenCode configuration file %s: %w", name, err)
+			}
+			if !bytes.Equal(data, want) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+		case name == "node_modules" || name == "skills":
+			if !info.IsDir() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a directory", name)
+			}
+		case name == ".gitignore":
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a regular file", name)
+			}
+		default:
+			return fmt.Errorf("OpenCode configuration folder holds unexpected entry %q", name)
+		}
+	}
+	return nil
+}
+
+// openCodeConfigFiles are the files prepareOpenCodeConfig writes into
+// OPENCODE_CONFIG_DIR. They pin OpenCode's plugin dependency, so OpenCode does
+// not fetch one at startup.
+func openCodeConfigFiles() map[string][]byte {
+	return map[string][]byte{
 		"package.json": fmt.Appendf(nil,
 			"{\n  \"private\": true,\n  \"dependencies\": {\n    \"@opencode-ai/plugin\": %q\n  }\n}\n",
 			acp.OpenCodeVersion,
@@ -865,7 +1065,14 @@ func prepareOpenCodeConfig(paths acp.SessionPaths) error {
 			acp.OpenCodeVersion,
 		),
 	}
-	for name, data := range files {
+}
+
+func prepareOpenCodeConfig(paths acp.SessionPaths) error {
+	configDir := filepath.Join(paths.Config, "opencode")
+	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+		return err
+	}
+	for name, data := range openCodeConfigFiles() {
 		if err := os.WriteFile(filepath.Join(configDir, name), data, 0o600); err != nil {
 			return err
 		}
@@ -939,6 +1146,55 @@ func openCodeSessionConfig(
 			"*.env.example": openCodePermissionAllow,
 		}
 	}
+	if skills := harnessv2.RuntimeSkillNames(request.Profile.Skills); len(skills) > 0 {
+		// OpenCode checks the skill permission with the skill name, so only
+		// the Orka skills are allowed; its built-in skills fall through to the
+		// top-level "*" deny. No nested "*" deny: OpenCode evaluates rules in
+		// JavaScript object order, which lists integer-like keys (a valid
+		// skill name such as "123") before "*", so a nested wildcard would
+		// win the last match and deny that skill.
+		skillPermissions := map[string]string{}
+		for _, name := range skills {
+			skillPermissions[name] = openCodePermissionAllow
+		}
+		permissions["skill"] = skillPermissions
+		// The projected skills live outside the workspace, and a blanket
+		// external_directory deny in the config overrides OpenCode's own
+		// skill-folder allowance, so its read tool could load SKILL.md but
+		// not the skill's supporting files. Allow only each projected Orka
+		// skill folder and keep the wildcard deny. JSON object keys are
+		// sorted, so "*" precedes these absolute paths and OpenCode's
+		// last-match rule picks the narrower allow.
+		dir, err := nativeSkillsDir(providerKindOpencode, paths)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("OpenCode skills folder %q must be absolute", dir)
+		}
+		// OpenCode's apply_patch asks the edit permission only for a move's
+		// source, so the edit rules below cannot stop it from moving a
+		// workspace file onto a projected skill. When that tool can mutate,
+		// keep the skill folders behind the deny: the skill tool still
+		// returns SKILL.md, but the supporting files stay unreadable.
+		if mutationAction != openCodePermissionAllow || intent == harnessv2.WorkspaceIntentRead || !openCodeUsesApplyPatch(model) {
+			externalDirectory := map[string]string{"*": openCodePermissionDeny}
+			for _, name := range skills {
+				externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+			}
+			permissions["external_directory"] = externalDirectory
+		}
+		// external_directory does not tell a read from a write, so that
+		// allowance would also let the edit, write, and apply_patch tools
+		// rewrite a projected skill. Keep them inside the workspace.
+		if mutationAction == openCodePermissionAllow {
+			editRules, err := openCodeSkillEditRules(paths.Workspace, dir, skills)
+			if err != nil {
+				return nil, err
+			}
+			permissions[openCodeToolEdit] = editRules
+		}
+	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
 		permissions[openCodeToolBash] = openCodePermissionDeny
@@ -995,7 +1251,9 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 	permissions := make(map[string]bool)
 	owners := make(map[string]string)
 	for _, descriptor := range policy.Tools {
-		if !descriptor.Source.Brokered() {
+		// A forwarding Tool serves a command-line client and is hidden from
+		// the model's tool list, so it takes no model-facing permission.
+		if !descriptor.Source.Brokered() || descriptor.Forward != nil {
 			continue
 		}
 		// OpenCode prefixes tools from the controller MCP server with `orka_`,
@@ -1014,6 +1272,44 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 		permissions[name] = openCodeToolPolicyAllows(policy, descriptor.Name)
 	}
 	return permissions, nil
+}
+
+// openCodeSkillEditRules allows edits everywhere except the projected skill
+// folders. OpenCode (1.19.0) asks one "edit" permission for its edit, write,
+// and apply_patch tools, with the file path relative to the project worktree:
+// the workspace when it is a Git repository, "/" otherwise. Both spellings of
+// each skill folder are denied, so a workspace file is caught only if its
+// path repeats the session's own absolute path. The rules stop those
+// path-taking tools only; a session that may run shell commands still owns its
+// private copy.
+// openCodeUsesApplyPatch mirrors the OpenCode 1.19.0 tool registry, which
+// replaces the edit and write tools with apply_patch for these model IDs.
+// OpenCode matches the model's API ID; this config sets no ID override, so
+// that is the provider/model key it writes.
+func openCodeUsesApplyPatch(model string) bool {
+	return strings.Contains(model, "gpt-") && !strings.Contains(model, "oss") && !strings.Contains(model, "gpt-4")
+}
+
+func openCodeSkillEditRules(workspace, skillsDir string, skills []string) (map[string]string, error) {
+	rules := map[string]string{"*": openCodePermissionAllow}
+	for _, name := range skills {
+		folder := filepath.Join(skillsDir, name)
+		fromWorkspace, err := filepath.Rel(workspace, folder)
+		if err != nil {
+			return nil, fmt.Errorf("locate OpenCode skill %q from the workspace: %w", name, err)
+		}
+		for _, relative := range []string{fromWorkspace, strings.TrimPrefix(folder, string(filepath.Separator))} {
+			pattern := filepath.ToSlash(filepath.Join(relative, "*"))
+			// OpenCode takes the last matching rule in key order and expands a
+			// leading "~" or "$HOME". JSON keys are sorted, so a deny must sort
+			// after "*" and must not be rewritten, or the allow would win.
+			if pattern <= "*" || strings.HasPrefix(pattern, "~") {
+				return nil, fmt.Errorf("OpenCode skill %q cannot be protected from edits at %q", name, folder)
+			}
+			rules[pattern] = openCodePermissionDeny
+		}
+	}
+	return rules, nil
 }
 
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation
@@ -1120,6 +1416,39 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
 		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+// maxRuntimeCapacity matches the RuntimePool capacity API bound.
+const maxRuntimeCapacity = 1000
+
+// applyCapacityFromEnv adopts the RuntimePool's capacity. Unset values keep
+// the built-in limits so an older controller's Pods behave as before.
+func applyCapacityFromEnv(limits *harnessv2.ProtocolLimits) error {
+	sessions, err := optionalCapacityFromEnv(EnvMaxResidentSessions, limits.MaxResidentSessions)
+	if err != nil {
+		return err
+	}
+	prompts, err := optionalCapacityFromEnv(EnvMaxConcurrentPrompts, limits.MaxConcurrentPrompts)
+	if err != nil {
+		return err
+	}
+	if prompts > sessions {
+		return fmt.Errorf("%s cannot exceed %s", EnvMaxConcurrentPrompts, EnvMaxResidentSessions)
+	}
+	limits.MaxResidentSessions, limits.MaxConcurrentPrompts = sessions, prompts
+	return nil
+}
+
+func optionalCapacityFromEnv(name string, fallback uint32) (uint32, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > maxRuntimeCapacity {
+		return 0, fmt.Errorf("%s must be an integer from 1 to %d", name, maxRuntimeCapacity)
+	}
+	return uint32(value), nil
 }
 
 func nativeSessionMaxBytesFromEnv() (int, error) {
@@ -1258,4 +1587,17 @@ func nativeInstructionProjection(provider, prompt string) *acp.InstructionProjec
 	default:
 		return nil
 	}
+}
+
+// operatorAccessPlatform reports whether tagged-process containment and the
+// file helper exist on this platform. Replaceable in tests.
+var operatorAccessPlatform = runtime.GOOS == "linux"
+
+// operatorAccessSupported reports whether this supervisor can serve operator
+// access. Operator commands run with exactly one supplementary tag group,
+// which only a root supervisor can assign; a non-root supervisor's children
+// inherit its own groups, so the exec helper would refuse every launch.
+// Outside Linux no tag can be proven free and no operation can be contained.
+func operatorAccessSupported(providerKind string, euid int) bool {
+	return operatorAccessPlatform && euid == 0 && !isExternalACPProvider(providerKind)
 }

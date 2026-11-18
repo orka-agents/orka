@@ -195,7 +195,7 @@ func setupSecurityHandlersWithAuthzFixture(t *testing.T, ctxTokenConfig ContextT
 		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
 		Mode: mode,
 	})
@@ -1672,7 +1672,7 @@ func TestSecurityFindingMutationsResolveCanonicalAlias(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, patchAgent).Build()
 		db, err := sqlite.NewDB(":memory:")
 		require.NoError(t, err)
-		securityStore := sqlite.NewStore(db, ":memory:")
+		securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 		handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: securityStore})
 
 		ctx := context.Background()
@@ -2046,7 +2046,7 @@ func TestCreateSecurityPullRequestReturnsGovernedReceiptWithoutGitHubMutation(t 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
@@ -2197,7 +2197,7 @@ func TestCreateSecurityPatchTaskRequestsGovernedPublication(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, patchAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
@@ -2276,7 +2276,7 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader}, SecurityStore: securityStore})
 	finding := &store.Finding{
 		ID: "finding-validation", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
@@ -2308,7 +2308,7 @@ func TestCreateSecurityPatchTaskRejectsLegacyCredentialReuse(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: securityStore})
 	finding := &store.Finding{ID: "fnd_legacy", Namespace: "demo", Title: "Legacy authority reuse"}
 

@@ -419,7 +419,8 @@ func patchOTelControllerManager(deploymentName string, containerIndex int, args 
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), failureMessage)
 
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName, "-n", namespace, "--timeout=5m")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName, "-n", namespace,
+		"--timeout="+controllerRolloutTimeout(deploymentName).String())
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed waiting for controller-manager rollout")
 

@@ -3,63 +3,63 @@
 
 export const features = [
   {
-    emoji: '🧑‍💻',
+    icon: 'GitPullRequest',
     title: 'Coding agents that open PRs',
     description:
       'Codex, Claude Code, Copilot CLI, and OpenCode work on a clean checkout. A separate publisher pushes the verified change and opens the pull request.',
     href: '/docs/agent-runtimes',
   },
   {
-    emoji: '🤖',
+    icon: 'Bot',
     title: 'AI tasks with tools',
     description:
       'Anthropic, OpenAI, or Azure OpenAI models with web search, code execution, custom HTTP and MCP tools, skills, and sessions.',
     href: '/docs/guides/agents-skills-and-tools',
   },
   {
-    emoji: '🔀',
+    icon: 'Network',
     title: 'Multi-agent coordination',
     description:
       'Coordinators delegate to specialists within allowlist, depth, and concurrency limits, or work toward a goal autonomously.',
     href: '/docs/multi-agent-coordination',
   },
   {
-    emoji: '🔁',
+    icon: 'GitMerge',
     title: 'Issue to pull request',
     description:
       'Review every pull request, or label an issue and let agents plan, implement, repair, and mark it ready to merge.',
     href: '/docs/repository-monitors',
   },
   {
-    emoji: '🛡️',
+    icon: 'ShieldCheck',
     title: 'Repository security scanning',
     description:
       'Threat models, validated findings, and remediation pull requests, with a person choosing what gets fixed.',
     href: '/docs/repository-security-scanning',
   },
   {
-    emoji: '💬',
+    icon: 'SquareTerminal',
     title: 'Chat, dashboard, and CLI',
     description:
       'Describe work in plain language to an orchestrator, watch it live in the dashboard, or script it with the orka CLI.',
     href: '/docs/chat',
   },
   {
-    emoji: '🔌',
+    icon: 'Plug',
     title: 'OpenAI & Anthropic APIs',
     description:
       'Point Claude Code, Cursor, or Continue at Orka. People get a cluster token; nobody needs a provider key.',
     href: '/docs/openai-compat',
   },
   {
-    emoji: '📨',
+    icon: 'MessagesSquare',
     title: 'Teams, Telegram, and A2A',
     description:
       'Gateways bring agents into the conversations people and other agents already have, with durable, deduplicated delivery.',
     href: '/docs/gateways',
   },
   {
-    emoji: '✅',
+    icon: 'UserCheck',
     title: 'Approvals and governance',
     description:
       'Hold consequential actions for a person, let people act through their own linked accounts, and audit every Task.',

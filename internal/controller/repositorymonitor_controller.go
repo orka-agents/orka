@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -56,6 +57,13 @@ const (
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
 	repositoryMonitorValidationRetry   = time.Minute
 	repositoryMonitorStaleRunError     = "[retry_scheduled] repository monitor run did not complete within "
+	// repositoryMonitorInterruptedRunError prefixes the error of a run whose
+	// execution ended, or whose owning controller epoch was replaced, before it
+	// recorded completion.
+	repositoryMonitorInterruptedRunError = "[retry_scheduled] repository monitor run was interrupted before it recorded completion"
+	// repositoryMonitorInterruptedRunRecordTimeout bounds the detached write that
+	// records an interrupted run's terminal state after its context ended.
+	repositoryMonitorInterruptedRunRecordTimeout = 10 * time.Second
 
 	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
 	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
@@ -78,6 +86,15 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
+
+	// activeRunsMu guards activeRuns, the monitor runs this process is
+	// executing right now, keyed by repositoryMonitorRunKey. A running run
+	// that is absent while this process holds the current controller epoch
+	// has no live executor: its claimant was an earlier epoch, which the
+	// storage write fence now rejects, or an execution in this process that
+	// returned before it recorded completion.
+	activeRunsMu sync.Mutex
+	activeRuns   map[string]struct{}
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
@@ -770,6 +787,26 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	if requeueAfter := time.Until(run.StartedAt); requeueAfter > 0 {
 		return nil, requeueAfter, nil
 	}
+	// Register the run as executing here before claiming it, so a reconcile of
+	// this process never mistakes its own claim for an abandoned run.
+	runKey := repositoryMonitorRunKey(monitor.Namespace, monitor.Name, run.ID)
+	r.markMonitorRunActive(runKey)
+	defer r.markMonitorRunInactive(runKey)
+	processed, requeueAfter, err := r.executeClaimedMonitorRun(ctx, monitor, run, owner, repository)
+	if err != nil && ctx.Err() != nil {
+		// The call ended before the run recorded completion, for example on
+		// controller shutdown. Record a terminal state now where it is safe;
+		// otherwise the next reconcile of the epoch holder reclaims it.
+		if interrupted := r.recordInterruptedMonitorRun(ctx, monitor, run.ID, err); interrupted != nil {
+			return interrupted, 0, nil
+		}
+	}
+	return processed, requeueAfter, err
+}
+
+// executeClaimedMonitorRun marks run running and executes it. It returns a
+// nil error only after the run's resulting state has been recorded.
+func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run store.MonitorRun, owner, repository string) (*store.MonitorRun, time.Duration, error) {
 	run.Phase = repositoryMonitorRunPhaseRunning
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
@@ -842,6 +879,11 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 }
 
 func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (*store.MonitorRun, time.Duration, error) {
+	// Read the controller epoch before the runs. Once this process holds the
+	// current epoch, the state write fence rejects writes from every earlier
+	// epoch, so a running run read afterwards can no longer be completed by a
+	// claimant from an earlier epoch.
+	epoch, holdsEpoch := r.ControllerEpochManager.Current()
 	runs, _, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{
 		Namespace:   monitor.Namespace,
 		MonitorName: monitor.Name,
@@ -853,6 +895,18 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	}
 
 	run := runs[0]
+	if holdsEpoch && !r.monitorRunActive(repositoryMonitorRunKey(monitor.Namespace, monitor.Name, run.ID)) {
+		runError := fmt.Sprintf("%s: no live controller is executing it; reclaimed by controller epoch %d and marked failed", repositoryMonitorInterruptedRunError, epoch.Epoch)
+		if err := r.finalizeInterruptedMonitorRun(ctx, monitor, &run, runError, map[string]any{
+			eventReasonField:  "interrupted_run",
+			"controllerEpoch": epoch.Epoch,
+		}); err != nil {
+			return nil, 0, err
+		}
+		return &run, 0, nil
+	}
+
+	// Backstop for a run this process reports as executing.
 	now := time.Now()
 	runningFor := now.Sub(run.StartedAt)
 	if runningFor < repositoryMonitorRunningRunTimeout {
@@ -874,11 +928,92 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	return &run, 0, nil
 }
 
+// recordInterruptedMonitorRun records a terminal state for a run whose
+// execution context ended before the run recorded completion. It writes with
+// a detached, bounded context; the write still carries this process's
+// controller epoch fence, so it cannot land once a newer epoch owns storage.
+// It returns the recorded run, or nil when the run is no longer running here
+// or the record could not be written, leaving the run to be reclaimed by the
+// controller epoch holder.
+func (r *RepositoryMonitorReconciler) recordInterruptedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, runID string, cause error) *store.MonitorRun {
+	logger := log.FromContext(ctx).WithName("repositorymonitor")
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), repositoryMonitorInterruptedRunRecordTimeout)
+	defer cancel()
+	run, err := r.Store.GetMonitorRun(recordCtx, monitor.Namespace, runID)
+	if err != nil {
+		logger.Error(err, "failed to read interrupted repository monitor run", "run", runID)
+		return nil
+	}
+	if run.Phase != repositoryMonitorRunPhaseRunning || run.MonitorName != monitor.Name {
+		return nil
+	}
+	runError := fmt.Sprintf("%s: %v", repositoryMonitorInterruptedRunError, cause)
+	if err := r.finalizeInterruptedMonitorRun(recordCtx, monitor, run, runError, map[string]any{
+		eventReasonField: "interrupted_run",
+	}); err != nil {
+		logger.Error(err, "failed to record interrupted repository monitor run", "run", runID)
+		return nil
+	}
+	return run
+}
+
+// finalizeInterruptedMonitorRun marks a running run failed with runError and
+// records a run_failed event so the next run of the monitor can start.
+func (r *RepositoryMonitorReconciler) finalizeInterruptedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, runError string, details map[string]any) error {
+	now := time.Now()
+	run.Phase = repositoryMonitorRunPhaseFailed
+	run.CompletedAt = &now
+	run.Error = runError
+	if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
+		return err
+	}
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, details); err != nil {
+		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
+	}
+	return nil
+}
+
+// repositoryMonitorRunErrorNeedsOutcomeVerification reports whether a failed
+// run ended without observing the outcome of the work it may have submitted.
+func repositoryMonitorRunErrorNeedsOutcomeVerification(runError string) bool {
+	return strings.HasPrefix(runError, repositoryMonitorStaleRunError) || strings.HasPrefix(runError, repositoryMonitorInterruptedRunError)
+}
+
+func repositoryMonitorRunKey(namespace, monitorName, runID string) string {
+	return namespace + "/" + monitorName + "/" + runID
+}
+
+func (r *RepositoryMonitorReconciler) markMonitorRunActive(key string) {
+	r.activeRunsMu.Lock()
+	defer r.activeRunsMu.Unlock()
+	if r.activeRuns == nil {
+		r.activeRuns = map[string]struct{}{}
+	}
+	r.activeRuns[key] = struct{}{}
+}
+
+func (r *RepositoryMonitorReconciler) markMonitorRunInactive(key string) {
+	r.activeRunsMu.Lock()
+	defer r.activeRunsMu.Unlock()
+	delete(r.activeRuns, key)
+}
+
+func (r *RepositoryMonitorReconciler) monitorRunActive(key string) bool {
+	r.activeRunsMu.Lock()
+	defer r.activeRunsMu.Unlock()
+	_, ok := r.activeRuns[key]
+	return ok
+}
+
 func repositoryMonitorRunFailureState(err error) string {
 	if err == nil {
 		return ""
 	}
 	if _, ok := errors.AsType[*repositoryMonitorPendingMutationProjectionError](err); ok {
+		return repositoryMonitorRunRetryScheduled
+	}
+	// Partial CI results settle on their own; retry rather than terminalize.
+	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
 		return repositoryMonitorRunRetryScheduled
 	}
 	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {

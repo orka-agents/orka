@@ -52,6 +52,36 @@ type AgentExecutionAgentRef struct {
 
 	// +kubebuilder:validation:Minimum=1
 	Generation int64 `json:"generation"`
+
+	// Identity is the Agent's external identity frozen at binding. Editing the
+	// Agent or the controller's issuer configuration does not change it.
+	// +optional
+	Identity *AgentExecutionIdentityRef `json:"identity,omitempty"`
+}
+
+// AgentExecutionIdentityRef pins the external identity a bound Task acts as.
+type AgentExecutionIdentityRef struct {
+	// Issuer is the identity's issuer type, such as entra.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Issuer string `json:"issuer"`
+
+	// ID is the identity's ID at the issuer.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+
+	// Instance identifies the issuer instance, for Entra the tenant and
+	// blueprint, as configured on the controller at binding.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Instance string `json:"instance"`
+
+	// ActsForRequester records that the binding froze an agentIdentity
+	// policy in Delegated mode, so the Task can act for its requester. Every
+	// approval on such a Task needs the requester.
+	// +optional
+	ActsForRequester bool `json:"actsForRequester,omitempty"`
 }
 
 // AgentExecutionSnapshotRef links the immutable non-secret execution snapshot.

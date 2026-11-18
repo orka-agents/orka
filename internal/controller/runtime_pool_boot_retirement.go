@@ -145,7 +145,8 @@ func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Contex
 }
 
 // recordNativeRuntimePoolDrain adds durable boot evidence only for enrolled
-// native instances. The legacy/provider authenticated receipt path is unchanged.
+// native instances. The legacy/provider authenticated receipt path is unchanged,
+// and a marked boot that never retained its Pod or committed a witness also uses it.
 func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context, pool *corev1alpha1.RuntimePool, active *corev1alpha1.RuntimePoolActiveInstanceStatus, status harnessv2.StatusResponse) error {
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, status)
@@ -172,6 +173,15 @@ func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context
 		return err
 	}
 	w, err := loadRuntimePoolBootWitness(ctx, r.ControlStore, agentRuntimeRecoveryIdentity(runtimePoolBootWitnessKind, pool.UID, pool.Namespace, active.RuntimeInstanceID))
+	if errors.Is(err, store.ErrNotFound) && !controllerutil.ContainsFinalizer(pod, runtimePoolBootPodFinalizer) && pod.Annotations[runtimePoolBootRetentionAnnotation] == "" {
+		// Admission requires a committed witness, which is written only after
+		// the Pod is retained, and retention is released only after retirement
+		// proof. A marked boot with no witness and no retention barrier therefore
+		// never admitted work, for example when its Pod became Ready only after
+		// scale-down began. Its exact authenticated quiescent drain is sufficient
+		// proof, as it is for unmarked Pods.
+		return r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, status)
+	}
 	if err != nil {
 		return err
 	}

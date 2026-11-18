@@ -115,9 +115,18 @@ describe('demo task API', () => {
     const pending = approvals.find((a) => a.status === 'pending')
     expect(pending?.id).toBe('apr-rollback-checkout')
 
+    // The cross-Task inbox and attention view list the same pending request.
+    const inbox = await json<{ items: Array<{ kind: string; approval?: { id: string; canApprove: boolean | null } }> }>('/approvals?status=pending')
+    expect(inbox.items.map((item) => item.approval?.id)).toContain('apr-rollback-checkout')
+    const attention = await json<{ items: Array<{ kind: string; task?: { name: string } }>; incomplete: boolean }>('/attention')
+    expect(attention.items[0]).toMatchObject({ kind: 'approval' })
+    expect(attention.incomplete).toBe(false)
+
     const decided = await json<{ status: string }>(`/tasks/${name}/approvals/${pending!.id}/decision`, post({ decision: 'approve' }))
     expect(decided.status).toBe('approved')
     expect((await call(`/tasks/${name}/approvals/${pending!.id}/decision`, post({ decision: 'approve' }))).status).toBe(409)
+    const afterInbox = await json<{ items: Array<{ approval?: { id: string } }> }>('/approvals?status=pending')
+    expect(afterInbox.items.map((item) => item.approval?.id)).not.toContain('apr-rollback-checkout')
 
     advanceClock(3 * 60_000)
     const after = taskSchema.parse(await json(`/tasks/${name}`))
@@ -165,6 +174,30 @@ describe('demo task API', () => {
     expect(task.status?.phase).toBe('Cancelled')
     const { events } = listExecutionEventsResponseSchema.parse(await json(`/tasks/${name}/events`))
     expect(events.at(-1)).toMatchObject({ type: 'TaskCancelled', summary: 'Cancelled: repository monitor stopped by command' })
+  })
+
+  it('cancels running children with their parent', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+    const parent = createDemoTask({ agent: 'coordinator', prompt: 'Prepare the release' })
+    const child = createDemoTask({ agent: 'docs', prompt: 'Draft the release notes', parent })
+    const finished = createDemoTask({ agent: 'triage', prompt: 'List release blockers', parent })
+    cancelDemoTask(finished, 'Cancelled: stopped earlier')
+    // A finished child's own running child is still cancelled.
+    const grandchild = createDemoTask({ agent: 'docs', prompt: 'Summarize the blockers', parent: finished })
+    advanceClock(10_000)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status?.phase).toBe('Running')
+    expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Running')
+
+    expect((await call(`/tasks/${parent}/cancel`, post({ reason: 'wrong branch' }))).ok).toBe(true)
+    expect(taskSchema.parse(await json(`/tasks/${child}`)).status).toMatchObject({
+      phase: 'Cancelled',
+      message: 'cancelled by demo-user: wrong branch',
+    })
+    expect(taskSchema.parse(await json(`/tasks/${finished}`)).status?.message).toBe('Cancelled: stopped earlier')
+    expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Cancelled')
+
+    // A stale confirmation is refused even once the Task is already cancelled.
+    expect((await call(`/tasks/${parent}/cancel`, post({ uid: 'replaced-uid' }))).status).toBe(409)
   })
 
   it('forks a finished container task with its own container and keeps its outcome', async () => {

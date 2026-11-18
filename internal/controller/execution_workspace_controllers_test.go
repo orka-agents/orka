@@ -661,6 +661,26 @@ func TestWorkspaceClassAuthorizerUsesUseVerb(t *testing.T) {
 	}
 }
 
+func TestAgentHostAuthorizerReviewsEachResourceAtItsVersion(t *testing.T) {
+	t.Parallel()
+	base := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).Build()
+	capture := &subjectAccessReviewClient{Client: base, allowed: true}
+	authorizer := AgentHostTemplateAuthorizer{Client: capture}
+	caller := authenticationv1.UserInfo{Username: "alice"}
+	if err := authorizer.AuthorizeSecretRead(context.Background(), defaultNS, "alice-github", caller); err != nil {
+		t.Fatalf("AuthorizeSecretRead: %v", err)
+	}
+	if attrs := capture.review.Spec.ResourceAttributes; attrs.Verb != "get" || attrs.Group != "" || attrs.Version != "v1" || attrs.Resource != "secrets" {
+		t.Fatalf("Secret review attributes = %#v", attrs)
+	}
+	if err := authorizer.AuthorizeAgentHostTemplate(context.Background(), defaultNS, "copilotd", caller); err != nil {
+		t.Fatalf("AuthorizeAgentHostTemplate: %v", err)
+	}
+	if attrs := capture.review.Spec.ResourceAttributes; attrs.Verb != "use" || attrs.Group != "core.orka.ai" || attrs.Version != "v1alpha1" {
+		t.Fatalf("template review attributes = %#v", attrs)
+	}
+}
+
 type subjectAccessReviewClient struct {
 	client.Client
 	allowed bool

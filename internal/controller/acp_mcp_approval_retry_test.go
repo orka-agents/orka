@@ -44,7 +44,7 @@ func (f *approvalRetryReadFault) readError() error {
 }
 
 type approvalRetryEventStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	fault         *approvalRetryReadFault
 	observeAppend func(*store.ExecutionEvent)
@@ -86,7 +86,7 @@ func configureApprovalRetryReadFault(t *testing.T, f *mcpApprovalFixture, source
 	fault := &approvalRetryReadFault{reads: make(chan struct{}, 2), approvedReads: make(chan struct{}, 2)}
 	switch source {
 	case "decision":
-		f.broker.ApprovalEvents = approvalRetryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events, fault: fault}
+		f.broker.ApprovalEvents = approvalRetryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage, fault: fault}
 	case "receipt":
 		f.broker.Effects = approvalRetryEffectStore{ExternalEffectStore: f.broker.Effects, fault: fault}
 	case "secret":
@@ -187,7 +187,7 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 				settlementReads := 0
 				if source == "receipt" {
 					f.broker.ApprovalEvents = approvalRetryEventStore{
-						TaskDataTransactionStore: f.events, DeduplicatingExecutionEventStore: f.events,
+						TaskDataAccessStore: f.storage, DeduplicatingExecutionEventStore: f.events,
 						observeAppend: func(event *store.ExecutionEvent) {
 							readMu.Lock()
 							defer readMu.Unlock()

@@ -51,7 +51,22 @@ type mockLLMEvalRequest struct {
 const (
 	mockLLMCaptureReadTimeout  = 15 * time.Second
 	mockLLMCaptureFetchTimeout = 12 * time.Second
+	// The settle timeout exceeds the capture proxy's grace for a client that
+	// hangs up before its response ends.
+	mockLLMCaptureSettleTimeout  = 5 * time.Second
+	mockLLMCaptureSettleInterval = 250 * time.Millisecond
 )
+
+// mockLLMCaptureInFlight reports whether a request made since before has
+// neither completed nor failed yet.
+func mockLLMCaptureInFlight(before mockLLMEvalSnapshot, state mockLLMCaptureState) bool {
+	for _, entry := range state.Entries {
+		if !before.requestIDs[entry.RequestID] && !entry.Complete && entry.Error == "" {
+			return true
+		}
+	}
+	return false
+}
 
 func (m mockLLMInstance) captureJournal() (mockLLMCaptureState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), mockLLMCaptureReadTimeout)
@@ -119,6 +134,28 @@ func (m mockLLMInstance) evalRequestsSince(
 	state, err := m.captureJournal()
 	if err != nil {
 		return nil, err
+	}
+	// A Task can finish before the relay of its last response settles, so
+	// re-read briefly while a new request is still in flight. The settle
+	// deadline bounds every re-read; the last complete read is then judged.
+	settle, cancel := context.WithTimeout(context.Background(), mockLLMCaptureSettleTimeout)
+	defer cancel()
+	for mockLLMCaptureInFlight(before, state) {
+		select {
+		case <-settle.Done():
+		case <-time.After(mockLLMCaptureSettleInterval):
+		}
+		if settle.Err() != nil {
+			break
+		}
+		next, err := m.captureJournalWithin(settle)
+		if err != nil {
+			if settle.Err() != nil {
+				break
+			}
+			return nil, err
+		}
+		state = next
 	}
 	journal, err := m.journal()
 	if err != nil {
@@ -188,7 +225,10 @@ func validateMockLLMEvalCapture(
 		}
 		index := len(requests)
 		if entry.RequestID == "" || !entry.Complete || entry.Error != "" {
-			return nil, fmt.Errorf("model request %d was not completely observed", index)
+			// Path, status and the capture's fixed error text identify the
+			// request without exposing its body.
+			return nil, fmt.Errorf("model request %d was not completely observed (path %q, status %d, error %q)",
+				index, entry.Path, entry.Status, entry.Error)
 		}
 		if entry.Status < 200 || entry.Status >= 300 {
 			return nil, fmt.Errorf("model request %d failed with HTTP %d", index, entry.Status)

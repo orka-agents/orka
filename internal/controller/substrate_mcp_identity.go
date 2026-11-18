@@ -63,7 +63,6 @@ func (r *ToolReconciler) migrateSubstrateMCPIdentities(
 		if qualified := qualify(actor.ActorID); qualified != actor.ActorID {
 			before := tool.DeepCopy()
 			actor.ActorID = qualified
-			actor.RouteHost = qualified + "." + strings.Trim(r.SubstrateConfig.WithDefaults().ActorDNSSuffix, ".")
 			tool.Status.Available = false
 			tool.Status.Endpoint = ""
 			tool.Status.Error = "native Actor identity migrated; endpoint readiness must be revalidated"

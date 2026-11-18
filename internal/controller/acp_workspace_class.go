@@ -599,27 +599,36 @@ func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 	return true, nil
 }
 
-// acpWorkspaceClassProfileHash recomputes the class profile hash with the same
-// canonical inputs the workspace class controller pins, detecting provider or
-// parameter drift behind an unchanged class generation.
-func acpWorkspaceClassProfileHash(
-	class *workspacev1alpha1.ExecutionWorkspaceClass,
-	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
-	parameters *unstructured.Unstructured,
-) (string, error) {
+// workspaceProviderProfileIdentity is the provider identity pinned into the
+// profile hash of every class that is not served by an external ACP provider.
+// Its JSON encoding is part of hashes frozen into existing class bindings and
+// execution snapshots, so its fields, order, and tags must not change.
+type workspaceProviderProfileIdentity struct {
+	UID               types.UID                              `json:"uid"`
+	ControllerName    string                                 `json:"controllerName"`
+	ParametersRef     workspacev1alpha1.TypedObjectReference `json:"parametersRef"`
+	RequiredContracts []string                               `json:"requiredContracts"`
+}
+
+func newWorkspaceProviderProfileIdentity(provider *workspacev1alpha1.ExecutionWorkspaceProvider) workspaceProviderProfileIdentity {
 	requiredContracts := append([]string(nil), provider.Spec.RequiredContracts...)
 	slices.Sort(requiredContracts)
-	providerIdentity := struct {
-		UID               types.UID                              `json:"uid"`
-		ControllerName    string                                 `json:"controllerName"`
-		ParametersRef     workspacev1alpha1.TypedObjectReference `json:"parametersRef"`
-		RequiredContracts []string                               `json:"requiredContracts"`
-	}{
+	return workspaceProviderProfileIdentity{
 		UID:               provider.UID,
 		ControllerName:    provider.Spec.ControllerName,
 		ParametersRef:     provider.Spec.ParametersRef,
 		RequiredContracts: requiredContracts,
 	}
+}
+
+// acpWorkspaceClassProfileHash is the profile hash of a class that names a
+// provider directly, computed from the provider identity and the resolved
+// class parameters.
+func acpWorkspaceClassProfileHash(
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	parameters *unstructured.Unstructured,
+) (string, error) {
 	resolved := struct {
 		APIVersion string    `json:"apiVersion"`
 		Kind       string    `json:"kind"`
@@ -633,7 +642,7 @@ func acpWorkspaceClassProfileHash(
 		Generation: parameters.GetGeneration(),
 		Spec:       parameters.Object["spec"],
 	}
-	return workspaceprovider.ClassProfileHash(class.Spec, providerIdentity, resolved)
+	return workspaceprovider.ClassProfileHash(class.Spec, newWorkspaceProviderProfileIdentity(provider), resolved)
 }
 
 func onDetachActionsToStrings(actions []workspacev1alpha1.WorkspaceOnDetach) []string {

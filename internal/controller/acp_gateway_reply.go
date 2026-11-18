@@ -51,5 +51,13 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 		projected.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 	}
 	projected.Spec.AgentRuntime.AllowedTools = sortedUnique(allowed)
+	if grant {
+		// The grant turns an implicit native set into an explicit allowlist,
+		// which dispatch judges differently, so keep it only when the
+		// projected policy still fits the Agent ceiling.
+		if validateAgentRuntimeCeiling(projected, agent) != nil {
+			return task, nil
+		}
+	}
 	return projected, nil
 }

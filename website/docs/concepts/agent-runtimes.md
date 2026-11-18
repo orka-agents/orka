@@ -48,9 +48,11 @@ for the external service lifecycle and capacity.
 
 Built-in runtimes can mount extra command-line tools from read-only toolbox
 images declared in `Agent.spec.runtime.toolboxes`; see
-[Toolboxes](../guides/toolboxes.md).
+[Toolboxes](../guides/toolboxes.md). Codex, Claude, and OpenCode can also receive
+Agent Skills from digest-pinned images declared in `Agent.spec.runtime.skills`; see
+[Runtime skills](../guides/runtime-skills.md).
 
-External runtimes use an `AgentRuntime` registration with `contractVersion: orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
+External runtimes register through an `AgentRuntime` that implements `orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
 
 ## Architecture
 
@@ -140,6 +142,7 @@ stateDiagram-v2
     prompt_running --> validating: prompt settled
     validating --> idle: read Task, or no changes
     validating --> preparing_publication: write Task with changes
+    validating --> publication_prepared: delta frozen during validation
 
     preparing_publication --> publication_prepared
     publication_prepared --> finalizing: publication reconciled
@@ -150,6 +153,7 @@ stateDiagram-v2
     deleted --> [*]
 
     prompt_running --> cancelling: cancellation requested
+    cancelling --> validating: prompt completed first
     cancelling --> poisoned
     poisoned --> deleting
 ```
@@ -253,7 +257,6 @@ metadata:
 spec:
   runtime:
     type: codex
-    contractVersion: orka.harness.v2
     defaultMaxTurns: 20
     defaultAllowBash: true
     defaultAllowedTools:
@@ -272,7 +275,119 @@ read-intent workspaces, Orka also disables Bash and OpenCode Grep because Grep
 cannot carry the secret-file exclusions applied to OpenCode Read; Read and Glob
 remain available when allowed by policy.
 
+The cloned repository is untrusted input, so built-in runtimes do not load
+agent configuration from it that could run commands or change provider
+routing outside the Orka tool policy:
+
+- **Claude** loads no settings files, neither from the repository's `.claude/`
+  directory nor from the session home. Repository hooks, `env`, and
+  `CLAUDE.md` are ignored. Orka's [runtime skills](../guides/runtime-skills.md)
+  reach Claude as a read-only plugin instead.
+- **Codex** does not trust the session workspace, so it ignores the
+  repository's `.codex/config.toml`, including MCP servers and shell
+  environment settings. It still reads `AGENTS.md`.
+- **Copilot** runs only hooks from the image's managed policy. Repository
+  hooks in `.github/hooks`, `.github/copilot/settings.json`, and
+  `.claude/settings.json`, and hooks in the session home, do not run.
+  Copilot CLI 1.0.96 still reads repository instruction files, such as
+  `AGENTS.md` and `.github/copilot-instructions.md`, as prompt context.
+- **OpenCode** 1.19.0 imports project plugins even when project
+  configuration is disabled. Orka therefore refuses an OpenCode session whose
+  workspace root contains `.opencode/`, `opencode.json`, or `opencode.jsonc`,
+  and fails the Task with `RuntimeSessionStartFailed`. It does not remove
+  those files, because they may be published. The check runs on every
+  session start, including a resume, and again before Orka restarts an
+  adapter that exited while idle. That restart also checks the session's own
+  OpenCode configuration folder and `~/.opencode`, which OpenCode reads as
+  global configuration and which the agent can write. Before that check,
+  Orka stops any running [operator access](../guides/operator-workspace-access.md)
+  command and refuses new ones until the restarted OpenCode accepts the
+  prompt, because those commands run as the session's identity. If the agent added
+  configuration or plugins to any of these, Orka retires the session instead
+  of restarting OpenCode. The replacement session gets fresh configuration
+  folders but the same workspace, so it starts only if the workspace still
+  passes the check.
+
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
+
+### Cap what Tasks can request
+
+The `default*` fields are only defaults: a Task can replace them with its own
+`allowedTools`, `allowBash`, or `maxTurns`. To set limits that a Task can
+narrow but never exceed, add a `ceiling`:
+
+```yaml
+spec:
+  runtime:
+    type: claude
+    defaultAllowedTools: [Read, Grep]
+    defaultAllowBash: false
+    defaultMaxTurns: 20
+    ceiling:
+      allowedTools: [Read, Grep, Edit]
+      allowBash: false
+      maxTurns: 40
+```
+
+Before a Task is bound, Orka resolves the policy it would run with (the Task's
+override, otherwise the Agent default) and fails the Task if that policy goes
+beyond the ceiling:
+
+| Task asks for | Result |
+| --- | --- |
+| nothing | the Agent defaults: Read, Grep, 20 turns |
+| `allowedTools: [Read]` | Read |
+| `allowedTools: [Read, Write]` | fails: `ceiling does not allow tool "Write"` |
+| `allowBash: true` with `Bash` in `allowedTools` | fails: `ceiling forbids Bash` |
+| `maxTurns: 100` | fails: `ceiling allows at most 40 turns` |
+
+How the check reads a policy:
+
+- **Tools.** The check uses the tools the runtime would actually expose, after
+  `disallowedTools`, the Bash gate, and runtime normalization (such as
+  OpenCode's alias grouping) apply. Tool names ignore case. Brokered and
+  custom tool names count too. For scoped names such as `Bash(git status)`, a
+  bare ceiling entry covers every scope of that tool, but a scoped entry
+  covers only that exact scope, compared case-sensitively. A `disallowedTools` entry narrows
+  the request only when it matches an allowed name exactly, as at dispatch, so
+  `bash` does not remove `Bash`.
+- **No explicit list.** A Task with no allowlist and an Agent with no
+  `defaultAllowedTools` resolve to the full native tool set, less anything
+  `disallowedTools` or `allowBash: false` removes. That usually exceeds a tool
+  ceiling, so set `defaultAllowedTools` within the ceiling. An allowlist of only
+  blank entries is judged the same way, so it can never slip past a ceiling.
+  Likewise,
+  `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
+- **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
+- **Unknown keys.** A key `ceiling` does not define, such as a misspelled
+  `allowedTool`, is rejected rather than dropped, so a typo cannot remove a limit.
+- **Coordination tools.** The `send_message` and `check_messages` tools that
+  Orka injects into delegated child Tasks are not counted against the ceiling.
+  A Task that lists them in its own `allowedTools` is judged on them as usual.
+- **Gateway replies.** Eligible gateway Tasks without an explicit allowlist
+  normally get `reply_in_conversation` implicitly. Under a ceiling, Orka keeps
+  that grant only when the resulting policy still fits: the ceiling must list
+  `reply_in_conversation`, and the native tool set must fit it (OpenCode's
+  default list, or another runtime's set narrowed by `disallowedTools` or
+  `allowBash: false`). Otherwise, include `reply_in_conversation` in an explicit
+  allowlist and in the ceiling.
+- **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
+  already fixes Bash and the turn budget. The check uses the tools the
+  registered AgentRuntime policy exposes, so a tool the registration lists but
+  also denies does not count against the ceiling.
+- **Codex.** Every Codex session can run shell commands. Even a read-only
+  session with only `Glob`, `Grep`, and `Read` runs read commands through the
+  shell. A Codex Task therefore always fails a `ceiling.allowBash: false`, so
+  use another runtime when the ceiling must exclude the shell.
+
+A Task is checked against the Agent generation it binds to. Changing a
+ceiling does not affect Tasks that are already bound. When an Agent's own
+explicit defaults exceed its ceiling, the Agent reports `Ready=False` with the
+reason.
+
+A ceiling limits what callers may request through the Task API. It does not
+stop anyone who can edit the Agent from changing the ceiling, so restrict
+`update` on Agents to the people who own them.
 
 ## Read-only workspace Task
 
@@ -440,19 +555,26 @@ immutable images:
 --controller-mode=harness-v2
 --acp-runtime-namespace=orka-runtimes
 --acp-provider-proxy-namespace=orka-system
---acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc:8080
+--acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc.cluster.local:8080
 --acp-codex-runtime-image=<repository>@sha256:<digest>
 --acp-claude-runtime-image=<repository>@sha256:<digest>
 --acp-copilot-runtime-image=<repository>@sha256:<digest>
 --acp-opencode-runtime-image=<repository>@sha256:<digest>
 ```
 
-:::warning[The two provider-proxy flags must name the same namespace]
-`--acp-provider-proxy-base-url` is the address runtime Pods call.
-`--acp-provider-proxy-namespace` is what the generated NetworkPolicy allows them to reach.
-If they disagree, every provider call is dropped by default-deny egress with no useful error.
-The flag defaults to `vekil-system`, but the Helm chart overrides it to the release namespace
-(`orka-system` on a default install), which is where the chart puts `provider-auth-proxy`.
+:::warning[The provider-proxy flags must match the proxy Pods]
+`--acp-provider-proxy-base-url` is the address runtime Pods call. Its host must end in
+`.<namespace>.svc` or `.<namespace>.svc.cluster.local`, where the namespace is
+`--acp-provider-proxy-namespace`, as in `<service>.<namespace>.svc`. Otherwise the controller
+rejects the configuration and RuntimePools report `Degraded`. Pools without an execution workspace
+show the error in their status message; execution-workspace pools show
+`runtime configuration is not admitted`. The namespace flag is unset by default. With
+`providerProxy.enabled=true`, the Helm chart sets it to the release namespace, where the chart
+deploys `provider-auth-proxy`.
+The generated NetworkPolicy allows TCP to Pods matching `--acp-provider-proxy-pod-labels` in that
+namespace, on the base URL's port. If those labels miss the proxy Pods, or that port differs from
+the port the proxy Pods listen on, every provider call is dropped by default-deny egress with no
+useful error.
 :::
 
 Mutable image tags are rejected for built-in pools. For Kustomize deployment,
@@ -462,6 +584,7 @@ cross-namespace Vekil ingress boundary.
 ## Troubleshooting
 
 - **Task fails before queueing**: for a built-in runtime, verify the Agent has `runtime.type: codex`, `claude`, `copilot`, or `opencode`, ACP is enabled, and the matching digest-pinned image is configured. For `runtimeRef`, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.
+- **OpenCode Task fails with `RuntimeSessionStartFailed`: "the OpenCode runtime refuses workspaces containing .opencode, opencode.json, or opencode.jsonc"**: the workspace root contains one of those entries; the runtime log names it. Run the Task with another built-in runtime, or remove those entries from the repository or branch it uses.
 - **Task remains queued**: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.
 - **Agent warnings in Task results**: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex's missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its `Info:` lines into the reply.
 - **Task reports `OutcomeUnknown`**: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.

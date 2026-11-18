@@ -1304,6 +1304,42 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 	require.Contains(t, failures[0], "resource-assertion")
 }
 
+func TestContextTokenTaskToolCredentialFailuresForSubstrateEgressCredentials(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-mcp", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+			Egress: []corev1alpha1.SubstrateActorEgressRule{{
+				Scheme: "https", Host: "api.github.com",
+				Credential: &corev1alpha1.SubstrateActorEgressCredential{SecretRef: corev1alpha1.SecretKeySelector{Name: "github-token", Key: "token"}},
+			}},
+		}}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"github-mcp"}}
+
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+
+	token.TransactionContext = map[string]any{"secret": "different-secret"}
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "github-token")
+}
+
 func TestContextTokenTaskToolCredentialFailuresResolvesBuiltInRuntimeCustomTools(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
@@ -1926,4 +1962,32 @@ func TestContextTokenTaskToolFailuresAcceptsGenericDenyAll(t *testing.T) {
 		RuntimeAllowedTools: []string{}, RuntimeAllowBash: false,
 	})
 	require.Empty(t, failures)
+}
+
+// A transaction token creates a memory consolidation run only with the
+// scopes its run's access needs.
+func TestContextTokenMemoryConsolidationFailures(t *testing.T) {
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	run := func(mode corev1alpha1.MemoryConsolidationMode, inSpec bool) CreateTaskRequest {
+		ai := &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{Mode: mode}}
+		if inSpec {
+			return CreateTaskRequest{Spec: &corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: ai}}
+		}
+		return CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: ai}
+	}
+	token := func(scopes ...string) *ContextToken { return &ContextToken{Scopes: scopes} }
+	reads := make([]string, 0, 4)
+	reads = append(reads, ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead)
+
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg,
+		CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{}}), "an ordinary Task needs no more")
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)), 2)
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead), cfg,
+		run(corev1alpha1.MemoryConsolidationDryRun, true)), 1, "the field is found in spec too")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)))
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationPropose, false)), 1,
+		"a Propose run also creates proposals")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(append(reads, ContextTokenScopeMemoryWrite)...), cfg,
+		run(corev1alpha1.MemoryConsolidationPropose, false)))
 }

@@ -278,6 +278,8 @@ func newRepositoryMonitorReadinessHeadDriftFixture(t *testing.T, peer bool) *rep
 			status.ID = 100 + writes
 			f.latest[sha] = status
 			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected request", http.StatusInternalServerError)

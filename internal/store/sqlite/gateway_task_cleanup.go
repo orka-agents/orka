@@ -97,12 +97,18 @@ func (s *Store) ListGatewayTaskCleanupReceipts(ctx context.Context, filter store
 // DeleteGatewayTaskCleanupReceipt is idempotent and never deletes another
 // incarnation that reused the Task name.
 func (s *Store) DeleteGatewayTaskCleanupReceipt(ctx context.Context, namespace, taskName, taskUID string) error {
+	return writeOperationErr(ctx, s, "DeleteGatewayTaskCleanupReceipt", func(ctx context.Context) error {
+		return s.deleteGatewayTaskCleanupReceiptWrite(ctx, namespace, taskName, taskUID)
+	})
+}
+
+func (s *Store) deleteGatewayTaskCleanupReceiptWrite(ctx context.Context, namespace, taskName, taskUID string) error {
 	for field, value := range map[string]string{"Task namespace": namespace, "Task name": taskName, "Task UID": taskUID} {
 		if err := store.ValidateControlIdentifier(field, value); err != nil {
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM gateway_task_cleanup_receipts WHERE namespace = ? AND task_name = ? AND task_uid = ?`, namespace, taskName, taskUID)
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM gateway_task_cleanup_receipts WHERE namespace = ? AND task_name = ? AND task_uid = ?`, namespace, taskName, taskUID)
 	if err != nil {
 		return fmt.Errorf("delete Gateway Task cleanup receipt: %w", err)
 	}

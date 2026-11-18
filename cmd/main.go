@@ -14,14 +14,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"os"
+	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -36,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
@@ -46,6 +53,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -55,6 +63,8 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
+	"github.com/orka-agents/orka/internal/agenthost"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -71,23 +81,32 @@ import (
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
+	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	// +kubebuilder:scaffold:imports
 )
 
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	serviceAccountTokenFile     = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101 -- a path, not a credential.
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
+	// storageConfigResolveTimeout bounds the startup Secret reads for storage
+	// adapters.
+	storageConfigResolveTimeout = 30 * time.Second
 )
 
 var (
@@ -121,6 +140,18 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
+// validateAgentIdentityProvenance refuses an identity issuer without Task
+// provenance admission. Identity binding judges a Task by who created it: the
+// RepositoryScan or RepositoryMonitor owner and markers it carries. Without
+// the webhook any Task editor could remove them and let an unchecked
+// automation Task bind as a root Task.
+func validateAgentIdentityProvenance(config agentidentity.Config, provenanceProtected bool) error {
+	if config.Entra != nil && !provenanceProtected {
+		return fmt.Errorf("an Agent identity issuer requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect how Tasks record who created them")
+	}
+	return nil
+}
+
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
 	if apiEnabled && !classUseAdmissionEnabled {
 		return fmt.Errorf("workspace provider API requires workspace class use admission")
@@ -132,6 +163,18 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 		// Kubernetes Task writer, so class-backed workspaces must never be
 		// served without it.
 		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the reserved workspace settlement metadata")
+	}
+	return nil
+}
+
+// validateOperatorAccessSecurityConfig fails operator workspace access closed
+// without Task provenance admission. The durable operator taint and the
+// workspace link it is read through are reserved acp.workspace.orka.ai/ Task
+// metadata; without the webhook any direct Task writer could strip them and
+// release a tainted workspace for publication or continuation.
+func validateOperatorAccessSecurityConfig(enabled, provenanceProtected bool) error {
+	if enabled && !provenanceProtected {
+		return fmt.Errorf("--operator-workspace-access-enabled requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the operator taint")
 	}
 	return nil
 }
@@ -198,25 +241,45 @@ func validateDisabledSubstrateRecoveryConfig(
 		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	recoveryState := ""
 	// Only registered cleanup controllers can service these obligations.
-
-	if recoveryState == "" {
-		var err error
-		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
-		if err != nil {
-			return err
-		}
+	recoveryState, routerRequired, err := controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+	if err != nil {
+		return err
 	}
-
 	if recoveryState == "" {
 		return nil
 	}
 	if configErr != nil {
 		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
 	}
-	if err := cfg.ValidateMCPTools(); err != nil {
+	// SubstrateActorPool finalization uses only the control API; MCP Tool
+	// finalization also builds the router client.
+	validate := cfg.ValidateControl
+	if routerRequired {
+		validate = cfg.ValidateMCPTools
+	}
+	if err := validate(); err != nil {
 		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
+	}
+	return nil
+}
+
+// validateSubstrateStartupConfig rejects removed Substrate v0.1.0 settings
+// unconditionally, then validates MCP Tool admission when it is enabled.
+// Disabled-admission recovery is validated separately once existing cleanup
+// obligations can be discovered.
+func validateSubstrateStartupConfig(mcpToolsEnabled bool, cfg controller.SubstrateConfig, configErr error) error {
+	if errors.Is(configErr, controller.ErrRemovedSubstrateSetting) {
+		return configErr
+	}
+	if !mcpToolsEnabled {
+		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("invalid substrate configuration from environment: %w", configErr)
+	}
+	if err := cfg.ValidateMCPTools(); err != nil {
+		return fmt.Errorf("invalid substrate configuration: %w", err)
 	}
 	return nil
 }
@@ -231,6 +294,11 @@ func main() {
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
+	var agentUseAuthorizationEnabled bool
+	var providerUseAuthorizationEnabled bool
+	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
+	var agentIdentityEntraAuthority, agentIdentityTokenFile string
+	var agentIdentityMaxDelegationAge time.Duration
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -241,6 +309,7 @@ func main() {
 	var nativeSessionMaxBytes int
 	var watchNamespace string
 	var generalWorkerImage string
+	var sessionLoaderImage string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
 	var containerWorkerServiceAccountName string
@@ -261,6 +330,8 @@ func main() {
 	var gatewayEnabled bool
 	var connectorsEnabled bool
 	var dashboardEnabled bool
+	var mcpServerEnabled bool
+	var mcpMaxConcurrent int
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
@@ -275,11 +346,14 @@ func main() {
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
-	var storeBackend string
-	var storePath string
+	var storageFlags storageconfig.Flags
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
+	var gatewayTaskPassCredentialsFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
+	var taskWebhookSigningSecret string
+	var taskWebhookDeliveryWorkers int
+	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
@@ -294,8 +368,10 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var acpWorkspaceAllowProviderTokenInSandbox bool
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
+	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
@@ -304,7 +380,9 @@ func main() {
 	var acpToolboxImagePullSecrets string
 	var acpToolboxNodeSelector string
 	var acpToolboxMountMethod string
+	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
+	var operatorWorkspaceAccessEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
@@ -356,7 +434,12 @@ func main() {
 	var outboundAccessTrustedGatewayServices string
 	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
+	var runtimeTelemetryCollectorEgress bool
 	var workspaceProviderAPIEnabled bool
+	var agentHostsEnabled bool
+	var agentHostNamespace string
+	var agentHostAgentImage string
+	var agentHostControllerPodLabels string
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -428,10 +511,33 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
+		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
+	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
+		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
+	flag.StringVar(&agentIdentityEntraAuthority, "agent-identity-entra-authority",
+		envStringDefault("ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY", agentidentity.DefaultEntraAuthority),
+		"Entra authority URL used for agent identity tokens, for example a sovereign cloud's login endpoint.")
+	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
+		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
+	flag.DurationVar(&agentIdentityMaxDelegationAge, "agent-identity-max-delegation-age",
+		envDurationDefault("ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE", outboundaccess.DefaultMaxDelegationAgeCap),
+		"Longest maxDelegationAge any Delegated agentIdentity policy may use.")
+	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
+		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
+		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&sessionLoaderImage, "session-loader-image", controller.DefaultInitImage,
+		"SHA256-digest-pinned session transcript fetcher (requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep).")
 	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
 		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
@@ -466,9 +572,13 @@ func main() {
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
+	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
+		"Serve the control-plane MCP endpoint at /mcp on the API port. Every tool runs with the caller's own REST API permissions.")
+	flag.IntVar(&mcpMaxConcurrent, "mcp-max-concurrent", api.DefaultMCPMaxConcurrent,
+		"Max concurrent MCP requests per API replica; waiting tools use a separate pool of half as many wait slots.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
-			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+
+			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
 			ConnectorPrivateEndpointsAcknowledgement+" and only with a plain-http localhost --connector-callback-base-url; never enable this in production.")
 	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
 		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
@@ -497,8 +607,9 @@ func main() {
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
-	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
-	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
+	flag.StringVar(&gatewayTaskPassCredentialsFile, "gateway-task-pass-credentials-file", "",
+		"Controller-only mounted JSON map of Gateway UID to {endpoint,token} for task passes. Endpoint pins the trusted HTTPS origin. Never mount in workers or use delivery bearers.")
+	storageFlags.AddFlags(flag.CommandLine)
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
@@ -508,6 +619,17 @@ func main() {
 			"then the kubelet's projection of that Secret. Empty means the operator supplies the mounted key file.")
 	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
 		"Item inside --agent-execution-snapshot-secret that holds the key.")
+	flag.StringVar(&taskWebhookSigningSecret, "task-webhook-signing-secret", "orka-task-webhook-signing",
+		"Name of the Secret in --task-webhook-signing-namespace that holds the Ed25519 keys signing Task webhook "+
+			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
+			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
+	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
+		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
+			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
+	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
+		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
+			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
+			"controller Pod namespace, --acp-runtime-namespace and --agent-host-namespace.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -536,6 +658,12 @@ func main() {
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
 		"Cluster-local base URL of the authenticated provider proxy boundary.")
+	flag.IntVar(&acpRuntimePoolMaxRunningPrompts, "acp-runtime-pool-max-running-prompts", int(corev1alpha1.DefaultRuntimePoolMaxRunningPrompts),
+		"Concurrent prompts each new built-in runtime RuntimePool runs (1-1000, at most --acp-runtime-pool-max-resident-sessions).")
+	flag.IntVar(&acpRuntimePoolMaxResidentSessions, "acp-runtime-pool-max-resident-sessions", int(corev1alpha1.DefaultRuntimePoolMaxResidentSessions),
+		"Resident RuntimeSessions each new built-in runtime RuntimePool keeps (1-1000).")
+	flag.IntVar(&acpDispatchMaxConcurrentTasks, "acp-dispatch-max-concurrent-tasks", controller.DefaultACPDispatchWorkers,
+		"Agent Tasks the controller runs through ACP runtimes at once across all RuntimePools (1-1000). A coordinator waiting on ACP child Tasks keeps its place.")
 	flag.StringVar(&acpProviderProxyPodLabels, "acp-provider-proxy-pod-labels", envutil.String("ORKA_ACP_PROVIDER_PROXY_POD_LABELS", "orka.ai/network-role=provider-auth-proxy"),
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
@@ -552,8 +680,17 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&operatorWorkspaceAccessEnabled, "operator-workspace-access-enabled", false,
+		"Serve the operator workspace debugging API (orka task exec / orka task cp). Each call additionally "+
+			"requires the ExecutionWorkspaceClass acp.workspace.orka.ai/operator-access opt-in and the dedicated "+
+			"tasks/exec or tasks/files permission. Write-capable access taints the session so it is never published, "+
+			"reused, checkpointed, or continued.")
+	flag.BoolVar(&acpSkillsEnabled, "acp-skills-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_SKILLS_ENABLED"), "true"),
+		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
+		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
 		"Enable in-tree Substrate MCP Tool actors and actor pools.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
@@ -571,8 +708,6 @@ func main() {
 		"Skip Substrate control API certificate verification. Only for local smoke tests.")
 	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
 		"Substrate router base URL for Actor traffic.")
-	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
-		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
 		"Default Substrate ActorTemplate for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
@@ -584,30 +719,21 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
-		substrateConfig.SessionIdentitySecretName,
-		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
-	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
-		substrateConfig.SessionIdentitySecretKey,
-		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
-	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
-		substrateConfig.SessionIdentityRequired,
-		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
-	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
-		substrateConfig.SessionIdentityAudience,
-		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
-		substrateConfig.SessionIdentityAppID,
-		"Application ID requested from Substrate SessionIdentity minted JWTs.")
-	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
-		substrateConfig.SessionIdentityUserID,
-		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
 		"Timeout for agent runtime execution inside the Substrate actor.")
+	flag.DurationVar(&substrateConfig.EgressPolicyPropagation, "substrate-egress-policy-propagation",
+		substrateConfig.EgressPolicyPropagation,
+		"How long a Substrate MCP Tool stays unavailable, with its Actor stopped, after the Actor's egress policy is "+
+			"replaced or the Actor is created, because the Substrate egress gateway may still apply earlier rules. Set "+
+			"it to the gateway's --egress-policy-cache-ttl plus 4s. 0 does not wait and is correct only with that "+
+			"cache disabled.")
 	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
 		"Default Substrate workspace cleanup policy (delete, retain).")
+	flag.StringVar(&substrateConfig.EgressCredentialProvider, "substrate-egress-credential-provider",
+		substrateConfig.EgressCredentialProvider,
+		"Credential provider class the Substrate egress gateway was installed with (only k8s.io). Enables MCP Tool egress credentials; empty makes Tools that request one fail closed.")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -746,6 +872,11 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.BoolVar(&runtimeTelemetryCollectorEgress, "runtime-telemetry-collector-egress",
+		strings.EqualFold(os.Getenv("ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS"), "true"),
+		"Admit the OTLP collector endpoints projected into ACP supervisors to the egress allowlist of "+
+			"gateway-enforced native runtimes (Agent Substrate). Requires --enable-telemetry and absolute "+
+			"http(s) collector URLs with fully qualified DNS hosts.")
 	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
@@ -760,6 +891,16 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
+	flag.BoolVar(&agentHostsEnabled, "enable-agent-hosts", envBool("ORKA_ENABLE_AGENT_HOSTS"),
+		"Enable AgentHost and AgentHostTemplate: long-lived, single-user agent hosts on Orka-owned Pods.")
+	flag.StringVar(&agentHostNamespace, "agent-host-namespace",
+		envutil.String("ORKA_AGENT_HOST_NAMESPACE", "orka-agent-hosts"),
+		"Namespace for agent-host Pods, volumes, NetworkPolicies and Secrets; must differ from --watch-namespace.")
+	flag.StringVar(&agentHostAgentImage, "agent-host-agent-image", os.Getenv("ORKA_AGENT_HOST_AGENT_IMAGE"),
+		"Digest-pinned image with the orka-host-agent binary, normally the controller image; required with --enable-agent-hosts.")
+	flag.StringVar(&agentHostControllerPodLabels, "agent-host-controller-pod-labels",
+		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
+		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -767,6 +908,40 @@ func main() {
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
+	agentIdentityEntraBlueprintClientID = strings.TrimSpace(agentIdentityEntraBlueprintClientID)
+	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
+		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
+			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: strings.TrimSpace(agentIdentityEntraAuthority),
+		}
+	}
+	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	// No OutboundAccessPolicy may mint tokens for the controller's own
+	// ServiceAccount, which the agent identity blueprint trusts.
+	controllerServiceAccount, controllerServiceAccountErr := currentServiceAccount()
+	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
+		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
+	var agentIdentitySource *agentidentity.Source
+	if agentIdentityConfig.Entra != nil {
+		agentIdentitySource = &agentidentity.Source{
+			Config: agentIdentityConfig,
+			Entra: &agentidentity.EntraIssuer{
+				Config:     *agentIdentityConfig.Entra,
+				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
+			},
+		}
+	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -779,6 +954,11 @@ func main() {
 		}
 		return
 	}
+	sessionLoaderImage, loaderImageErr := normalizeSessionLoaderImage(sessionLoaderImage)
+	if loaderImageErr != nil {
+		fmt.Fprintln(os.Stderr, loaderImageErr)
+		os.Exit(1)
+	}
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
 		fmt.Fprintln(os.Stderr, "--watch-namespace is required; controllers cannot use a cluster-wide watch")
@@ -787,6 +967,22 @@ func main() {
 	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
 	if !enforceNamespaceIsolation {
 		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
+		os.Exit(1)
+	}
+	if err := validateAgentHostConfig(agentHostsEnabled, agentHostNamespace, agentHostAgentImage,
+		watchNamespace, acpRuntimeNamespace, currentPodNamespace()); err != nil {
+		setupLog.Error(err, "invalid agent host configuration")
+		os.Exit(1)
+	}
+	if err := validateTaskWebhookSigningNamespace(taskWebhookSigningSecret, taskWebhookSigningNamespace,
+		watchNamespace, currentPodNamespace(), acpRuntimeNamespace, agentHostNamespace); err != nil {
+		// The logger is not set up yet, so setupLog would drop this.
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
+		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
+			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
 		os.Exit(1)
 	}
 
@@ -847,19 +1043,47 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to every worker ServiceAccount,
+	// however the provenance trust list is overridden.
+	api.SetWorkerServiceAccountNames(orkaadmission.WorkerServiceAccountNames(
+		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
+		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
+	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
+	// Read the storage configuration before anything opens storage. It reads
+	// only local flags and the configuration file.
+	storageConfig, err := storageFlags.Load()
+	if err != nil {
+		setupLog.Error(err, "invalid storage configuration")
+		os.Exit(1)
+	}
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
+	substrateConfig.EnableTelemetry = enableTracing
+	if err := controller.ValidateRuntimeTelemetryCollectorEgress(enableTracing, runtimeTelemetryCollectorEgress, os.Getenv); err != nil {
+		setupLog.Error(err, "invalid runtime telemetry collector egress configuration")
+		os.Exit(1)
+	}
 	substrateConfig = substrateConfig.WithDefaults()
+	if err := validateSubstrateStartupConfig(substrateMCPToolsEnabled, substrateConfig, substrateConfigErr); err != nil {
+		setupLog.Error(err, "invalid substrate configuration")
+		os.Exit(1)
+	}
+	// The manager is the only Orka identity on the Substrate router's SPIFFE
+	// allowlist. Substrate MCP Tool calls from workers reach Actors through the
+	// authenticated orka-api proxy, and the ACP broker calls in-process.
+	var substrateMCPRouter *worker.SubstrateMCPRouter
 	if substrateMCPToolsEnabled {
-		if substrateConfigErr != nil {
-			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration")
 			os.Exit(1)
 		}
-		if err := substrateConfig.ValidateMCPTools(); err != nil {
-			setupLog.Error(err, "invalid substrate configuration")
+		substrateMCPRouter, err = worker.NewSubstrateMCPRouter(substrateConfig.RouterURL, routerHTTP)
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router configuration")
 			os.Exit(1)
 		}
 	}
@@ -932,7 +1156,16 @@ func main() {
 		setupLog.Error(err, "invalid trusted token endpoint Service references")
 		os.Exit(1)
 	}
-	outboundAccessTrust := outboundaccess.TrustConfig{Gateways: trustedGateways, TokenEndpoints: trustedTokenEndpoints}
+	outboundAccessTrust := outboundaccess.TrustConfig{
+		Gateways:       trustedGateways,
+		TokenEndpoints: trustedTokenEndpoints,
+		// Never let an OutboundAccessPolicy hand the AI worker a token for the
+		// controller or a worker, labeled or not.
+		PlatformServiceAccounts: outboundaccess.PlatformServiceAccountSet(
+			splitCommaList(executionModeControllerUsernames), watchNamespace,
+			aiWorkerServiceAccountName, vendorWorkerServiceAccountName, containerWorkerServiceAccountName),
+		TokenRequester: watchNamespace + "/" + aiWorkerServiceAccountName,
+	}
 	if err := validateStaticTrustedServiceReferences(watchNamespace, outboundAccessTrust); err != nil {
 		setupLog.Error(err, "invalid static-controller outbound trust configuration")
 		os.Exit(1)
@@ -944,6 +1177,10 @@ func main() {
 		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+	if err := validateOperatorAccessSecurityConfig(operatorWorkspaceAccessEnabled, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "operator workspace access fails closed without Task provenance admission")
 		os.Exit(1)
 	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
@@ -1027,29 +1264,18 @@ func main() {
 
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
-	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
-		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
-		Opencode: acpOpencodeRuntimeImage,
-	}, nil)
-	if err != nil {
-		// Not fatal: AI and container Tasks do not need these images.
-		// Agent Tasks fail closed until the controller restarts with
-		// registry access or digest-pinned runtime images.
-		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
-			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
-			"digests, or set them to empty strings to run without coding agents")
-	}
-	acpCodexRuntimeImage = images.Codex
-	acpClaudeRuntimeImage = images.Claude
-	acpCopilotRuntimeImage = images.Copilot
-	acpOpencodeRuntimeImage = images.Opencode
 	restConfig := ctrl.GetConfigOrDie()
-	acpToolboxPolicy, err := resolveACPToolboxPolicy(restConfig, acpToolboxesEnabled, acpToolboxAllowedRegistries,
+	acpToolboxPolicy, err := resolveACPToolboxPolicy(acpToolboxesEnabled, acpToolboxAllowedRegistries,
 		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
 	if err != nil {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
 		os.Exit(1)
 	}
+	if acpSkillsEnabled && !acpToolboxesEnabled {
+		setupLog.Error(errors.New("--acp-skills-enabled requires --acp-toolboxes-enabled"), "invalid ACP skill configuration")
+		os.Exit(1)
+	}
+	acpToolboxPolicy.SkillsEnabled = acpSkillsEnabled
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,
@@ -1071,10 +1297,33 @@ func main() {
 		runtimeCacheNamespace,
 		controllerCacheNamespace,
 	)
+	if agentHostsEnabled {
+		mgrOptions.Cache = agentHostCacheOptions(mgrOptions.Cache, agentHostNamespace)
+	}
 
-	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
+	// Manager construction makes the first API server request: the cache
+	// resolves each per-object setting through discovery.
+	startupRetries := newStartupRetry(setupLog, time.Now())
+	mgr, err := retryStartupStep(processCtx, startupRetries, "Kubernetes API server", isTransientConnectError,
+		func() (ctrl.Manager, error) {
+			return ctrl.NewManager(restConfig, mgrOptions)
+		})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+	// Reads the API server version, so it runs once the API server is reachable.
+	acpToolboxPolicy = checkACPToolboxImageVolumeSupport(restConfig, acpToolboxPolicy)
+	// Record whether Agent use is enforced before anything serves requests,
+	// so work created while it was off can never bind an Agent identity. A
+	// new period starts only once this controller leads.
+	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to identify the leader election Lease")
+		os.Exit(1)
+	}
+	if err := establishAgentUseEnforcementPeriod(processCtx, startupRetries, mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+		setupLog.Error(err, "unable to record the Agent use enforcement period")
 		os.Exit(1)
 	}
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
@@ -1150,6 +1399,18 @@ func main() {
 				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 			)
 			setupLog.Info("registered Task and Tool workspace class use admission")
+			// Installs that serve admission from the controller also check
+			// AgentHost selections here; others use orka-admission.
+			if agentHostsEnabled {
+				orkaadmission.RegisterAgentHostWebhook(
+					webhookServer,
+					mgr.GetScheme(),
+					controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+					mgr.GetAPIReader(),
+					orkaadmission.ExecutionModeConfig{ControllerUsernames: splitCommaList(executionModeControllerUsernames)},
+				)
+				setupLog.Info("registered AgentHost admission")
+			}
 		}
 
 		if taskProvenanceAdmissionEnabled {
@@ -1161,6 +1422,8 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
+			admissionConfig.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+				admissionConfig.TrustedServiceAccountNames, []string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName})
 			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
@@ -1196,10 +1459,17 @@ func main() {
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
-		Reader:     mgr.GetAPIReader(),
-		KubeClient: kubeClient,
-		Trust:      outboundAccessTrust,
-		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		Reader:                 mgr.GetAPIReader(),
+		ReservedServiceAccount: controllerServiceAccount,
+		KubeClient:             kubeClient,
+		Trust:                  outboundAccessTrust,
+		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		AuditLog:               agentIdentityAuditLog,
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.AgentIdentities = agentIdentitySource
+		outboundAccessResolver.MaxDelegationAge = agentIdentityMaxDelegationAge
+		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger
@@ -1257,15 +1527,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create SQLite store
-	if storeBackend != "sqlite" {
-		setupLog.Error(fmt.Errorf("unsupported store backend: %s", storeBackend), "unknown store backend")
+	// Resolve the Secrets that storage adapters reference with the direct
+	// reader, before any application storage opens and without waiting for
+	// the manager cache. A configuration bound only to SQLite reads nothing.
+	storageLog := setupLog.WithValues("source", storageConfig.Source, "digest", storageConfig.Digest,
+		"state", storageConfig.Bindings[storagev1.StateContract].Backend,
+		"artifacts", storageConfig.Bindings[storagev1.ArtifactsContract].Backend)
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), storageConfigResolveTimeout)
+	_, err = storageConfig.Resolve(resolveCtx, mgr.GetAPIReader(), currentPodNamespace())
+	cancelResolve()
+	if err != nil {
+		storageLog.Error(err, "unable to resolve the storage configuration")
 		os.Exit(1)
 	}
+	// Only embedded SQLite can serve a contract until the storage adapter
+	// transport exists; an adapter binding is refused, never replaced.
+	storePath, err := storageConfig.RequireEmbeddedSQLite()
+	if err != nil {
+		storageLog.Error(err, "unsupported storage configuration")
+		os.Exit(1)
+	}
+	storageLog.Info("storage configuration loaded")
 
 	// Acquire SQLite exclusivity and validate durable dataset history before
-	// deciding whether an absent snapshot key may be created.
-	sqliteStore, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
+	// deciding whether an absent snapshot key may be created. Application
+	// consumers reach storage only through the storage client, which holds
+	// the snapshot key; the SQLite store is its in-process provider and a
+	// manager runnable.
+	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
@@ -1276,23 +1565,40 @@ func main() {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
 	}
-	if err := sqliteStore.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
+	if err := appStorage.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	// Identity-use records pseudonymize the requester with this key, also for
+	// calls refused while no issuer is configured.
+	auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+	if keyErr != nil {
+		setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+		os.Exit(1)
+	}
+	outboundAccessResolver.AuditPseudonymKey = auditKey
+	if agentIdentitySource != nil {
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
+		}.Check
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&storageclient.ClockMonitor{Client: appStorage}); err != nil {
+		setupLog.Error(err, "unable to add the storage clock monitor")
 		os.Exit(1)
 	}
 	if usageRetention < 0 {
 		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
 		os.Exit(1)
 	}
-	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+	if err := mgr.Add(&usage.Retention{Store: appStorage, Period: usageRetention}); err != nil {
 		setupLog.Error(err, "unable to add usage retention")
 		os.Exit(1)
 	}
-	agentExecutionSnapshotStore := sqliteStore
+	agentExecutionSnapshotStore := appStorage
 	connectorConfig := api.ConnectorConfig{Enabled: connectorsEnabled}
 	// The OAuth client exists whether or not new consent is enabled: the
 	// Connection finalizer must still be able to revoke committed tokens for
@@ -1303,7 +1609,7 @@ func main() {
 		os.Exit(1)
 	}
 	if connectorsAllowPrivateEndpoints {
-		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector and Agent identity Tool endpoints may be private or cluster-local. This is for local fixtures only and must never be enabled in production")
 		connectors.SetAllowPrivateEndpoints(true)
 		worker.SetAllowPrivateConnectionEndpoints(true)
 	}
@@ -1336,8 +1642,8 @@ func main() {
 			Enabled:         true,
 			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
 			StateKey:        stateKey,
-			Credentials:     sqliteStore,
-			Consents:        sqliteStore,
+			Credentials:     appStorage,
+			Consents:        appStorage,
 			OAuth:           connectorOAuthClient,
 		}
 		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
@@ -1348,15 +1654,20 @@ func main() {
 	// chatLinkedAccounts lets chat and the compatibility proxies run the
 	// GitHub built-ins as the signed-in person; nil until connectors exist.
 	var chatLinkedAccounts api.LinkedAccountsFactory
+	// hostCredentials feeds agent hosts from Connections; it shares the tool
+	// path's source, so the two never refresh the same grant twice.
+	var hostCredentials controller.AgentHostCredentials
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
-		outboundAccessResolver.Connections = &credential.Source{
+		connectionCredentials := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
-			Credentials: sqliteStore,
+			Credentials: appStorage,
 			OAuth:       connectorOAuthClient,
 		}
+		outboundAccessResolver.Connections = connectionCredentials
+		hostCredentials = connectionCredentials
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 			// Fresh point reads from the API server; namespace-wide scans
 			// (providers, the authoritative Connection listing) from the cache.
@@ -1366,7 +1677,7 @@ func main() {
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 		APIReader: mgr.GetAPIReader(),
-		Store:     sqliteStore,
+		Store:     appStorage,
 		Namespace: watchNamespace,
 		Retention: agentExecutionSnapshotRetention,
 		Interval:  agentExecutionSnapshotRetentionInterval,
@@ -1383,13 +1694,30 @@ func main() {
 
 	// Create the durable control store, epoch manager, and Session cleanup recovery.
 	acpAdmissionGate := controller.NewACPAdmissionGate()
-	sessionManager := controller.NewSessionManager(sqliteStore)
+	sessionManager := controller.NewSessionManager(appStorage)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
+
+	// Agent Substrate v1 native workspaces are reached only through atenet-router
+	// with the controller's allowlisted pod certificate. Build it from the
+	// configured identity alone, not the admission flags: after new dispatch is
+	// disabled, existing routed runtimes still need authenticated recovery,
+	// drain and cleanup. Without that identity the router stays unset and routed
+	// pools fail closed as Degraded; Pod-backed providers are unaffected.
+	var runtimePoolSubstrateRouter *controller.RuntimePoolSubstrateRouter
+	if strings.TrimSpace(substrateConfig.APICertFile) != "" {
+		routerHTTP, err := workspace.NewSubstrateRouterHTTPClient(substrateConfig.WorkspaceClientConfig())
+		if err != nil {
+			setupLog.Error(err, "invalid substrate router client configuration for execution workspaces")
+			os.Exit(1)
+		}
+		runtimePoolSubstrateRouter = &controller.RuntimePoolSubstrateRouter{URL: substrateConfig.RouterURL, HTTPClient: routerHTTP}
+	}
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
-		Snapshots: agentExecutionSnapshotStore,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
+		Snapshots: agentExecutionSnapshotStore, SubstrateRouter: runtimePoolSubstrateRouter,
 	}
 	controlStoreOptions := []storekube.Option{
 		storekube.WithAPIReader(mgr.GetAPIReader()),
@@ -1398,14 +1726,23 @@ func main() {
 	}
 
 	kubeControlStore, err := storekube.NewComposite(
-		mgr.GetClient(), controlNamespace, sqliteStore, controlStoreOptions...,
+		mgr.GetClient(), controlNamespace, appStorage, controlStoreOptions...,
 	)
 	if err != nil {
 		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
 		os.Exit(1)
 	}
-	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
-		WithMirror(sqliteStore)
+	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID)
+	// The epoch manager advances each storage dataset to the acquired epoch
+	// and opens its write fence; every storage client write waits for the
+	// fence of the dataset it targets.
+	for contract, dataset := range appStorage.Datasets() {
+		controllerEpochManager.WithStorage(contract, dataset)
+	}
+	if err := appStorage.BindFences(controllerEpochManager); err != nil {
+		setupLog.Error(err, "unable to bind the storage client to the controller epoch manager")
+		os.Exit(1)
+	}
 	sessionCleanupDispatcher.Store = kubeControlStore
 	sessionCleanupDispatcher.Epochs = controllerEpochManager
 	sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
@@ -1420,8 +1757,8 @@ func main() {
 	}
 
 	acpSessionContinuity, err := controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
-		SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-		GatewayEvents: sqliteStore, Lineages: sqliteStore,
+		SessionControls: kubeControlStore, Transcripts: appStorage, Publications: kubeControlStore, BranchClaims: kubeControlStore,
+		GatewayEvents: appStorage, Lineages: appStorage,
 	})
 
 	if err != nil {
@@ -1442,13 +1779,32 @@ func main() {
 		setupLog.Error(err, "unable to add ACP artifact retention")
 		os.Exit(1)
 	}
-	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv()
+	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv(
+		processCtx, startupRetries)
 	if err != nil {
 		setupLog.Error(err, "unable to configure Workspace/Publisher client")
 		os.Exit(1)
 	}
+	// Tag resolution needs cluster DNS, which comes up with the node like the
+	// API server and the Publisher, so it runs after both are reachable.
+	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
+		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+		Opencode: acpOpencodeRuntimeImage,
+	}, nil)
+	if err != nil {
+		// Not fatal: AI and container Tasks do not need these images.
+		// Agent Tasks fail closed until the controller restarts with
+		// registry access or digest-pinned runtime images.
+		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
+			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
+			"digests, or set them to empty strings to run without coding agents")
+	}
+	acpCodexRuntimeImage = images.Codex
+	acpClaudeRuntimeImage = images.Claude
+	acpCopilotRuntimeImage = images.Copilot
+	acpOpencodeRuntimeImage = images.Opencode
 
-	sessionManager.SetGatewayEventStore(sqliteStore)
+	sessionManager.SetGatewayEventStore(appStorage)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	gatewayConfig := gatewayruntime.Config{
 		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
@@ -1461,11 +1817,16 @@ func main() {
 		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
 		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
-	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
+	gatewayService := gatewayruntime.NewService(mgr.GetClient(), appStorage, appStorage, appStorage, gatewayConfig)
+	gatewayService.TaskPassCredentials, err = gatewayruntime.LoadTaskPassCredentials(gatewayTaskPassCredentialsFile)
+	if err != nil {
+		setupLog.Error(err, "unable to load gateway task pass credentials")
+		os.Exit(1)
+	}
 	gatewayService.APIReader = mgr.GetAPIReader()
 	if kubeControlStore != nil {
 		gatewayService.SessionCleanup = kubeControlStore
-		gatewayService.SessionCleanupCandidates = sqliteStore
+		gatewayService.SessionCleanupCandidates = appStorage
 		gatewayService.SessionCleanupEpochs = controllerEpochManager
 	}
 	if gatewayEnabled {
@@ -1477,10 +1838,23 @@ func main() {
 	}
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
+	var taskWebhookKeys taskwebhook.KeySource
+	if name := strings.TrimSpace(taskWebhookSigningSecret); name != "" {
+		taskWebhookKeys = &taskwebhook.SecretKeySource{
+			Reader:    mgr.GetAPIReader(),
+			Writer:    mgr.GetClient(),
+			Namespace: strings.TrimSpace(taskWebhookSigningNamespace),
+			Name:      name,
+		}
+		webhookNotifier.SetKeySource(taskWebhookKeys)
+	} else {
+		setupLog.Info("Task webhook signing is disabled; Task webhooks will not be delivered")
+	}
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.InitImage = sessionLoaderImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
@@ -1503,6 +1877,7 @@ func main() {
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
 		"general", generalWorkerImage,
+		"sessionLoader", sessionLoaderImage,
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
@@ -1530,6 +1905,7 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
+		SubstrateRouter:      runtimePoolSubstrateRouter,
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
@@ -1546,6 +1922,7 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	runtimePoolReconciler.AllowProviderTokenInSandbox = acpWorkspaceAllowProviderTokenInSandbox
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
 		Namespace:       acpProviderProxyNamespace,
@@ -1556,6 +1933,7 @@ func main() {
 	runtimePoolReconciler.ControlStore = kubeControlStore
 	runtimePoolReconciler.EnablePDB = true
 	runtimePoolReconciler.EnableTelemetry = enableTracing
+	runtimePoolReconciler.TelemetryCollectorEgress = runtimeTelemetryCollectorEgress
 	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 	runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
 
@@ -1576,23 +1954,40 @@ func main() {
 	}
 
 	// Setup Task controller with helper components.
+	if acpRuntimePoolMaxResidentSessions < 1 || acpRuntimePoolMaxResidentSessions > 1000 ||
+		acpRuntimePoolMaxRunningPrompts < 1 || acpRuntimePoolMaxRunningPrompts > acpRuntimePoolMaxResidentSessions {
+		setupLog.Error(nil, "invalid RuntimePool capacity: prompts must be between 1 and resident sessions, which must be between 1 and 1000",
+			"maxRunningPrompts", acpRuntimePoolMaxRunningPrompts, "maxResidentSessions", acpRuntimePoolMaxResidentSessions)
+		os.Exit(1)
+	}
+	if acpDispatchMaxConcurrentTasks < 1 || acpDispatchMaxConcurrentTasks > 1000 {
+		setupLog.Error(nil, "invalid --acp-dispatch-max-concurrent-tasks: must be between 1 and 1000",
+			"maxConcurrentTasks", acpDispatchMaxConcurrentTasks)
+		os.Exit(1)
+	}
 	taskReconciler := &controller.TaskReconciler{
+		ACPRuntimePoolCapacity: corev1alpha1.RuntimePoolCapacitySpec{
+			MaxRunningPrompts:   int32(acpRuntimePoolMaxRunningPrompts),
+			MaxResidentSessions: int32(acpRuntimePoolMaxResidentSessions),
+		},
 		Client:                       mgr.GetClient(),
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		TaskProvenanceProtected:      taskProvenanceProtected,
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
+		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
 		KubeClient:                   kubeClient,
-		ResultStore:                  sqliteStore,
-		PlanStore:                    sqliteStore,
-		MessageStore:                 sqliteStore,
-		ArtifactStore:                sqliteStore,
-		ExecutionEventStore:          sqliteStore,
+		ResultStore:                  appStorage,
+		PlanStore:                    appStorage,
+		MessageStore:                 appStorage,
+		ArtifactStore:                appStorage,
+		ExecutionEventStore:          appStorage,
 		DurableControlStore:          kubeControlStore,
 		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
-		RepositoryValidationBindings: sqliteStore,
+		RepositoryValidationBindings: appStorage,
 		MCPRegistry:                  acpMCPRegistry,
 		Mode:                         mode,
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
@@ -1606,10 +2001,12 @@ func main() {
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
 		ACPToolboxPolicy:            acpToolboxPolicy,
+		Identity:                    agentIdentityConfig,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
@@ -1633,6 +2030,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
+	// Parked turns resume through continuation Tasks on the same Session.
+	if err := (&controller.TaskWaitReconciler{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ExecutionEvents: appStorage,
+		TaskProvenanceProtected: taskProvenanceProtected,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TaskWait")
+		os.Exit(1)
+	}
 
 	// Session settlement commits terminal Task status through the Kubernetes outbox.
 	agentOutboxProjector := &controller.ACPOutboxProjector{
@@ -1643,14 +2048,17 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: sqliteStore,
-		EventStore: sqliteStore, PlanStore: sqliteStore,
+		Identity:        agentIdentityConfig,
+		SubstrateRouter: runtimePoolSubstrateRouter,
+		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,
 		IdlePoolTTL:          acpIdlePoolTTL,
+		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
@@ -1671,11 +2079,12 @@ func main() {
 	}
 	upgradeDrain := controller.NewACPUpgradeDrainCoordinator(
 		mgr.GetClient(), mgr.GetAPIReader(), controllerEpochManager, kubeControlStore,
-		&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
+		&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: appStorage},
 		acpAdmissionGate, acpUpgradeDrainOptions,
 	)
 
 	upgradeDrain.ControllerNamespace = controlNamespace
+	upgradeDrain.SubstrateRouter = runtimePoolSubstrateRouter
 	if err := mgr.Add(upgradeDrain); err != nil {
 		setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 		os.Exit(1)
@@ -1688,9 +2097,11 @@ func main() {
 	if err := (&controller.OutboundAccessPolicyReconciler{
 		Client:                     mgr.GetClient(),
 		APIReader:                  mgr.GetAPIReader(),
+		ReservedServiceAccount:     controllerServiceAccount,
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+		MaxDelegationAge:           agentIdentityMaxDelegationAge,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)
@@ -1724,8 +2135,8 @@ func main() {
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
-		Credentials: sqliteStore,
-		Consents:    sqliteStore,
+		Credentials: appStorage,
+		Consents:    appStorage,
 	}
 	connectionReconciler.Revoker = connectorOAuthClient
 	if err := connectionReconciler.SetupWithManager(mgr); err != nil {
@@ -1844,11 +2255,56 @@ func main() {
 		}
 	}
 
+	if agentHostsEnabled {
+		controllerLabels, err := parseExactLabels(agentHostControllerPodLabels)
+		if err != nil {
+			setupLog.Error(fmt.Errorf("--agent-host-controller-pod-labels: %w", err), "invalid agent host configuration")
+			os.Exit(1)
+		}
+		if err := (&controller.AgentHostReconciler{
+			Client:        mgr.GetClient(),
+			APIReader:     mgr.GetAPIReader(),
+			Scheme:        mgr.GetScheme(),
+			HostNamespace: strings.TrimSpace(agentHostNamespace),
+			AgentImage:    strings.TrimSpace(agentHostAgentImage),
+			Controller: agenthost.ControllerPeer{
+				Namespace: currentPodNamespace(),
+				PodLabels: controllerLabels,
+			},
+			IdleStatus:      agenthost.HTTPStatusReader{},
+			HostCredentials: hostCredentials,
+			GitHubAccounts:  agenthost.GitHubAccounts{},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentHost")
+			os.Exit(1)
+		}
+		// With connectors, linking the agent-host provider gives a person a host.
+		if hostCredentials != nil {
+			if err := (&controller.AgentHostProvisioner{
+				Client:          mgr.GetClient(),
+				HostCredentials: hostCredentials,
+				GitHubAccounts:  agenthost.GitHubAccounts{},
+				Recorder:        mgr.GetEventRecorder("agenthost-provisioner"),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "AgentHostProvisioner")
+				os.Exit(1)
+			}
+		}
+	}
+
 	if err := (&controller.AgentReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
+		Identity:      agentIdentityConfig,
+		APIReader:     mgr.GetAPIReader(),
+		IdentityVerifier: func() controller.AgentIdentityVerifier {
+			if agentIdentitySource == nil {
+				return nil
+			}
+			return agentIdentitySource
+		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -1904,12 +2360,13 @@ func main() {
 	}
 
 	if err := (&controller.RepositoryScanReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Scheme:        mgr.GetScheme(),
-		SecurityStore: sqliteStore,
-		ArtifactStore: sqliteStore,
-		ResultStore:   sqliteStore,
+		Client:                        mgr.GetClient(),
+		APIReader:                     mgr.GetAPIReader(),
+		Scheme:                        mgr.GetScheme(),
+		SecurityStore:                 appStorage,
+		ArtifactStore:                 appStorage,
+		ResultStore:                   appStorage,
+		ACPDispatchMaxConcurrentTasks: acpDispatchMaxConcurrentTasks,
 		// Governed publications are recorded by the ACP dispatcher in the
 		// durable control store; verifying patch proposals must read the same
 		// store, not the SQLite payload store.
@@ -1922,9 +2379,9 @@ func main() {
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
-		Store:                     sqliteStore,
-		ResultStore:               sqliteStore,
-		ArtifactStore:             sqliteStore,
+		Store:                     appStorage,
+		ResultStore:               appStorage,
+		ArtifactStore:             appStorage,
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
@@ -1965,6 +2422,7 @@ func main() {
 		connectorToolEffects = kubeControlStore
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
+		SubstrateMCPProxy:         api.SubstrateMCPProxyConfig{Router: substrateMCPRouter},
 		Port:                      apiPort,
 		NativeSessionMaxBytes:     nativeSessionMaxBytes,
 		WatchNamespace:            watchNamespace,
@@ -1979,23 +2437,24 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
-		ResultStore:               sqliteStore,
-		SessionStore:              sqliteStore,
-		PlanStore:                 sqliteStore,
-		MessageStore:              sqliteStore,
-		ArtifactStore:             sqliteStore,
+		ResultStore:               appStorage,
+		SessionStore:              appStorage,
+		PlanStore:                 appStorage,
+		MessageStore:              appStorage,
+		ArtifactStore:             appStorage,
 		ArtifactReservations:      artifactRetentionWiring.runtimeReservations,
 		AgentExecutionSnapshots:   agentExecutionSnapshotStore,
 		ExternalEffects:           kubeControlStore,
-		MemoryStore:               sqliteStore,
-		MemoryProposalStore:       sqliteStore,
-		SecurityStore:             sqliteStore,
-		RepositoryMonitorStore:    sqliteStore,
-		ExecutionEventStore:       sqliteStore,
-		GatewayEventStore:         sqliteStore,
-		GatewayDeliveryStore:      sqliteStore,
+		MemoryStore:               appStorage,
+		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
+		SecurityStore:             appStorage,
+		RepositoryMonitorStore:    appStorage,
+		ExecutionEventStore:       appStorage,
+		GatewayEventStore:         appStorage,
+		GatewayDeliveryStore:      appStorage,
 		GatewayService:            gatewayService,
-		HealthChecker:             sqliteStore,
+		HealthChecker:             appStorage,
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
 		ControllerEpochs:          publisherControllerEpochs,
@@ -2012,7 +2471,12 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled: dashboardEnabled,
+		DashboardEnabled:         dashboardEnabled,
+		AgentUseAuthorization:    agentUseAuthorizationEnabled,
+		ProviderUseAuthorization: providerUseAuthorizationEnabled,
+		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
+		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		TaskWebhookKeys:          taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2030,9 +2494,12 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-		Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		TaskProvenanceProtected: taskProvenanceProtected,
+		GatewayService:          gatewayService,
+		SubstrateMCPRouter:      substrateMCPRouter,
+		Reader:                  mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
-		ExecutionEvents:         sqliteStore,
+		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,
 		KubeClient:              kubeClient, Registry: acpMCPRegistry,
 		OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
@@ -2061,19 +2528,20 @@ func main() {
 				// Children the broker creates for this Task inherit its
 				// verified requester only through this seal.
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
-				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName, AgentUID: task.AgentUID,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
-				Tenant: request.Namespace, WatchNamespace: watchNamespace,
+				ExecutionEvents: appStorage,
+				Tenant:          request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
 				TaskProvenanceProtected:      taskProvenanceProtected,
-				RepositoryValidationBindings: sqliteStore,
-				ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
-				MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
+				RepositoryValidationBindings: appStorage,
+				ResultStore:                  appStorage, SessionDeleter: sessionManager,
+				MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       sqliteStore, MemoryProposalWriter: sqliteStore,
-				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
+				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil
 		},
@@ -2166,7 +2634,9 @@ func workspacePublicationReclaimer(publisherClient *publisherservice.Client) con
 	return publisherClient
 }
 
-func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64, error) {
+func workspacePublisherClientFromEnv(
+	ctx context.Context, retry startupRetry,
+) (*publisherservice.Client, []byte, int64, error) {
 	artifactSecretPath := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE"))
 	var artifactSecret []byte
 	if artifactSecretPath != "" {
@@ -2200,9 +2670,13 @@ func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64,
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	capabilities, err := client.Capabilities(ctx)
+	// The Publisher can restart with the node and be unreachable for a while.
+	capabilities, err := retryStartupStep(ctx, retry, "Workspace/Publisher", isTransientPublisherError,
+		func() (publisherservice.CapabilitiesResponse, error) {
+			readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return client.Capabilities(readCtx)
+		})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("read Workspace/Publisher capabilities: %w", err)
 	}
@@ -2226,12 +2700,9 @@ func envDurationDefault(name string, fallback time.Duration) time.Duration {
 	return value
 }
 
-// resolveACPToolboxPolicy builds the controller-wide toolbox policy. With the
-// imageVolume mount method it reads the API server version through discovery
-// (readable by every authenticated client) and, below 1.36, marks toolbox
-// mounting unavailable instead of silently falling back to copying.
+// resolveACPToolboxPolicy builds the controller-wide toolbox policy from flags.
+// It needs no API server, so invalid flags fail before startup waits for one.
 func resolveACPToolboxPolicy(
-	restConfig *rest.Config,
 	enabled bool,
 	allowedRegistries, imagePullSecrets, nodeSelector, mountMethod string,
 ) (controller.ACPToolboxPolicy, error) {
@@ -2255,8 +2726,18 @@ func resolveACPToolboxPolicy(
 		}
 		policy.NodeSelector = selector
 	}
-	if !enabled || method != controller.ACPToolboxMountImageVolume {
-		return policy, nil
+	return policy, nil
+}
+
+// checkACPToolboxImageVolumeSupport applies to the imageVolume mount method:
+// it reads the API server version through discovery (readable by every
+// authenticated client) and, below 1.36, marks toolbox mounting unavailable
+// instead of silently falling back to copying.
+func checkACPToolboxImageVolumeSupport(
+	restConfig *rest.Config, policy controller.ACPToolboxPolicy,
+) controller.ACPToolboxPolicy {
+	if !policy.Enabled || policy.MountMethod != controller.ACPToolboxMountImageVolume {
+		return policy
 	}
 	// Only imageVolume toolboxes depend on this capability check, so a failed
 	// discovery read must not take the whole controller down: fail closed by
@@ -2271,15 +2752,15 @@ func resolveACPToolboxPolicy(
 	}
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
-		return unavailable(fmt.Errorf("create discovery client: %w", err)), nil
+		return unavailable(fmt.Errorf("create discovery client: %w", err))
 	}
 	serverVersion, err := discoveryClient.ServerVersion()
 	if err != nil {
-		return unavailable(fmt.Errorf("read API server version: %w", err)), nil
+		return unavailable(fmt.Errorf("read API server version: %w", err))
 	}
 	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
 	if err != nil {
-		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)), nil
+		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err))
 	}
 	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
 		policy.UnavailableReason = fmt.Sprintf(
@@ -2288,7 +2769,7 @@ func resolveACPToolboxPolicy(
 		)
 		setupLog.Error(errors.New(policy.UnavailableReason), "toolbox image volumes are unavailable; Agents with toolboxes are rejected")
 	}
-	return policy, nil
+	return policy
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {
@@ -2301,17 +2782,199 @@ func parseExactLabels(raw string) (map[string]string, error) {
 		key, value, ok := strings.Cut(entry, "=")
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		if !ok || key == "" || value == "" {
-			return nil, fmt.Errorf("provider proxy Pod label %q must be key=value", entry)
+			return nil, fmt.Errorf("label %q must be key=value", entry)
+		}
+		// Selectors built from these labels are refused by the API server
+		// when either part is malformed; refuse them at startup instead.
+		if problems := validation.IsQualifiedName(key); len(problems) > 0 {
+			return nil, fmt.Errorf("label key %q: %s", key, strings.Join(problems, "; "))
+		}
+		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
+			return nil, fmt.Errorf("label %q value %q: %s", key, value, strings.Join(problems, "; "))
 		}
 		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("provider proxy Pod label %q is duplicated", key)
+			return nil, fmt.Errorf("label %q is duplicated", key)
 		}
 		result[key] = value
 	}
 	if len(result) == 0 {
-		return nil, fmt.Errorf("at least one provider proxy Pod label is required")
+		return nil, fmt.Errorf("at least one label is required")
 	}
 	return result, nil
+}
+
+// agentHostImagePattern matches a digest-pinned image reference.
+var agentHostImagePattern = regexp.MustCompile(`^[^@\s]+@sha256:[a-f0-9]{64}$`)
+
+// validateAgentHostConfig rejects agent-host settings the controller cannot
+// serve. Agent-host Pods run user workloads under the restricted Pod Security
+// profile, so they never share the watch, ACP runtime or controller namespace.
+func validateAgentHostConfig(enabled bool, hostNamespace, agentImage string, reserved ...string) error {
+	if !enabled {
+		return nil
+	}
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" {
+		return fmt.Errorf("--agent-host-namespace is required with --enable-agent-hosts")
+	}
+	if problems := validation.IsDNS1123Label(hostNamespace); len(problems) > 0 {
+		return fmt.Errorf("--agent-host-namespace %q is not a namespace name: %s", hostNamespace, strings.Join(problems, "; "))
+	}
+	for _, namespace := range reserved {
+		if hostNamespace == strings.TrimSpace(namespace) {
+			return fmt.Errorf("--agent-host-namespace %q is used by the controller or ACP runtimes", hostNamespace)
+		}
+	}
+	if !agentHostImagePattern.MatchString(strings.TrimSpace(agentImage)) {
+		return fmt.Errorf("--agent-host-agent-image must be pinned by digest with --enable-agent-hosts")
+	}
+	return nil
+}
+
+const defaultTaskWebhookSigningNamespace = "orka-task-webhook-signing"
+
+// validateTaskWebhookSigningNamespace keeps the webhook signing key out of
+// every namespace whose Secrets a Task can reach. A Task's or Agent's
+// secretRef mounts any Secret in the Task namespace, and worker roles are
+// bound there, so a key beside Tasks lets them forge notices. The reserved
+// namespaces are the watch namespace, the controller Pod namespace, and the
+// ACP runtime and agent-host namespaces, whose Pods run agent code.
+func validateTaskWebhookSigningNamespace(secretName, namespace string, reserved ...string) error {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" {
+		return nil
+	}
+	if problems := validation.IsDNS1123Subdomain(secretName); len(problems) > 0 {
+		return fmt.Errorf("--task-webhook-signing-secret %q is not a Secret name: %s", secretName, strings.Join(problems, "; "))
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return fmt.Errorf("--task-webhook-signing-namespace is required while --task-webhook-signing-secret is set")
+	}
+	if problems := validation.IsDNS1123Label(namespace); len(problems) > 0 {
+		return fmt.Errorf("--task-webhook-signing-namespace %q is not a namespace name: %s", namespace, strings.Join(problems, "; "))
+	}
+	for _, other := range reserved {
+		if namespace == strings.TrimSpace(other) {
+			return fmt.Errorf("--task-webhook-signing-namespace %q is used by Tasks, the controller, ACP runtimes or agent hosts; "+
+				"keep the signing key in a namespace that holds nothing else", namespace)
+		}
+	}
+	return nil
+}
+
+// agentHostCacheOptions adds the agent-host namespace to the cache for the
+// objects the AgentHost controller keeps there, on top of whatever namespaces
+// each type already caches.
+func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Options {
+	hostNamespace = strings.TrimSpace(hostNamespace)
+	if hostNamespace == "" || len(options.DefaultNamespaces) == 0 {
+		return options
+	}
+	if options.ByObject == nil {
+		options.ByObject = make(map[crclient.Object]cache.ByObject)
+	}
+	for _, object := range []crclient.Object{
+		&corev1.Pod{},
+		&corev1.Secret{},
+		&corev1.PersistentVolumeClaim{},
+		&networkingv1.NetworkPolicy{},
+	} {
+		key := object
+		namespaces := maps.Clone(options.DefaultNamespaces)
+		for candidate, byObject := range options.ByObject {
+			if reflect.TypeOf(candidate) == reflect.TypeOf(object) {
+				key = candidate
+				namespaces = maps.Clone(byObject.Namespaces)
+				break
+			}
+		}
+		namespaces[hostNamespace] = cache.Config{}
+		options.ByObject[key] = cache.ByObject{Namespaces: namespaces}
+	}
+	return options
+}
+
+// establishAgentUseEnforcementPeriod records this run's Agent use
+// enforcement with a direct client, since the manager's cache is not running
+// yet, and stores when the current enforcement period began.
+func establishAgentUseEnforcementPeriod(ctx context.Context, retry startupRetry, mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	period := &agentidentity.EnforcementPeriod{}
+	config.Enforcement = period
+	if !config.AgentUseAuthorization {
+		// This runs before the manager starts, so a connection error just
+		// after a node restart is retried within the shared startup budget.
+		// Deleting the marker is idempotent, so a repeated attempt is safe.
+		if _, err := retryStartupStep(ctx, retry, "Kubernetes API server", isTransientConnectError, func() (struct{}, error) {
+			attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			return struct{}{}, agentidentity.EndEnforcementPeriod(attemptCtx, directClient, namespace)
+		}); err != nil {
+			return err
+		}
+		period.Start(time.Time{})
+		// An enforcing leader may have started a period since: end it again
+		// once this controller leads, or stop rather than serve beside it.
+		return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			var err error
+			for range 6 {
+				if err = agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return err
+		}))
+	}
+	// The period is decided each time this controller wins leadership, never
+	// from what it read before: the leader it replaces, or one that ran while
+	// this controller waited, may not have checked Agent use. Identity
+	// decisions wait until then.
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		for {
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace, leader)
+			if err == nil {
+				period.Start(since)
+				setupLog.Info("Agent use enforcement period started", "since", since)
+				return nil
+			}
+			setupLog.Error(err, "unable to start the Agent use enforcement period; retrying")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}))
+}
+
+// agentUseLeaderLease names the leader election Lease this controller holds
+// once it leads, as controller-runtime names it, or nil with leader election
+// off.
+func agentUseLeaderLease(leaderElection bool, watchNamespace string) (*agentidentity.LeaderLease, error) {
+	if !leaderElection {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(watchNamespace)
+	if namespace == "" {
+		namespace = currentPodNamespace()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &agentidentity.LeaderLease{
+		Key:          crclient.ObjectKey{Namespace: namespace, Name: controllerLeaderElectionID},
+		HolderPrefix: hostname + "_",
+	}, nil
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
@@ -2449,7 +3112,7 @@ func currentPodNamespace() string {
 	return strings.TrimSpace(string(data))
 }
 
-// loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
+// loadAgentExecutionSnapshotKey reads the AES-256 snapshot key from a file
 // holding either exactly 32 raw bytes or whitespace-padded base64 text.
 func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
@@ -2459,17 +3122,22 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	return decodeAgentExecutionSnapshotKey(raw)
 }
 
-func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
-	key, err := loadAgentExecutionSnapshotKey(path)
-	if err != nil {
-		return nil, err
-	}
-	return sqlite.NewAgentExecutionSnapshotCipher(key)
-}
-
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// agentIdentityAuditLogger returns the sink for agent identity use records.
+// It writes where and how the diagnostic logger does, but no
+// --zap-log-level filters it and it is never sampled: an audit record must
+// not depend on how verbose the controller's diagnostics are.
+func agentIdentityAuditLogger(opts zap.Options) logr.Logger {
+	opts.Level = uberzap.LevelEnablerFunc(func(zapcore.Level) bool { return true })
+	return zap.New(zap.UseFlagOptions(&opts))
+}
+
+// agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
+// requesters in agent identity use records.
+const agentIdentityAuditKeyInfo = "orka.agent-identity.audit-pseudonym.v1"
 
 // requesterStampKeyInfo is the HKDF label for the requester stamp key.
 const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
@@ -2498,4 +3166,22 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// currentServiceAccount returns the ServiceAccount this Pod runs as, from its
+// mounted API token.
+func currentServiceAccount() (outboundaccess.ReservedServiceAccount, error) {
+	token, err := os.ReadFile(serviceAccountTokenFile)
+	if err != nil {
+		return outboundaccess.ReservedServiceAccount{}, fmt.Errorf("read the controller's ServiceAccount token: %w", err)
+	}
+	return outboundaccess.ServiceAccountFromToken(string(token))
+}
+
+// envStringDefault returns the trimmed environment value, or fallback when unset.
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

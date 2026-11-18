@@ -31,7 +31,8 @@ resource describing an HTTP endpoint or MCP server.
 
 **Built-in tool** — a tool Orka ships, such as `web_search`, `delegate_task`, or
 `create_pull_request`. Some are selected by name; others are added automatically, for
-example memory tools on every AI Task. See [Built-in tools](built-in-tools.md).
+example memory tools on every native AI Task during the warning release. See
+[Built-in tools](built-in-tools.md) and [migration notes](../operations/upgrading.md#memory-tool-opt-in).
 
 **Coordinator** — an Agent with `coordination.enabled` that delegates work to other Agents
 as child Tasks. See [Multi-agent coordination](../guides/multi-agent-coordination.md).

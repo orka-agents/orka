@@ -166,12 +166,20 @@ func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T
 	task := artifactRetentionTask()
 	task.Spec.WebhookURL = server.URL
 	reconciler, retirer := newSettledArtifactRetentionReconciler(t, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
+	clock := &webhookTestClock{now: time.Unix(1_800_000_000, 0)}
+	notifier := newTestWebhookNotifier(t, newWebhookTestKeys(t), clock)
 	reconciler.WebhookNotifier = notifier
+	deliveries := attachTestWebhookDispatcher(t, reconciler)
 
 	for wantWebhookAttempts := int32(1); wantWebhookAttempts <= 2; wantWebhookAttempts++ {
 		current := &corev1alpha1.Task{}
+		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reconciler.handleCompleted(context.Background(), current); err != nil {
+			t.Fatal(err)
+		}
+		deliveries.drain(context.Background())
 		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
 			t.Fatal(err)
 		}
@@ -179,9 +187,10 @@ func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.RequeueAfter != 30*time.Second {
-			t.Fatalf("handleCompleted() requeue = %v, want 30s", result.RequeueAfter)
+		if want := notifier.backoff(wantWebhookAttempts); result.RequeueAfter != want {
+			t.Fatalf("handleCompleted() requeue = %v, want %v", result.RequeueAfter, want)
 		}
+		clock.now = clock.now.Add(result.RequeueAfter)
 		if got := webhookAttempts.Load(); got != wantWebhookAttempts {
 			t.Fatalf("webhook attempts = %d, want %d", got, wantWebhookAttempts)
 		}

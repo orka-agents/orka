@@ -30,7 +30,7 @@ func (s *failingTaskDataCleanup) DeleteResult(context.Context, string, string) e
 	return nil
 }
 
-func (s *failingTaskDataCleanup) DeleteArtifacts(context.Context, string, string) error {
+func (s *failingTaskDataCleanup) DeleteArtifacts(context.Context, store.ArtifactOwner) error {
 	if s.operation == "artifact" {
 		return s.err
 	}

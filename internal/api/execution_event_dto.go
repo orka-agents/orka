@@ -130,7 +130,7 @@ type ListSessionExecutionEventsResponse struct {
 }
 
 // NewExecutionEventResponse converts a store event to an API DTO and intentionally
-// omits store-only fields such as ExecutionEvent.Internal.
+// omits store-only fields such as ExecutionEvent.Usage.
 func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
 	var response ExecutionEventResponse
 	fillExecutionEventResponse(&response, &event)

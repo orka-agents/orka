@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -81,16 +82,18 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			default:
 			}
 
-			// Truncate conversation if needed
+			// Truncate a view of the whole conversation if needed, never the
+			// conversation itself, so the cut stays where it was and the prompt
+			// prefix stays cacheable.
+			sent := messages
 			if h.config.MaxSessionSize > 0 {
-				tokenBudget := h.config.MaxSessionSize / 4
-				messages = llm.TruncateMessages(messages, tokenBudget)
+				sent = llm.TruncateMessages(messages, h.config.MaxSessionSize/4)
 			}
 
 			// Build request for this iteration
 			compReq := &llm.CompletionRequest{
 				Model:        model,
-				Messages:     messages,
+				Messages:     sent,
 				SystemPrompt: capturedReq.SystemPrompt,
 				Tools:        capturedReq.Tools,
 				MaxTokens:    capturedReq.MaxTokens,
@@ -791,12 +794,6 @@ func isTaskStillRunning(result string) bool {
 	if !parsed.Success {
 		return false
 	}
-	// Terminal phases — auto-poll should stop
-	switch parsed.Data.Phase {
-	case "Succeeded", "Failed", "Cancelled":
-		return false
-	default:
-		// Running, Pending, Scheduled — still active
-		return true
-	}
+	// Auto-poll stops once the Task is terminal.
+	return !corev1alpha1.TaskPhase(parsed.Data.Phase).IsTerminal()
 }

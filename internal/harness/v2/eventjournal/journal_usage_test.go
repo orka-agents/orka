@@ -27,7 +27,7 @@ func TestJournalRejectsCacheCountsExceedingInput(t *testing.T) {
 			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "usage.db"))
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
-			eventStore := sqlite.NewStore(db, "usage")
+			eventStore := orkaEventStore(t, db)
 			mapCtx := testMapContext()
 			state, err := (Journal{EventStore: eventStore, MapContext: mapCtx}).Open(ctx)
 			require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestJournalContinuationRetainsProfileModelForUsage(t *testing.T) {
 			db, err := sqlite.NewDB(path)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
-			eventStore := sqlite.NewStore(db, "usage")
+			eventStore := orkaEventStore(t, db)
 			mapCtx := testMapContext()
 			now := time.Now().UTC()
 			first, err := (Journal{EventStore: eventStore, MapContext: mapCtx}).Open(ctx)
@@ -188,7 +188,7 @@ func TestJournalContinuationRetainsProfileModelForUsage(t *testing.T) {
 			require.NoError(t, db.Close())
 			db, err = sqlite.NewDB(path)
 			require.NoError(t, err)
-			eventStore = sqlite.NewStore(db, "usage")
+			eventStore = orkaEventStore(t, db)
 			filter := store.UsageFilter{Namespaces: []string{mapCtx.Namespace}, Model: mapCtx.Model,
 				From: now.Add(-time.Minute), Until: now.Add(time.Minute), AsOf: now.Add(time.Minute)}
 			data, err := eventStore.LoadUsage(ctx, filter)

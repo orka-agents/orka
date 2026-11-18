@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -117,7 +116,7 @@ func bindingTestNamespace() *corev1.Namespace {
 	}}
 }
 
-func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sqlite.Store) {
+func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sealedTestStore) {
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
@@ -129,14 +128,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	snapshotStore := sqlite.NewStore(db, "test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	snapshotStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
@@ -194,6 +186,16 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		}
 	}
 
+	recorder := reconciler.Recorder.(*record.FakeRecorder)
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, agentExecutionSettingsReason) || !strings.Contains(event, "model "+acpTestModel) {
+			t.Fatalf("binding event = %q, want the effective model", event)
+		}
+	default:
+		t.Fatal("first binding did not report its execution settings")
+	}
+
 	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
@@ -205,6 +207,11 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("verify pass reported settings again: %q", event)
+	default:
 	}
 }
 
@@ -322,6 +329,85 @@ func TestResolveAgentExecutionCandidateDigestIsStable(t *testing.T) {
 	}
 	if third.binding.Snapshot.Digest == first.binding.Snapshot.Digest {
 		t.Fatal("snapshot digest must change when executable inputs change")
+	}
+}
+
+// A Task validated against a stale cached Agent is not bound while the live
+// Agent is a newer generation, such as one whose ceiling was just tightened.
+func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := bindingTestTask()
+	cached := bindingTestAgent()
+	live := cached.DeepCopy()
+	live.Generation = cached.Generation + 1
+	live.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{}}
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), live)
+
+	result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), cached)
+	if err != nil || !handled || result.RequeueAfter == 0 {
+		t.Fatalf("ensure binding = result=%+v handled=%v err=%v, want a requeue", result, handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		t.Fatalf("a stale Agent generation was bound: %+v", current.Status.AgentExecutionBinding)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), live); err != nil || handled {
+		t.Fatalf("binding against the live generation = handled=%v err=%v", handled, err)
+	}
+}
+
+// A ceiling tightened between the live check and the binding write is caught
+// before the bound Task starts: the next binding pass re-judges it against
+// the live Agent and fails it, while a newer generation it still fits leaves
+// it alone.
+func TestBoundTaskIsRejudgedAgainstATightenedCeilingBeforeItStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ceiling *corev1alpha1.AgentRuntimeCeiling
+		fails   bool
+	}{
+		{name: "tightened past the Task", ceiling: &corev1alpha1.AgentRuntimeCeiling{AllowBash: new(bool)}, fails: true},
+		{name: "still within the ceiling", ceiling: &corev1alpha1.AgentRuntimeCeiling{MaxTurns: new(int32(500))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			task := bindingTestTask()
+			agent := bindingTestAgent()
+			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), agent.DeepCopy())
+			if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+				t.Fatalf("first binding = handled=%v err=%v", handled, err)
+			}
+
+			live := &corev1alpha1.Agent{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(agent), live); err != nil {
+				t.Fatal(err)
+			}
+			live.Spec.Runtime.Ceiling = tc.ceiling
+			live.Generation = agent.Generation + 1
+			if err := reconciler.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			bound := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			_, err, handled := reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
+			if err != nil || handled != tc.fails {
+				t.Fatalf("re-judging = handled=%v err=%v, want handled=%v", handled, err, tc.fails)
+			}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			if failed := bound.Status.Phase == corev1alpha1.TaskPhaseFailed; failed != tc.fails {
+				t.Fatalf("phase = %q message = %q, want failed=%v", bound.Status.Phase, bound.Status.Message, tc.fails)
+			}
+		})
 	}
 }
 

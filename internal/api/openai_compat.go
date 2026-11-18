@@ -540,9 +540,9 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 		}
 		if resp != nil && streamOpts != nil && streamOpts.IncludeUsage {
 			finishChunk.Usage = &OAIUsage{
-				PromptTokens:     resp.InputTokens,
+				PromptTokens:     resp.PromptTokens(),
 				CompletionTokens: resp.OutputTokens,
-				TotalTokens:      resp.InputTokens + resp.OutputTokens,
+				TotalTokens:      resp.PromptTokens() + resp.OutputTokens,
 			}
 		}
 		_ = writeStreamChunk(w, finishChunk)
@@ -640,9 +640,9 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 			FinishReason: &finishReason,
 		}},
 		Usage: &OAIUsage{
-			PromptTokens:     resp.InputTokens,
+			PromptTokens:     resp.PromptTokens(),
 			CompletionTokens: resp.OutputTokens,
-			TotalTokens:      resp.InputTokens + resp.OutputTokens,
+			TotalTokens:      resp.PromptTokens() + resp.OutputTokens,
 		},
 	})
 }
@@ -787,9 +787,9 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					Model:   model,
 					Choices: []OAIChoice{},
 					Usage: &OAIUsage{
-						PromptTokens:     resp.InputTokens,
+						PromptTokens:     resp.PromptTokens(),
 						CompletionTokens: resp.OutputTokens,
-						TotalTokens:      resp.InputTokens + resp.OutputTokens,
+						TotalTokens:      resp.PromptTokens() + resp.OutputTokens,
 					},
 				}
 				_ = writeStreamChunk(w, usageChunk)
@@ -894,9 +894,9 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Model:   model,
 						Choices: []OAIChoice{},
 						Usage: &OAIUsage{
-							PromptTokens:     chunk.InputTokens,
+							PromptTokens:     chunk.PromptTokens(),
 							CompletionTokens: chunk.OutputTokens,
-							TotalTokens:      chunk.InputTokens + chunk.OutputTokens,
+							TotalTokens:      chunk.PromptTokens() + chunk.OutputTokens,
 						},
 					}
 					_ = writeStreamChunk(w, usageChunk)
@@ -1150,7 +1150,10 @@ func (h *OpenAICompatHandler) resolveCompatProvider(c fiber.Ctx, ctx context.Con
 			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
 		},
 		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+			if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model); err != nil {
+				return err
+			}
+			return authorizeChatProviderUse(c, h.kubeClient, "openAIChatCompletions", provider)
 		},
 		RequireModel: true,
 		// Enforced scoped context tokens get no implicit Provider selection.

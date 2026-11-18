@@ -148,6 +148,18 @@ describe('FindingDetail', () => {
     expect(screen.getByText(/rows, _ := db.Query/)).toHaveClass('whitespace-pre-wrap')
   })
 
+  it('labels each evidence location with its attack-path role', () => {
+    findingQuery.current = {
+      isLoading: false,
+      error: null,
+      data: { ...finding, evidence: [{ kind: 'file', path: 'internal/search.go', startLine: 40, role: 'root_control' }] },
+    }
+
+    render(<FindingDetail findingId="f-1" />)
+
+    expect(screen.getByText('root control')).toBeInTheDocument()
+  })
+
   it('keeps showing a loaded finding when a refetch fails', () => {
     findingQuery.current = { isLoading: false, data: finding, error: new ApiError(500, '{"error":{"code":500,"message":"security store unavailable"}}') }
 

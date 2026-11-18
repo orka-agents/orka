@@ -19,6 +19,10 @@ type ExecutionWorkspaceRequest struct {
 	TemplateName      string
 	TemplateNamespace string
 	TemplateUID       string
+	// TemplateSuspendUnsupported is set by template validation when Substrate
+	// cannot suspend an Actor of this template: it snapshots volumes only and
+	// mounts no durable directory. Such an Actor is stopped by deleting it.
+	TemplateSuspendUnsupported bool
 
 	SubstrateBootstrapSecretName string
 	SubstrateBootstrapSecretKey  string

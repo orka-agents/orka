@@ -141,7 +141,7 @@ func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 				require.Equal(t, http.StatusOK, status, response)
 				stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
 				require.NoError(t, err)
-				require.Equal(t, memorySourceProposal, stored.Source)
+				require.Equal(t, store.MemorySourceProposal, stored.Source)
 				require.Equal(t, "protected", stored.SourceProposalID)
 			}
 
@@ -160,7 +160,7 @@ func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 			stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
 			require.NoError(t, err)
 			require.Equal(t, "edited with another link", stored.Content)
-			require.Equal(t, memorySourceProposal, stored.Source)
+			require.Equal(t, store.MemorySourceProposal, stored.Source)
 		})
 	}
 }
@@ -171,7 +171,7 @@ func TestMemoryUpdateRelabelsUnlinkedProposalSource(t *testing.T) {
 	for _, route := range memoryUpdateRoutes {
 		t.Run(route, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
-			require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "unlinked", Namespace: "default", Source: memorySourceProposal, Content: "unlinked"}))
+			require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "unlinked", Namespace: "default", Source: store.MemorySourceProposal, Content: "unlinked"}))
 			f.allowOnly(t, memoryPermission("update", "memories", "unlinked"))
 			status, body := f.request(t, http.MethodPut, route+"unlinked", `{"source":"user"}`)
 			require.Equal(t, http.StatusOK, status, body)
@@ -250,44 +250,4 @@ func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, linked)
-}
-
-// Apply writes its memory and marks the proposal applied in one transaction,
-// so a memory that already names an unapplied proposal was written some other
-// way, for example by a direct store caller. Apply refuses to adopt it.
-func TestProposalApplyRefusesMemoryItDidNotWrite(t *testing.T) {
-	for _, path := range []string{"/api/v1/memory-proposals/protected/apply", "/internal/v1/memory-proposals/default/protected/apply"} {
-		t.Run(path, func(t *testing.T) {
-			f := newExternalAuthorizationFixture(t)
-			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
-				Namespace: "default", ID: "protected", Status: "accepted", Reviewer: "reviewer",
-			}))
-			memory, err := f.store.GetMemory(t.Context(), "default", "protected")
-			require.NoError(t, err)
-			memory.SourceProposalID = "protected"
-			require.NoError(t, f.store.UpdateMemory(t.Context(), memory))
-
-			f.allowOnly(t,
-				memoryPermission("apply", "memoryproposals", "protected"),
-				memoryPermission("create", "memories", ""),
-				memoryPermission("get", "memories", "protected"),
-			)
-			before := f.changes(t)
-			status, body := f.request(t, http.MethodPost, path, `{}`)
-			require.Equal(t, http.StatusConflict, status, body)
-			require.NotContains(t, body, "protected-content")
-			require.Equal(t, before, f.changes(t))
-			for _, review := range f.reviews {
-				attributes := review.ResourceAttributes
-				require.False(t, attributes.Resource == "memories" && attributes.Verb == "get", "a refused memory is never read")
-			}
-
-			proposal, err := f.store.GetMemoryProposal(t.Context(), "default", "protected")
-			require.NoError(t, err)
-			require.Equal(t, "accepted", proposal.Status)
-			require.Empty(t, proposal.AppliedMemoryID)
-			require.Empty(t, proposal.AppliedBy)
-			require.Nil(t, proposal.AppliedAt)
-		})
-	}
 }

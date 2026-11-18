@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2, Inbox } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { to: '/security', label: 'Security', icon: Shield },
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
   { to: '/kanban', label: 'Board', icon: Columns3 },
+  { to: '/approvals', label: 'Approvals', icon: Inbox },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },
@@ -129,7 +130,7 @@ export function Sidebar() {
       <div className="flex h-14 items-center border-b border-border px-4">
         {!sidebarCollapsed && (
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground">
-            <OrcaMark className="h-6 w-6" />
+            <OrcaMark small className="h-6 w-6" />
             <span>Orka</span>
           </Link>
         )}
@@ -163,15 +164,16 @@ export function Sidebar() {
               onClick={() => { if (overlayOpen) closeOverlay() }}
               className={cn(
                 'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                // Refined active state: left accent bar + subtle tint + colored
-                // icon/text, replacing the old heavy solid fill.
+                // Active: a quiet grey fill and full-strength ink. In a
+                // black-and-white UI an accent bar or tint would be the
+                // loudest thing in the sidebar.
                 isActive
-                  ? 'bg-primary/10 text-primary before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary'
+                  ? 'bg-accent text-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
                 sidebarCollapsed && 'justify-center px-2'
               )}
             >
-              <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-primary')} />
+              <Icon className="h-4 w-4 shrink-0" />
               {!sidebarCollapsed && <span>{label}</span>}
             </Link>
           )

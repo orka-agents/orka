@@ -156,14 +156,16 @@ func TestNewDashboardCmd_WithoutToken(t *testing.T) {
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
-	// Without --token, it will try createServiceAccountToken which needs kubectl.
-	// This should error in test environment.
+	// Without --token the command mints a ServiceAccount token with kubectl.
+	// Fail that step here instead of reaching whatever cluster kubectl uses.
+	tokenErr := errors.New("kubectl create token failed")
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(string, string) (string, error) { return "", tokenErr }
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
 	root.SetArgs([]string{"dashboard", "--server", "http://test:8080"})
 
-	err := root.Execute()
-	// Expect error since kubectl is likely not available or service account doesn't exist
-	if err == nil {
-		t.Log("dashboard without token succeeded (kubectl available)")
+	if err := root.Execute(); !errors.Is(err, tokenErr) {
+		t.Fatalf("Execute() error = %v, want the token creation failure", err)
 	}
 }
 
@@ -228,6 +230,43 @@ func TestNewDashboardCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 	if gotNamespace != "orka-system" {
 		t.Fatalf("namespace = %q, want configured namespace", gotNamespace)
+	}
+}
+
+// ORKA_SERVER and ORKA_NAMESPACE stand in for --server and --namespace.
+func TestNewDashboardCmd_UsesServerAndNamespaceFromEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envServer, "http://env-server:9090")
+	t.Setenv(envNamespace, "orka-system")
+	stubDashboardProbe(t)
+
+	var gotNamespace string
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(_, namespace string) (string, error) {
+		gotNamespace = namespace
+		return "opaque-login-value-env", nil
+	}
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
+
+	var opened string
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(url string) error {
+		opened = url
+		return nil
+	}
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	root.SetOut(io.Discard)
+	root.SetArgs([]string{"dashboard"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if gotNamespace != "orka-system" {
+		t.Fatalf("namespace = %q, want %s", gotNamespace, envNamespace)
+	}
+	if !strings.HasPrefix(opened, "http://env-server:9090/login#") {
+		t.Fatalf("opened %q, want the %s dashboard", opened, envServer)
 	}
 }
 

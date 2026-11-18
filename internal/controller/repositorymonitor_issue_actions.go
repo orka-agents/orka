@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
@@ -52,6 +53,7 @@ const (
 	repositoryMonitorCommandIntentImplement      = "implement"
 	repositoryMonitorIssueUnknownValue           = "unknown"
 	repositoryMonitorPatchPathDenied             = "patch_path_denied"
+	repositoryMonitorPatchPathNotAllowed         = "patch_path_not_allowed"
 	repositoryMonitorPatchPathInvalid            = "patch_path_invalid"
 	repositoryMonitorPatchManifestMismatch       = "patch_path_manifest_mismatch"
 	repositoryMonitorPatchSensitiveContentReason = "patch_secret_scan_failed"
@@ -196,6 +198,17 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
+	// A halted command (cancelled, or coalesced into another action) must not
+	// block or emit events for the shared issue, which the action that still
+	// owns the work is driving.
+	if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || halted {
+		return 0, err
+	}
+	if actionKind != command.Intent {
+		if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || halted {
+			return 0, err
+		}
+	}
 	if !repositoryMonitorIssuePhaseTransitionAllowed(item.WorkflowPhase, phase) {
 		reason := fmt.Sprintf("phase_transition_not_allowed:%s_to_%s", item.WorkflowPhase, phase)
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
@@ -216,14 +229,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 			return 0, err
 		}
 		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
-	}
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
-		return 0, err
-	}
-	if actionKind != command.Intent {
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-			return 0, err
-		}
 	}
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		planID := ""
@@ -482,8 +487,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		workspace.PushBranch = repositoryMonitorIssueImplementationBranch(monitor, item, command)
 		maxChangedFiles := int32(repositoryMonitorImplementationMaxChangedFiles(monitor)) //nolint:gosec // CRD field is int32-bounded.
 		workspace.MaxChangedFiles = &maxChangedFiles
-		workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
-		workspace.DenyRepositoryControlPaths = true
+		repositoryMonitorApplyPatchPathLimits(monitor, workspace)
 		workspace.RejectBinaryFiles = true
 		workspace.RejectSecretLikeContent = true
 		annotations[labels.AnnotationAgentRuntimeAuthOnly] = scheduledRunLabelValue
@@ -690,7 +694,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTasks
 			}
 			return ingested, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, &item, &task)
@@ -803,7 +807,7 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 		item.LastVerdict = repositoryMonitorReviewVerdictFailed
 		return nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+	if !task.Status.Phase.IsTerminal() {
 		return nil
 	}
 	// Apply the retained result before a new command can restart its workflow.
@@ -975,7 +979,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 		var task corev1alpha1.Task
 		err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task)
 		if err == nil {
-			if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+			if !task.Status.Phase.IsTerminal() {
 				continue
 			}
 			if _, awaiting := awaitingTasks[taskName]; awaiting {
@@ -1222,7 +1226,7 @@ func repositoryMonitorImplementationResultBody(envelope map[string]any, sr *comm
 
 //nolint:gocyclo // Result ingestion intentionally keeps each durable workflow transition explicit.
 func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
 		return false, err
 	}
 	if item.LastActionID == record.ID && !repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {
@@ -1365,7 +1369,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ct
 	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
 	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
-		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
 		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -1521,6 +1525,36 @@ func repositoryMonitorImplementationMaxChangedFiles(monitor *corev1alpha1.Reposi
 	return 12
 }
 
+// repositoryMonitorApplyPatchPathLimits bounds which repository paths a
+// monitor write Task may publish. Implementation and repair Tasks share one
+// policy: spec.issueWorkflow.implementation.allowedPaths, when set, and
+// repository control paths are always denied. The runtime enforces both before
+// any publication.
+func repositoryMonitorApplyPatchPathLimits(monitor *corev1alpha1.RepositoryMonitor, workspace *corev1alpha1.WorkspaceConfig) {
+	if monitor == nil || workspace == nil {
+		return
+	}
+	workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
+	workspace.DenyRepositoryControlPaths = true
+}
+
+// repositoryMonitorWorkspacePathRejectionReason reports the patch path reason
+// for a write Task whose runtime rejected its workspace delta under the path
+// limits, so nothing was published. It returns "" for any other outcome.
+func repositoryMonitorWorkspacePathRejectionReason(task *corev1alpha1.Task) string {
+	if task == nil || task.Status.Delivery == nil || task.Status.Delivery.Reason != acpWorkspaceValidationFailedReason {
+		return ""
+	}
+	switch message := task.Status.Delivery.Message; {
+	case strings.Contains(message, harnessv2.WorkspaceDeltaRepositoryControlPathMessage):
+		return repositoryMonitorPatchPathDenied
+	case strings.Contains(message, harnessv2.WorkspaceDeltaDisallowedPathMessage):
+		return repositoryMonitorPatchPathNotAllowed
+	default:
+		return ""
+	}
+}
+
 func repositoryMonitorImplementationPathAllowed(monitor *corev1alpha1.RepositoryMonitor, path string) bool {
 	if monitor == nil || len(monitor.Spec.IssueWorkflow.Implementation.AllowedPaths) == 0 {
 		return true
@@ -1631,7 +1665,12 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			"maxChangedFiles":   task.Spec.Workspace.MaxChangedFiles,
 			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
-		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: patchArtifact, ContentType: artifactContentTypeJSON, Data: deliverySummary}); err != nil {
+			// A store that has not accepted the write yet is retried, not
+			// recorded as a blocked implementation.
+			if store.IsTemporaryStorageError(err) {
+				return "", "", "", err
+			}
 			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
 		}
 		copyRecord := *record
@@ -2160,7 +2199,7 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 			return repositoryMonitorPatchPathDenied, nil
 		}
 		if !repositoryMonitorImplementationPathAllowed(monitor, path) {
-			return "patch_path_not_allowed", nil
+			return repositoryMonitorPatchPathNotAllowed, nil
 		}
 	}
 	addedContent := repositoryMonitorPatchAddedContent(sr.Diff)
@@ -2179,7 +2218,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		return repositoryMonitorPatchSensitiveContentReason, nil
 	}
 	diffName := repositoryMonitorIssuePatchDiffArtifact(item.Number, record.ID)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sr.Diff)); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sr.Diff)}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_diff_artifact_save_failed", nil
 	}
 	planID := ""
@@ -2203,7 +2245,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		"changedFiles":     sr.Files,
 	}
 	data, _ := json.Marshal(summary)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), "application/json", data); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), ContentType: artifactContentTypeJSON, Data: data}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_summary_artifact_save_failed", nil
 	}
 	return "", nil
