@@ -70,8 +70,7 @@ func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 		attempt.BindingDigest != binding.BindingDigest || attempt.SnapshotDigest != binding.Snapshot.Digest ||
 		attempt.RuntimeInstanceID != execution.RuntimeInstanceID ||
 		corev1alpha1.TaskExecutionState(attempt.ExecutionState) != execution.State ||
-		attempt.DeliveryState != store.PromptDeliveryNotRequested || task.Status.Delivery == nil ||
-		task.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested {
+		!abandonedValidationDelivery(attempt, task) {
 		return fmt.Errorf("%w: abandoned validation does not match the terminal Task attempt", store.ErrConflict)
 	}
 	if runtimeFence.RuntimeInstanceID != harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID) || runtimeFence.SupervisorBootID != harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID) ||
@@ -134,7 +133,8 @@ func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 	if delta.Delta.State == harnessv2.WorkspaceDeltaPrepared {
 		// Only local, unexported work is abandoned. A published/in-flight
 		// publication cannot reach this path: its durable delivery state is
-		// not NotRequested and its runtime is no longer Validating.
+		// neither NotRequested nor the recovered validation conflict, and its
+		// runtime is no longer Validating.
 		finalization, err := abandonedValidationFinalization(task, taskUID, delta.Delta.DeltaID)
 		if err != nil {
 			return err
@@ -265,5 +265,45 @@ func abandonedValidationFinalization(task *corev1alpha1.Task, taskUID types.UID,
 }
 
 func abandonedValidationRecoveryTask(task *corev1alpha1.Task) bool {
-	return task != nil && task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown && task.Status.Delivery != nil && task.Status.Delivery.State == corev1alpha1.TaskDeliveryStateNotRequested
+	return task != nil && task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown &&
+		abandonedValidationTaskDelivery(task)
+}
+
+// abandonedValidationTaskDelivery reports whether a Task's delivery leaves a
+// runtime validation to abandon: none was recorded, or it is the conflict
+// recovery records for a validation it could not finish before recording the
+// outcome as unknown.
+func abandonedValidationTaskDelivery(task *corev1alpha1.Task) bool {
+	if task == nil || task.Status.Delivery == nil {
+		return false
+	}
+	return task.Status.Delivery.State == corev1alpha1.TaskDeliveryStateNotRequested ||
+		(task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown &&
+			recoveredValidationConflict(task.Status.Delivery))
+}
+
+// abandonedValidationDelivery reports whether an unknown or failed attempt and
+// its Task leave a runtime validation to abandon: neither recorded a delivery,
+// or recovery recorded its validation conflict for an unknown outcome
+// (settleRecoveredWorkspaceValidation). The runtime may still hold that
+// validation, since recovery could not finish it.
+func abandonedValidationDelivery(attempt *store.PromptAttempt, task *corev1alpha1.Task) bool {
+	if attempt == nil || task == nil || task.Status.Delivery == nil {
+		return false
+	}
+	switch attempt.DeliveryState {
+	case store.PromptDeliveryNotRequested:
+		return task.Status.Delivery.State == corev1alpha1.TaskDeliveryStateNotRequested
+	case store.PromptDeliveryConflict:
+		return attempt.ExecutionState == store.PromptExecutionOutcomeUnknown && recoveredValidationConflict(task.Status.Delivery)
+	default:
+		return false
+	}
+}
+
+// recoveredValidationConflict reports whether delivery is the conflict
+// recovery records for a workspace validation it could not finish.
+func recoveredValidationConflict(delivery *corev1alpha1.TaskDeliveryStatus) bool {
+	return delivery != nil && delivery.State == corev1alpha1.TaskDeliveryStateDeliveryConflict &&
+		delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeDeliveryConflict && delivery.Reason == acpRecoveredWorkspaceLostReason
 }
