@@ -52,11 +52,17 @@ Namespaces whose Pods call the native API need the `ate.dev/api-access=true` lab
 The router limits each request's total duration with `--route-timeout`, 5 minutes
 by default. Its stream idle timeout is 30 seconds longer. Because the limit covers
 the whole response, streamed updates do not extend it. Each ACP prompt is one
-streamed request, so a turn that runs longer is reset mid-stream: Core reports
-`runtime prompt stream disconnected` and the turn fails. Set `--route-timeout`
-above the longest turn your Tasks may run. If long turns must also survive a
-router rollout, raise its `--drain-timeout` and the router Pod's
-`terminationGracePeriodSeconds` to match. Orka cannot set these router options.
+streamed request, so a turn that runs longer is reset mid-stream. Core logs
+`runtime prompt stream disconnected`. Because the runtime had already accepted
+the prompt, Core can't tell whether the turn finished, so it marks the Task
+`OutcomeUnknown` and doesn't replay it. Set `--route-timeout` above the
+longest turn your Tasks may run. Orka cannot set this router option.
+
+Router rollouts also cut long turns. On shutdown, the router drains established
+Envoy streams for a fixed window of about 15 seconds. `--drain-timeout` bounds
+only the later drain of parked requests and doesn't extend that window. A turn
+still streaming when a router Pod stops is reset the same way, so roll the
+router when no long turns are running.
 
 Actor, ActorTemplate, Atespace, Worker, and Tag are native API resources. WorkerPool
 is a Kubernetes CRD. Create infrastructure templates through the native API, such

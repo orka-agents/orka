@@ -14,8 +14,11 @@
 - Pending placement: verify the infrastructure template selects exactly one
   dedicated WorkerPool and that a worker is Active with capacity for one Actor.
   Physical worker capacity is separate from Actor count.
-- Stream stops early: configure the native router's `--route-timeout` for the
-  longest Task, and its shutdown grace if long turns must survive router drain.
+- Stream stops early (`runtime prompt stream disconnected`, Task
+  `OutcomeUnknown`): raise the native router's `--route-timeout` above the
+  longest turn. It caps total response time, so streamed updates don't extend
+  it. A router rollout also resets streams after a fixed drain window of about
+  15s, which `--drain-timeout` doesn't change.
 - Suspended or failed workspace: inspect sanitized conditions first. Private
   controller ConfigMaps retain Actor and Tag provenance. A snapshot alone is
   not workload termination proof. Do not forge consent annotations or unstick
