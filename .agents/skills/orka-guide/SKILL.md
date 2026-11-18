@@ -54,7 +54,10 @@ checked at that tag.
   `git log --oneline -F --grep='(#<N>)' --grep='<PR title>' <commit>..<tag>`. Without them
   locally, use
   `gh api repos/orka-agents/orka/compare/<commit>...<tag> --jq '.commits[].commit.message|split("\n")[0]'`.
-  Search the tag, not the `release-X.Y` branch.
+  Search the tag, not the `release-X.Y` branch. These can miss a backport that kept neither
+  the number nor the title, and `=` matches one commit, not the whole change: confirm the
+  verdict in the tagged files with the `git grep` or contents call above, or call it
+  unverified.
 - The docs aren't versioned, so a documented feature can still be unreleased.
 - A check that errors or can't run proves nothing: call the status unverified, never
   "not in vX.Y.Z".
@@ -67,7 +70,8 @@ whether main changes your answer, check only the files you cite:
 `git diff --stat <main-sha> -- <paths>`, or, when `<main-sha>` isn't in the checkout, each
 path's last commit on main,
 `gh api 'repos/orka-agents/orka/commits?sha=<main-sha>&path=<path>&per_page=1' --jq '.[0].sha'`.
-If that commit is an ancestor of `HEAD`, main hasn't changed the file since.
+If that commit is an ancestor of `HEAD` and `git diff --quiet <that-commit> -- <path>` exits
+0, the file you read is main's.
 
 ## Answering
 
