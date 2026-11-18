@@ -37,9 +37,11 @@ var (
 			Help: "Size of the SQLite database file in bytes",
 		},
 	)
-	// writeWaitSeconds and writeHoldSeconds split a write operation's time:
-	// the wait for the store's single connection, and the time the operation
-	// then holds it until it commits or rolls back. A long wait
+	// writeWaitSeconds and writeHoldSeconds split the time of a contract
+	// write with a write envelope, or of receipt pruning: the wait for the
+	// store's single connection, and the time the operation then holds it
+	// until it commits or rolls back. Other users of the connection appear
+	// only in the pool statistics. A long wait
 	// with short holds is pool contention or a starved process; a long hold
 	// is slow SQL, or a holder the host descheduled.
 	writeWaitSeconds = prometheus.NewHistogramVec(

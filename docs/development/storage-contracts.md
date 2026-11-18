@@ -968,10 +968,12 @@ persist:
   registry and nothing is counted twice. The append duration runs from the
   start of the client call, so it includes Orka's sanitization and, for a
   remote provider, network time. The embedded SQLite store still records
-  `orka_store_db_size_bytes` from its database file, the wait and hold time of
-  each write transaction by method (`orka_store_sqlite_write_wait_seconds`,
-  `orka_store_sqlite_write_hold_seconds`), and its connection pool statistics
-  as `go_sql_*{db_name="orka_store_sqlite"}`.
+  `orka_store_db_size_bytes` from its database file, its connection pool
+  statistics as `go_sql_*{db_name="orka_store_sqlite"}`, and, by method, the
+  connection wait and hold time (`orka_store_sqlite_write_wait_seconds`,
+  `orka_store_sqlite_write_hold_seconds`) of each contract write that carries
+  a write envelope and of receipt pruning. Other users of the connection,
+  such as reads, appear only in the pool statistics.
 - **Usage from execution events.** The client derives the usage observation
   that a worker usage report or the controller's ACP journal carries and
   sends it as `ExecutionEvent.Usage`, unless Orka code attached an

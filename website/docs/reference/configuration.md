@@ -814,9 +814,9 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_api_request_duration_seconds` | Histogram | `endpoint`, `method` | API request latency in seconds |
 | `orka_skills_loaded_total` | Counter | `skill`, `namespace` | Skills loaded by namespace and name |
 | `orka_store_db_size_bytes` | Gauge | — | Size of the SQLite database file in bytes |
-| `orka_store_sqlite_write_wait_seconds` | Histogram | `method` | Time a SQLite store write waited for the store's single connection before its transaction began |
-| `orka_store_sqlite_write_hold_seconds` | Histogram | `method` | Time a SQLite store write held the single connection, from the start of its transaction to its commit or rollback |
-| `go_sql_*` | Gauge/Counter | `db_name` (`orka_store_sqlite`) | Connection pool statistics of the SQLite store, including `go_sql_wait_count_total` and `go_sql_wait_duration_seconds_total` |
+| `orka_store_sqlite_write_wait_seconds` | Histogram | `method` | Time a SQLite store contract write, or receipt pruning, waited for the store's single connection before its transaction began |
+| `orka_store_sqlite_write_hold_seconds` | Histogram | `method` | Time a SQLite store contract write, or receipt pruning, held the single connection, from the start of its transaction to its commit or rollback |
+| `go_sql_*` | Gauge/Counter | `db_name` (`orka_store_sqlite`) | Connection pool statistics of the SQLite store, covering every user of its connection, including `go_sql_wait_count_total` and `go_sql_wait_duration_seconds_total` |
 | `orka_context_token_auth_total` | Counter | `profile`, `result` | Context-token authentication attempts |
 | `orka_context_token_authorization_total` | Counter | `action`, `result`, `reason` | Context-token authorization decisions (allow/deny/audit) |
 | `orka_context_token_tts_exchange_total` | Counter | `result`, `reason` | transaction-token TTS token-exchange attempts |

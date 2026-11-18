@@ -611,11 +611,11 @@ func (s *Store) PruneOperationReceipts(ctx context.Context, limit int) (int, err
 		const method = "PruneOperationReceipts"
 		started := time.Now()
 		conn, err := s.db.Conn(ctx)
-		writeWaitSeconds.WithLabelValues(method).Observe(time.Since(started).Seconds())
+		began := time.Now()
+		writeWaitSeconds.WithLabelValues(method).Observe(began.Sub(started).Seconds())
 		if err != nil {
 			return 0, fmt.Errorf("prune operation receipts: %w", err)
 		}
-		began := time.Now()
 		defer func() {
 			_ = conn.Close()
 			writeHoldSeconds.WithLabelValues(method).Observe(time.Since(began).Seconds())
