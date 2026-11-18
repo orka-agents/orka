@@ -24,6 +24,10 @@ import (
 // DefaultStorePath is the default embedded SQLite database file.
 const DefaultStorePath = "/data/orka.db"
 
+// DefaultSQLiteSynchronous is the default synchronous mode of the embedded
+// SQLite database.
+const DefaultSQLiteSynchronous = "normal"
+
 // MaxFileBytes bounds the configuration file. It matches the largest
 // ConfigMap Kubernetes stores.
 const MaxFileBytes = 1 << 20
@@ -38,6 +42,9 @@ type Flags struct {
 	// StorePath is the embedded SQLite file used by every contract bound to
 	// sqlite.
 	StorePath string
+	// SQLiteSynchronous is the synchronous mode of the embedded SQLite store,
+	// normal or full. The controller validates it when it opens the store.
+	SQLiteSynchronous string
 	// ConfigPath is the configuration file; empty selects the default
 	// configuration.
 	ConfigPath string
@@ -63,13 +70,17 @@ func (f *storeBackendFlag) Set(value string) error {
 	return nil
 }
 
-// AddFlags registers --store-backend, --store-path and --storage-config.
+// AddFlags registers --store-backend, --store-path, --store-sqlite-synchronous
+// and --storage-config.
 func (f *Flags) AddFlags(fs *flag.FlagSet) {
 	f.storeBackend = storeBackendFlag{value: EmbeddedSQLiteBackend}
 	fs.Var(&f.storeBackend, "store-backend",
 		"Storage `backend` when --storage-config is not set. Only sqlite is supported. Cannot be combined with --storage-config.")
 	fs.StringVar(&f.StorePath, "store-path", DefaultStorePath,
 		"Path to the embedded SQLite database file, used by every storage contract bound to sqlite.")
+	fs.StringVar(&f.SQLiteSynchronous, "store-sqlite-synchronous", DefaultSQLiteSynchronous,
+		"SQLite synchronous `mode` of the embedded database: normal syncs the write-ahead log at checkpoints, so the "+
+			"latest commits can be lost if the node or its disk fails; full syncs every commit.")
 	fs.StringVar(&f.ConfigPath, "storage-config", "",
 		"Path to a storage configuration file that binds each storage contract to sqlite or to a storage adapter. "+
 			"Empty binds both contracts to embedded SQLite at --store-path.")

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -409,6 +410,73 @@ func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
 			}
 			if stored.LastError == "" {
 				t.Fatalf("projection last error should be recorded")
+			}
+		})
+	}
+}
+
+// No ACP Task reports success while storage is held for recovery, whether
+// the outbox projects its terminal status or the dispatcher writes it
+// directly; once the hold is released the same write goes through.
+func TestACPTaskSuccessWaitsWhileStorageIsHeld(t *testing.T) {
+	for _, writer := range []string{"outbox", "direct"} {
+		t.Run(writer, func(t *testing.T) {
+			ctx := context.Background()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: types.UID("task-uid")},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: "session"}},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						Attempt: 1, PromptID: "prompt-1", State: corev1alpha1.TaskExecutionStateSucceeded,
+						Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+					}},
+			}
+			kube := fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+			manager := &ControllerEpochManager{ready: make(chan struct{})}
+			manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+			delivery := corev1alpha1.TaskDeliveryStatus{
+				State:   corev1alpha1.TaskDeliveryStateNotRequested,
+				Outcome: corev1alpha1.TaskDeliveryOutcome(corev1alpha1.TaskDeliveryStateNotRequested),
+			}
+			succeed := func() error {
+				if writer == "direct" {
+					dispatcher := &ACPDispatcher{Client: kube, Epochs: manager}
+					return dispatcher.completeSuccessWithDelivery(ctx, task, delivery, "ACP task completed")
+				}
+				payload, err := json.Marshal(taskTerminalProjection{
+					Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: 1,
+					Phase: corev1alpha1.TaskPhaseSucceeded, Execution: *task.Status.Execution, Delivery: &delivery,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				projector := &ACPOutboxProjector{Client: kube, Epochs: manager}
+				_, err = projector.deliver(ctx, store.OutboxProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload})
+				return err
+			}
+			phase := func() corev1alpha1.TaskPhase {
+				t.Helper()
+				var current corev1alpha1.Task
+				if err := kube.Get(ctx, client.ObjectKeyFromObject(task), &current); err != nil {
+					t.Fatal(err)
+				}
+				return current.Status.Phase
+			}
+
+			if err := succeed(); !errors.Is(err, store.ErrStorageRecoveryRequired) {
+				t.Fatalf("success written while held = %v; want ErrStorageRecoveryRequired", err)
+			}
+			if got := phase(); got != corev1alpha1.TaskPhaseRunning {
+				t.Fatalf("Task phase while held = %q, want Running", got)
+			}
+			manager.clearHold()
+			if err := succeed(); err != nil {
+				t.Fatalf("success written after the hold was released = %v", err)
+			}
+			if got := phase(); got != corev1alpha1.TaskPhaseSucceeded {
+				t.Fatalf("Task phase after the hold was released = %q, want Succeeded", got)
 			}
 		})
 	}
