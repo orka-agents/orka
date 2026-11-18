@@ -45,6 +45,17 @@ type UsageTask struct {
 	PhaseObservedAt time.Time          `json:"-"`
 	PhaseAttempt    int32              `json:"-"`
 	GatewayOwner    *UsageGatewayOwner `json:"gatewayOwner,omitempty"`
+	// Requester and AHPTurn are retained for access checks only; reports
+	// omit them. AHPTurn marks a Task that was private as an AHP turn.
+	Requester *UsageRequester `json:"requester,omitempty"`
+	AHPTurn   bool            `json:"ahpTurn,omitempty"`
+}
+
+// UsageRequester retains who requested a Task, so access that depends on
+// the requester survives Task cleanup.
+type UsageRequester struct {
+	Issuer  string `json:"issuer"`
+	Subject string `json:"subject"`
 }
 
 // UsageGatewayOwner retains the immutable access boundary after Task cleanup.
@@ -148,6 +159,11 @@ type UsageData struct {
 	// HiddenTasks are accounted for only as cumulative-counter baselines. Their
 	// counts and identifiers must not appear in the public report.
 	HiddenTasks map[string]bool
+	// HiddenSessionBaselines names sessions, as namespace/session, whose
+	// counters' first total must not appear in the public report: it may hold
+	// usage of a Task the report cannot see, even one whose row is gone.
+	// Later gains are still attributed.
+	HiddenSessionBaselines map[string]bool
 }
 
 // UsageStore is independent of task/transcript cleanup. Implementations must
@@ -160,6 +176,14 @@ type UsageStore interface {
 	RecordUsagePullRequest(context.Context, UsagePullRequest) error
 	LoadUsage(context.Context, UsageFilter) (UsageData, error)
 	ListUsagePullRequestLinks(context.Context, string, string, time.Time, int) ([]UsagePRLink, error)
+	// ListUsageTasksInSessions returns, up to limit, the retained rows of a
+	// namespace's Tasks that continued any of the named sessions, by name
+	// without surrounding space, whatever their period. A namespace UID, when
+	// given, keeps out the rows of an earlier namespace of the same name.
+	// Rows of Tasks that started after startedBy, when it is not zero, are
+	// left out and do not count against the limit. Past the limit it returns
+	// ErrUsageSelectionTooLarge.
+	ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]UsageTask, error)
 	PruneUsage(context.Context, time.Time) error
 }
 

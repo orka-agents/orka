@@ -11,9 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	kubernetestesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
@@ -35,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 // An AHP turn's Task and the Orka Session it continues are the requester's:
@@ -338,6 +343,195 @@ func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 	}
 }
 
+// Usage outlives the Tasks of AHP turns. A person sees AHP usage only when it
+// names them as its requester, also once a session of its name is someone
+// else's: a name is free again once its session and Tasks are gone. Usage
+// that names no requester, such as a chat's, is no person's.
+func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
+	const namespace = "default"
+	bobsTurn := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "ahp-bob-t1", Namespace: namespace, Labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "bob"},
+			SessionRef: &corev1alpha1.SessionReference{Name: "ahp-live"},
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(bobsTurn).Build()})
+	requester := func(subject string) *store.UsageRequester {
+		return &store.UsageRequester{Issuer: "https://issuer.example", Subject: subject}
+	}
+	rows := []store.UsageTask{
+		{Namespace: namespace, TaskUID: "alice-turn", SessionName: "ahp-alice", Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "alice-legacy", SessionName: "ahp-alice"},
+		// Two people used the same name, one after the other.
+		{Namespace: namespace, TaskUID: "reused-alice", SessionName: "ahp-reused", Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "reused-bob", SessionName: "ahp-reused", Requester: requester("bob")},
+		{Namespace: namespace, TaskUID: "other-issuer", SessionName: "ahp-other", Requester: &store.UsageRequester{Issuer: "https://other.example", Subject: "alice"}},
+		// Bob's turn now continues ahp-live; Alice used the name before.
+		{Namespace: namespace, TaskUID: "alice-before-bob", SessionName: "ahp-live", Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "legacy-in-bobs", SessionName: "ahp-live"},
+		// A name with surrounding space is the session it names.
+		{Namespace: namespace, TaskUID: "padded-legacy-in-bobs", SessionName: " ahp-live"},
+		// A private fork of a turn with no session of its own.
+		{Namespace: namespace, TaskUID: "alice-sessionless-fork", AHPTurn: true, Requester: requester("alice")},
+		// A delegate_task child of Alice's turn inherits its AHP-turn mark
+		// and requester but continues no session, and has an ordinary name.
+		{Namespace: namespace, TaskUID: "alice-delegated-child", TaskName: "worker", AHPTurn: true, Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "unknown-sessionless-turn", AHPTurn: true},
+		// A requester recorded without an identity names no one.
+		{Namespace: namespace, TaskUID: "empty-requester", SessionName: "ahp-empty", Requester: &store.UsageRequester{}},
+		// Any Task may be named with the AHP prefix: a name alone is no turn's.
+		{Namespace: namespace, TaskUID: "ordinary-ahp-name", TaskName: "ahp-report", Requester: requester("bob")},
+		{Namespace: namespace, TaskUID: "ordinary-ahp-name-no-requester", TaskName: "ahp-report-2"},
+		{Namespace: namespace, TaskUID: "team", SessionName: "team-session"},
+		// Tasks a chat in an AHP session created: their rows name no
+		// session, but their usage does.
+		{Namespace: namespace, TaskUID: "chat-created-alice", TaskName: "report", Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "chat-created-no-requester", TaskName: "report-2"},
+	}
+	// Usage with no Task, as a chat's, names no requester.
+	observations := []store.UsageObservation{
+		{Namespace: namespace, TaskUID: "chat-created-alice", CounterID: "chat-created-alice", SessionName: "ahp-alice"},
+		{Namespace: namespace, TaskUID: "chat-created-no-requester", CounterID: "chat-created-no-requester", SessionName: "ahp-alice"},
+		{Namespace: namespace, CounterID: "chat-in-bobs", SessionName: "ahp-live"},
+		{Namespace: namespace, CounterID: "chat-in-gone", SessionName: "ahp-gone"},
+		{Namespace: namespace, CounterID: "chat-in-team", SessionName: "team-session"},
+	}
+	hidden := func(caller *UserInfo) map[string]bool {
+		data := store.UsageData{Tasks: slices.Clone(rows), Observations: slices.Clone(observations)}
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, caller)
+			return handlers.filterUsageTaskAccess(c, &data, time.Now())
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		return data.HiddenTasks
+	}
+	noOnes := map[string]bool{
+		"default/alice-legacy": true, "default/other-issuer": true, "default/legacy-in-bobs": true, "default/padded-legacy-in-bobs": true,
+		"default/unknown-sessionless-turn": true, "default/call-chat-in-bobs": true, "default/call-chat-in-gone": true,
+		"default/empty-requester": true, "default/chat-created-no-requester": true,
+	}
+	with := func(keys ...string) map[string]bool {
+		hidden := maps.Clone(noOnes)
+		for _, key := range keys {
+			hidden["default/"+key] = true
+		}
+		return hidden
+	}
+	require.Equal(t, with("reused-bob"), hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"}))
+	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
+		hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}))
+	require.Empty(t, hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"}))
+	// A person the API server signs in itself carries no issuer and subject,
+	// so no AHP usage is theirs.
+	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
+		hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}))
+}
+
+// A session's usage counter spans its turns, and the report shows the first
+// total it sees as the session's earlier usage. A turn hidden from a person
+// must not reach them through a visible turn that shares its counter.
+// A session's first total may hold an earlier turn's usage that the person
+// may not see. When retention has removed that turn's row, and it reported
+// nothing of its own, nothing shows the total is not theirs: it is not shown,
+// and only later gains are credited to their turn.
+func TestAHPUsageCounterShowsNoTotalAPrunedTurnMayHold(t *testing.T) {
+	const namespace = "default"
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	tokens := func(n int64) *int64 { return &n }
+	observe := func(id string, at time.Time, in int64) store.UsageObservation {
+		return store.UsageObservation{ID: id, Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", SessionName: "ahp-shared",
+			CounterID: "session", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted,
+			ObservedAt: at, InputTokens: tokens(in), OutputTokens: tokens(7)}
+	}
+	data := store.UsageData{
+		// The earlier turn's row is gone, and it reported nothing of its own.
+		Tasks: []store.UsageTask{{Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", TaskName: "alices-turn",
+			SessionName: "ahp-shared", Phase: "Succeeded", Runtime: "agent", StartedAt: start,
+			Requester: &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}}},
+		Observations: []store.UsageObservation{observe("first", start.Add(time.Minute), 4242), observe("later", start.Add(2*time.Minute), 4300)},
+	}
+	filter := store.UsageFilter{Namespaces: []string{namespace}, NamespaceUIDs: map[string]string{namespace: "namespace-uid"},
+		From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)}
+	app := fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &data, filter.AsOf)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), "alices-turn")
+	require.NotContains(t, string(encoded), "4242", "the first total, which may hold another person's usage, is not shown")
+	require.Contains(t, string(encoded), `"inputTokens":58`, "the later gain is the turn's")
+}
+
+func TestAHPUsageCounterDoesNotShowAHiddenTurn(t *testing.T) {
+	const namespace = "default"
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	tokens := func(n int64) *int64 { return &n }
+	turn := func(uid string, requester *store.UsageRequester, at time.Time) store.UsageTask {
+		return store.UsageTask{Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: uid, TaskName: uid, SessionName: "ahp-shared",
+			Phase: "Succeeded", Runtime: "agent", StartedAt: at, Requester: requester}
+	}
+	for name, earlier := range map[string]*store.UsageRequester{
+		"another person's": {Issuer: "https://issuer.example", Subject: "bob"},
+		"no one's":         nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := store.UsageData{
+				Tasks: []store.UsageTask{turn("earlier-turn", earlier, start),
+					turn("alices-turn", &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}, start.Add(time.Minute))},
+				Observations: []store.UsageObservation{
+					// The earlier turn reports no counts; Alice's turn then
+					// reports the counter's total, the earlier tokens included.
+					{ID: "earlier", Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "earlier-turn", SessionName: "ahp-shared",
+						CounterID: "session", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted,
+						ObservedAt: start.Add(30 * time.Second)},
+					{ID: "alice", Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", SessionName: "ahp-shared",
+						CounterID: "session", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted,
+						ObservedAt: start.Add(90 * time.Second), InputTokens: tokens(4242), OutputTokens: tokens(77)},
+				},
+			}
+			filter := store.UsageFilter{Namespaces: []string{namespace}, NamespaceUIDs: map[string]string{namespace: "namespace-uid"},
+				From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)}
+			app := fiber.New()
+			app.Get("/", func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+				return handlers.filterUsageTaskAccess(c, &data, filter.AsOf)
+			})
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			require.Equal(t, http.StatusOK, response.StatusCode)
+			report, err := usage.Build(data, filter)
+			require.NoError(t, err)
+			encoded, err := json.Marshal(report)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), "alices-turn")
+			require.NotContains(t, string(encoded), "earlier-turn")
+			require.NotContains(t, string(encoded), "4242")
+		})
+	}
+}
+
 // A page of sessions leaves out another person's AHP sessions, and its
 // continue token never names one: pages read on until full, and the token
 // names the last session listed.
@@ -407,4 +601,304 @@ func TestAHPSessionPagesNeverNameAHiddenSession(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{"team-new", "team-old"}, all)
+}
+
+// Whose AHP usage is follows from the usage alone, so a report looks up no
+// session owners and lists no Tasks.
+func TestAHPUsageLooksUpNoSessionOwners(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	var lists atomic.Int32
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists.Add(1)
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	handlers := NewHandlers(HandlersConfig{Client: kube})
+	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+	data := store.UsageData{
+		Tasks: []store.UsageTask{
+			{Namespace: "default", TaskUID: "one", SessionName: "ahp-gone", Requester: alice},
+			{Namespace: "default", TaskUID: "two", SessionName: "ahp-other"},
+		},
+		Observations: []store.UsageObservation{{Namespace: "default", CounterID: "chat", SessionName: "ahp-other"}},
+	}
+	app := fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"})
+		return handlers.filterUsageTaskAccess(c, &data, time.Now())
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Equal(t, map[string]bool{"default/one": true, "default/two": true, "default/call-chat": true}, data.HiddenTasks)
+	require.Zero(t, lists.Load())
+}
+
+// A turn of an AHP session from outside the report's period, such as an
+// operator's from before it, may have used the session's counter too: the
+// report credits nothing on that counter to the person's turns.
+func TestAHPUsageCountsHiddenTurnsOutsideTheReport(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+	for _, task := range []store.UsageTask{
+		{Namespace: "default", TaskUID: "operator", TaskName: "operator", SessionName: " ahp-alice\t", Phase: "Succeeded", StartedAt: start.Add(-48 * time.Hour)},
+		// Padded with space SQL's TRIM does not know.
+		{Namespace: "default", TaskUID: "operator-2", TaskName: "operator-2", SessionName: "\u00a0ahp-alice\u2003", Phase: "Succeeded",
+			StartedAt: start.Add(-47 * time.Hour)},
+		// Holding the name without being it.
+		{Namespace: "default", TaskUID: "other", TaskName: "other", SessionName: "ahp-alice-2", Phase: "Succeeded", StartedAt: start.Add(-46 * time.Hour)},
+		{Namespace: "default", TaskUID: "alice", TaskName: "alice", SessionName: "ahp-alice", Phase: "Succeeded", StartedAt: start, Requester: alice},
+		{Namespace: "default", TaskUID: "elsewhere", TaskName: "elsewhere", SessionName: "ahp-elsewhere", Phase: "Succeeded", StartedAt: start.Add(-48 * time.Hour)},
+	} {
+		require.NoError(t, ss.RegisterUsageTask(ctx, task))
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: ss})
+	tokens := int64(250)
+	data := store.UsageData{
+		Tasks: []store.UsageTask{{Namespace: "default", TaskUID: "alice", TaskName: "alice", SessionName: "ahp-alice", Phase: "Succeeded",
+			StartedAt: start, Requester: alice}},
+		Observations: []store.UsageObservation{{ID: "alice", Namespace: "default", TaskUID: "alice", SessionName: "ahp-alice", CounterID: "session",
+			Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted, InputTokens: &tokens,
+			ObservedAt: start.Add(time.Minute)}},
+	}
+	app := fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &data, start.Add(time.Hour))
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Equal(t, map[string]bool{"default/operator": true, "default/operator-2": true}, data.HiddenTasks,
+		"the earlier turns join the report, hidden")
+	filter := store.UsageFilter{Namespaces: []string{"default"}, From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)}
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), `"inputTokens":250`)
+	require.NotContains(t, string(encoded), "operator")
+}
+
+// A hidden reporter whose Task's row retention pruned, or which reported no
+// counts, cannot show how much of its session's counter it used: a person's
+// turns are credited nothing on that counter. A ServiceAccount, which sees
+// all AHP usage, keeps the counter's gains attributed.
+func TestAHPUsageCounterWithRowlessHiddenUsage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build()})
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+	count := func(n int64) *int64 { return &n }
+	build := func(caller *UserInfo) string {
+		t.Helper()
+		turn := func(uid string, at time.Time) store.UsageTask {
+			return store.UsageTask{Namespace: "default", TaskUID: uid, TaskName: uid, SessionName: "ahp-alice", Phase: "Succeeded",
+				StartedAt: at, Requester: alice}
+		}
+		report := func(id, uid string, input *int64, at time.Duration) store.UsageObservation {
+			return store.UsageObservation{ID: id, Namespace: "default", TaskUID: uid, SessionName: "ahp-alice", CounterID: "session",
+				Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted, InputTokens: input,
+				ObservedAt: start.Add(at)}
+		}
+		data := store.UsageData{
+			Tasks: []store.UsageTask{turn("first", start), turn("second", start.Add(2*time.Minute))},
+			// The pruned turn ran between Alice's, and reported no counts.
+			Observations: []store.UsageObservation{report("a", "first", count(100), time.Minute),
+				report("b", "pruned", nil, 90*time.Second), report("c", "second", count(250), 3*time.Minute)},
+		}
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, caller)
+			return handlers.filterUsageTaskAccess(c, &data, start.Add(time.Hour))
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		built, err := usage.Build(data, store.UsageFilter{Namespaces: []string{"default"}, From: start.Add(-time.Hour), Until: start.Add(time.Hour),
+			AsOf: start.Add(time.Hour)})
+		require.NoError(t, err)
+		encoded, err := json.Marshal(built)
+		require.NoError(t, err)
+		return string(encoded)
+	}
+	person := build(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+	require.NotContains(t, person, `"inputTokens":150`, "the pruned turn's usage reaches no turn of Alice's")
+	require.NotContains(t, person, "pruned")
+	operator := build(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"})
+	require.Contains(t, operator, `"inputTokens":150`, "a ServiceAccount's report keeps the gain attributed")
+}
+
+// limitRecordingStore records the limit each session lookup is given.
+type limitRecordingStore struct {
+	*sqlite.Store
+	limits []int
+}
+
+func (s *limitRecordingStore) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]store.UsageTask, error) {
+	s.limits = append(s.limits, limit)
+	return s.Store.ListUsageTasksInSessions(ctx, namespace, namespaceUID, sessions, startedBy, limit)
+}
+
+// The lookup of a report's AHP session rows has one budget across all its
+// teams, as the report's own record limit does.
+func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	recording := &limitRecordingStore{Store: sqlite.NewStore(db, ":memory:")}
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, namespace := range []string{"team-a", "team-b"} {
+		for i := range 3 {
+			require.NoError(t, recording.RegisterUsageTask(ctx, store.UsageTask{Namespace: namespace, TaskUID: fmt.Sprint("turn-", i),
+				TaskName: fmt.Sprint("turn-", i), SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start}))
+		}
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: recording})
+	data := store.UsageData{Tasks: []store.UsageTask{
+		{Namespace: "team-a", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start},
+		{Namespace: "team-b", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start},
+	}}
+	app := fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &data, start.Add(time.Hour))
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	// Each lookup may return the team's loaded row again, so its limit leaves
+	// room for it; only the three rows the report did not load use budget.
+	require.Equal(t, []int{usageMaxRecords - 2 + 1, usageMaxRecords - 2 - 3 + 1}, recording.limits,
+		"the report's two records and each team's new rows count against one budget")
+
+	// A report already at its record limit has no budget left for the lookup.
+	full := store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start}}}
+	for i := range usageMaxRecords - 1 {
+		full.Observations = append(full.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+			SessionName: "team-session", ObservedAt: start})
+	}
+	recording.limits = nil
+	app = fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &full, start.Add(time.Hour))
+	})
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusUnprocessableEntity, response.StatusCode)
+	require.Equal(t, []int{1}, recording.limits, "only room for the report's own row")
+}
+
+// Placeholders for a session's observations whose Task rows the report did not
+// load are not rows the lookup returns again: they leave its limit alone, and a
+// retained row one stands for is a new record against the budget.
+func TestAHPUsageSessionLookupDoesNotCountPlaceholders(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	recording := &limitRecordingStore{Store: sqlite.NewStore(db, ":memory:")}
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, uid := range []string{"loaded", "turn-0", "turn-1", "turn-2"} {
+		require.NoError(t, recording.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: uid,
+			TaskName: uid, SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start}))
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: recording})
+	report := func(extra int) int {
+		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
+		// Five turns whose rows retention pruned, and one, turn-0, whose row
+		// the report did not select: each gets a placeholder.
+		for _, uid := range []string{"gone-0", "gone-1", "gone-2", "gone-3", "gone-4", "turn-0"} {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", TaskUID: uid, TaskName: uid,
+				CounterID: "counter-" + uid, SessionName: "ahp-shared", ObservedAt: start})
+		}
+		// The report's own records leave room for exactly the three turns it
+		// did not load.
+		for i := range usageMaxRecords - 10 + extra {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+				SessionName: "team-session", ObservedAt: start})
+		}
+		recording.limits = nil
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+			return handlers.filterUsageTaskAccess(c, data, start.Add(time.Hour))
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		return response.StatusCode
+	}
+	require.Equal(t, http.StatusOK, report(0))
+	require.Equal(t, []int{3 + 1}, recording.limits, "only the loaded row widens the limit, not the placeholders")
+	require.Equal(t, http.StatusUnprocessableEntity, report(1),
+		"turn-0's retained row is a new record, though a placeholder stands for it")
+}
+
+// A report that the session lookup takes exactly to its record limit is not
+// refused because the lookup also returns a row the report already loaded.
+func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	backend := sqlite.NewStore(db, ":memory:")
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, uid := range []string{"loaded", "turn-0", "turn-1"} {
+		require.NoError(t, backend.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: uid,
+			TaskName: uid, SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start}))
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: backend})
+	report := func(extra int) (*store.UsageData, int) {
+		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
+		// The report's own records leave room for exactly the two other turns.
+		for i := range usageMaxRecords - 3 + extra {
+			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+				SessionName: "team-session", ObservedAt: start})
+		}
+		app := fiber.New()
+		app.Get("/", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+			return handlers.filterUsageTaskAccess(c, data, start.Add(time.Hour))
+		})
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		return data, response.StatusCode
+	}
+	data, status := report(0)
+	require.Equal(t, http.StatusOK, status)
+	require.Len(t, data.Tasks, 3, "both other turns join the report, hidden")
+	require.True(t, data.HiddenTasks["team-a/turn-0"])
+	require.True(t, data.HiddenTasks["team-a/turn-1"])
+
+	// One record more and the turns no longer fit.
+	_, status = report(1)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+	// A turn that started after the report's asOf is outside it and uses
+	// none of its budget.
+	require.NoError(t, backend.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: "after-asof",
+		TaskName: "after-asof", SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start.Add(2 * time.Hour)}))
+	data, status = report(0)
+	require.Equal(t, http.StatusOK, status, "a later turn does not push a historical report past its limit")
+	require.NotContains(t, data.HiddenTasks, "team-a/after-asof")
 }

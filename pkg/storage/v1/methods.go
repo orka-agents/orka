@@ -336,6 +336,7 @@ var methodCatalog = map[string]MethodInfo{
 	"ListTaskCounterObservations":           stateRead(),
 	"ListUnreadMessages":                    stateRead(),
 	"ListUsagePullRequestLinks":             stateRead(),
+	"ListUsageTasksInSessions":              stateRead(),
 	"ListWorkActions":                       stateRead(),
 	"LoadTranscript":                        stateRead(),
 	"LoadTranscriptThrough":                 stateRead(),

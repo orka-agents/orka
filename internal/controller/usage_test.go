@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -161,5 +162,65 @@ func TestUsageRetryPreservesPendingInterval(t *testing.T) {
 		report, err := usage.Build(data, filter)
 		require.NoError(t, err)
 		require.Equal(t, check.phase, report.Works[0].Tasks[0].Phase)
+	}
+}
+
+func TestUsageRetainsTheRequesterButReportsOmitIt(t *testing.T) {
+	backend := setupControllerSQLiteStore(t)
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "ahp-t1", Namespace: "default", UID: "task-uid", CreationTimestamp: metav1.NewTime(start),
+		Labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, SessionRef: &corev1alpha1.SessionReference{Name: "ahp-session"},
+			RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice", Email: "alice@example.com"}}}
+	snapshot := usageTaskSnapshot(task)
+	require.Equal(t, &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}, snapshot.Requester)
+	require.True(t, snapshot.AHPTurn)
+	snapshot.NamespaceUID = "namespace-uid"
+	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+	// The first requester recorded stays, and a Task once private stays so.
+	snapshot.Requester = &store.UsageRequester{Issuer: "https://issuer.example", Subject: "mallory"}
+	snapshot.AHPTurn = false
+	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+	filter := store.UsageFilter{Namespaces: []string{"default"}, NamespaceUIDs: map[string]string{"default": "namespace-uid"},
+		From: start.Add(-time.Minute), Until: start.Add(time.Hour), AsOf: time.Now().UTC()}
+	data, err := backend.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	require.Len(t, data.Tasks, 1)
+	require.Equal(t, &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}, data.Tasks[0].Requester)
+	require.True(t, data.Tasks[0].AHPTurn)
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"taskUID":"task-uid"`)
+	require.NotContains(t, string(encoded), "alice")
+	require.NotContains(t, string(encoded), "requester")
+	require.NotContains(t, string(encoded), "ahpTurn")
+}
+
+// Only AHP usage is shown by who requested it, so an ordinary Task's
+// requester is not kept past the Task; a Task in an AHP session, or an AHP
+// turn, keeps it.
+func TestUsageRetainsTheRequesterOfAHPTasksOnly(t *testing.T) {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"}
+	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+	for name, test := range map[string]struct {
+		session string
+		labels  map[string]string
+		want    *store.UsageRequester
+	}{
+		"ordinary":      {want: nil},
+		"other session": {session: "team-session", want: nil},
+		"AHP session":   {session: " ahp-session", want: alice},
+		"AHP turn":      {labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}, want: alice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default", UID: "task-uid", Labels: test.labels},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, RequestedBy: requester}}
+			if test.session != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: test.session}
+			}
+			require.Equal(t, test.want, usageTaskSnapshot(task).Requester)
+		})
 	}
 }

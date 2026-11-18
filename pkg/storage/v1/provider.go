@@ -145,8 +145,9 @@ const (
 	// and the consolidation proposal types, whose application changes the
 	// memories they target only at the generations they name. Revision 11
 	// adds [MemoryConsolidationStore]. Revision 12 adds [AHPStore] to
-	// [StateProvider].
-	ContractRevision = 12
+	// [StateProvider]. Revision 13 adds [UsageStore.ListUsageTasksInSessions]
+	// and the requester a [UsageTask] keeps.
+	ContractRevision = 13
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
