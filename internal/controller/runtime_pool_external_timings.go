@@ -32,6 +32,12 @@ const (
 	// provider to retire a sequence, in the same form. It only measures how
 	// long the runtime took to stop.
 	externalRetirementAuthorizedAnnotation = "acp.workspace.orka.ai/retirement-authorized-at"
+	// externalRuntimeStopRequestedAnnotation records, in the same form and in
+	// the retirement authorization patch, when this controller process first
+	// saw the RuntimePool retire that sequence. It only measures how long the
+	// runtime took to stop, and is absent when the process did not see the
+	// retirement begin, for example after a restart.
+	externalRuntimeStopRequestedAnnotation = "acp.workspace.orka.ai/stop-requested-at"
 
 	externalRuntimeStartedLogMessage = "ACP workspace runtime started"
 	externalRuntimeStoppedLogMessage = "ACP workspace runtime stopped"
@@ -152,8 +158,10 @@ func externalRuntimeReadyAt(w *workspacev1alpha1.ExecutionWorkspace, published t
 }
 
 // externalRuntimeStopPhases breaks a runtime stop into Core's drain, from the
-// last detach to retirement authorization, and the provider's retirement up to
-// Core's independent proof that the instance stopped.
+// first observed retirement of the sequence to retirement authorization, and
+// the provider's retirement up to Core's independent proof that the instance
+// stopped. Detach and settlement times are not used: settlement can suspend
+// the workspace after the pool already began, or even finished, its drain.
 func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped time.Time) []externalRuntimePhase {
 	retirement := w.Spec.Retirement
 	authorized, ok := parseExternalRuntimeMilestone(w.Annotations[externalRetirementAuthorizedAnnotation], retirement.Sequence)
@@ -161,16 +169,28 @@ func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped 
 		return nil
 	}
 	var phases []externalRuntimePhase
-	if retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Attachment == nil {
-		// The last detach starts a Suspend only when nothing reattached since.
-		if detached, err := time.Parse(time.RFC3339Nano, w.Annotations[acpWorkspaceLastDetachedAnnotation]); err == nil && !authorized.Before(detached) {
-			phases = append(phases,
-				externalRuntimePhase{externalRuntimePhaseDrain, authorized.Sub(detached)},
-				externalRuntimePhase{externalRuntimePhaseStopTotal, stopped.Sub(detached)},
-			)
-		}
+	if requested, ok := parseExternalRuntimeMilestone(w.Annotations[externalRuntimeStopRequestedAnnotation], retirement.Sequence); ok && !authorized.Before(requested) {
+		phases = append(phases,
+			externalRuntimePhase{externalRuntimePhaseDrain, authorized.Sub(requested)},
+			externalRuntimePhase{externalRuntimePhaseStopTotal, stopped.Sub(requested)},
+		)
 	}
 	return append(phases, externalRuntimePhase{externalRuntimePhaseProviderRetirement, stopped.Sub(authorized)})
+}
+
+// stampExternalRuntimeStopRequested adds the observed start of the stop to the
+// patch that first authorizes the sequence's retirement. A later
+// authorization of the same sequence, such as a Delete after a Suspend,
+// retires an instance whose drain already ended, so it carries no start.
+func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool types.UID, authorized time.Time) {
+	sequence := w.Spec.Retirement.Sequence
+	delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
+	if previous != nil && previous.Sequence == sequence {
+		return
+	}
+	if requested, ok := r.externalTimings.retirementRequested(pool, sequence); ok && !requested.After(authorized) {
+		setExternalRuntimeMilestone(w, externalRuntimeStopRequestedAnnotation, sequence, requested)
+	}
 }
 
 func externalRuntimePhaseKeysAndValues(phases []externalRuntimePhase) []any {
@@ -194,10 +214,12 @@ func phaseLogKey(phase string) string {
 
 // externalRuntimeTimingReports remembers, per RuntimePool, the runtime
 // instance whose start and the retirement whose stop this controller process
-// already reported, and when it first proved that retirement's termination.
-// A readmission or a repeated Stopped write after a transient failure is then
-// not reported again. It lives in memory only, so it costs no write: after a
-// controller restart one already-reported transition can be reported again.
+// already reported, when it first saw the pool retire its current sequence,
+// and when it first proved that retirement's termination. A readmission or a
+// repeated Stopped write after a transient failure is then not reported
+// again. It lives in memory only, so it costs no write: after a controller
+// restart one already-reported transition can be reported again, and a
+// retirement already under way is not given a start.
 type externalRuntimeTimingReports struct {
 	mu    sync.Mutex
 	pools map[types.UID]*externalRuntimeTimingReport
@@ -208,6 +230,13 @@ type externalRuntimeTimingReport struct {
 	stoppedKey      string
 	provenKey       string
 	provenAt        time.Time
+
+	// retiringSequence is the sequence the pool is retiring, or zero.
+	// retirementRequestedAt is when this process first saw that retirement,
+	// or zero when the retirement was already under way at the process's
+	// first look at the pool.
+	retiringSequence      int64
+	retirementRequestedAt time.Time
 }
 
 func (t *externalRuntimeTimingReports) poolLocked(uid types.UID) *externalRuntimeTimingReport {
@@ -220,6 +249,38 @@ func (t *externalRuntimeTimingReports) poolLocked(uid types.UID) *externalRuntim
 		t.pools[uid] = report
 	}
 	return report
+}
+
+// observeRetirement records whether the pool is retiring the sequence, and
+// when this process first saw it begin. A pool that leaves retirement before
+// it was authorized starts a later retirement afresh.
+func (t *externalRuntimeTimingReports) observeRetirement(uid types.UID, sequence int64, retiring bool, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, seen := t.pools[uid]
+	report := t.poolLocked(uid)
+	switch {
+	case !retiring:
+		report.retiringSequence, report.retirementRequestedAt = 0, time.Time{}
+	case report.retiringSequence == sequence:
+	case !seen:
+		// The retirement may have begun before this process started.
+		report.retiringSequence, report.retirementRequestedAt = sequence, time.Time{}
+	default:
+		report.retiringSequence, report.retirementRequestedAt = sequence, at
+	}
+}
+
+// retirementRequested returns when this process first saw the pool retire the
+// sequence, if it saw the retirement begin.
+func (t *externalRuntimeTimingReports) retirementRequested(uid types.UID, sequence int64) (time.Time, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	report := t.pools[uid]
+	if report == nil || report.retiringSequence != sequence || report.retirementRequestedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return report.retirementRequestedAt, true
 }
 
 // claimStart reports whether the instance's start is not yet reported, and
