@@ -32,8 +32,11 @@ type streamUsageState struct {
 	Provider              string
 }
 
+// providerName is the name the provider registers under and reports in errors.
+const providerName = "anthropic"
+
 func init() {
-	llm.RegisterProvider("anthropic", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerName, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
 }
@@ -72,7 +75,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 // Name returns the provider name
 func (p *Provider) Name() string {
-	return "anthropic"
+	return providerName
 }
 
 func (p *Provider) TelemetryProviderName() string {
@@ -132,7 +135,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		// None of it has reached the caller, so report a gateway failure,
 		// which the retry layer retries.
 		return nil, &llm.ProviderError{
-			Provider:   "anthropic",
+			Provider:   providerName,
 			Message:    "anthropic stream ended before the message finished",
 			StatusCode: http.StatusBadGateway,
 		}
@@ -484,7 +487,7 @@ var streamErrorStatus = map[shared.ErrorType]int{
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status
 // code from the Anthropic SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
-	pe := &llm.ProviderError{Provider: "anthropic", Message: err.Error()}
+	pe := &llm.ProviderError{Provider: providerName, Message: err.Error()}
 	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
 		// An error event inside a stream carries the stream's 200 status.
