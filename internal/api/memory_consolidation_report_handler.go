@@ -19,7 +19,7 @@ import (
 // memory consolidation run (ADR 0051). The Task result holds only the
 // report's structure, since anyone who can read the Task can read it; the
 // full report quotes the Sessions and memories the run read, so its route
-// also requires list and get on sessions and list on memories. It is served
+// also requires list and get on sessions and list on memories and memoryproposals. It is served
 // while the Task exists and its run finished.
 func (h *Handlers) GetTaskMemoryConsolidationReport(c fiber.Ctx) error {
 	id := c.Params("id")

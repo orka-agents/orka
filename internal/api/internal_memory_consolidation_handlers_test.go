@@ -376,6 +376,87 @@ func TestMemoryConsolidationReportsAWindowCutPastMaxLookback(t *testing.T) {
 	require.True(t, old.Equal(*report.WindowCutFrom))
 }
 
+// A run reads the namespace's open proposals, including those an earlier run
+// left pending, and does not propose the same change again.
+func TestMemoryConsolidationDoesNotRepeatAnOpenProposal(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose, MinNewSessions: new(int32(1))})
+	f.seedSessions(t, 1)
+	for _, id := range []string{"mem-a", "mem-b", "mem-c", "mem-d"} {
+		require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: id, Namespace: "default", Content: "Release with make test"}))
+	}
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "earlier-run", Namespace: "default",
+		Type: store.MemoryProposalTypeSupersede, Title: "Release with e2e", Content: "Release with make test and e2e.",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}}))
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "remembered", Namespace: "default",
+		Type: store.MemoryProposalTypeMemory, Title: "Tagging", Content: "Tag releases after make test."}))
+
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.NotNil(t, begin.Input)
+	read := map[string]bool{}
+	for _, proposal := range begin.Input.Proposals {
+		read[proposal.ID] = true
+	}
+	require.Equal(t, map[string]bool{"earlier-run": true, "remembered": true}, read)
+
+	source := []store.MemoryProposalSource{{SessionName: "session-0"}}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{
+		{Type: "supersede", Content: "Release with make test and the e2e suite.", Sources: source,
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}},
+		{Type: "add", Content: "tag releases after make test", Sources: source},
+		{Type: "merge", Content: "Release with make test, then tag it.", Sources: source, Covers: []string{"remembered"},
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-b", Generation: 1}, {MemoryID: "mem-c", Generation: 1}}},
+	}}, &report))
+	require.Len(t, report.Operations, 1)
+	require.Equal(t, []string{"remembered"}, report.Operations[0].Covers)
+	require.Len(t, report.Rejected, 2, "the earlier run's supersede and the remembered fact are not proposed again")
+	require.Len(t, report.ProposalIDs, 1)
+	proposal, err := f.store.GetMemoryProposal(t.Context(), "default", report.ProposalIDs[0])
+	require.NoError(t, err)
+	require.Contains(t, proposal.Description, "redundant with this one: remembered.")
+}
+
+// Proposals created while a run ran are checked at completion; a reload that
+// reaches its limit marks the report's input truncated.
+func TestMemoryConsolidationReportsALaterProposalReloadThatReachedItsLimit(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{MinNewSessions: new(int32(1))})
+	f.seedSessions(t, 1)
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.False(t, begin.Input.Truncated)
+	for i := range memoryconsolidation.MaxInputProposals {
+		require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: fmt.Sprintf("later-%d", i), Namespace: "default",
+			Type: store.MemoryProposalTypeMemory, Title: "Later", Content: fmt.Sprintf("fact %d", i)}))
+	}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{}}, &report))
+	require.True(t, report.InputTruncated, "the later proposals a full reload left out were not checked")
+}
+
+// A proposal the run read but a reviewer archived while it ran can no longer
+// be covered: the fact it proposed may already be in memory.
+func TestMemoryConsolidationDoesNotCoverAProposalReviewedWhileItRan(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose, MinNewSessions: new(int32(1))})
+	f.seedSessions(t, 1)
+	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "mem-go", Namespace: "default", Content: "Use Go 1.24."}))
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "remembered", Namespace: "default",
+		Type: store.MemoryProposalTypeMemory, Title: "Go", Content: "Use Go 1.26."}))
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+	require.Len(t, begin.Input.Proposals, 1)
+	require.NoError(t, f.store.ArchiveMemoryProposal(t.Context(), "default", "remembered"))
+
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{
+		{Type: "supersede", Content: "Use Go 1.26 for every build.", Covers: []string{"remembered"},
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-go", Generation: 1}}},
+	}}, &report))
+	require.Empty(t, report.Operations)
+	require.Len(t, report.Rejected, 1)
+	require.Empty(t, report.ProposalIDs)
+}
+
 // A run submits operations only. Orka builds each proposal, so a submission
 // cannot choose a proposal's ID, namespace or attribution, or record a review
 // or apply outcome.

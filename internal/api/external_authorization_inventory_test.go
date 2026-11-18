@@ -57,7 +57,7 @@ GET /api/v1/approvals | list core.orka.ai:tasks
 POST /api/v1/tasks/:id/approvals/:approvalID/decision | update core.orka.ai:tasks/approvals protected; patch core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/fork | get core.orka.ai:tasks protected; create core.orka.ai:tasks
 GET /api/v1/tasks/:id/result | get core.orka.ai:tasks protected
-GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories
+GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories; list core.orka.ai:memoryproposals
 GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/children | get core.orka.ai:tasks protected; list core.orka.ai:tasks
 GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected

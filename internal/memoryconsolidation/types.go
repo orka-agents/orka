@@ -46,7 +46,17 @@ const (
 	// input fails the run, which leaves its Sessions to the next one.
 	MaxMemoryInputChars     = 60_000
 	MaxTranscriptInputChars = 60_000
-	MaxInputChars           = MaxMemoryInputChars + MaxTranscriptInputChars
+	MaxInputChars           = MaxMemoryInputChars + MaxTranscriptInputChars + MaxProposalInputChars
+
+	// MaxInputProposals is the most open memory proposals a run reads, the
+	// newest first, so it does not propose again what already awaits review.
+	MaxInputProposals = 50
+	// MaxProposalInputChars bounds the open proposals a run reads, apart
+	// from its memories and transcripts.
+	MaxProposalInputChars = 20_000
+	// MaxCoveredIDChars bounds each proposal ID an operation covers; a
+	// longer ID is dropped, so covers cannot grow a report past its limit.
+	MaxCoveredIDChars = 128
 
 	MaxContentChars   = 1200
 	MaxTitleChars     = 120
@@ -147,12 +157,25 @@ func Window(cursor *time.Time, now time.Time, lookback time.Duration) (start, en
 type Input struct {
 	Memories []InputMemory  `json:"memories"`
 	Sessions []InputSession `json:"sessions"`
+	// Proposals are the namespace's open memory proposals: pending, or
+	// accepted and not yet applied.
+	Proposals []InputProposal `json:"proposals,omitempty"`
+	// LaterProposals are open proposals created after the run read its
+	// input, which a completion reloads. They are never part of what the
+	// model read, so an operation may not cover them, but it may not repeat
+	// them either.
+	LaterProposals []InputProposal `json:"-"`
+	// ClosedProposals names proposals the run read that a completion found
+	// no longer open: applied, rejected, archived or gone. An operation may
+	// not cover one, since the fact it proposed may already be in memory.
+	ClosedProposals map[string]bool `json:"-"`
 	// EligibleSessions counts every Session that changed in the window,
 	// including those beyond MaxInputSessions.
 	EligibleSessions int `json:"eligibleSessions"`
 	// Truncated reports that a limit was reached, so some memories, Sessions
-	// or messages may have been left out: the character budgets, the 200
-	// memories, the 50 Sessions, or a Session's message limits.
+	// messages or open proposals may have been left out: the character
+	// budgets, the 200 memories, the 50 Sessions, a Session's message limits,
+	// or the 50 open proposals.
 	Truncated bool `json:"truncated,omitempty"`
 	// CutFrom is the cursor a window was cut from when it lay further back
 	// than MaxLookback: Sessions changed between it and the window's start
@@ -169,6 +192,17 @@ type InputMemory struct {
 	RecalledCount  int        `json:"recalledCount"`
 	LastRecalledAt *time.Time `json:"lastRecalledAt,omitempty"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+// InputProposal is one open memory proposal as a run sees it: a change that
+// already awaits review.
+type InputProposal struct {
+	ID      string                       `json:"id"`
+	Type    string                       `json:"type"`
+	Status  string                       `json:"status"`
+	Title   string                       `json:"title,omitempty"`
+	Content string                       `json:"content,omitempty"`
+	Targets []store.MemoryProposalTarget `json:"targets,omitempty"`
 }
 
 // InputSession is one Session's recent user and assistant messages.
@@ -202,6 +236,9 @@ type Operation struct {
 	Reason  string                       `json:"reason,omitempty"`
 	Targets []store.MemoryProposalTarget `json:"targets,omitempty"`
 	Sources []store.MemoryProposalSource `json:"sources,omitempty"`
+	// Covers names open proposals the run read that this operation makes
+	// redundant, so the reviewer can reject or archive them in its favor.
+	Covers []string `json:"covers,omitempty"`
 }
 
 // Conflict is a contradiction between memories that the run could not settle.
