@@ -865,6 +865,9 @@ func (s *Store) syncControllerEpochStatus(
 			return err
 		}
 		if decision.writeStatus {
+			// The storage acknowledgements, any storage recovery hold and the
+			// conditions belong to the installation, not to one epoch, so
+			// they carry across every epoch the mirror records.
 			object.Status = corev1alpha1.ControllerEpochStatus{
 				Epoch:                epoch.Epoch,
 				HolderID:             epoch.HolderID,
@@ -874,6 +877,9 @@ func (s *Store) syncControllerEpochStatus(
 				UpdatedAt:            metaTime(epoch.UpdatedAt),
 				LeaseName:            lease.Name,
 				LeaseResourceVersion: lease.ResourceVersion,
+				StorageEpochs:        object.Status.StorageEpochs,
+				StorageRecovery:      object.Status.StorageRecovery,
+				Conditions:           object.Status.Conditions,
 			}
 			if err := s.client.Status().Update(ctx, object); err != nil {
 				return err
@@ -900,6 +906,17 @@ func (s *Store) syncControllerEpochStatus(
 }
 
 func (s *Store) requireControllerEpoch(ctx context.Context, fence store.ControllerEpochFence) (store.ControllerEpochFence, epochSnapshot, error) {
+	return s.lockControllerEpochMutation(ctx, fence, false)
+}
+
+// lockControllerEpochMutation takes the controller epoch mutation interlock
+// for fence. Unless allowHeld is set, a recorded storage recovery hold refuses
+// it with a store.StorageHoldError. The object is read between the Lease read
+// and the Lease update that takes the interlock, so a hold recorded under the
+// interlock in between makes that update conflict, and the next pass sees it.
+func (s *Store) lockControllerEpochMutation(
+	ctx context.Context, fence store.ControllerEpochFence, allowHeld bool,
+) (store.ControllerEpochFence, epochSnapshot, error) {
 	normalized, err := store.NormalizeEpochFence(fence)
 	if err != nil {
 		return store.ControllerEpochFence{}, epochSnapshot{}, err
@@ -959,6 +976,9 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		}
 		if err := validateControllerEpochObjectForLease(object, current, lease.Name); err != nil {
 			return store.ControllerEpochFence{}, epochSnapshot{}, err
+		}
+		if hold := storageRecordFromObject(object).Hold; hold != nil && !allowHeld {
+			return store.ControllerEpochFence{}, epochSnapshot{}, &store.StorageHoldError{Hold: *hold}
 		}
 		active, expiresAt, err := controllerEpochMutationLock(lease)
 		if err != nil {

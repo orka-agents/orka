@@ -13,6 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,6 +128,33 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported SQLite schema version")
 	require.Nil(t, s)
 	require.False(t, called)
+}
+
+// The synchronous mode the controller selects reaches the store it opens:
+// FULL makes the dataset local-fsync, and without it the dataset stays
+// local-buffered.
+func TestOpenControllerSQLiteStoreAppliesSynchronousMode(t *testing.T) {
+	for name, test := range map[string]struct {
+		options []sqlite.OpenOption
+		want    storagev1.DurabilityClass
+	}{
+		"full": {
+			options: []sqlite.OpenOption{sqlite.WithSynchronous(sqlite.SynchronousFull)}, want: storagev1.DurabilityLocalFsync,
+		},
+		"default": {want: storagev1.DurabilityLocalBuffered},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.db")
+			s, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+				return bytes.Repeat([]byte{0x42}, 32), nil
+			}, test.options...)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+			info, err := s.Describe(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, test.want, info.Durability)
+		})
+	}
 }
 
 func TestControllerSQLiteBootstrapResumesAfterKeyWriteLostResponse(t *testing.T) {

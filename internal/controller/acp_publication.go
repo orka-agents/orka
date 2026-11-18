@@ -1453,7 +1453,9 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		})
 	})
 }
 
@@ -1490,7 +1492,9 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		})
 	})
 }
 
@@ -1537,7 +1541,9 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		})
 	})
 }
 
