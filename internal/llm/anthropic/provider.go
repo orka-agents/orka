@@ -101,13 +101,20 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return acc.failed(toProviderError(err))
+		pe := toProviderError(err)
+		if acc.started && pe.StatusCode == 0 && ctx.Err() == nil {
+			// The connection broke after the stream started. None of the
+			// output has reached the caller, so treat it like a stream that
+			// ends early.
+			pe.StatusCode = http.StatusBadGateway
+		}
+		return acc.failed(pe)
 	}
 	if !acc.completed {
-		// A dropped connection ends the stream without an error. Returning
-		// the partial message would pass truncated output off as complete.
-		// None of it has reached the caller, so report a gateway failure,
-		// which the retry layer retries.
+		// A dropped connection can also end the stream without an error.
+		// Returning the partial message would pass truncated output off as
+		// complete. None of it has reached the caller, so report a gateway
+		// failure, which the retry layer retries.
 		return acc.failed(&llm.ProviderError{
 			Provider:   providerName,
 			Message:    "anthropic stream ended before the message finished",

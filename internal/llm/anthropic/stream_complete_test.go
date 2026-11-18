@@ -240,3 +240,42 @@ func TestCompleteKeepsHTTPStatusCode(t *testing.T) {
 		t.Errorf("status code = %d, want 400", pe.StatusCode)
 	}
 }
+
+func TestCompleteRetriesBrokenStream(t *testing.T) {
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Promise more body than is sent, so the client reads an unexpected EOF.
+		w.Header().Set("Content-Length", "100000")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+	})
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	pe, ok := errors.AsType[*llm.ProviderError](err)
+	if !ok {
+		t.Fatalf("error = %v (%T), want *llm.ProviderError", err, err)
+	}
+	if pe.StatusCode != http.StatusBadGateway || !llm.ShouldRetry(err) {
+		t.Errorf("error = %q, status code = %d, retry = %t; want 502, true", pe.Message, pe.StatusCode, llm.ShouldRetry(err))
+	}
+	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
+		t.Errorf("response = %+v, want only the reported input usage", resp)
+	}
+}
+
+func TestCompleteDoesNotRetryCancelledStream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+		w.(http.Flusher).Flush()
+		cancel()
+		<-r.Context().Done()
+	})
+	_, err := provider.Complete(ctx, &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("Complete() succeeded after its context was cancelled")
+	}
+	if pe, ok := errors.AsType[*llm.ProviderError](err); ok && pe.StatusCode == http.StatusBadGateway {
+		t.Errorf("a cancelled request reported %d; cancellation must not look like a gateway failure", pe.StatusCode)
+	}
+}
