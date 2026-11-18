@@ -91,7 +91,9 @@ func (p *Provider) TelemetryProviderName() string {
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildRequestParams(req)
 
-	stream := p.client.Messages.NewStreaming(ctx, params)
+	streamCtx, guard := newIdleGuard(ctx)
+	defer guard.stop()
+	stream := p.client.Messages.NewStreaming(streamCtx, params, guard.middleware())
 	defer func() { _ = stream.Close() }()
 
 	acc := completionAccumulator{provider: p.TelemetryProviderName()}
@@ -99,6 +101,15 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		if err := acc.add(stream.Current()); err != nil {
 			return acc.failed(toProviderError(err))
 		}
+	}
+	if idled(streamCtx) && ctx.Err() == nil {
+		// A stalled connection, like a broken one, has shown the caller
+		// nothing, so the retry layer may try again.
+		return acc.failed(&llm.ProviderError{
+			Provider:   providerName,
+			Message:    "anthropic stream sent nothing for " + streamIdleTimeout.String(),
+			StatusCode: http.StatusBadGateway,
+		})
 	}
 	if err := stream.Err(); err != nil {
 		pe := toProviderError(err)
@@ -511,8 +522,10 @@ var streamErrorStatus = map[shared.ErrorType]int{
 	shared.ErrorTypeNotFoundError:       http.StatusNotFound,
 	shared.ErrorTypeRateLimitError:      http.StatusTooManyRequests,
 	shared.ErrorTypeAPIError:            http.StatusInternalServerError,
-	shared.ErrorTypeTimeoutError:        http.StatusGatewayTimeout,
-	shared.ErrorTypeOverloadedError:     529,
+	// Not 504: llm.ShouldRetry skips 504s, which the SDK has already retried
+	// when they arrive before a stream. One inside a stream it has not.
+	shared.ErrorTypeTimeoutError:    http.StatusBadGateway,
+	shared.ErrorTypeOverloadedError: 529,
 }
 
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
@@ -277,5 +278,71 @@ func TestCompleteDoesNotRetryCancelledStream(t *testing.T) {
 	}
 	if pe, ok := errors.AsType[*llm.ProviderError](err); ok && pe.StatusCode == http.StatusBadGateway {
 		t.Errorf("a cancelled request reported %d; cancellation must not look like a gateway failure", pe.StatusCode)
+	}
+}
+
+const messageStartEvent = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+
+func shortenStreamIdleTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := streamIdleTimeout
+	streamIdleTimeout = d
+	t.Cleanup(func() { streamIdleTimeout = previous })
+}
+
+func TestCompleteAbandonsStalledStream(t *testing.T) {
+	shortenStreamIdleTimeout(t, 200*time.Millisecond)
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, messageStartEvent)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // stall without closing the connection
+	})
+	start := time.Now()
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Complete() took %s on a stalled stream", elapsed)
+	}
+	pe, ok := errors.AsType[*llm.ProviderError](err)
+	if !ok {
+		t.Fatalf("error = %v (%T), want *llm.ProviderError", err, err)
+	}
+	if pe.StatusCode != http.StatusBadGateway || !llm.ShouldRetry(err) {
+		t.Errorf("error = %q, status code = %d, retry = %t; want 502, true", pe.Message, pe.StatusCode, llm.ShouldRetry(err))
+	}
+	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
+		t.Errorf("response = %+v, want only the reported input usage", resp)
+	}
+}
+
+// Pings carry no event the SDK returns, but they show the stream is alive.
+func TestCompleteKeepsStreamAliveOnPings(t *testing.T) {
+	shortenStreamIdleTimeout(t, 300*time.Millisecond)
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, messageStartEvent)
+		w.(http.Flusher).Flush()
+		for range 8 {
+			time.Sleep(100 * time.Millisecond)
+			_, _ = fmt.Fprint(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
+			w.(http.Flusher).Flush()
+		}
+		_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	if _, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("Complete() error = %v; pings for 800ms must keep a 300ms idle bound open", err)
+	}
+}
+
+func TestCompleteRetriesStreamTimeoutEvent(t *testing.T) {
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, messageStartEvent)
+		_, _ = fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"timed out\"}}\n\n")
+	})
+	_, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err == nil || !llm.ShouldRetry(err) {
+		t.Errorf("error = %v, retry = %t; want a retried error", err, llm.ShouldRetry(err))
 	}
 }
