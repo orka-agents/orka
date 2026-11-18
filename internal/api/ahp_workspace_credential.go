@@ -126,12 +126,13 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 }
 
 // recoverToken remembers the token a workspace already holds, once per Pod
-// for this process: an earlier run of this server may have installed it, and
-// what the workspace shows, in terminals and file reads, is redacted for it.
-// An error means the token could not be read, and nothing in the workspace
-// may be shown until it is.
+// for this process: an earlier run of this server may have installed it, also
+// one configured to provide tokens when this one is not, and what the
+// workspace shows, in terminals and file reads, is redacted for it. An error
+// means the token could not be read, and nothing in the workspace may be
+// shown until it is.
 func (w *ahpWorkspaces) recoverToken(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod) error {
-	if w.b == nil || w.b.cfg.RepositoryCredential == nil {
+	if w.b == nil {
 		return nil
 	}
 	w.mu.Lock()

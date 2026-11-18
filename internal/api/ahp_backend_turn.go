@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/ahphost"
@@ -305,11 +306,16 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	b.turns[turnKey] = turn
 	b.mu.Unlock()
 	if err := b.h.client.Create(ctx, task); err != nil {
-		// The Task may exist even so; stop it, then take the turn back. Its
-		// number stays used, so a Task the server kept under the name never
-		// stands in the next turn's way.
-		_ = b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name, "")
-		b.takeBackUncreatedTurn(ctx, principal, record, action.TurnId, emit)
+		// The Task may exist even so. The turn is taken back only once that
+		// Task is known absent or asked to stop, so it never runs beside the
+		// next turn; until then the session stays busy with it. Its number
+		// stays used, so a Task the server kept under the name never stands
+		// in the next turn's way.
+		if b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name, "") == nil {
+			b.takeBackUncreatedTurn(ctx, principal, record, action.TurnId, emit)
+		} else {
+			go b.takeBackOnceStopped(context.WithoutCancel(ctx), principal, record, action.TurnId, task.Namespace, name, emit)
+		}
 		b.mu.Lock()
 		if b.turns[turnKey] == turn {
 			delete(b.turns, turnKey)
@@ -560,6 +566,22 @@ const ahpTaskGoneUID = "\x00gone"
 // session still recording the turn would refuse every later message: the
 // take-back is tried until it lands. Messages waiting behind the turn run once
 // it has: a drain before then finds the turn still recorded and leaves them.
+// takeBackOnceStopped keeps asking a Task whose creation reported a failure
+// to stop, and takes its turn back once it is known absent or asked to stop.
+// A Task that cannot be stopped keeps the session busy: recovery follows it,
+// or settles the turn once it is gone, rather than let a next turn run beside
+// it.
+func (b *ahpBackend) takeBackOnceStopped(ctx context.Context, principal ahphost.Principal, record ahpSession, turnID, namespace, name string, emit ahphost.Emitter) {
+	err := retry.OnError(b.cancelBackoff, func(error) bool { return true }, func() error {
+		return b.cancelTask(ctx, principal, namespace, name, "")
+	})
+	if err != nil {
+		log.Error(err, "stop an AHP turn Task whose creation reported a failure; its session stays busy", "session", record.Session, "task", name)
+		return
+	}
+	b.takeBackUncreatedTurn(ctx, principal, record, turnID, emit)
+}
+
 func (b *ahpBackend) takeBackUncreatedTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, turnID string, emit ahphost.Emitter) {
 	takenBack := b.updateSessionUntilDone(ctx, principal.UserKey, record.Session, "take back a turn whose Task was not created", func(s *ahpSession) {
 		if s.ActiveTurn != turnID {
