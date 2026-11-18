@@ -86,11 +86,11 @@ func TestACPPreDispatchTimingsReportsEachStepOnce(t *testing.T) {
 	timings.mark(task, acpPreDispatchReserved)
 	clock.Advance(100 * time.Millisecond)
 
-	record := timings.finish(task)
-	if record == nil {
+	finished := timings.finish(task)
+	if finished == nil {
 		t.Fatal("finish returned no record")
 	}
-	got := preDispatchValues(record.keysAndValues())
+	got := preDispatchValues(finished.keysAndValues())
 	want := map[string]any{
 		"sinceTaskCreatedMs":  int64(7100),
 		"observedMs":          int64(300),
@@ -397,6 +397,8 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	// The Task's first reconcile observed it before any execution.
+	acpPreDispatch.mark(bound, acpPreDispatchObserved)
 	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatal(err)
 	}
@@ -418,5 +420,87 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 	acpPreDispatch.mu.Unlock()
 	if orphaned {
 		t.Fatal("the queue pass recreated a record after its Task was reported")
+	}
+}
+
+// A Task's record is created only before it has an execution. Marks from
+// later stages that run after its start reported, such as a dispatcher scan
+// of the still-Reserved Task or a queue pass of the executing Task, update
+// nothing and never recreate a record that nothing would report.
+func TestACPPreDispatchTimingsLateMarksNeverRecreateAReportedRecord(t *testing.T) {
+	created := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	clock := &steppingClock{now: created}
+	timings := newACPPreDispatchTimings(clock.Now)
+	task := preDispatchTestTask("reported", created)
+	timings.mark(task, acpPreDispatchObserved)
+	timings.markQueueWriteIssued(task)
+	if timings.finish(task) == nil {
+		t.Fatal("finish returned no record")
+	}
+	for milestone := acpPreDispatchExecutionBound; milestone < acpPreDispatchMilestoneCount; milestone++ {
+		timings.mark(task, milestone)
+	}
+	timings.markQueueWriteIssued(task)
+	timings.markStarted(task)
+	if len(timings.records) != 0 {
+		t.Fatalf("late marks recreated %d records after the Task reported", len(timings.records))
+	}
+	// A Task never observed before execution, such as one queued before this
+	// process started, is not tracked either.
+	unobserved := preDispatchTestTask("unobserved", created)
+	timings.mark(unobserved, acpPreDispatchScanned)
+	timings.mark(unobserved, acpPreDispatchReserved)
+	if len(timings.records) != 0 || timings.finish(unobserved) != nil {
+		t.Fatal("a dispatcher mark created a record for an unobserved Task")
+	}
+}
+
+// Each reserved execution attempt records its own start; an attempt that
+// requeues before its turn leaves the record for the attempt that runs.
+func TestACPPreDispatchTimingsStartedIsTheLatestAttempt(t *testing.T) {
+	created := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	clock := &steppingClock{now: created.Add(time.Second)}
+	timings := newACPPreDispatchTimings(clock.Now)
+	task := preDispatchTestTask("requeued", created)
+	timings.mark(task, acpPreDispatchObserved)
+	timings.mark(task, acpPreDispatchReserved)
+	timings.markStarted(task)
+	clock.Advance(3 * time.Second)
+	timings.mark(task, acpPreDispatchReserved)
+	timings.markStarted(task)
+	finished := timings.finish(task)
+	if finished == nil {
+		t.Fatal("finish returned no record")
+	}
+	got := preDispatchValues(finished.keysAndValues())
+	if got["sinceTaskCreatedMs"] != int64(4000) || got["startedMs"] != int64(3000) {
+		t.Fatalf("timings = %v, want the second attempt's start", got)
+	}
+}
+
+// An execution that exits before its turn begins, here an unverifiable
+// binding, records its start but neither consumes nor reports the Task's
+// milestones; the attempt that reaches its turn reports them.
+func TestExecuteReservedTaskEarlyExitKeepsPreDispatchMilestones(t *testing.T) {
+	task := preDispatchTestTask("55555555-5555-5555-5555-555555555555", time.Now())
+	acpPreDispatch.mark(task, acpPreDispatchObserved)
+	acpPreDispatch.markQueueWriteIssued(task)
+	t.Cleanup(func() { acpPreDispatch.finish(task) })
+
+	if err := (&ACPDispatcher{}).executeReservedTask(context.Background(), task.DeepCopy(), acpDispatchTarget{}); err == nil {
+		t.Fatal("execution without an execution snapshot store unexpectedly proceeded")
+	}
+	acpPreDispatch.mu.Lock()
+	remaining := acpPreDispatch.records[task.UID]
+	var started, queued time.Time
+	if remaining != nil {
+		started, queued = remaining.marks[acpPreDispatchStarted], remaining.marks[acpPreDispatchQueued]
+	}
+	acpPreDispatch.mu.Unlock()
+	if remaining == nil {
+		t.Fatal("an execution that requeued before its turn consumed the pre-dispatch record")
+	}
+	if started.IsZero() || queued.IsZero() {
+		t.Fatalf("record after the early exit: queued %s, started %s; want both kept", queued, started)
 	}
 }
