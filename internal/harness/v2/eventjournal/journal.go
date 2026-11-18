@@ -1299,6 +1299,11 @@ func (s *State) appendMappedEventWithPlan(
 		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller's context has ended, so a retry under it cannot reach
+		// the store, and its reconcile would only repeat the scan above.
+		return nil, false, errors.Join(firstErr, fmt.Errorf("%s retry skipped: %w", operation, ctxErr))
+	}
 
 	appended, isNew, err = appendIfAbsent()
 	if err == nil {

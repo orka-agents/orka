@@ -13,11 +13,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// appendSamples counts the observations vec holds for AppendExecutionEvent.
-func appendSamples(t *testing.T, vec *prometheus.HistogramVec) uint64 {
+// samples counts the observations vec holds for method.
+func samples(t *testing.T, vec *prometheus.HistogramVec, method string) uint64 {
 	t.Helper()
 	var metric dto.Metric
-	require.NoError(t, vec.WithLabelValues("AppendExecutionEvent").(prometheus.Histogram).Write(&metric))
+	require.NoError(t, vec.WithLabelValues(method).(prometheus.Histogram).Write(&metric))
 	return metric.GetHistogram().GetSampleCount()
 }
 
@@ -27,16 +27,29 @@ func appendSamples(t *testing.T, vec *prometheus.HistogramVec) uint64 {
 func TestWriteOperationRecordsItsWaitAndHold(t *testing.T) {
 	s := setupTestStore(t)
 	dataset := advanceTestEpoch(t, s, testWriteFence)
-	waits, holds := appendSamples(t, writeWaitSeconds), appendSamples(t, writeHoldSeconds)
+	const method = "AppendExecutionEvent"
+	waits, holds := samples(t, writeWaitSeconds, method), samples(t, writeHoldSeconds, method)
 
 	event := &store.ExecutionEvent{Namespace: "tenant", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
 		TaskName: "task-a", Type: events.ExecutionEventTypeTaskStarted}
-	ctx, _ := testEnvelope(t, t.Context(), dataset, "AppendExecutionEvent", time.Now(), event)
+	ctx, _ := testEnvelope(t, t.Context(), dataset, method, time.Now(), event)
 	_, err := s.AppendExecutionEvent(ctx, event)
 	require.NoError(t, err)
 
-	require.Equal(t, waits+1, appendSamples(t, writeWaitSeconds))
-	require.Equal(t, holds+1, appendSamples(t, writeHoldSeconds))
+	require.Equal(t, waits+1, samples(t, writeWaitSeconds, method))
+	require.Equal(t, holds+1, samples(t, writeHoldSeconds, method))
+}
+
+// Receipt pruning runs outside a write transaction and records its wait and
+// hold as one does.
+func TestReceiptPruningRecordsItsWaitAndHold(t *testing.T) {
+	s := setupTestStore(t)
+	const method = "PruneOperationReceipts"
+	waits, holds := samples(t, writeWaitSeconds, method), samples(t, writeHoldSeconds, method)
+	_, err := s.PruneOperationReceipts(t.Context(), receiptPruneBatch)
+	require.NoError(t, err)
+	require.Equal(t, waits+1, samples(t, writeWaitSeconds, method))
+	require.Equal(t, holds+1, samples(t, writeHoldSeconds, method))
 }
 
 // The store the controller opens exports its connection pool statistics

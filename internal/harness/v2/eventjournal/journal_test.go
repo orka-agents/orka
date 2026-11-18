@@ -1279,6 +1279,10 @@ type stallingAppendEventStore struct {
 	blockList   bool
 	// failAppends makes an append fail at once, without committing.
 	failAppends bool
+	// skipCommit makes an append wait out its context without committing.
+	skipCommit  bool
+	appendCalls int
+	listCalls   int
 }
 
 func (s *stallingAppendEventStore) AppendExecutionEventIfAbsent(
@@ -1286,8 +1290,13 @@ func (s *stallingAppendEventStore) AppendExecutionEventIfAbsent(
 	event *store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
+	s.appendCalls++
 	if s.failAppends {
 		return nil, false, errors.New("append failed")
+	}
+	if s.skipCommit {
+		<-ctx.Done()
+		return nil, false, ctx.Err()
 	}
 	deduplicatingStore := s.ExecutionEventStore.(store.DeduplicatingExecutionEventStore)
 	if _, _, err := deduplicatingStore.AppendExecutionEventIfAbsent(context.WithoutCancel(ctx), event, dedupeKey); err != nil {
@@ -1301,6 +1310,7 @@ func (s *stallingAppendEventStore) ListExecutionEvents(
 	ctx context.Context,
 	filter store.ExecutionEventFilter,
 ) ([]store.ExecutionEvent, error) {
+	s.listCalls++
 	if s.listStarted != nil {
 		select {
 		case s.listStarted <- struct{}{}:
@@ -1334,6 +1344,33 @@ func TestJournalReconcilesAnAppendThatOutlivedItsDeadline(t *testing.T) {
 	}
 	if !state.HasUpdate(event) {
 		t.Fatal("journal did not remember the reconciled update")
+	}
+}
+
+// An append that waited out its caller's deadline and did not commit is
+// reconciled once, and not retried under the ended context.
+func TestJournalDoesNotRetryAnAppendAfterItsDeadline(t *testing.T) {
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &stallingAppendEventStore{ExecutionEventStore: base, skipCommit: true}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listsBefore := eventStore.listCalls
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	_, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if !errors.Is(err, context.DeadlineExceeded) || isNew {
+		t.Fatalf("append that never committed: new=%t err=%v, want its deadline", isNew, err)
+	}
+	if eventStore.appendCalls != 1 || eventStore.listCalls-listsBefore != 1 {
+		t.Fatalf("appends = %d and reconcile lists = %d, want one of each", eventStore.appendCalls, eventStore.listCalls-listsBefore)
+	}
+	if state.HasUpdate(event) {
+		t.Fatal("journal remembered an update that was never persisted")
 	}
 }
 

@@ -591,18 +591,38 @@ func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveO
 	return outcome, nil
 }
 
+// pruneOperationReceiptsSQL deletes up to a limit of the oldest receipts
+// recorded before a cutoff.
+const pruneOperationReceiptsSQL = `DELETE FROM operation_receipts WHERE rowid IN (
+   SELECT rowid FROM operation_receipts WHERE recorded_at_ns < ? ORDER BY recorded_at_ns LIMIT ?
+ )`
+
 // PruneOperationReceipts implements storagev1.OperationReceiptStore.
 func (s *Store) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
 	if limit < 1 {
 		return 0, store.ValidationErrorf("operation receipt prune limit must be at least 1")
 	}
 	cutoff := s.now().Add(-receiptRetention).UnixNano()
-	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
-		`DELETE FROM operation_receipts WHERE rowid IN (
-		   SELECT rowid FROM operation_receipts WHERE recorded_at_ns < ? ORDER BY recorded_at_ns LIMIT ?
-		 )`,
-		cutoff, limit,
-	)
+	executor := s.taskDataExecutor(ctx)
+	if s.taskDataTx(ctx) == nil {
+		// Pruning runs outside a write transaction, and a batch can hold the
+		// single connection long enough to matter, so it records its wait and
+		// hold as a write transaction does.
+		const method = "PruneOperationReceipts"
+		started := time.Now()
+		conn, err := s.db.Conn(ctx)
+		writeWaitSeconds.WithLabelValues(method).Observe(time.Since(started).Seconds())
+		if err != nil {
+			return 0, fmt.Errorf("prune operation receipts: %w", err)
+		}
+		began := time.Now()
+		defer func() {
+			_ = conn.Close()
+			writeHoldSeconds.WithLabelValues(method).Observe(time.Since(began).Seconds())
+		}()
+		executor = conn
+	}
+	result, err := executor.ExecContext(ctx, pruneOperationReceiptsSQL, cutoff, limit)
 	if err != nil {
 		return 0, fmt.Errorf("prune operation receipts: %w", err)
 	}

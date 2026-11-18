@@ -622,7 +622,8 @@ func TestExecutionEventDedupeKeyLookupSearchesTheDedupeIndex(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(plan) != 1 || !strings.Contains(plan[0], "USING INDEX idx_execution_events_stream_dedupe_key") {
-		t.Fatalf("deduplication key lookup plan = %q, want a search of idx_execution_events_stream_dedupe_key", plan)
+	if len(plan) != 1 || !strings.Contains(plan[0], "USING INDEX idx_execution_events_stream_dedupe_key") ||
+		!strings.Contains(plan[0], "dedupe_key=?") {
+		t.Fatalf("deduplication key lookup plan = %q, want a search of idx_execution_events_stream_dedupe_key by key", plan)
 	}
 }
