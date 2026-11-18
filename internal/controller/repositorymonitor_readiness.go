@@ -39,6 +39,9 @@ type repositoryMonitorCIResult struct {
 	// failed names the failing check runs or status contexts when reason is
 	// repositoryMonitorCINotGreen.
 	failed []repositoryMonitorCIFailure
+	// pending lists the check runs that had not completed when failed was
+	// read; it is set only alongside failed.
+	pending []repositoryMonitorCIFailure
 	// incomplete marks a failing result read from partial check runs or
 	// statuses: the commit is not green, but failed may not list every failure.
 	incomplete bool
@@ -49,10 +52,26 @@ const repositoryMonitorCIFailureSourceStatus = "commit_status"
 
 // repositoryMonitorCIFailure is one failing check run or status context.
 // source tells a check run (with its app) from a status context, since the
-// two can share a name.
+// two can share a name. The remaining fields are the raw, unsanitized GitHub
+// details repair evidence is built from; only name and source classify a
+// failure.
 type repositoryMonitorCIFailure struct {
 	name   string
 	source string
+	// id is the check run or commit status ID.
+	id int64
+	// appSlug names the GitHub App behind a check run.
+	appSlug    string
+	headSHA    string
+	status     string
+	conclusion string
+	// url is a check run's html_url or a commit status's target_url.
+	url             string
+	title           string
+	summary         string
+	annotationCount int
+	// description is a commit status's description.
+	description string
 }
 
 func (f repositoryMonitorCIFailure) key() string {
@@ -65,6 +84,7 @@ type repositoryMonitorCommitStatus struct {
 	State       string `json:"state"`
 	Description string `json:"description,omitempty"`
 	URL         string `json:"url,omitempty"`
+	TargetURL   string `json:"target_url,omitempty"`
 }
 
 func repositoryMonitorPauseLabels(spec corev1alpha1.RepositoryMonitorSpec) []string {

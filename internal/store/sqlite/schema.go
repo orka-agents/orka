@@ -12,9 +12,9 @@ import (
 
 // SchemaVersion records the metadata layout. It never replaces validation of
 // every schema object; every upgrade, from an unversioned layout or from an
-// earlier version, requires the locked migration path. Version 6 adds the
+// earlier version, requires the locked migration path. Version 8 adds the
 // Agent Host Protocol tables.
-const SchemaVersion = 6
+const SchemaVersion = 8
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),

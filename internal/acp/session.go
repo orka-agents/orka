@@ -66,6 +66,11 @@ type RuntimeSessionConfig struct {
 	ResumeSessionID string
 	AuthMethodID    string
 	ClientInfo      Implementation
+	// ValidateAdapterRelaunch, when set, runs after an idle adapter's exit is
+	// proven and before a replacement launches. Session creation checks the
+	// workspace once, but the agent can change it afterwards; an error retires
+	// the session as lost instead of starting a replacement.
+	ValidateAdapterRelaunch func() error
 
 	InitializeTimeout time.Duration
 	PromptLease       time.Duration
@@ -588,6 +593,11 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	case <-exited.Client().Done():
 	case <-resumeCtx.Done():
 		return nil, AgentCapabilities{}, fmt.Errorf("drain exited adapter output: %w", resumeCtx.Err())
+	}
+	if cfg.ValidateAdapterRelaunch != nil {
+		if err := cfg.ValidateAdapterRelaunch(); err != nil {
+			return nil, AgentCapabilities{}, fmt.Errorf("revalidate workspace before adapter relaunch: %w", err)
+		}
 	}
 	process, capabilities, err := s.launchAdapter(resumeCtx)
 	if err != nil {

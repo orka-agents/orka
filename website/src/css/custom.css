@@ -89,6 +89,10 @@ html[data-theme] {
   --ifm-link-hover-color: var(--orka-ink);
   --ifm-link-hover-decoration: underline;
 
+  /* The local search plugin fills the selected result with the primary colour (ink) and defaults
+     its text to white, which vanishes in dark mode. Paper always contrasts with ink. */
+  --search-local-hit-active-color: var(--orka-paper);
+
   --ifm-font-family-base: var(--orka-font-sans);
   --ifm-heading-font-family: var(--orka-font-sans);
   --ifm-font-family-monospace: var(--orka-font-mono);

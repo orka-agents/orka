@@ -433,11 +433,46 @@ func authorizeContextTokenTaskContextObject(ctx context.Context, reader client.R
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 	failures := contextTokenTaskContextFailures(token, authzCtx, true)
+	failures = append(failures, contextTokenMemoryConsolidationFailures(token, cfg, req)...)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+// contextTokenMemoryConsolidationFailures requires, for a Task that runs
+// memory consolidation, the scopes its run's access needs: it reads every
+// Session and memory in its namespace, and in Propose mode it creates memory
+// proposals. Kubernetes permissions are checked separately.
+func contextTokenMemoryConsolidationFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, req CreateTaskRequest) []string {
+	consolidation := (*corev1alpha1.MemoryConsolidationSpec)(nil)
+	for _, ai := range []*corev1alpha1.AISpec{req.AI, taskRequestSpecAI(req)} {
+		if ai != nil && ai.MemoryConsolidation != nil {
+			consolidation = ai.MemoryConsolidation
+		}
+	}
+	if consolidation == nil {
+		return nil
+	}
+	required := [][]string{cfg.SessionReadScopes, cfg.MemoryReadScopes}
+	if consolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
+		required = append(required, cfg.MemoryWriteScopes)
+	}
+	var failures []string
+	for _, scopes := range required {
+		if !hasAnyScope(token.Scopes, scopes) {
+			failures = append(failures, fmt.Sprintf("a memory consolidation run needs one of scopes %q", strings.Join(scopes, ",")))
+		}
+	}
+	return failures
+}
+
+func taskRequestSpecAI(req CreateTaskRequest) *corev1alpha1.AISpec {
+	if req.Spec == nil {
+		return nil
+	}
+	return req.Spec.AI
 }
 
 func authorizeContextTokenTaskDeleteObject(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
@@ -692,6 +727,7 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 		Priority:          task.Spec.Priority,
 		RetryPolicy:       task.Spec.RetryPolicy,
 		WebhookURL:        task.Spec.WebhookURL,
+		WebhookEvents:     task.Spec.WebhookEvents,
 		SecretRef:         task.Spec.SecretRef,
 		SessionRef:        task.Spec.SessionRef,
 		AI:                task.Spec.AI,
@@ -1730,6 +1766,7 @@ func collectOutboundTLSCredentialSecret(names map[string]struct{}, tlsConfig *co
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenMemoryConsolidationFailures(token, cfg, authzCtx.Request)...)
 	failures = append(failures, contextTokenWorkspaceCredentialFailures(token, cfg, taskRequestWorkspace(authzCtx.Request))...)
 	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, true)...)
 	return failures

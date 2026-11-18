@@ -140,9 +140,13 @@ const (
 	// SaveResult or SaveArtifact replaces a stored result or file only when
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
-	// [ProviderLimits.MaxResultBytes].
-	// Revision 9 adds [AHPStore] to [StateProvider].
-	ContractRevision = 9
+	// [ProviderLimits.MaxResultBytes]. Revision 9 adds
+	// [MemoryStore.RecordMemoryRecall]. Revision 10 adds memory generations
+	// and the consolidation proposal types, whose application changes the
+	// memories they target only at the generations they name. Revision 11
+	// adds [MemoryConsolidationStore]. Revision 12 adds [AHPStore] to
+	// [StateProvider].
+	ContractRevision = 12
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -215,6 +219,7 @@ type StateProvider interface {
 
 	MemoryStore
 	MemoryProposalStore
+	MemoryConsolidationStore
 
 	SecurityStore
 	RepositoryMonitorStore

@@ -65,6 +65,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/cancel` | POST | Cancel a queued or running task and keep it |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
+| `/api/v1/tasks/:id/memory-consolidation-report` | GET | Get a memory consolidation run's full report |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
 | `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
 | `/api/v1/tasks/:id/exec` | GET (WebSocket) | Run an operator command in the Task's execution workspace ([operator workspace access](../guides/operator-workspace-access.md)) |

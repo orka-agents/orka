@@ -34,7 +34,9 @@ const (
 	// TaintAnnotation durably marks an ExecutionWorkspace and the Task whose
 	// RuntimeSession received a write-capable operator operation. Both
 	// prefixes are controller-protected: ExecutionWorkspace annotations by the
-	// core admission policy, Task annotations by the provenance webhook.
+	// core admission policy, which also makes this marker permanent, and Task
+	// annotations by the provenance webhook. Enforcement honours the marker on
+	// the workspace or on any Task linked to that exact incarnation.
 	TaintAnnotation = "acp.workspace.orka.ai/operator-tainted"
 
 	// ExecResource and FilesResource are the dedicated virtual subresources of

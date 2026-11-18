@@ -6,6 +6,16 @@
   admitted, requires `acp.runtime.v2`, and references a provider registration
   with a fresh heartbeat. Remove any legacy `--agent-sandbox-*` arguments; the
   controller no longer accepts them.
+- **Controller crash-loops on
+  `open /tmp/k8s-webhook-server/serving-certs/tls.crt`:** class-use admission
+  starts the manager's webhook server, and `make deploy` mounts no certificate
+  for it. Mount the `orka-admission-tls` Secret and pass `--webhook-cert-path`,
+  as the standard workflow shows.
+- **Extra Tasks stay Queued with no condition or reason:** the controller runs
+  at most `--acp-dispatch-max-concurrent-tasks` (default `4`) ACP agent Tasks at
+  once across all RuntimePools. Tasks beyond that keep
+  `status.execution.state: Queued` until a place frees up. Wait, or raise the
+  flag.
 - **Provider registration has no supported contracts:** check the provider
   Deployment logs, its pinned `SandboxProviderConfig` UID, and that the shared
   bundle and provider CRDs come from the orka-workspace revision in `go.mod`.

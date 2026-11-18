@@ -19,8 +19,34 @@ Approvals appear in three places:
 | Built-in runtimes (Codex, Claude, Copilot, OpenCode) | The runtime's own requests to run a tool, for a Task with `agentRuntime.permissionDecisions: Requester`. The prompt waits while the request is held. | [Permission requests](#permission-requests-from-built-in-runtimes) |
 
 People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
-`orka task decline`, or through the API. Most of this page covers the external-runtime
+`orka task decline`, or through the API. To alert reviewers instead of having them poll, see
+[Alerting reviewers](#alerting-reviewers). Most of this page covers the external-runtime
 path; the last section covers built-in runtimes' permission requests.
+
+## Alerting reviewers
+
+A Task can send a signed webhook when an approval is requested and when it is approved,
+declined, expired, or cancelled. Select the events next to the Task's `webhookURL`:
+
+```yaml
+spec:
+  webhookURL: https://hooks.example.com/orka
+  webhookEvents:
+    - task.approval_requested
+    - task.approval_resolved
+```
+
+This works for all three approval paths and for [parked sign-offs](parking-agent-turns.md),
+whose decision can arrive after the parked turn `Succeeded`. A notice carries the approval ID,
+the gated tool's name, severity, the deadline when the approval has one, and the resolution.
+It never carries the proposed arguments, the action text, the reviewer's reason, or who
+decided. Open the approval in the dashboard or the API to review it. A brokered review that
+times out is sent as `expired` a few seconds after its deadline. Approval notices are retried
+for about three minutes, since review lasts at most ten.
+
+Treat the notice as an alert. Decide through the dashboard, the CLI, or the API, which check
+the approval again. See [Approval events](task-webhooks.md#approval-events) for the body,
+deduplication, ordering, and how to verify the signature.
 
 ## Approvals for external runtimes
 
