@@ -18,9 +18,11 @@ import (
 
 // streamIdleTimeout is how long Complete waits without receiving a byte
 // before it abandons a stream. The API sends ping events while the model
-// thinks, so only a stalled connection stays silent this long. A variable so
-// tests can shorten it.
-var streamIdleTimeout = 5 * time.Minute
+// thinks, but a proxy may buffer a whole turn and send nothing until it ends.
+// Ten minutes matches the SDK's timeout for the whole non-streaming request
+// Complete used to send, so a turn that finished then still finishes now. A
+// variable so tests can shorten it.
+var streamIdleTimeout = 10 * time.Minute
 
 // errStreamIdle cancels a stream that has gone quiet for streamIdleTimeout.
 var errStreamIdle = errors.New("anthropic stream went idle")
