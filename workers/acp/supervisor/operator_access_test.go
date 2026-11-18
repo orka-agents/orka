@@ -1032,6 +1032,66 @@ func TestOperatorExecDisconnectKillsAndReleasesTheOperation(t *testing.T) {
 	}
 }
 
+// A caller that stops reading blocks the exec relay's writes for up to their
+// 30s timeout. Revocation must not wait that out: the quiesce barrier ends the
+// caller stream, so the handler finishes its cleanup and releases the
+// registration within the barrier's deadline instead of poisoning a session
+// whose process was already contained.
+func TestOperatorQuiesceEndsAStreamBlockedOnItsCaller(t *testing.T) {
+	process := newFakeOperatorProcess()
+	go func() {
+		// Output until the process is killed; the caller never reads it.
+		chunk := []byte(strings.Repeat("x", 32<<10))
+		for {
+			if _, err := process.stdoutW.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(operatorExecURL(server, sessionID), "http"), &websocket.DialOptions{
+		HTTPHeader:   signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}}),
+		Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow() //nolint:errcheck
+	state := supervisor.sessions[sessionID]
+	// Let the relay fill the connection's buffers so its writes block.
+	waitFor := func(done func() bool, what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor(func() bool {
+		supervisor.mu.Lock()
+		defer supervisor.mu.Unlock()
+		for _, registration := range state.operators {
+			if registration.stream != nil {
+				return true
+			}
+		}
+		return false
+	}, "the exec stream was never bound")
+	time.Sleep(500 * time.Millisecond)
+	started := time.Now()
+	if err := supervisor.quiesceOperators(state, 5*time.Second); err != nil {
+		t.Fatalf("quiesce after %s: %v", time.Since(started), err)
+	}
+	if !process.killed.Load() {
+		t.Fatal("the barrier returned with the operator process alive")
+	}
+}
+
 // When the file helper fails before reading its stdin, the handler must not
 // return while the upload copy still reads r.Body (or uses the response through
 // MaxBytesReader) for a client that keeps the body open.

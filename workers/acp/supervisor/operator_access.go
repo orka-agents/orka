@@ -45,6 +45,11 @@ var operatorFileTimeout = 5 * time.Minute
 // Replaceable in tests.
 var operatorLeaderExitGrace = 10 * time.Second
 
+// operatorStreamAbortGrace is how long a revoked operation's handler may take
+// to deliver its final status before its caller stream is ended. A quiesce
+// barrier with a shorter deadline uses half of it.
+var operatorStreamAbortGrace = 2 * time.Second
+
 // operatorAccessStates are the RuntimeSession states that admit operator
 // access. Every validation, publication, finalization, cancellation, and
 // deletion state is refused: the workspace is frozen or its delta is being
@@ -76,6 +81,54 @@ type operatorTarget struct {
 type operatorRegistration struct {
 	process operatorProcess // nil until started and bound
 	revoked bool
+	// stream ends the operation's caller stream on revocation, so a write
+	// blocked on a caller that stopped reading cannot hold the registration
+	// past the quiesce deadline. Nil until the stream is bound.
+	stream *operatorStreamAbort
+}
+
+// operatorStreamAbort ends one operation's caller stream. Its handler disables
+// it before releasing the registration, so a late abort never reaches a
+// connection that has moved on to another request.
+type operatorStreamAbort struct {
+	mu       sync.Mutex
+	disabled bool
+	end      func()
+}
+
+func newOperatorStreamAbort(end func()) *operatorStreamAbort {
+	return &operatorStreamAbort{end: end}
+}
+
+func (a *operatorStreamAbort) abort() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.disabled {
+		a.disabled = true
+		a.end()
+	}
+}
+
+func (a *operatorStreamAbort) disable() {
+	a.mu.Lock()
+	a.disabled = true
+	a.mu.Unlock()
+}
+
+// bindOperatorStream records the abort for an operation's caller stream. An
+// operation already revoked has had its process killed and gets the same
+// grace to deliver its final status as one revoked later.
+func (s *Server) bindOperatorStream(target operatorTarget, stream *operatorStreamAbort) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	registration := target.state.operators[target.token]
+	if registration == nil {
+		return
+	}
+	registration.stream = stream
+	if registration.revoked {
+		time.AfterFunc(operatorStreamAbortGrace, stream.abort)
+	}
 }
 
 // revokeSessionOperatorsLocked revokes every operator registration and starts
@@ -89,6 +142,11 @@ func revokeSessionOperatorsLocked(state *sessionState) {
 		registration.revoked = true
 		if registration.process != nil {
 			go registration.process.Kill()
+		}
+		if registration.stream != nil {
+			// Let the handler deliver the final status first; only a stream
+			// still blocked on its caller after the grace is ended.
+			time.AfterFunc(operatorStreamAbortGrace, registration.stream.abort)
 		}
 	}
 }
@@ -121,14 +179,19 @@ func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProc
 // An unproven kill or a timeout returns an error; the caller fails closed.
 func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	abortStreamsAt := time.Now().Add(min(operatorStreamAbortGrace, timeout/2))
 	for {
 		s.mu.Lock()
 		state.operatorsClosed = true
 		var bound []operatorProcess
+		var streams []*operatorStreamAbort
 		for _, registration := range state.operators {
 			registration.revoked = true
 			if registration.process != nil {
 				bound = append(bound, registration.process)
+			}
+			if registration.stream != nil {
+				streams = append(streams, registration.stream)
 			}
 		}
 		remaining := len(state.operators)
@@ -136,6 +199,14 @@ func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) er
 		for _, process := range bound {
 			if !process.Kill() {
 				return fmt.Errorf("operator process termination could not be proven")
+			}
+		}
+		// A handler blocked writing to a caller that stopped reading would
+		// otherwise keep its registration until its write timeout. Handlers
+		// first get a grace to deliver their final status.
+		if !time.Now().Before(abortStreamsAt) {
+			for _, stream := range streams {
+				stream.abort()
 			}
 		}
 		if remaining == 0 {
@@ -525,6 +596,9 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	stream := newOperatorStreamAbort(func() { _ = conn.CloseNow() })
+	defer stream.disable()
+	s.bindOperatorStream(target, stream)
 	conn.SetReadLimit(operatoraccess.MaxFrameBytes + 1)
 	started := time.Now()
 	final := runOperatorExec(r.Context(), conn, process, request.Exec)
@@ -869,6 +943,15 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(operatorFileTimeout))
 	_ = controller.SetWriteDeadline(time.Now().Add(operatorFileTimeout))
+	// Revocation ends a transfer blocked on the caller at once; the helper
+	// itself is killed by the revocation.
+	stream := newOperatorStreamAbort(func() {
+		now := time.Now()
+		_ = controller.SetReadDeadline(now)
+		_ = controller.SetWriteDeadline(now)
+	})
+	defer stream.disable()
+	s.bindOperatorStream(target, stream)
 
 	if request.Write {
 		// The helper commits only after reading exactly request.Size bytes
