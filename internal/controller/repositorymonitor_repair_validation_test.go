@@ -705,3 +705,70 @@ func TestRepairValidationPassIsRecheckedAgainstTheLiveMonitor(t *testing.T) {
 		})
 	}
 }
+
+// Orphan deletion of a RepositoryMonitor removes the owner reference but
+// leaves the admission-held monitor markers; such a repair fails closed.
+func TestRepairValidationGateFailsClosedForOrphanedRepair(t *testing.T) {
+	h := newRepairValidationGateHarness(t, nil)
+	repair := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), client.ObjectKeyFromObject(h.f.repair), repair); err != nil {
+		t.Fatal(err)
+	}
+	for name, marker := range map[string]func(*corev1alpha1.Task){
+		"monitor label": func(task *corev1alpha1.Task) {
+			task.Labels = map[string]string{labels.LabelRepositoryMonitor: h.f.monitor.Name}
+		},
+		"monitor annotation": func(task *corev1alpha1.Task) {
+			task.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: h.f.monitor.Name}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			orphaned := repair.DeepCopy()
+			orphaned.OwnerReferences = nil
+			orphaned.Labels, orphaned.Annotations = nil, nil
+			marker(orphaned)
+			if _, required, unavailable := h.dispatcher.repositoryMonitorRepairGateMonitor(context.Background(), orphaned); !required || unavailable == "" {
+				t.Fatalf("gate = (required %v, %q), want required and unavailable", required, unavailable)
+			}
+		})
+	}
+	unmarked := repair.DeepCopy()
+	unmarked.OwnerReferences = nil
+	unmarked.Labels, unmarked.Annotations = nil, nil
+	if _, required, _ := h.dispatcher.repositoryMonitorRepairGateMonitor(context.Background(), unmarked); required {
+		t.Fatal("a write Task with no RepositoryMonitor owner or marker must not be gated")
+	}
+}
+
+// stallingTaskReader blocks reads of one Task until the caller's context
+// ends, like an unresponsive API server.
+type stallingTaskReader struct {
+	client.Reader
+	name string
+}
+
+func (r stallingTaskReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1alpha1.Task); ok && key.Name == r.name {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A stalled API call cannot hold the gate, and with it the runtime session,
+// past the validation wait.
+func TestRepairValidationGateBoundsStalledAPICalls(t *testing.T) {
+	h := newRepairValidationGateHarness(t, nil)
+	h.dispatcher.RepairValidationWaitTimeout = 200 * time.Millisecond
+	h.dispatcher.APIReader = stallingTaskReader{Reader: h.client, name: h.f.validation.Name}
+	done := make(chan repairValidationGateOutcome, 1)
+	go func() { done <- h.run(t) }()
+	select {
+	case outcome := <-done:
+		if outcome.status != tools.RepositoryRepairValidationUnavailable {
+			t.Fatalf("outcome = %#v, want unavailable", outcome)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate did not return after its wait deadline while the API server stalled")
+	}
+}

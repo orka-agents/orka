@@ -176,7 +176,10 @@ func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 		marked.Labels = map[string]string{
 			labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1", gateway.TaskGatewayBindingLabel: "binding",
 		}
-		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor", gateway.TaskGatewayBindingAnnotation: "binding"}
+		marked.Annotations = map[string]string{
+			labels.AnnotationRepositoryMonitorName: "monitor", gateway.TaskGatewayBindingAnnotation: "binding",
+			labels.AnnotationRepairValidationAttempt: "1", labels.AnnotationRepairValidationOriginalTask: "repair-task",
+		}
 		marked.OwnerReferences = nil // already orphaned by the garbage collector
 		for name, change := range map[string]func(*corev1alpha1.Task){
 			"remove monitor label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
@@ -186,6 +189,12 @@ func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 			"remove gateway binding label": func(task *corev1alpha1.Task) { delete(task.Labels, gateway.TaskGatewayBindingLabel) },
 			"remove gateway binding annotation": func(task *corev1alpha1.Task) {
 				delete(task.Annotations, gateway.TaskGatewayBindingAnnotation)
+			},
+			"reset repair validation attempt": func(task *corev1alpha1.Task) {
+				delete(task.Annotations, labels.AnnotationRepairValidationAttempt)
+			},
+			"change repair validation lineage": func(task *corev1alpha1.Task) {
+				task.Annotations[labels.AnnotationRepairValidationOriginalTask] = "other-task"
 			},
 		} {
 			for _, user := range []string{untrustedUsername, trustedControllerUser} {

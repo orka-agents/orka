@@ -33,10 +33,10 @@ const (
 	// repositoryMonitorRepairValidationAttemptAnnotation records how many
 	// earlier attempts of the same repair job failed pre-push validation.
 	// The first repair Task has none, which means zero.
-	repositoryMonitorRepairValidationAttemptAnnotation = "orka.ai/repair-validation-attempt"
+	repositoryMonitorRepairValidationAttemptAnnotation = labels.AnnotationRepairValidationAttempt
 	// repositoryMonitorRepairValidationOriginalTaskAnnotation names the repair
 	// job's first Task, from which every retry name is derived.
-	repositoryMonitorRepairValidationOriginalTaskAnnotation = "orka.ai/repair-validation-original-task"
+	repositoryMonitorRepairValidationOriginalTaskAnnotation = labels.AnnotationRepairValidationOriginalTask
 
 	repositoryMonitorRepairValidationFailedError      = "repair_validation_failed"
 	repositoryMonitorRepairValidationUnavailableError = "repair_validation_unavailable"

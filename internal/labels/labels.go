@@ -146,6 +146,13 @@ const (
 	// AnnotationRepositoryValidationDenyControlPaths is "true" when the
 	// repair workspace denied repository control paths.
 	AnnotationRepositoryValidationDenyControlPaths = "orka.ai/repository-validation-deny-control-paths"
+	// AnnotationRepairValidationAttempt records how many earlier attempts of
+	// a repository monitor repair job failed pre-push validation. Admission
+	// holds it so editing a Task cannot reset the retry budget.
+	AnnotationRepairValidationAttempt = "orka.ai/repair-validation-attempt"
+	// AnnotationRepairValidationOriginalTask names a repair job's first Task,
+	// from which every retry name is derived. Admission holds it.
+	AnnotationRepairValidationOriginalTask = "orka.ai/repair-validation-original-task"
 )
 
 // Parked-turn continuation metadata. The parked Task's status.wait is the

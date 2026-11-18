@@ -36,6 +36,10 @@ const (
 	// Re-issue the bound download capability well inside its maximum lifetime
 	// so kubelet's Secret propagation always delivers an unexpired token.
 	repairValidationCapabilityRefresh = 2 * time.Minute
+	// repairValidationCallTimeout bounds each API or storage call made
+	// outside the validation wait, including recording the outcome after
+	// that wait has expired.
+	repairValidationCallTimeout = 30 * time.Second
 )
 
 // repairValidationCancelled marks a gate interrupted by Task cancellation;
@@ -67,6 +71,12 @@ func (d *ACPDispatcher) repositoryMonitorRepairGateMonitor(ctx context.Context, 
 	}
 	owner := metav1.GetControllerOf(task)
 	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != repositoryMonitorResourceKind {
+		// Orphan deletion of a RepositoryMonitor drops the owner reference
+		// but keeps the admission-held monitor markers. Such a repair can no
+		// longer be checked against its monitor, so it fails closed.
+		if taskAutomationMarker(task) == repositoryMonitorResourceKind {
+			return nil, true, "The RepositoryMonitor that owns this repair is missing."
+		}
 		return nil, false, ""
 	}
 	monitor := &corev1alpha1.RepositoryMonitor{}
@@ -85,6 +95,14 @@ func (d *ACPDispatcher) repositoryMonitorRepairGateMonitor(ctx context.Context, 
 	return monitor, true, ""
 }
 
+// boundedRepairGateMonitor is repositoryMonitorRepairGateMonitor under its
+// own call deadline, since the gate's context is detached from cancellation.
+func (d *ACPDispatcher) boundedRepairGateMonitor(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.RepositoryMonitor, bool, string) {
+	callCtx, cancel := context.WithTimeout(ctx, repairValidationCallTimeout)
+	defer cancel()
+	return d.repositoryMonitorRepairGateMonitor(callCtx, task)
+}
+
 // recheckRepairValidationConfiguration keeps a pass only while the live
 // RepositoryMonitor still requires the image and command it was validated
 // with. A pass under a check the operator has since replaced does not
@@ -92,7 +110,7 @@ func (d *ACPDispatcher) repositoryMonitorRepairGateMonitor(ctx context.Context, 
 func (d *ACPDispatcher) recheckRepairValidationConfiguration(
 	ctx context.Context, task *corev1alpha1.Task, validated *corev1alpha1.RepositoryMonitor, outcome repairValidationGateOutcome,
 ) repairValidationGateOutcome {
-	live, required, unavailable := d.repositoryMonitorRepairGateMonitor(ctx, task)
+	live, required, unavailable := d.boundedRepairGateMonitor(ctx, task)
 	switch {
 	case unavailable != "":
 		return repairValidationUnavailable("%s", unavailable)
@@ -116,7 +134,7 @@ func (d *ACPDispatcher) gateRepositoryMonitorRepairPublication(
 	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, delta harnessv2.WorkspaceDeltaDescriptor,
 ) (corev1alpha1.TaskDeliveryStatus, error) {
 	ctx = context.WithoutCancel(ctx)
-	monitor, required, unavailable := d.repositoryMonitorRepairGateMonitor(ctx, task)
+	monitor, required, unavailable := d.boundedRepairGateMonitor(ctx, task)
 	if !required {
 		return corev1alpha1.TaskDeliveryStatus{}, nil
 	}
@@ -188,6 +206,26 @@ func (d *ACPDispatcher) runRepositoryMonitorRepairValidation(
 	if delta.Artifact == nil || delta.Artifact.MediaType != artifactcap.MediaTypeWorkspaceDelta {
 		return repairValidationUnavailable("The repair patch artifact is unavailable.")
 	}
+	interval := d.RepairValidationPollInterval
+	if interval <= 0 {
+		interval = defaultRepairValidationPollInterval
+	}
+	wait := d.RepairValidationWaitTimeout
+	if wait <= 0 {
+		wait = tools.RepositoryValidationTimeout + repairValidationWaitSlack
+	}
+	deadline := time.Now().Add(wait)
+	// Every call until the verdict runs under the wait deadline, so a
+	// stalled API server cannot hold the runtime session past it. The
+	// verdict is recorded under a separate bound once that deadline passes.
+	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
+	defer cancelRun()
+	record := func(validationTask *corev1alpha1.Task, outcome repairValidationGateOutcome, binding *store.MonitorEvent, input tools.RepositoryRepairValidationInput) repairValidationGateOutcome {
+		recordCtx, cancel := context.WithTimeout(ctx, repairValidationCallTimeout)
+		defer cancel()
+		return d.recordRepairValidationOutcome(recordCtx, binding, validationTask, input, outcome)
+	}
+
 	command := monitor.Spec.Validation.RepairCommand
 	input := tools.RepositoryRepairValidationInput{
 		Monitor: monitor, RepairTask: task, Image: strings.TrimSpace(monitor.Spec.Validation.Image),
@@ -201,23 +239,25 @@ func (d *ACPDispatcher) runRepositoryMonitorRepairValidation(
 	if err != nil {
 		return repairValidationUnavailable("The repair validation binding is invalid: %v.", err)
 	}
-	if err := tools.EnsureRepositoryRepairValidationBinding(ctx, d.RepositoryValidationBindings, binding); err != nil {
+	if err := tools.EnsureRepositoryRepairValidationBinding(runCtx, d.RepositoryValidationBindings, binding); err != nil {
 		return repairValidationUnavailable("The repair validation binding could not be persisted.")
 	}
-	if recorded, err := tools.FindRepositoryRepairValidationResult(ctx, d.RepositoryValidationBindings, task.Namespace, validationTask.Name); err != nil {
+	if recorded, err := tools.FindRepositoryRepairValidationResult(runCtx, d.RepositoryValidationBindings, task.Namespace, validationTask.Name); err != nil {
 		return repairValidationUnavailable("The recorded repair validation result could not be read.")
 	} else if recorded != nil {
-		return d.verifiedRepairValidationOutcome(ctx, validationTask.Name, delta.Artifact.Digest, recorded)
+		verifyCtx, cancel := context.WithTimeout(ctx, repairValidationCallTimeout)
+		defer cancel()
+		return d.verifiedRepairValidationOutcome(verifyCtx, validationTask.Name, delta.Artifact.Digest, recorded)
 	}
-	if err := tools.EnsureRepositoryRepairValidationCommandSecret(ctx, d.Client, tools.BuildRepositoryRepairValidationCommandSecret(task, validationTask, command)); err != nil {
+	if err := tools.EnsureRepositoryRepairValidationCommandSecret(runCtx, d.Client, tools.BuildRepositoryRepairValidationCommandSecret(task, validationTask, command)); err != nil {
 		return repairValidationUnavailable("The repair validation command Secret could not be persisted.")
 	}
-	if err := d.Client.Create(ctx, validationTask); err != nil {
+	if err := d.Client.Create(runCtx, validationTask); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return repairValidationUnavailable("The repair validation Task could not be created.")
 		}
 		existing := &corev1alpha1.Task{}
-		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(validationTask), existing); err != nil {
+		if err := uncachedReader(d.APIReader, d.Client).Get(runCtx, client.ObjectKeyFromObject(validationTask), existing); err != nil {
 			return repairValidationUnavailable("The existing repair validation Task could not be read.")
 		}
 		if !tools.RepositoryRepairValidationTaskMatches(existing, input) {
@@ -229,49 +269,44 @@ func (d *ACPDispatcher) runRepositoryMonitorRepairValidation(
 		return repairValidationUnavailable("The repair validation Task has no identity to bind its patch capability to.")
 	}
 
-	interval := d.RepairValidationPollInterval
-	if interval <= 0 {
-		interval = defaultRepairValidationPollInterval
-	}
-	wait := d.RepairValidationWaitTimeout
-	if wait <= 0 {
-		wait = tools.RepositoryValidationTimeout + repairValidationWaitSlack
-	}
-	deadline := time.Now().Add(wait)
 	var lastIssued time.Time
 	capabilityDone := false
 	for {
 		current := &corev1alpha1.Task{}
-		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(validationTask), current); err != nil {
+		if err := uncachedReader(d.APIReader, d.Client).Get(runCtx, client.ObjectKeyFromObject(validationTask), current); err != nil {
 			if apierrors.IsNotFound(err) {
-				return d.recordRepairValidationOutcome(ctx, binding, validationTask, input, repairValidationUnavailable("The repair validation Task disappeared before it finished."))
+				return record(validationTask, repairValidationUnavailable("The repair validation Task disappeared before it finished."), binding, input)
 			}
 		} else {
 			if current.UID != validationTask.UID {
 				return repairValidationUnavailable("The repair validation Task was replaced while it ran.")
 			}
 			if current.Status.Phase.IsTerminal() {
-				return d.recordRepairValidationOutcome(ctx, binding, current, input, classifyRepairValidationTask(current, command))
+				return record(current, classifyRepairValidationTask(current, command), binding, input)
 			}
 			if !capabilityDone {
-				capabilityDone = d.repairValidationPatchDownloadStarted(ctx, current)
+				capabilityDone = d.repairValidationPatchDownloadStarted(runCtx, current)
 			}
 			if !capabilityDone && (lastIssued.IsZero() || time.Since(lastIssued) >= repairValidationCapabilityRefresh) {
-				if err := d.issueRepairValidationCapability(ctx, current, delta.Artifact); err != nil {
+				if err := d.issueRepairValidationCapability(runCtx, current, delta.Artifact); err != nil {
 					logf.FromContext(ctx).Error(err, "issue repair validation patch capability", "namespace", current.Namespace, "task", current.Name)
 				} else {
 					lastIssued = time.Now()
 				}
 			}
 		}
-		if cancelled, err := d.taskCancellationRequested(ctx, task); err == nil && cancelled {
+		if cancelled, err := d.taskCancellationRequested(runCtx, task); err == nil && cancelled {
 			return repairValidationGateOutcome{required: true, status: repairValidationCancelled}
 		}
-		if time.Now().After(deadline) {
-			return d.recordRepairValidationOutcome(ctx, binding, validationTask, input, repairValidationUnavailable("The repair validation Task did not finish within %s.", wait))
+		if runCtx.Err() != nil || time.Now().After(deadline) {
+			return record(validationTask, repairValidationUnavailable("The repair validation Task did not finish within %s.", wait), binding, input)
 		}
 		timer := time.NewTimer(interval)
-		<-timer.C
+		select {
+		case <-runCtx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
 	}
 }
 
