@@ -11,6 +11,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +84,21 @@ func TestMintBoundsAPersonsTokens(t *testing.T) {
 	listed, err := tokens.Store.ListAHPTokens(ctx, UserKey(alice.Issuer, alice.Subject))
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(listed), MaxActiveTokensPerUser+storagev1.MaxAHPEndedTokensPerUser)
+}
+
+// Concurrent mints cannot together pass the active-token cap.
+func TestConcurrentMintsKeepTheCap(t *testing.T) {
+	tokens := newTokenService(t)
+	ctx := context.Background()
+	alice := MintRequest{Issuer: "https://issuer.example", Subject: "alice", Namespace: "team", TTL: time.Hour}
+	var wg sync.WaitGroup
+	for range MaxActiveTokensPerUser + 20 {
+		wg.Go(func() { _, _ = tokens.Mint(ctx, alice) })
+	}
+	wg.Wait()
+	listed, err := tokens.Store.ListAHPTokens(ctx, UserKey(alice.Issuer, alice.Subject))
+	require.NoError(t, err)
+	require.Equal(t, MaxActiveTokensPerUser, len(listed), "the tokens stored")
 }
 
 func TestMintRejectsBadRequests(t *testing.T) {
