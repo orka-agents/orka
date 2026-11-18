@@ -13,6 +13,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
@@ -1070,4 +1071,131 @@ func TestACPDispatcherNativeRestoreHonorsHistoryCutoff(t *testing.T) {
 			require.Zero(t, prompts)
 		})
 	}
+}
+
+// An operator exec admitted after the pre-capture taint check, but before the
+// capture closed operator admission, taints the Task and may change the
+// private home. The snapshot the capture returns must then be discarded: a
+// first native turn reconciles its persisted intent and falls back to the
+// transcript, and a Session that already depends on native continuity fails
+// closed.
+func TestNativeCaptureDiscardsASnapshotTaintedDuringCapture(t *testing.T) {
+	for _, nativeContinuity := range []bool{false, true} {
+		name := "first-native-turn"
+		if nativeContinuity {
+			name = "native-continuity"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			raw, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "native-taint.db"))
+			defer closeStore()
+			persistence := sealedStore(t, raw)
+			continuity := newACPSessionTestContinuity(t, persistence, ACPBootstrapLimits{})
+			control := ensureACPSessionForTest(t, continuity, fence, "native-taint")
+			require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, control.Namespace, control.SessionName, control.SessionUID))
+			taskUID := "88888888-8888-8888-8888-888888888888"
+			turn, attempt := openACPSessionTurnForTest(t, continuity, persistence.Store, fence, control, taskUID, "native-taint-prompt", "remember this")
+			completeACPAttemptExecutionForTest(t, persistence.Store, fence, attempt, false)
+			snapshot := storetest.NativeSessionSnapshot(t, "operator changed the private home")
+			runtimeFence := harnessv2.Fence{
+				RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id",
+				ControllerEpoch: uint64(fence.Epoch), RuntimeProfileDigest: snapshot.RuntimeProfileDigest,
+				ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+				RuntimeSessionUID:          snapshot.RuntimeSessionUID, RuntimeSessionGeneration: 1,
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "native-taint-task", UID: types.UID(taskUID)},
+				Spec:       corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: control.SessionName, Append: true}},
+				Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+					Attempt: 1, PromptID: attempt.Key.PromptID, RuntimeSessionUID: string(runtimeFence.RuntimeSessionUID),
+					RuntimeSessionGeneration: 1, RuntimeInstanceID: string(runtimeFence.RuntimeInstanceID),
+					RuntimeSessionSupervisorBootID: string(runtimeFence.SupervisorBootID), RuntimeSessionProfileDigest: string(runtimeFence.RuntimeProfileDigest),
+				}},
+			}
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+			dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: persistence, EventStore: persistence, Sessions: continuity}
+			captures := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captures++
+				// orka-api taints the Task before forwarding the exec that the
+				// capture barrier later kills.
+				latest := &corev1alpha1.Task{}
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(task), latest))
+				latest.Annotations[operatoraccess.TaintAnnotation] = operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1"})
+				require.NoError(t, kubeClient.Update(ctx, latest))
+				now := time.Now().UTC()
+				writeDispatcherJSON(w, harnessv2.CaptureNativeSessionResponse{
+					Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+					Snapshot: snapshot, Session: harnessv2.RuntimeSessionDescriptor{
+						RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), RuntimeSessionUID: runtimeFence.RuntimeSessionUID,
+						Generation: 1, RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+						RuntimeProfileDigest: runtimeFence.RuntimeProfileDigest, State: harnessv2.RuntimeSessionStatePoisoned,
+						ProviderSessionID: snapshot.ProviderSessionID, CreatedAt: now, LastTransitionAt: now,
+						WorkspaceBaseline: harnessv2.WorkspaceBaseline{RepositoryIdentity: "workspace:native-taint", Revision: "empty", TreeDigest: testControlDigestForDispatcher("native-taint-tree")},
+					},
+				})
+			}))
+			defer server.Close()
+			runtimeClient, err := harnessv2.NewClient(server.URL, harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)), harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))))
+			require.NoError(t, err)
+			session := &acpTaskSession{Turn: turn, Binding: ACPRuntimeSessionBinding{SessionUID: control.SessionUID, Generation: 1}}
+			if nativeContinuity {
+				session.NativeSession = &store.NativeSessionRecord{SessionUID: control.SessionUID}
+			}
+			err = dispatcher.captureTaskNativeSession(ctx, runtimeClient, task, runtimeFence, session)
+			require.Equal(t, 1, captures)
+			require.Nil(t, session.NativeCapture, "a snapshot tainted during capture must never become native continuity")
+			if nativeContinuity {
+				require.ErrorIs(t, err, operatoraccess.ErrTainted)
+				return
+			}
+			require.NoError(t, err)
+			current := &corev1alpha1.Task{}
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(task), current))
+			var intent nativeCaptureIntent
+			require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &intent))
+			require.True(t, intent.Unsupported, "the persisted capture intent must record the transcript fallback")
+			require.NoError(t, dispatcher.guardNativeSessionSettlement(ctx, current, session, nil),
+				"settlement must not wait for a checkpoint that was discarded")
+			// A retry takes the pre-capture taint path and settles the same way
+			// without contacting the runtime again.
+			require.NoError(t, dispatcher.captureTaskNativeSession(ctx, runtimeClient, current, runtimeFence, session))
+			require.Equal(t, 1, captures)
+			require.Nil(t, session.NativeCapture)
+		})
+	}
+}
+
+// A capture intent persisted before the Task was tainted is reconciled by the
+// pre-capture taint path too, so settlement does not wait forever for it.
+func TestOperatorTaintReconcilesAPersistedCaptureIntent(t *testing.T) {
+	ctx := t.Context()
+	raw, _, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "native-taint-intent.db"))
+	defer closeStore()
+	persistence := sealedStore(t, raw)
+	intent, err := json.Marshal(nativeCaptureIntent{Request: harnessv2.CaptureNativeSessionRequest{
+		Metadata: harnessv2.MutationMetadata{OperationID: "capture-native-g1", RequestDigest: harnessv2.RequestDigest(testControlDigestForDispatcher("intent"))},
+	}})
+	require.NoError(t, err)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "tainted", UID: "tainted-uid", Annotations: map[string]string{
+			nativeCaptureIntentAnnotation:  string(intent),
+			operatoraccess.TaintAnnotation: operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1"}),
+		}},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt", RuntimeSessionUID: "sess", RuntimeSessionGeneration: 1}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: persistence, EventStore: persistence}
+	skipped, err := dispatcher.skipNativeCaptureForOperatorTaint(ctx, task, &acpTaskSession{})
+	require.NoError(t, err)
+	require.True(t, skipped)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(task), current))
+	var reconciled nativeCaptureIntent
+	require.NoError(t, json.Unmarshal([]byte(current.Annotations[nativeCaptureIntentAnnotation]), &reconciled))
+	require.True(t, reconciled.Unsupported)
 }

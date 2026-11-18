@@ -28,7 +28,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
@@ -37,6 +36,12 @@ import (
 // MemoryReader is the least-privilege store dependency required by recall_memory.
 type MemoryReader interface {
 	ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error)
+}
+
+// MemoryRecallRecorder is the least-privilege store dependency recall_memory
+// uses to count the memories a recall returned.
+type MemoryRecallRecorder interface {
+	RecordMemoryRecall(context.Context, store.MemoryRecall) error
 }
 
 // MemoryProposalWriter is the least-privilege store dependency required by
@@ -89,6 +94,7 @@ type ToolContext struct {
 	TaskUID                   string
 	ParentTaskID              string
 	AgentName                 string
+	AgentUID                  string
 	ToolCallID                string
 	OperationID               string
 	Tenant                    string
@@ -110,8 +116,12 @@ type ToolContext struct {
 	// tool call. The receipt remains authoritative when provenance admission is
 	// disabled and Task metadata is mutable.
 	ExternalEffects store.ExternalEffectStore
+	// ExecutionEvents lets brokered tools append idempotent Task execution
+	// events, such as the approval request of a parked turn.
+	ExecutionEvents store.DeduplicatingExecutionEventStore
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
+	MemoryRecallRecorder MemoryRecallRecorder
 	MemoryProposalWriter MemoryProposalWriter
 	TranscriptSearcher   TranscriptSearcher
 	// RepositoryValidationBindings stores the controller-owned command binding
@@ -480,9 +490,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !ok {
 		err := &ToolNotFoundError{Name: name}
 		if spanRecording {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
+			tracing.RecordSpanErrorType(span, "tool_not_found")
 		}
 		if meterActive {
 			r.recordToolDuration(ctx, time.Since(start).Seconds(), toolTelemetryName, toolTypeValue, "tool_not_found")
@@ -497,18 +505,16 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	}
 	metricErrType := ""
 	if err != nil {
-		errType := fmt.Sprintf("%T", err)
+		errType := tracing.ErrorType(err)
 		if spanRecording {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			tracing.RecordSpanErrorType(span, errType)
 		}
 		metricErrType = errType
 	} else if spanRecording || meterActive {
-		if failed, errType, message := failedToolResult(result); failed {
+		if failed, errType := failedToolResult(result); failed {
+			errType = toolErrorClass(errType)
 			if spanRecording {
-				span.SetStatus(codes.Error, message)
-				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+				tracing.RecordSpanErrorType(span, errType)
 			}
 			metricErrType = errType
 		}
@@ -544,6 +550,11 @@ func registryToolSpanAttributes(ctx context.Context, toolTelemetryName string, t
 		}
 		if tc.ToolCallID != "" {
 			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+		}
+		// The Agent UID a Task's execution binding froze, not its reusable
+		// name, joins tool spans with identity records (ADR 0039).
+		if tc.AgentUID != "" {
+			attrs = append(attrs, attribute.String(genai.AttrAgentID, tc.AgentUID))
 		}
 	}
 	if ok {
@@ -632,8 +643,9 @@ func telemetryDisabled() bool {
 
 // RecordRejectedToolCall records a failed tool invocation that is rejected before
 // dispatch, for example by request-level allowlists or invalid arguments. It
-// intentionally does not execute the tool.
-func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
+// intentionally does not execute the tool. Only errType is recorded, and only
+// when it belongs to Orka's tool error vocabulary.
+func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType string) {
 	if strings.TrimSpace(name) == "" || telemetryDisabled() {
 		return
 	}
@@ -649,54 +661,64 @@ func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, mess
 	if errType == "" {
 		errType = "tool_rejected"
 	}
-	if message == "" {
-		message = errType
-	}
+	errType = toolErrorClass(errType)
 	tracer := tracing.GenAITracer(genai.InstrumentationName)
 	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+rejectedToolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
-	span.SetStatus(codes.Error, message)
-	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+	tracing.RecordSpanErrorType(span, errType)
 	span.End()
 	DefaultRegistry.recordToolDuration(ctx, time.Since(start).Seconds(), rejectedToolTelemetryName, genai.ToolTypeFunction, errType)
 }
 
 // FailedToolResultForTelemetry detects structured tool failures for callers
-// that reject tool calls before dispatch but still need telemetry.
-func FailedToolResultForTelemetry(result string) (bool, string, string) {
+// that reject tool calls before dispatch but still need telemetry. It returns
+// the result's unvalidated errorType, never its message.
+func FailedToolResultForTelemetry(result string) (bool, string) {
 	return failedToolResult(result)
 }
 
-func failedToolResult(result string) (bool, string, string) {
+func failedToolResult(result string) (bool, string) {
 	// Most successful tool results are compact JSON with "success":true and no
 	// false literal. Avoid the generic map unmarshal on that hot path; only parse
 	// when a structured failure is possible.
 	if !strings.Contains(result, "false") {
-		return false, "", ""
+		return false, ""
 	}
 	var body map[string]json.RawMessage
 	if json.Unmarshal([]byte(result), &body) != nil {
-		return false, "", ""
+		return false, ""
 	}
 	successJSON, ok := body["success"]
 	if !ok {
-		return false, "", ""
+		return false, ""
 	}
 	var success bool
 	if json.Unmarshal(successJSON, &success) != nil || success {
-		return false, "", ""
+		return false, ""
 	}
 
 	var tr ChatToolResult
 	_ = json.Unmarshal([]byte(result), &tr)
-	errType := tr.ErrorType
-	if errType == "" {
-		errType = "tool_error"
+	if tr.ErrorType == "" {
+		return true, "tool_error"
 	}
-	message := tr.Error
-	if message == "" {
-		message = errType
+	return true, tr.ErrorType
+}
+
+// toolErrorClass admits only Orka's bounded error vocabulary. Tool result
+// bodies are untrusted, including fields named errorType.
+func toolErrorClass(errorType string) string {
+	switch errorType {
+	case "invalid_arguments", "internal_error", "not_found", "already_exists",
+		"permission_denied", "authorization_failed", "limit_reached", "api_error",
+		"cleanup_failed", "missing_publication_credential", "missing_workspace",
+		"no_identity", "pause_label_rejected", "permission_error", "unauthorized_tool",
+		"unsupported_container_workspace_field", "unsupported_custom_image_publication",
+		"unsupported_schedule", "validation_not_authorized", "validation_task_conflict",
+		"tool_not_found", "tool_not_enabled", "tool_rejected":
+		return errorType
+	default:
+		return "tool_error"
 	}
-	return true, errType, message
 }
 
 func registryToolKind(name string) string {
@@ -792,6 +814,9 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	// park_until is offered only to Agents that list it in their allowed
+	// tools; it records a data-only park on the authenticated turn.
+	r.Register(NewParkUntilTool())
 	return nil
 }
 

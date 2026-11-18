@@ -31,11 +31,11 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 	}
 
 	create("counted")
-	if err := s.ReleaseLockWithTokenUsage(ctx, "default", "counted", "owner", "owner-uid", 150, 25); err != nil {
+	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "counted", OwnerName: "owner", OwnerUID: "owner-uid", Now: time.Now().UTC()}, 150, 25); err != nil {
 		t.Fatalf("ReleaseLockWithTokenUsage: %v", err)
 	}
 	// A replay after the release matches no owner and adds nothing.
-	if err := s.ReleaseLockWithTokenUsage(ctx, "default", "counted", "owner", "owner-uid", 150, 25); err != nil {
+	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "counted", OwnerName: "owner", OwnerUID: "owner-uid", Now: time.Now().UTC()}, 150, 25); err != nil {
 		t.Fatalf("replayed ReleaseLockWithTokenUsage: %v", err)
 	}
 	if in, out, owner := tokens("counted"); in != 150 || out != 25 || owner != "" {
@@ -44,7 +44,7 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 
 	// Another owner's release changes nothing.
 	create("other-owner")
-	if err := s.ReleaseLockWithTokenUsage(ctx, "default", "other-owner", "intruder", "intruder-uid", 10, 10); err != nil {
+	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "other-owner", OwnerName: "intruder", OwnerUID: "intruder-uid", Now: time.Now().UTC()}, 10, 10); err != nil {
 		t.Fatalf("ReleaseLockWithTokenUsage(intruder): %v", err)
 	}
 	if in, out, owner := tokens("other-owner"); in != 0 || out != 0 || owner != "owner" {
@@ -57,7 +57,7 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 		now.Add(-time.Minute), "default", "expired"); err != nil {
 		t.Fatalf("expire lock: %v", err)
 	}
-	if err := s.ReleaseLockWithTokenUsage(ctx, "default", "expired", "owner", "owner-uid", 10, 10); err != nil {
+	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "expired", OwnerName: "owner", OwnerUID: "owner-uid", Now: time.Now().UTC()}, 10, 10); err != nil {
 		t.Fatalf("ReleaseLockWithTokenUsage(expired): %v", err)
 	}
 	if in, out, owner := tokens("expired"); in != 0 || out != 0 || owner != "" {

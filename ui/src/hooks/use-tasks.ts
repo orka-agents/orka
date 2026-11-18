@@ -103,6 +103,33 @@ export function useDeleteTask() {
   })
 }
 
+export interface TaskCancellation {
+  namespace: string
+  name: string
+  phase: string
+  // True when this request recorded the cancellation; false when the task
+  // already had one or was already Cancelled.
+  requested: boolean
+  message: string
+}
+
+// useCancelTask stops a Pending or Running task without deleting it, so its
+// result, artifacts and events stay readable.
+export function useCancelTask() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    // uid pins the request to the task the person confirmed; a task
+    // recreated under the same name since then is refused (409).
+    mutationFn: ({ id, uid, reason }: { id: string; uid?: string; reason?: string }) =>
+      api.post<TaskCancellation>(`/tasks/${id}/cancel`, { ...(uid && { uid }), ...(reason && { reason }) }, { namespace }),
+    onSuccess: (_result, { id }) => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      queryClient.invalidateQueries({ queryKey: ['task', id, namespace] })
+    },
+  })
+}
+
 const taskEventsPageLimit = '1000'
 
 async function fetchTaskEvents(

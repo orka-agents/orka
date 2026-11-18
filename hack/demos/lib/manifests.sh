@@ -40,7 +40,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 100
     defaultAllowBash: true
@@ -84,7 +83,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -135,7 +133,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -371,7 +368,6 @@ metadata:
     demo.orka.ai/scenario: cron-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 40
     defaultAllowBash: true
@@ -474,7 +470,6 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -513,7 +508,6 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -676,7 +670,6 @@ metadata:
     demo.orka.ai/scenario: substrate
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
     defaultMaxTurns: 30
     defaultAllowBash: true

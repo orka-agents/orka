@@ -149,7 +149,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		if mutation != nil && (mutation.Status == repositoryMonitorUpdateBranchSubmitting || mutation.Status == repositoryMonitorAutomergeStatePending || mutation.Status == repositoryMonitorRunPhaseSucceeded) {
 			now := time.Now()
 			deadline := repositoryMonitorUpdateBranchDeadline(mutation)
-			needsOutcomeVerification := strings.HasPrefix(run.Error, repositoryMonitorStaleRunError)
+			needsOutcomeVerification := repositoryMonitorRunErrorNeedsOutcomeVerification(run.Error)
 			if !deadline.IsZero() && !now.Before(deadline) && !needsOutcomeVerification {
 				run.Error = "[run_failed] " + repositoryMonitorUpdateBranchTimeoutReason
 				if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {

@@ -63,6 +63,16 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if !source.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, fmt.Errorf("checkpoint source workspace has changed or is deleting")
 	}
+	// Operator access forfeits checkpoint export: a source tainted through its
+	// own marker or the marker of any Task linked to this exact incarnation is
+	// never routed to a provider, so no fork can consume its data.
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, source)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if tainted {
+		return r.failRouting(ctx, checkpoint, "SourceOperatorTainted")
+	}
 	if source.Labels[workspace.ProviderControllerLabel] == acpWorkspaceControllerLabelValue {
 		return ctrl.Result{}, nil // Retained legacy checkpoints keep their original owner.
 	}

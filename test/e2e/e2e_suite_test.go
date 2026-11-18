@@ -99,6 +99,7 @@ var _ = BeforeSuite(func() {
 		fakeForgeImage,
 		mockLLMCaptureImage,
 		aimockAuthorityImage,
+		fakeEntraImage,
 	}
 	if gatewayE2EEnabled() {
 		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
@@ -311,7 +312,12 @@ var _ = BeforeSuite(func() {
 			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"},`+
 			`{"name":"ORKA_ENABLE_WORKSPACE_PROVIDER_API","value":"true"},`+
 			`{"name":"ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED","value":"true"},`+
-			`{"name":"ORKA_ACP_WORKSPACE_DISPATCH_ENABLED","value":"true"}],`+
+			`{"name":"ORKA_ACP_WORKSPACE_DISPATCH_ENABLED","value":"true"},`+
+			// Runtime skills reuse toolbox delivery; only the suite's own skill
+			// images are allowed.
+			`{"name":"ORKA_ACP_TOOLBOXES_ENABLED","value":"true"},`+
+			`{"name":"ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES","value":"`+e2eRegistryAddress+"/"+repositoryConfigSkillRegistryPath+`"},`+
+			`{"name":"ORKA_ACP_SKILLS_ENABLED","value":"true"}],`+
 			`"volumeMounts":[{"name":"e2e-workspace-webhook-tls",`+
 			`"mountPath":"/tmp/k8s-webhook-server/serving-certs","readOnly":true}]}],`+
 			`"volumes":[{"name":"e2e-workspace-webhook-tls","secret":{"secretName":"orka-admission-tls"}}]}}}}`,
@@ -674,6 +680,7 @@ func e2eImageBuilds() []e2eImageBuild {
 		dockerBuild(fakeForgeImage, "test/fixtures/fakeforge/Dockerfile"),
 		dockerBuild(mockLLMCaptureImage, "test/fixtures/aimockcapture/Dockerfile"),
 		dockerBuild(aimockAuthorityImage, "test/fixtures/aimockauthority/Dockerfile"),
+		dockerBuild(fakeEntraImage, "test/fixtures/fakeentra/Dockerfile"),
 	}
 	if gatewayE2EEnabled() {
 		builds = append(builds,

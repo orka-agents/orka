@@ -64,3 +64,42 @@ func TestStaticChartRendersToolboxFlags(t *testing.T) {
 		}
 	})
 }
+
+func TestStaticChartRendersSkillFlag(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, output)
+		}
+		if strings.Contains(output, "--acp-skills-enabled") {
+			t.Fatalf("default render unexpectedly enabled skills:\n%s", output)
+		}
+	})
+
+	t.Run("requires toolboxes", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t,
+			"--set", "controller.acpRuntime.skills.enabled=true",
+			"--show-only", "templates/deployment.yaml",
+		)
+		if err == nil || !strings.Contains(output, "skills.enabled requires controller.acpRuntime.toolboxes.enabled") {
+			t.Fatalf("helm render error = %v, want toolbox requirement:\n%s", err, output)
+		}
+	})
+
+	t.Run("enabled with toolboxes", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t,
+			"--set", "controller.acpRuntime.toolboxes.enabled=true",
+			"--set", "controller.acpRuntime.toolboxes.allowedRegistries[0]=registry.example.com/skills",
+			"--set", "controller.acpRuntime.skills.enabled=true",
+			"--show-only", "templates/deployment.yaml",
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, output)
+		}
+		for _, want := range []string{"--acp-toolboxes-enabled=true", "--acp-skills-enabled=true"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("render is missing %s:\n%s", want, output)
+			}
+		}
+	})
+}

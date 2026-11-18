@@ -32,6 +32,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
@@ -87,24 +88,42 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
-	TaskProvenanceProtected   bool
-	ControllerEpochs          ControllerEpochFenceSource
-	E2EPromptFaultEnabled     bool
-	Connectors                ConnectorConfig
-	ConnectorTools            ConnectorToolExecutionConfig
+	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	HealthChecker            store.HealthChecker
+	Clientset                kubernetes.Interface
+	APIReader                client.Reader
+	TaskProvenanceProtected  bool
+	ControllerEpochs         ControllerEpochFenceSource
+	E2EPromptFaultEnabled    bool
+	Connectors               ConnectorConfig
+	ConnectorTools           ConnectorToolExecutionConfig
+	// OperatorAccess configures `orka task exec` / `orka task cp`.
+	OperatorAccess OperatorAccessConfig
+	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
+	// Substrate MCP actor Tools through the manager's router identity.
+	SubstrateMCPProxy SubstrateMCPProxyConfig
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// MCP configures the control-plane MCP endpoint (--mcp-server-enabled).
+	MCP MCPServerConfig
+	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
+	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
+	// or RepositoryMonitor they create or edit names.
+	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -121,6 +140,7 @@ type Server struct {
 	openaiHandler       *OpenAICompatHandler
 	anthropicHandler    *AnthropicCompatHandler
 	internalHandlers    *InternalHandlers
+	mcpServer           *mcpServer
 	ResultStore         store.ResultStore
 	SessionStore        store.SessionStore
 	PlanStore           store.PlanStore
@@ -130,12 +150,19 @@ type Server struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+
+	memoryConsolidationStore store.MemoryConsolidationStore
+
+	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
+	substrateMCPProxyWriteTimeout time.Duration
 }
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
+	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -158,6 +185,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore: config.MemoryProposalStore,
 		ExecutionEventStore: config.ExecutionEventStore,
 		GatewayEventStore:   config.GatewayEventStore,
+
+		memoryConsolidationStore: config.MemoryConsolidationStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -177,6 +206,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -184,14 +214,17 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.handlers.chatTurns = server.chatHandler
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.substrateMCPProxyWriteTimeout = substrateMCPProxyWriteTimeout
 	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -233,13 +266,28 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The MCP handler reads its body before taking a concurrency permit;
+	// bound that read so stalled uploads only cost their own connection.
+	var mcpURI fasthttp.URI
+	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
+	}
 	return fasthttp.RequestConfig{}
 }
 
-// requestConfig bounds writes on the Responses route as well as provider work.
+// requestConfig bounds writes on the Responses and MCP proxy routes as well as
+// provider and Actor work.
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if isOperatorFileUpload(header) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: int(operatoraccess.MaxFileBytes), ReadTimeout: 10 * time.Minute}
+	}
+	if isOperatorFileDownload(header) {
+		// The streamed copy-out body is bounded like its supervisor transfer;
+		// a client that stops reading cannot pin the response and its audit.
+		return fasthttp.RequestConfig{WriteTimeout: operatorFileTransferTimeout}
+	}
 	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
@@ -249,7 +297,34 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
 	}
+	if isSubstrateMCPProxyRoute(header) {
+		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
+	}
 	return config
+}
+
+// isOperatorFileUpload matches PUT /api/v1/tasks/{task}/files, whose bounded
+// body is streamed to the runtime supervisor.
+func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
+	return string(header.Method()) == fiber.MethodPut && isOperatorFilesPath(header)
+}
+
+// isOperatorFileDownload matches GET /api/v1/tasks/{task}/files, whose body is
+// streamed from the runtime supervisor.
+func isOperatorFileDownload(header *fasthttp.RequestHeader) bool {
+	return string(header.Method()) == fiber.MethodGet && isOperatorFilesPath(header)
+}
+
+func isOperatorFilesPath(header *fasthttp.RequestHeader) bool {
+	var uri fasthttp.URI
+	if uri.Parse(header.Host(), header.RequestURI()) != nil {
+		return false
+	}
+	// Fiber routes case-insensitively, so this must match every spelling the
+	// upload route accepts.
+	parts := strings.Split(strings.Trim(string(uri.PathOriginal()), "/"), "/")
+	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], externalToolTaskResource) && strings.EqualFold(parts[4], "files")
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
@@ -269,6 +344,12 @@ func (s *Server) setupMiddleware() {
 	// Recovery middleware
 	s.app.Use(recover.New())
 
+	// Before anything reads the request context: an MCP wait's REST replays
+	// end with the wait.
+	if s.config.MCP.Enabled {
+		s.app.Use(adoptMCPReplayDeadline)
+	}
+
 	// Request ID middleware
 	s.app.Use(requestid.New())
 
@@ -284,10 +365,14 @@ func (s *Server) setupMiddleware() {
 	for i, o := range origins {
 		origins[i] = strings.TrimSpace(o)
 	}
+	allowHeaders := allowedCORSHeaders(s.config.ContextTokens)
+	if s.config.MCP.Enabled {
+		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
+	}
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
+		AllowHeaders: allowHeaders,
 	}))
 
 	// Logging middleware
@@ -357,18 +442,31 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.GetTask)
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
+	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
 	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
 	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	// Cross-Task attention read models, computed on read for one namespace.
+	api.Get("/attention", s.handlers.ListAttention)
+	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.GetTaskMemoryConsolidationReport)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
 	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
+	// each call also needs the class opt-in and the dedicated tasks/exec or
+	// tasks/files permission.
+	// Their audit envelope precedes route authorization so dedicated
+	// permission denials are audited too.
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.HandleOperatorExec)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.HandleOperatorFileDownload)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.HandleOperatorFileUpload)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
@@ -378,6 +476,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+	api.Post("/sessions/:id/cancel", s.handlers.CancelSession)
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
@@ -424,6 +523,10 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
+	// Substrate MCP actors are reachable only through this authenticated
+	// proxy; the manager is the router's sole allowlisted client.
+	api.Post("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
+	api.Delete("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
 
 	// Runtime fabric endpoints
 	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
@@ -440,6 +543,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/agents/:name", s.handlers.GetAgent)
 	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
+	api.Put("/agents/:name/spec", s.handlers.UpdateAgentSpec)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
 	// Skills endpoints
@@ -543,6 +647,16 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
+	// Control-plane MCP endpoint. The route only authenticates; each tool
+	// replays its REST route in process, which authorizes it.
+	if s.config.MCP.Enabled {
+		app := s.app
+		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
+		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
+		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp.Post("", s.mcpServer.Handle)
+	}
+
 	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
@@ -552,15 +666,16 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:                  s.client,
-				APIReader:               s.config.APIReader,
-				MemoryStore:             s.MemoryStore,
-				MemoryProposalStore:     s.MemoryProposalStore,
-				ExecutionEventStore:     s.ExecutionEventStore,
-				GatewayEventStore:       s.GatewayEventStore,
-				GatewayService:          s.config.GatewayService,
-				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
-				ConnectorTools:          s.config.ConnectorTools,
+				Client:                   s.client,
+				APIReader:                s.config.APIReader,
+				MemoryStore:              s.MemoryStore,
+				MemoryProposalStore:      s.MemoryProposalStore,
+				MemoryConsolidationStore: s.memoryConsolidationStore,
+				ExecutionEventStore:      s.ExecutionEventStore,
+				GatewayEventStore:        s.GatewayEventStore,
+				GatewayService:           s.config.GatewayService,
+				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
+				ConnectorTools:           s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -601,6 +716,8 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
+		internal.Post("/memory-consolidation/:namespace/begin", s.internalHandlers.BeginMemoryConsolidation)
+		internal.Post("/memory-consolidation/:namespace/complete", s.internalHandlers.CompleteMemoryConsolidation)
 	}
 }
 
@@ -642,7 +759,7 @@ func (s *Server) Start(ctx context.Context) error {
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve. Lower case and without
 // a trailing slash, matched against a normalized path: see routeLookupPath.
-var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known"}
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known", mcpEndpointPath}
 
 // routeLookupPath normalizes path the way the router matches it. Fiber is
 // case-insensitive and non-strict about a trailing slash by default, so

@@ -243,8 +243,12 @@ func fencedOperations(at time.Time) []fencedOperation {
 		{"SendMessage", func(ctx context.Context, p storagev1.StateProvider) error {
 			return p.SendMessage(ctx, &storagev1.Message{Namespace: ns, FromTask: "task-fenced", ToTask: "peer", ParentTask: "parent", Content: "hello"})
 		}},
-		{"GetMessages", func(ctx context.Context, p storagev1.StateProvider) error {
-			_, err := p.GetMessages(ctx, ns, "peer", "parent", true)
+		{"ListUnreadMessages", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.ListUnreadMessages(ctx, ns, "peer", "parent", 0)
+			return err
+		}},
+		{"ConsumeMessages", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.ConsumeMessages(ctx, storagev1.ConsumeMessagesRequest{Namespace: ns, TaskName: "peer", ParentTask: "parent"})
 			return err
 		}},
 		{"GetSession", func(ctx context.Context, p storagev1.StateProvider) error {
@@ -310,6 +314,24 @@ func fencedOperations(at time.Time) []fencedOperation {
 		{"CheckTaskJobAuthority", func(ctx context.Context, p storagev1.StateProvider) error {
 			return p.CheckTaskJobAuthority(ctx, storagev1.TaskJobIdentity{Namespace: ns, TaskUID: "task-uid", JobUID: "job"})
 		}},
+		{"BeginMemoryConsolidationRun", func(ctx context.Context, p storagev1.StateProvider) error {
+			return p.BeginMemoryConsolidationRun(ctx, &storagev1.MemoryConsolidationRun{Namespace: ns, TaskUID: "consolidation-fenced",
+				TaskName: "task-fenced", Mode: "DryRun", Status: storagev1.MemoryConsolidationRunning, WindowStart: at.Add(-time.Hour),
+				WindowEnd: at, Input: []byte(`{}`), CreatedAt: at})
+		}},
+		{"CompleteMemoryConsolidationRun", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.CompleteMemoryConsolidationRun(ctx, storagev1.MemoryConsolidationCompletion{Namespace: ns,
+				TaskUID: "consolidation-fenced", Status: storagev1.MemoryConsolidationCompleted, Report: []byte(`{}`), CompletedAt: at})
+			return err
+		}},
+		{"GetMemoryConsolidationRun", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, err := p.GetMemoryConsolidationRun(ctx, ns, "consolidation-fenced")
+			return err
+		}},
+		{"ListMemoryConsolidationSessions", func(ctx context.Context, p storagev1.StateProvider) error {
+			_, _, err := p.ListMemoryConsolidationSessions(ctx, ns, at.Add(-time.Hour), at, 10)
+			return err
+		}},
 	}
 }
 
@@ -321,10 +343,12 @@ func requireNoFencedEffects(t *testing.T, p storagev1.StateProvider) {
 	require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused result write")
 	_, err = p.GetPlan(ctx, conditionalNamespace, "task-fenced")
 	require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused plan write")
-	messages, err := p.GetMessages(ctx, conditionalNamespace, "peer", "parent", false)
+	messages, err := p.ListUnreadMessages(ctx, conditionalNamespace, "peer", "parent", 0)
 	require.NoError(t, err)
 	require.Empty(t, messages, "a refused message")
 	require.Empty(t, listEvents(t, p, storagev1.ExecutionEventFilter{Namespace: conditionalNamespace, StreamID: "task-fenced"}), "refused appends")
+	_, err = p.GetMemoryConsolidationRun(ctx, conditionalNamespace, "consolidation-fenced")
+	require.ErrorIs(t, err, storagev1.ErrNotFound, "a refused consolidation run")
 }
 
 func runTaskDataFences(t *testing.T, newProvider StateFactory) {

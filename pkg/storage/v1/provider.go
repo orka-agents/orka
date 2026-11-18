@@ -110,7 +110,10 @@
 // support; names and semantics may change before then.
 package v1
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const (
 	// ContractVersion identifies this storage extension contract.
@@ -127,7 +130,22 @@ const (
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
 	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
-	ContractRevision = 5
+	// Revision 6 requires [SessionCreationReader] on state.v1.
+	// Revision 7 split the inbox read into [MessageStore.ListUnreadMessages]
+	// and [MessageStore.ConsumeMessages], bounded by [MaxMessageBatch], made
+	// [MessageStore.SendMessage] write the assigned ID and creation time back,
+	// and made every Session lease decision, and the claim check when
+	// freezing a gateway event's allowed tools, use the time the request
+	// carries. Revision 8 orders whole-object replacement by write stamp: a
+	// SaveResult or SaveArtifact replaces a stored result or file only when
+	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
+	// stored one's, and results are limited to [MaxResultBytes], reported in
+	// [ProviderLimits.MaxResultBytes]. Revision 9 adds
+	// [MemoryStore.RecordMemoryRecall]. Revision 10 adds memory generations
+	// and the consolidation proposal types, whose application changes the
+	// memories they target only at the generations they name. Revision 11
+	// adds [MemoryConsolidationStore].
+	ContractRevision = 11
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -146,6 +164,13 @@ type SessionTypeReader interface {
 	GetSessionType(ctx context.Context, namespace, name string) (string, error)
 }
 
+// SessionCreationReader reads when a Session record was created without
+// loading its transcript. A Session deleted and recreated under the same
+// name gets a new creation time, so the time identifies one incarnation.
+type SessionCreationReader interface {
+	GetSessionCreatedAt(ctx context.Context, namespace, name string) (time.Time, error)
+}
+
 // StateProvider is the provider side of state.v1.
 type StateProvider interface {
 	HealthChecker
@@ -158,6 +183,7 @@ type StateProvider interface {
 
 	SessionStore
 	SessionTypeReader
+	SessionCreationReader
 	SessionTurnCommitter
 	FencedSessionWriteStore
 	SessionSoulReader
@@ -192,6 +218,7 @@ type StateProvider interface {
 
 	MemoryStore
 	MemoryProposalStore
+	MemoryConsolidationStore
 
 	SecurityStore
 	RepositoryMonitorStore

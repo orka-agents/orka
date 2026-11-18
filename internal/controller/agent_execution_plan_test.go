@@ -97,6 +97,35 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantReason: "do not support maxTurns",
 		},
 		{
+			name: "external runtimeRef ceiling ignores tools the registration denies",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read-inventory", "update-inventory"}}
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+					Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"read-inventory"}},
+				}
+			},
+			objects:  []client.Object{plannerExternalRuntimeWithMCPPolicy([]string{"read-inventory", "update-inventory"}, []string{"update-inventory"})},
+			wantPath: agentExecutionPathExternal,
+		},
+		{
+			name: "external runtimeRef ceiling rejects tools the registration exposes",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read-inventory", "update-inventory"}}
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+					Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"read-inventory"}},
+				}
+			},
+			objects:    []client.Object{plannerExternalRuntimeWithMCPPolicy([]string{"read-inventory", "update-inventory"}, []string{})},
+			wantPath:   agentExecutionPathRejected,
+			wantReason: `ceiling does not allow tool "update-inventory"`,
+		},
+		{
 			name: "OpenCode uses ACP RuntimePool",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
@@ -292,6 +321,12 @@ func plannerExternalRuntime() *corev1alpha1.AgentRuntime {
 			RuntimeInstanceID: "external-instance", RuntimeProfileDigest: profile.Digest, WorkspaceGovernance: &governance,
 		}},
 	}
+}
+
+func plannerExternalRuntimeWithMCPPolicy(allowed, disallowed []string) *corev1alpha1.AgentRuntime {
+	runtime := plannerExternalRuntime()
+	runtime.Spec.Capabilities.MCPPolicy = &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: allowed, DisallowedTools: disallowed}
+	return runtime
 }
 
 func plannerRuntimeRefAgent() *corev1alpha1.Agent {

@@ -51,6 +51,7 @@ var stateFamilies = []stateFamily{
 	{"sessions", runSessions},
 	{"session-locks", runSessionLocks},
 	{"chat-turns", runChatTurns},
+	{"lease-clocks", runLeaseClocks},
 	{"session-soul", runSessionSoul},
 	{"session-lineage", runSessionLineage},
 	{"session-cleanup-persistence", runSessionCleanupPersistence},
@@ -72,8 +73,11 @@ var stateFamilies = []stateFamily{
 	{"sealed-connector-consents", runSealedConnectorConsents},
 	{"sealed-connector-listings", runSealedConnectorListings},
 	{"memory-proposal-application", runMemoryProposalApplication},
+	{"memory-consolidation", runMemoryConsolidation},
+	{"memory-consolidation-runs", runMemoryConsolidationRuns},
 	{"task-data-fences", runTaskDataFences},
 	{"artifact-fence", runArtifactFence},
+	{"result-write-order", runResultWriteOrder},
 	{"grouped-execution-events", runGroupedExecutionEvents},
 	{"scan-ingestion", runScanIngestion},
 	{"timestamps", runTimestamps},
@@ -125,6 +129,9 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 	newProvider = artifactFactory(newProvider, settings)
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
+	})
+	t.Run("artifact-write-order", func(t *testing.T) {
+		runArtifactWriteOrder(t, newProvider)
 	})
 	t.Run("write-envelopes", func(t *testing.T) {
 		runWriteCatalog(t, newProvider, artifactWriteCases)
