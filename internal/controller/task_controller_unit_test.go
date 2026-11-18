@@ -2014,6 +2014,66 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 	}
 }
 
+// Marked siblings are counted first; once they fill the limit no Job list is
+// needed. Otherwise one batched list finds every unmarked sibling's Job.
+func TestCountChildSiblingSlots(t *testing.T) {
+	scheme := newTestScheme()
+	ownedJob := func(owner *corev1alpha1.Task) *batchv1.Job {
+		return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name:      owner.Name + "-job",
+			Namespace: owner.Namespace,
+			Labels:    map[string]string{labels.LabelTask: owner.Name},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: owner.Name, UID: owner.UID,
+			}},
+		}}
+	}
+	pending := corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+	running := coordinationChildTask("running", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "running-job"})
+	unmarked1 := coordinationChildTask("unmarked-1", pending)
+	unmarked1.UID = "unmarked-1-uid"
+	unmarked2 := coordinationChildTask("unmarked-2", pending)
+	unmarked2.UID = "unmarked-2-uid"
+	waiting := coordinationChildTask("waiting", pending)
+	waiting.UID = "waiting-uid"
+	child := coordinationChildTask("child", pending)
+	siblings := []corev1alpha1.Task{*running, *unmarked1, *unmarked2, *waiting, *child}
+
+	t.Run("limit filled by marked siblings skips the Job list", func(t *testing.T) {
+		r := newUnitReconciler(scheme)
+		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return errors.New("unexpected live list")
+				},
+			}).Build()
+		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 1)
+		if err != nil || active != 1 {
+			t.Fatalf("countChildSiblingSlots() = %d, %v; want 1, nil", active, err)
+		}
+	})
+
+	t.Run("one list counts every unmarked sibling with a Job", func(t *testing.T) {
+		jobLists := 0
+		r := newUnitReconciler(scheme)
+		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(ownedJob(unmarked1), ownedJob(unmarked2)).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					jobLists++
+					return c.List(ctx, list, opts...)
+				},
+			}).Build()
+		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 5)
+		if err != nil || active != 3 {
+			t.Fatalf("countChildSiblingSlots() = %d, %v; want 3, nil", active, err)
+		}
+		if jobLists != 1 {
+			t.Fatalf("live Job lists = %d, want 1", jobLists)
+		}
+	})
+}
+
 func TestValidateCoordinationConstraints_WaitingSiblingsDoNotBlockAdmission(t *testing.T) {
 	scheme := newTestScheme()
 	parentTask, parentAgent := coordinationConcurrencyFixture(1)

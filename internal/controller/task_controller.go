@@ -32,7 +32,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -352,21 +354,59 @@ func childTaskHoldsConcurrencySlot(task *corev1alpha1.Task) bool {
 	}
 }
 
-// taskOwnsJob reports, from a live read, whether any Job owned by task exists.
-func (r *TaskReconciler) taskOwnsJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+// countChildSiblingSlots counts the siblings of task that hold a
+// maxConcurrentChildren slot, stopping once limit is reached. createTaskJob
+// creates a Job before the Task records JobName, so a failed status write or a
+// restart can leave a running child Pending without markers; those siblings are
+// counted when one live Job list finds a Job they own.
+func (r *TaskReconciler) countChildSiblingSlots(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	siblings []corev1alpha1.Task,
+	limit int32,
+) (int32, error) {
+	active := int32(0)
+	unmarked := map[types.UID]struct{}{}
+	var unmarkedNames []string
+	for i := range siblings {
+		s := &siblings[i]
+		switch {
+		case s.Name == task.Name:
+			continue
+		case childTaskHoldsConcurrencySlot(s):
+			if active++; active >= limit {
+				return active, nil
+			}
+		case s.Status.Phase == corev1alpha1.TaskPhasePending:
+			unmarked[s.UID] = struct{}{}
+			unmarkedNames = append(unmarkedNames, labels.SelectorValue(s.Name))
+		}
+	}
+	if len(unmarked) == 0 {
+		return active, nil
+	}
+
+	byTask, err := k8slabels.NewRequirement(labels.LabelTask, selection.In, unmarkedNames)
+	if err != nil {
+		return 0, err
+	}
 	var jobs batchv1.JobList
 	if err := r.taskMetadataReader().List(ctx, &jobs, client.InNamespace(task.Namespace),
-		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
-		return false, err
+		client.MatchingLabelsSelector{Selector: k8slabels.NewSelector().Add(*byTask)}); err != nil {
+		return 0, err
 	}
 	for i := range jobs.Items {
 		for _, ref := range jobs.Items[i].OwnerReferences {
-			if ref.UID == task.UID {
-				return true, nil
+			if _, ok := unmarked[ref.UID]; !ok {
+				continue
+			}
+			delete(unmarked, ref.UID)
+			if active++; active >= limit {
+				return active, nil
 			}
 		}
 	}
-	return false, nil
+	return active, nil
 }
 
 // Reconcile handles the reconciliation loop for Task resources
@@ -1383,26 +1423,10 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 			log.Error(err, "failed to list sibling tasks")
 			return ctrl.Result{}, err, true
 		}
-		active := int32(0)
-		for i := range siblings.Items {
-			s := &siblings.Items[i]
-			if s.Name == task.Name {
-				continue
-			}
-			holdsSlot := childTaskHoldsConcurrencySlot(s)
-			if !holdsSlot && s.Status.Phase == corev1alpha1.TaskPhasePending {
-				// A Job is created before its Task records JobName, so a failed
-				// status write leaves a running child Pending without markers.
-				owns, err := r.taskOwnsJob(ctx, s)
-				if err != nil {
-					log.Error(err, "failed to list sibling task jobs")
-					return ctrl.Result{}, err, true
-				}
-				holdsSlot = owns
-			}
-			if holdsSlot {
-				active++
-			}
+		active, err := r.countChildSiblingSlots(ctx, task, siblings.Items, coord.MaxConcurrentChildren)
+		if err != nil {
+			log.Error(err, "failed to count sibling task jobs")
+			return ctrl.Result{}, err, true
 		}
 		if active >= coord.MaxConcurrentChildren {
 			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
