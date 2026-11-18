@@ -1009,7 +1009,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	action := externalRetirementAction(w, deleting)
-	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
+	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action, NotAfter: externalSuspendNotAfter(pool, w, action)}
 	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
 		// Recheck immediately before authorizing: the drain probe above can
 		// outlast a short eviction window.
