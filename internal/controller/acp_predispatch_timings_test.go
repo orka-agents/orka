@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -320,5 +322,101 @@ func TestTrustedServiceGrantCreateAcceptsConcurrentIdenticalCreate(t *testing.T)
 	r = &TaskReconciler{Client: raced(foreign)}
 	if err := r.createOrUpdateTrustedServiceRole(context.Background(), desiredRole()); err == nil {
 		t.Fatal("a concurrently created Role with other permissions was accepted")
+	}
+}
+
+// The Queued status write is watch-visible before it returns, so a dispatcher
+// scan, and even the start report, can run while the queue pass is still in
+// the write. The queued milestone must already be recorded then, ahead of
+// scanned, and the queue pass must leave no record behind for the reported
+// Task.
+func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: types.UID("33333333-3333-3333-3333-333333333333"), Generation: 2},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "implement", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{},
+			Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: "https://github.com/orka-agents/orka.git"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("44444444-4444-4444-4444-444444444444"), Generation: 3},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:            corev1alpha1.AgentRuntimeCodex,
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+		}},
+	}
+	var reported *acpPreDispatchRecord
+	interleaved := false
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
+	kubeClient := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, delegate client.Client, subResource string, object client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+			if err := delegate.SubResource(subResource).Patch(ctx, object, patch, options...); err != nil {
+				return err
+			}
+			written, ok := object.(*corev1alpha1.Task)
+			if !ok || interleaved || written.Status.Execution == nil ||
+				written.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
+				return nil
+			}
+			// The committed Queued status reaches the dispatcher before the
+			// write returns: it scans, reserves, and starts the Task.
+			interleaved = true
+			visible := written.DeepCopy()
+			acpPreDispatch.mark(visible, acpPreDispatchScanned)
+			acpPreDispatch.mark(visible, acpPreDispatchReserved)
+			reported = acpPreDispatch.finish(visible)
+			return nil
+		},
+	})
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		<-epochDone
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &TaskReconciler{
+		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+	}
+	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
+		t.Fatal(err)
+	}
+	if !interleaved || reported == nil {
+		t.Fatalf("the dispatcher never observed the Queued write (interleaved=%t)", interleaved)
+	}
+	queued, scanned := reported.marks[acpPreDispatchQueued], reported.marks[acpPreDispatchScanned]
+	if queued.IsZero() {
+		t.Fatal("the start report ran without the queued milestone")
+	}
+	if scanned.Before(queued) {
+		t.Fatalf("scanned at %s precedes queued at %s", scanned, queued)
+	}
+	if _, ok := preDispatchValues(reported.keysAndValues())["dispatchScannedMs"]; !ok {
+		t.Fatalf("the report omits the queue-to-scan step: %v", reported.keysAndValues())
+	}
+	acpPreDispatch.mu.Lock()
+	_, orphaned := acpPreDispatch.records[task.UID]
+	acpPreDispatch.mu.Unlock()
+	if orphaned {
+		t.Fatal("the queue pass recreated a record after its Task was reported")
 	}
 }
