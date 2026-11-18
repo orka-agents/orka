@@ -27,10 +27,12 @@ cluster access. When something needs changing, it gives you the commands to run.
   The Agent's system prompt only points to the skill, so the instructions and
   the sources always come from the same version.
 - **Read-only tools.** The Agent's defaults are Read, Glob and Grep, with Bash
-  off. `orka ask` keeps them, and its Tasks have no workspace, so their runtime
-  sessions are read-only. These are defaults, as on any Agent: a Task created
-  directly with its own `agentRuntime` tools, Bash or a workspace can widen them.
-  Treat `create` on Tasks in the guide's namespace as the permission that
+  off, and its [runtime ceiling](../concepts/agent-runtimes.md#cap-what-tasks-can-request) holds every Task to
+  the same set and to `guide.maxTurns`: a Task that asks for another tool, Bash
+  or more turns fails before it runs. `orka ask` keeps the defaults, and its
+  Tasks have no workspace, so their runtime sessions are read-only. A Task
+  created directly can still add a workspace, which the guide can then read, so
+  treat `create` on Tasks in the guide's namespace as the permission that
   matters.
 
 Build the snapshot from the commit the controller runs, and the guide describes

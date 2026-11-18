@@ -131,7 +131,8 @@ func (c GuideAgentConfig) Validate(policy ACPToolboxPolicy, images ACPRuntimeIma
 func (c GuideAgentConfig) DesiredAgent() *corev1alpha1.Agent {
 	contractVersion := c.ContractVersion
 	maxTurns := c.MaxTurns
-	allowBash := false
+	allowBash, ceilingAllowBash := false, false
+	ceilingMaxTurns := c.MaxTurns
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GuideAgentName,
@@ -147,6 +148,13 @@ func (c GuideAgentConfig) DesiredAgent() *corev1alpha1.Agent {
 				DefaultMaxTurns:     &maxTurns,
 				DefaultAllowedTools: slices.Clone(guideAllowedTools),
 				DefaultAllowBash:    &allowBash,
+				// The ceiling holds every Task to the same read-only tool set,
+				// so one created directly can't widen the defaults.
+				Ceiling: &corev1alpha1.AgentRuntimeCeiling{
+					AllowedTools: slices.Clone(guideAllowedTools),
+					AllowBash:    &ceilingAllowBash,
+					MaxTurns:     &ceilingMaxTurns,
+				},
 				Toolboxes: []corev1alpha1.AgentToolbox{{
 					Image:     strings.TrimSpace(c.DocsImage),
 					MountPath: GuideDocsMountPath,

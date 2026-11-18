@@ -105,6 +105,15 @@ func TestGuideDesiredAgentIsReadOnly(t *testing.T) {
 	if spec.Runtime.DefaultAllowBash == nil || *spec.Runtime.DefaultAllowBash {
 		t.Fatal("defaultAllowBash must be explicitly false")
 	}
+	ceiling := spec.Runtime.Ceiling
+	if ceiling == nil || !slices.Equal(ceiling.AllowedTools, []string{"Glob", "Grep", "Read"}) ||
+		ceiling.AllowBash == nil || *ceiling.AllowBash ||
+		ceiling.MaxTurns == nil || *ceiling.MaxTurns != DefaultGuideMaxTurns {
+		t.Fatalf("ceiling = %#v, want Glob, Grep and Read, no Bash, and the default turn limit", ceiling)
+	}
+	if err := validateAgentRuntimeCeiling(nil, agent); err != nil {
+		t.Fatalf("guide defaults must fit the guide ceiling: %v", err)
+	}
 	if spec.Runtime.RuntimeRef != nil || spec.ProviderRef != nil || spec.SecretRef != nil ||
 		spec.Execution != nil || spec.Coordination != nil || len(spec.Tools) != 0 || len(spec.Skills) != 0 {
 		t.Fatalf("guide Agent must carry no external runtime, credentials, workspace, tools or skills: %#v", spec)
@@ -177,6 +186,20 @@ func TestGuideAgentPlansReadOnlySessionOnSupportedRuntimes(t *testing.T) {
 				return !slices.Contains([]string{"Glob", "Grep", "Read"}, name)
 			}) {
 				t.Fatalf("tool policy = %v bash=%v, want only Glob, Grep, Read", allowed, allowBash)
+			}
+			if err := validateAgentRuntimeCeiling(task, agent); err != nil {
+				t.Fatalf("the guide's own Task must fit its ceiling: %v", err)
+			}
+			allowBashTrue := true
+			for name, widened := range map[string]*corev1alpha1.AgentRuntimeSpec{
+				"write tool": {AllowedTools: []string{"Read", "Write"}},
+				"bash":       {AllowedTools: []string{"Read", "Bash"}, AllowBash: &allowBashTrue},
+			} {
+				direct := task.DeepCopy()
+				direct.Spec.AgentRuntime = widened
+				if err := validateAgentRuntimeCeiling(direct, agent); err == nil {
+					t.Fatalf("a Task widening the guide with %s must exceed its ceiling", name)
+				}
 			}
 		})
 	}
