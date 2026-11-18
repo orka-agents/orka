@@ -83,9 +83,11 @@ workers, but gives no per-Actor proof of sandbox exit:
 - **Without it.** An opted-in profile's allocation is refused, with the error on the
   workspace's `Provisioned` condition, and existing shared pools are strongly retired.
 - **Verified even with it.** The provider holds global viewer and lists every
-  ActorTemplate. Any template outside the pool's Atespace whose selector is empty or is
-  satisfied by the pool's labels fails closed: the pool stops admitting and is strongly
-  retired. This runs before each claim, before each Resume, and on every sweep.
+  ActorTemplate. A template whose selector is empty or is satisfied by the pool's labels
+  is foreign if it is outside the pool's Atespace, or inside it but not a derived
+  template this provider recorded. Any foreign template fails closed: the pool stops
+  admitting and is strongly retired. This runs before each claim, before each Resume,
+  and on every sweep.
 - **Residual risk.** A foreign template or Actor created between two checks can reach a
   shared worker until the next check, the ledger's assignment check, or observation
   detects it. Detection then strongly retires the pool. The checks bound this race; they
