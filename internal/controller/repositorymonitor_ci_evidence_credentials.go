@@ -58,7 +58,9 @@ var (
 const repositoryMonitorEvidenceAddMaskCommand = "::add-mask::"
 
 // repositoryMonitorEvidenceQuotedScalarMaxLines bounds how many lines a
-// credential's unclosed quoted value is followed through.
+// credential's unclosed quoted value is followed through before the tracker
+// stops trusting any later line to end it: past the limit, every remaining
+// line is withheld.
 const repositoryMonitorEvidenceQuotedScalarMaxLines = 64
 
 // repositoryMonitorEvidenceCredentialLine reports whether a line of CI text
@@ -212,8 +214,14 @@ func repositoryMonitorEvidenceDiffMarker(line string) bool {
 //     indicator, tag, or anchor) or a key with no value on its line
 //     (password:), through the lines indented deeper than the key;
 //   - a quoted value that opens on the key's line (password: "first), through
-//     the line with its closing quote, or at most
-//     repositoryMonitorEvidenceQuotedScalarMaxLines lines.
+//     the line with its closing quote. A value still open after
+//     repositoryMonitorEvidenceQuotedScalarMaxLines lines leaves the tracker
+//     unsure where it ends, so it withholds every remaining line;
+//   - a PEM block, from the line with its BEGIN marker through the line with
+//     the END marker of the same label (any END marker when the BEGIN line
+//     does not show its label), blank lines included, on each diff side;
+//   - after a line too long to keep whole (see openCut), the lines indented
+//     deeper than it.
 //
 // Keys are also recognized behind a unified diff marker (+, -, or a space),
 // as CI tools print diffs of configuration: such a block continues through
@@ -226,6 +234,50 @@ type repositoryMonitorEvidenceMultilineTracker struct {
 	// both sides, so a removed line that ends a value cannot expose the
 	// added lines that replace it.
 	sides [2]repositoryMonitorEvidenceMultilineSide
+	// pems holds the PEM block open on each diff side, apart from sides so
+	// that a line ending a YAML or quoted value leaves it open.
+	pems [2]repositoryMonitorEvidencePEMSide
+	// exhausted means a quoted value stayed open past
+	// repositoryMonitorEvidenceQuotedScalarMaxLines: no later line is
+	// trusted to end it, so every line is withheld.
+	exhausted bool
+}
+
+// repositoryMonitorEvidencePEMSide is the PEM block open on one side of a
+// diff.
+type repositoryMonitorEvidencePEMSide struct {
+	// open means a block is open; label is its BEGIN marker's lower-cased
+	// label, or empty when the marker did not show it.
+	open  bool
+	label string
+}
+
+// track follows the side's PEM block through lower, the next lower-cased
+// line, and reports whether the line is part of one: inside a block or
+// holding a BEGIN or END marker of one. An END marker whose label differs
+// from its BEGIN marker's does not end the block.
+func (p *repositoryMonitorEvidencePEMSide) track(lower string) bool {
+	inside := p.open
+	for pos := 0; pos < len(lower); {
+		if p.open {
+			k := strings.Index(lower[pos:], repositoryMonitorEvidencePEMEnd)
+			if k < 0 {
+				break
+			}
+			pos += k + len(repositoryMonitorEvidencePEMEnd)
+			if label := repositoryMonitorEvidencePEMLabel(lower[pos:]); p.label == "" || label == p.label {
+				p.open, p.label = false, ""
+			}
+			continue
+		}
+		k := strings.Index(lower[pos:], repositoryMonitorEvidencePEMBegin)
+		if k < 0 {
+			break
+		}
+		pos += k + len(repositoryMonitorEvidencePEMBegin)
+		p.open, p.label, inside = true, repositoryMonitorEvidencePEMLabel(lower[pos:]), true
+	}
+	return inside
 }
 
 // repositoryMonitorEvidenceMultilineSide is the multi-line value open on one
@@ -268,10 +320,67 @@ func repositoryMonitorEvidenceDiffSides(line string) []int {
 	return []int{0, 1}
 }
 
+// repositoryMonitorEvidencePEMSides returns the diff sides lower, a
+// lower-cased line, is on for PEM tracking: a line that starts with a PEM
+// marker is the marker on both sides, not a removed line.
+func repositoryMonitorEvidencePEMSides(lower string) []int {
+	if strings.HasPrefix(lower, repositoryMonitorEvidencePEMBegin) || strings.HasPrefix(lower, repositoryMonitorEvidencePEMEnd) {
+		return []int{0, 1}
+	}
+	return repositoryMonitorEvidenceDiffSides(lower)
+}
+
 // repositoryMonitorEvidenceMultilineKey reports whether line is a credential
 // key whose value continues on the following lines.
 func repositoryMonitorEvidenceMultilineKey(line string) bool {
 	return security.SensitiveYAMLBlockHeader(line) || security.SensitiveYAMLEmptyValueKey(line)
+}
+
+// open reports that the text read so far ends inside a value the tracker
+// withholds without a clear end: a quoted value, a PEM block, or any value
+// once the tracker is exhausted. A reader that stops here cannot tell how
+// much of the value it did not see.
+func (t *repositoryMonitorEvidenceMultilineTracker) open() bool {
+	for i := range t.sides {
+		if t.sides[i].quote != 0 || t.pems[i].open {
+			return true
+		}
+	}
+	return t.exhausted
+}
+
+// repositoryMonitorEvidencePEMLabel returns the lower-cased label of the PEM
+// marker whose label starts at rest, such as "rsa private key", or empty
+// when rest does not show the marker's closing dashes.
+func repositoryMonitorEvidencePEMLabel(rest string) string {
+	label, _, ok := strings.Cut(rest, "-----")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(label)
+}
+
+// openCut follows the lines after line, which a reader keeps only the head
+// of: the tail it drops may hold a credential key whose value continues on
+// the next lines, so the lines indented deeper than it, or deeper behind its
+// diff marker, are withheld as that value until a line that is not. A side
+// already following a value keeps it. The reader passes the whole line to
+// withhold first, so quoted values and PEM blocks the tail opens are
+// followed as on any line.
+func (t *repositoryMonitorEvidenceMultilineTracker) openCut(line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	for _, i := range repositoryMonitorEvidenceDiffSides(line) {
+		side := &t.sides[i]
+		if side.quote != 0 || side.inBlock {
+			continue
+		}
+		side.inBlock, side.rawIndent, side.diffIndent = true, repositoryMonitorEvidenceIndent(line), -1
+		if repositoryMonitorEvidenceDiffMarker(line) {
+			side.diffIndent = repositoryMonitorEvidenceIndent(line[1:])
+		}
+	}
 }
 
 // withhold reports whether line, the next line of the text, belongs to a
@@ -279,9 +388,22 @@ func repositoryMonitorEvidenceMultilineKey(line string) bool {
 // with control and format runes stripped. Each diff side line is on is
 // updated independently: a context line can continue a value on one side
 // and open another on the other. A blank line inside a block is not
-// withheld, but does not end the block.
+// withheld, but does not end the block; a blank line inside a PEM block is
+// withheld.
 func (t *repositoryMonitorEvidenceMultilineTracker) withhold(line string) bool {
+	if t.exhausted {
+		return true
+	}
 	blank := strings.TrimSpace(line) == ""
+	lower := strings.ToLower(line)
+	// A line inside a block on either side is withheld: a base64 body line
+	// can start with a diff marker's character.
+	inPEM := t.pems[0].open || t.pems[1].open
+	for _, i := range repositoryMonitorEvidencePEMSides(lower) {
+		if t.pems[i].track(lower) {
+			inPEM = true
+		}
+	}
 	var rawKey, diffKey bool
 	var quote byte
 	if !blank {
@@ -289,7 +411,7 @@ func (t *repositoryMonitorEvidenceMultilineTracker) withhold(line string) bool {
 		diffKey = repositoryMonitorEvidenceDiffMarker(line) && repositoryMonitorEvidenceMultilineKey(line[1:])
 		quote = repositoryMonitorEvidenceOpensQuotedCredential(line)
 	}
-	withheld := false
+	withheld := inPEM
 	for _, i := range repositoryMonitorEvidenceDiffSides(line) {
 		side := &t.sides[i]
 		switch {
@@ -303,8 +425,13 @@ func (t *repositoryMonitorEvidenceMultilineTracker) withhold(line string) bool {
 				continue
 			}
 			side.quoteLines++
-			if repositoryMonitorEvidenceClosingQuote(line, side.quote) >= 0 || side.quoteLines >= repositoryMonitorEvidenceQuotedScalarMaxLines {
+			switch {
+			case repositoryMonitorEvidenceClosingQuote(line, side.quote) >= 0:
 				*side = repositoryMonitorEvidenceMultilineSide{}
+			case side.quoteLines >= repositoryMonitorEvidenceQuotedScalarMaxLines:
+				// Clearing the value here would expose its later lines
+				// once its key line is out of view.
+				t.exhausted = true
 			}
 			continue
 		case blank:

@@ -57,6 +57,10 @@ const (
 	repositoryMonitorCILogReasonUnresolved        = "log_destination_unresolved"
 	repositoryMonitorCILogReasonEmpty             = "log_empty"
 	repositoryMonitorCILogReasonHeadMismatch      = "job_head_sha_mismatch"
+	// The excerpt ends inside a credential value with no clear end, such as
+	// a PEM block or a quoted value the read stopped in, or one open past
+	// the tracker's limit: its remaining lines are withheld.
+	repositoryMonitorCILogReasonValueWithheld = "log_credential_value_withheld"
 )
 
 // repositoryMonitorCheckLogEvidence is a bounded excerpt of one failed
@@ -117,6 +121,9 @@ type repositoryMonitorCILogExcerpt struct {
 	// openStart and openEnd mean log lines that were not kept precede or
 	// follow lines.
 	openStart, openEnd bool
+	// withheldRest means lines ends inside a credential value that never
+	// clearly ended, so its last lines are withheld.
+	withheldRest bool
 }
 
 // repositoryMonitorCILogScanner reads a job log line by line, keeping only a
@@ -137,21 +144,32 @@ type repositoryMonitorCILogScanner struct {
 	cleanup     bool
 	tail        []string
 	// multiline follows credential multi-line values as the log streams
-	// by.
+	// by. openSince counts the lines seen through the one that left it
+	// inside a value with no clear end yet, or is -1.
 	multiline *repositoryMonitorEvidenceMultilineTracker
+	openSince int
 }
 
 func newRepositoryMonitorCILogScanner() *repositoryMonitorCILogScanner {
-	return &repositoryMonitorCILogScanner{errorAt: -1, multiline: newRepositoryMonitorEvidenceMultilineTracker()}
+	return &repositoryMonitorCILogScanner{errorAt: -1, openSince: -1, multiline: newRepositoryMonitorEvidenceMultilineTracker()}
 }
 
 // withholdMultilineValue withholds each line of a credential's multi-line
 // value, such as a YAML block scalar, a quoted value through its closing
-// quote, or either behind a diff marker, as it streams by, so pruning the
-// rolling window cannot drop the key line that identifies the value while
-// its other lines survive.
-func (s *repositoryMonitorCILogScanner) withholdMultilineValue(line string) string {
-	if s.multiline.withhold(repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(line, ""))) {
+// quote, a PEM block through its END marker, or any of them behind a diff
+// marker, as it streams by, so pruning the rolling window cannot drop the
+// key line that identifies the value while its other lines survive. tracked
+// is the whole cleaned line, which for a line kept only to its head (cut)
+// includes the tail the excerpt drops: a value that tail opens is followed
+// onto the next lines, and the lines indented deeper than the cut line are
+// withheld as the value of a key the tail may hold.
+func (s *repositoryMonitorCILogScanner) withholdMultilineValue(line, tracked string, cut bool) string {
+	normalized := repositoryMonitorEvidenceStripRunes(strings.ToValidUTF8(tracked, ""))
+	withheld := s.multiline.withhold(normalized)
+	if cut {
+		s.multiline.openCut(normalized)
+	}
+	if withheld {
 		return repositoryMonitorEvidenceRedactedLine
 	}
 	return line
@@ -161,12 +179,30 @@ func (s *repositoryMonitorCILogScanner) windowBefore() int {
 	return repositoryMonitorCILogExcerptLines + repositoryMonitorCILogSecretMargin
 }
 
-func (s *repositoryMonitorCILogScanner) add(line string) {
+// addRaw scans the next raw log line. A line longer than
+// repositoryMonitorCILogRawLineLimit keeps only its head, cut at the last
+// space so no fragment of a credential survives the cut, while the
+// multi-line tracker reads it whole.
+func (s *repositoryMonitorCILogScanner) addRaw(raw string) {
+	if len(raw) <= repositoryMonitorCILogRawLineLimit {
+		s.add(raw, "")
+		return
+	}
+	s.add(repositoryMonitorEvidenceCutRaw(raw, repositoryMonitorCILogRawLineLimit)+repositoryMonitorCILogCutMarker, raw)
+}
+
+// add scans the next log line; full is the whole raw line when line keeps
+// only its head, or empty.
+func (s *repositoryMonitorCILogScanner) add(line, full string) {
 	line, keep := repositoryMonitorCILogCleanLine(line)
 	if !keep {
 		return
 	}
-	line = s.withholdMultilineValue(line)
+	tracked := line
+	if full != "" {
+		tracked, _ = repositoryMonitorCILogCleanLine(full)
+	}
+	line = s.withholdMultilineValue(line, tracked, full != "")
 	if !s.cleanup && repositoryMonitorCILogCleanupLine(line) {
 		s.cleanup = true
 		s.tail, s.tailSeen = append([]string(nil), s.recent...), s.seen
@@ -176,6 +212,12 @@ func (s *repositoryMonitorCILogScanner) add(line string) {
 		}
 	}
 	s.seen++
+	switch open := s.multiline.open(); {
+	case !open:
+		s.openSince = -1
+	case s.openSince < 0:
+		s.openSince = s.seen
+	}
 	if s.errorAfter > 0 {
 		s.errorWindow = append(s.errorWindow, line)
 		s.errorAfter--
@@ -207,6 +249,7 @@ func (s *repositoryMonitorCILogScanner) excerpt(truncated bool) (repositoryMonit
 		return repositoryMonitorCILogExcerpt{
 			lines: s.errorWindow, errorAt: s.errorAt, truncated: truncated,
 			openStart: s.errorSeen > s.errorAt+1, openEnd: truncated || !s.errorClosed && end < s.seen,
+			withheldRest: s.openSince >= 0 && s.openSince <= end,
 		}, errorKind
 	}
 	tail, seen := s.recent, s.seen
@@ -218,50 +261,39 @@ func (s *repositoryMonitorCILogScanner) excerpt(truncated bool) (repositoryMonit
 	return repositoryMonitorCILogExcerpt{
 		lines: tail, errorAt: -1, truncated: truncated,
 		openStart: seen > len(tail), openEnd: truncated && !s.cleanup,
+		withheldRest: s.openSince >= 0 && s.openSince <= seen,
 	}, tailKind
 }
 
-// readRepositoryMonitorCILog scans at most limit bytes of a log body. A line
-// longer than repositoryMonitorCILogRawLineLimit keeps only its head, cut at
-// the last space so no fragment of a credential survives the cut, and a
-// final line the limit or a read error cut short is dropped for the same
-// reason. The second result reports that the read stopped before the end of
-// the log.
+// readRepositoryMonitorCILog scans at most limit bytes of a log body, one
+// line at a time as addRaw describes. A final line the limit or a read error
+// cut short is dropped, so no fragment of a credential survives the cut. The
+// second result reports that the read stopped before the end of the log.
 func readRepositoryMonitorCILog(body io.Reader, limit int64) (*repositoryMonitorCILogScanner, bool, error) {
 	limited := &io.LimitedReader{R: body, N: limit}
 	reader := bufio.NewReaderSize(limited, 64<<10)
 	scanner := newRepositoryMonitorCILogScanner()
+	// line holds the whole raw line, at most limit bytes, so the tracker
+	// sees the part of a long line the excerpt drops.
 	line := make([]byte, 0, 1024)
-	overlong := false
 	for {
 		chunk, err := reader.ReadSlice('\n')
-		if !overlong {
-			room := repositoryMonitorCILogRawLineLimit - len(line)
-			if len(chunk) > room {
-				line, overlong = append(line, chunk[:max(room, 0)]...), true
-			} else {
-				line = append(line, chunk...)
-			}
-		}
+		line = append(line, chunk...)
 		switch {
 		case err == nil:
-			text := strings.TrimSuffix(string(line), "\n")
-			if overlong {
-				text = repositoryMonitorEvidenceCutRaw(text, len(text)) + repositoryMonitorCILogCutMarker
+			scanner.addRaw(strings.TrimSuffix(string(line), "\n"))
+			if cap(line) > 64<<10 {
+				line = make([]byte, 0, 1024)
+			} else {
+				line = line[:0]
 			}
-			scanner.add(text)
-			line, overlong = line[:0], false
 		case errors.Is(err, bufio.ErrBufferFull):
 		case errors.Is(err, io.EOF):
 			// A body that ends without a final newline is complete only
 			// when the limit did not stop it.
 			if limited.N > 0 {
 				if len(line) > 0 {
-					text := string(line)
-					if overlong {
-						text = repositoryMonitorEvidenceCutRaw(text, len(text)) + repositoryMonitorCILogCutMarker
-					}
-					scanner.add(text)
+					scanner.addRaw(string(line))
 				}
 				return scanner, false, nil
 			}
@@ -510,9 +542,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCILogFor(ctx context.Cont
 	excerpt, kind := scanner.excerpt(truncated)
 	evidence.ExcerptKind, evidence.ReadTruncated = kind, truncated
 	evidence.Excerpt = repositoryMonitorCILogExcerptText(excerpt)
-	if evidence.Excerpt == "" {
+	switch {
+	case evidence.Excerpt == "":
 		evidence.Availability, evidence.Reason, evidence.ExcerptKind = repositoryMonitorEvidenceUnavailable, repositoryMonitorCILogReasonEmpty, ""
-	} else if truncated {
+	case excerpt.withheldRest:
+		evidence.Availability, evidence.Reason = repositoryMonitorEvidenceTruncated, repositoryMonitorCILogReasonValueWithheld
+	case truncated:
 		evidence.Availability = repositoryMonitorEvidenceTruncated
 	}
 	return evidence
