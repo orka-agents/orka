@@ -289,9 +289,10 @@ For each action:
    `retry: never` and the code `action_not_reachable` (section 4).
 2. Otherwise, if any provider returns `deny`, the result is `deny`.
 3. Otherwise, if a required provider for any domain the action touches failed or returned
-   `unknown`, the result is `unknown` with `retry: later`. The exception is a tool with no
-   reusable request builder yet (below): its Kubernetes domains count as failed with
-   `retry: never`, and the result keeps `retry: never`.
+   `unknown`, the result is `unknown`. Its `retry` is `never` when any of those unknowns
+   can't change by waiting: a Kubernetes domain of a tool with no reusable request builder
+   yet (below), or a dry run the API server refused because a matching webhook isn't
+   dry-run safe (section 4). Otherwise it's `later`.
 4. Otherwise, if no provider returned a decision other than `unknown`, the result is
    `unknown`:
    - with `retry: never` when no provider is configured for the domain;
@@ -312,6 +313,9 @@ effects reach.
   `retry: later`.
 - If the tool has no reusable request builder yet, they count the same way, but with
   `retry: never`.
+- Both rules apply only when Orka would derive a request, that is when `orka-policy`
+  answered `allow` or `conditional` (section 4, step 3). Otherwise `orka-policy`'s answer
+  stands.
 - A write that creates several objects touches those domains once per derived request,
   and every one of them must be answered.
 
@@ -467,7 +471,8 @@ at that moment.
     - They can only serve `discovery`.
     - Per-Node entries stay the only way to register an enforcement provider.
 - **Discovery fields.** Discovery entries also declare their domains, whether they're
-  `required`, and their `disclosure` level.
+  `required`, and their `disclosure` level. An AuthZEN decision point can also declare that
+  it puts an `error` in `context` for every failed item in a batch (section 9).
 - **Who can register.** Tasks and Agents can't add providers or choose trust.
 - **If #952 changes.** If its registry lands in a different shape, discovery follows that
   shape. The in-process providers need no registration at all.
@@ -552,13 +557,14 @@ classes, each with a closed set of codes:
   `resource_authorization_denied`. It also takes the broker's existing
   `connection_required` code, which keeps its name. The broker returns it when the
   requester's linked account is missing or can't be used: not linked, expired, not ready,
-  without a credential, ambiguous, not bound, revoked, or linked through a changed client.
-  Nothing was sent. Its `retry` is `never`: only the requester can link or re-link the
-  account, and Orka's own text, which names the provider and the fix, stays in `error` as
-  the guidance to relay. Approval settlement keeps the code for an approved call that
-  fails the same way, and approval recovery replays it. It isn't
-  `connection_binding_unavailable`, which means the binding couldn't be resolved at all
-  and trying later may help.
+  without a credential, ambiguous, not bound, revoked, linked through a changed client,
+  being deleted, changed after the Task started, or linked again after the Task started.
+  Nothing was sent. Its `retry` is `never`: the Task's Connection binding is frozen at
+  dispatch, so no call in this run can succeed. The fix is for the person to link,
+  re-link or remove extra links as needed, and then run the Task again. Orka's own text,
+  which says which, stays in `error` as the guidance to relay. Approval settlement keeps
+  the code for an approved call that fails the same way, and approval recovery replays
+  it.
 - The Check-only code `action_not_reachable` (section 3) is never a refusal.
 
 **Which channel.** A refusal the model can act on comes back as an `isError` result,
@@ -602,7 +608,7 @@ Each happens before a request can be parsed, so neither can carry a classified r
 | Broker 200 `isError` results the broker already shapes: `code: invalid_arguments` (registry argument rejection) and `code: tool_execution_failed` (a custom tool's failure, or a read-only tool's request deadline) | `isError` with those codes | Map them into the shared vocabulary:<br>- `invalid_arguments`: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- `tool_execution_failed` on a consequential tool: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. A failure isn't evidence of no effect;<br>- `tool_execution_failed` on a read-only tool: `internal_error` / `tool_failed`, with no `retry`. A read-only tool's request deadline currently arrives under the same code. A broker change gives it its own code, which maps to `transient`, `retry: later`.<br><br>A replayed receipt carries the same mapping as the original result. |
 | Broker 502: tool execution failed, or the tool returned an invalid result | `-32002` | `isError`, depending on the cause:<br>- consequential tool whose outcome is settled as unknown: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- tool that reported no effect: `no_effect` / `tool_failed_without_effect`, `retry: with_changes`;<br>- read-only tool: `internal_error` / `tool_failed`, with no `retry`. |
 | Broker 200 `isError` with `code: connection_required`: the requester's linked account is missing or can't be used, for an ordinary call or an approved one | `isError` with that code and Orka's guidance to link or re-link the account | `authorization_failed` / `connection_required`, `retry: never`. The code and the guidance stay the same. |
-| Broker: connection binding unavailable | `-32002` | `isError`: `transient` / `connection_binding_unavailable`, `retry: later` |
+| Broker 502 "MCP tool connection binding is unavailable": a consequential or approval-required call whose Connection binding can't be named | `-32002` | Depending on the cause:<br>- the Task froze no Connection for the Tool's policy or for the linked built-in: `authorization_failed` / `connection_required`, `retry: never`. Today only read-only calls without approval get that code for this case; the broker would return the same refusal for consequential and approval-required calls;<br>- the Tool is no longer connector-backed as it was at dispatch, or its classification changed: `policy_denied` / `outbound_access_denied`, `retry: never`;<br>- the broker couldn't read the Task, its snapshot or the Tool: `transient` / `connection_binding_unavailable`, `retry: later`. |
 | A discovery tool over its rate limit | Not yet possible | `isError`: `transient` / `rate_limited`, `retry: later` |
 | Approval outcomes | `isError` with a code | Codes stay the same; each gains `errorType` and `retry`:<br>- `approval_declined`: `approval`, `never`;<br>- `approval_expired`: `approval`, `after_approval`;<br>- `approval_cancelled`: `approval`, `never`;<br>- `approval_stale`: `approval`, `never`;<br>- `tool_outcome_unknown`: `outcome_unknown`, `never`;<br>- `tool_failed_without_effect`: `no_effect`, `with_changes`. |
 | A call waiting for approval (#841) | Not yet possible | `approval` / `approval_pending`, `retry: after_approval` |
@@ -625,7 +631,7 @@ operational state the agent can't see today, and the review must clear each item
 
 - broker availability, session capacity and request expiry (`broker_unavailable`,
   `session_at_capacity`, `request_expired`);
-- connection-binding state (`connection_binding_unavailable`), and whether the requester's
+- whether the broker could read the connection binding (`connection_binding_unavailable`), and whether the requester's
   linked account can be used (`connection_required`, which the broker already returns);
 - token-exchange availability (`token_exchange_unavailable`);
 - local preparation failures (`request_not_sent`, `arguments_rejected`);
@@ -721,7 +727,7 @@ serves AuthZEN itself.
 | `domain` and `verb` | `action.name` |
 | `resource` | `resource` (`type`, `id`, `properties`) |
 | `allow`, `deny` | `decision: true`, `decision: false` |
-| `requires_approval`, `conditional` | `context` fields the adapter understands. In a single evaluation, any other `false` without an `error` in `context` is `deny`. In an `evaluations` response, a bare `false` is `deny` only when the operator registered the decision point as one that puts an `error` in `context` for every evaluation that fails. Otherwise it's `unknown`, because AuthZEN lets a failed item in a batch come back as a bare `false`. |
+| `requires_approval`, `conditional` | `context` fields the adapter understands. In a single evaluation, any other `false` without an `error` in `context` is `deny`. AuthZEN lets a failed item in an `evaluations` response come back as a bare `false`, so the adapter sends each such item again as a single Access Evaluation, where a bare `false` is a denial. It skips that step for a decision point the operator registered as one that puts an `error` in `context` for every failed item. |
 | `unknown` | A `decision: false` whose `context` carries `error` (AuthZEN 1.0 §7.2.1), or a 4xx or 5xx response. The adapter never treats either as `allow` or `deny`. |
 | Check with several actions | `evaluations`, with `execute_all` semantics |
 | Describe for one resource | Action search, which returns only the actions permitted on the resource. The adapter reports those actions and marks the result `complete: false`. It reports no constraint values, sources or modes, because action search doesn't return them. |
