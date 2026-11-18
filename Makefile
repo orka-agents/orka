@@ -63,6 +63,9 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
+	# controller-gen leaves the CRD of a removed kind behind, so regenerate from
+	# empty. workspace-crds has already copied the workspace.orka.ai CRDs in.
+	find config/crd/bases -name '*.yaml' ! -name 'workspace.orka.ai_*' -delete
 	# A module pattern excludes nested provider checkouts used by local conformance.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
 	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
