@@ -36,11 +36,11 @@ It describes current behavior. The contract for changing that behavior is
 | Orka API authorization in built-in tools: namespace scope, API authorization checks including context-token scopes, Task creation limits | Orka API and the tools | No | A tool result with `permission_denied`, `authorization_failed` or `limit_reached`, plus a message and suggestion. `code_exec`'s resource authorization is the exception: an unclassified "resource authorization: …" error. | Yes |
 | Agent runtime ceilings (`Agent.spec.runtime.ceiling`, ADR 0048) | Controller. For a built-in runtime, before it binds a Task and again until the Task starts; for a `runtimeRef` Agent, only at planning and binding, against the registered AgentRuntime policy | No | Nothing when the call is made: `delegate_task` creates the child Task, which then fails with a message such as "agent … ceiling forbids Bash, …" | Yes, from the target Agent's current ceiling and the child's resolved settings, and for a `runtimeRef` Agent its registered AgentRuntime policy |
 | Per-namespace active-Task cap (`--max-tasks-per-namespace`) | Controller | No | No refusal. A child Task over the cap doesn't start; it's requeued every 10 seconds, with a `NamespaceTaskLimitReached` event. | Yes, from the controller setting and the current count |
-| Delegation limits in the parent Agent's `spec.coordination`: `allowedAgents`, `maxDepth` and `maxConcurrentChildren` | `delegate_task` checks the allowed agents and the depth. It reads them from the parent Agent on ACP, and on native AI workers from the worker's environment, set when its Job was built. The controller checks all three again, against the parent Agent's current spec, whenever the child Task reconciles. | No | From `delegate_task`, a raw error such as "coordination depth exceeded: …" or "agent … is not in the allowed agents list"; an ACP agent sees `-32002`. From the controller, a depth or allowed-agents failure fails the child Task. At `maxConcurrentChildren`, nothing is refused: the child Task is requeued every 10 seconds. | Yes, from the parent Agent's current spec and the current count of active children |
-| Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, an unavailable binding is the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
+| Delegation limits in the parent Agent's `spec.coordination`: `enabled`, `allowedAgents`, `maxDepth` and `maxConcurrentChildren` | `delegate_task` checks the allowed agents and the depth. On ACP it reads them from the parent Agent, and first refuses the call when the Agent has no `spec.coordination` or `enabled` is false. On native AI workers it reads them from the worker's environment, set when its Job was built. The controller checks all three again, against the parent Agent's current spec, whenever the child Task reconciles. | No | From `delegate_task`, a raw error such as "parent agent does not have coordination enabled", "coordination depth exceeded: …" or "agent … is not in the allowed agents list"; an ACP agent sees `-32002`. From the controller, a depth or allowed-agents failure fails the child Task. At `maxConcurrentChildren`, nothing is refused: the child Task is requeued every 10 seconds. | Yes, from the parent Agent's current spec and the current count of active children. A native AI worker's own `delegate_task` check uses the values captured when its Job was built, so a pre-check for it uses those. |
+| Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, a requester's account that is missing or can't be used is an `isError` result with `code: connection_required` and guidance to link or re-link it; a binding that can't be resolved is the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
 | Child transaction-token scopes | Subset check and token exchange when a child Task is created | No | An unclassified tool error | Partly: the subset rule can be checked, but the exchange itself can still refuse |
 | Kubernetes RBAC for the identity Orka acts as | API server | No | Through the shared classifier: a tool result with `permission_denied` and "Check RBAC permissions". On some paths: the raw error, unclassified. | Yes: a SubjectAccessReview for that identity |
-| Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object |
+| Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object, unless a matching webhook doesn't declare dry-run-safe side effects |
 | Network egress from ACP RuntimePools, Kubernetes `code_exec` Jobs and validation Tasks | Kubernetes NetworkPolicy (default deny for RuntimePools), plus runtime enforcement where installed | No, though the fixed rules are documented | A connection failure or timeout that looks like an outage | Fixed rules: yes. Runtime enforcement policies: no |
 | Filesystem layout: read-only root filesystems; private per-session paths and UIDs for ACP children | Pod security context and the ACP supervisor | No | An ordinary filesystem error, such as `EROFS` or `EACCES` | Yes; the layout is fixed |
 | Repository agent configuration (built-in ACP runtimes) | Runtime launch settings, the Copilot image's managed hook policy, and the supervisor's OpenCode workspace check | No | Claude, Codex and Copilot ignore repository settings, hooks and MCP servers without saying so. For OpenCode, a workspace root with `.opencode/`, `opencode.json` or `opencode.jsonc` fails the Task with `RuntimeSessionStartFailed`. If the agent writes one of these, or adds configuration to its OpenCode configuration folder or `~/.opencode`, the session is retired at the next idle adapter restart, and its replacement starts only if the workspace passes the check. | Yes; the rules are fixed for each runtime |
@@ -154,8 +154,14 @@ the JSON-RPC errors above is a tool execution error. Only the 200 `isError` resu
   - `approval_stale`;
   - `tool_outcome_unknown` ("The tool may have run. Do not repeat it automatically.");
   - `tool_failed_without_effect`.
-- Among the refusals the broker produces itself, this is the only one that gives the agent
-  a code and retry guidance.
+- The broker gives two refusals of its own a code as well, both as `isError` results:
+  - `invalid_arguments`, when the tool registry rejects the arguments before the tool
+    runs;
+  - `connection_required`, when the requester's linked account is missing or can't be
+    used. Its text names the provider and tells the requester to link or re-link the
+    account. Approval settlement keeps this code for an approved call that fails the
+    same way.
+- None of them carries a `retry` field.
 - A built-in tool's own `ChatToolResult` refusal also reaches the agent as an `isError`
   result, carrying its `errorType` and `suggestion`.
 
@@ -246,7 +252,10 @@ that person's linked account (a Connection) (`LinkedAccountCredentials` in
 
 **What the agent sees.** The refusal's shape depends on the tool. Through the ACP broker,
 a consequential call whose Connection binding can't be named is refused with a 502 before
-anything is reserved, and the agent sees `-32002`.
+anything is reserved, and the agent sees `-32002`. When the requester's own linked account
+is missing or can't be used, the broker returns an `isError` result with
+`code: connection_required` and text that names the provider and tells the requester to
+link or re-link the account (`internal/controller/acp_mcp_broker.go`).
 
 ### Child transaction-token scopes
 
@@ -319,8 +328,11 @@ child-Task credentials use, so agents don't normally reach them:
 
 - Orka already uses SubjectAccessReview for several of its own authorization decisions.
 - It doesn't use server-side dry-run anywhere.
-- A dry run with the identity that will make the request would evaluate the whole
-  admission chain without saving anything.
+- A dry run with the identity that will make the request would evaluate the admission
+  chain without saving anything, with one gap. If a matching webhook doesn't declare
+  `sideEffects` as `None` or `NoneOnDryRun`, the API server rejects the dry run without
+  calling it, but the real request would still reach it. That outcome says nothing about
+  admission, so a Check reports it as unavailable, not as a decision.
 
 ### Network egress
 

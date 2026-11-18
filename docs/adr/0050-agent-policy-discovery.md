@@ -289,7 +289,9 @@ For each action:
    `retry: never` and the code `action_not_reachable` (section 4).
 2. Otherwise, if any provider returns `deny`, the result is `deny`.
 3. Otherwise, if a required provider for any domain the action touches failed or returned
-   `unknown`, the result is `unknown` with `retry: later`.
+   `unknown`, the result is `unknown` with `retry: later`. The exception is a tool with no
+   reusable request builder yet (below): its Kubernetes domains count as failed with
+   `retry: never`, and the result keeps `retry: never`.
 4. Otherwise, if no provider returned a decision other than `unknown`, the result is
    `unknown`:
    - with `retry: never` when no provider is configured for the domain;
@@ -374,7 +376,7 @@ The default providers need nothing extra installed:
 | --- | --- | --- |
 | `orka-policy` | Describe and Check, covering:<br>- the frozen tool and approval policies, and each tool's effect;<br>- workspace intent;<br>- publication constraints: `createPR`, `expectedRemoteSHA`, `maxChangedFiles`, `allowedPaths`, `denyRepositoryControlPaths`, `rejectBinaryFiles` and `rejectSecretLikeContent`;<br>- namespace scope;<br>- Task and delegation limits;<br>- Agent runtime ceilings (ADR 0048);<br>- transaction-token scope constraints, never the token itself;<br>- the OutboundAccessPolicy each allowed HTTP Tool references;<br>- fixed RuntimePool egress and the fixed writable paths;<br>- once #952 lands, an admitted enforcement requirement: format, capabilities and requirement digest. | Yes, tied to the frozen digests, with six exceptions:<br>- the enforcement requirement, whose receipt is historical (`authoritative: false`);<br>- fixed egress and writable paths, which the cluster's network plugin and container runtime enforce, not Orka (`authoritative: false`);<br>- the connector-read check for `list_connections`. It's authoritative only at that moment, because its scopes come from current controller configuration rather than a frozen digest. Its `versions` entry is a digest of the connector-read scopes and the enforcement mode, which the controller reads from its startup flags;<br>- OutboundAccessPolicies. The resolver reads each one live on every call, and only connector-backed Tools pin a policy's UID and generation at dispatch. So these answers are authoritative only at that moment. Each carries its own version: the policy's UID, its generation, a digest of its contents, and its readiness;<br>- Task and delegation limits. The controller reads the parent Agent's `spec.coordination` (`allowedAgents`, `maxDepth` and `maxConcurrentChildren`) live whenever a child Task reconciles, and so does a brokered `delegate_task` on every call. `maxConcurrentChildren` and the per-namespace active-Task cap also depend on how many Tasks are active, and the per-turn creation limit on how many the turn has created. So these answers are authoritative only at that moment. Each carries its own version: the parent Agent's UID and generation, or a digest of Orka's limit settings. The counts are observations, not versions. Reaching `maxConcurrentChildren` or the namespace cap refuses nothing, because the child Task is created and waits. Check answers `allow` for that call, with a `warn` reason that gives the limit and the count it saw;<br>- Agent runtime ceilings. The controller reads the target Agent's ceiling live when the child Task reconciles. For a built-in runtime it judges a bound Task again against the live ceiling until the Task starts; for a `runtimeRef` Agent it judges the ceiling against the AgentRuntime registration it reads at planning and binding. So these answers are authoritative only at that moment. Each carries the target Agent's UID and generation and, for a `runtimeRef` Agent, the AgentRuntime's UID and generation. |
 | `kubernetes-authorization` | Check, with a SubjectAccessReview for the identity that will make the request: the controller or worker ServiceAccount. Never the agent's own identity, because ACP runtime Pods have no Kubernetes RBAC. | Yes, for RBAC at that moment |
-| `kubernetes-dry-run` | Check, with a server-side dry run of the proposed object for that same identity. It records the denying webhook or policy, its message and any warnings. It covers ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in admission plugins such as ResourceQuota. It runs only when the agent asks. | Yes, for admission at that moment |
+| `kubernetes-dry-run` | Check, with a server-side dry run of the proposed object for that same identity. It records the denying webhook or policy, its message and any warnings. It covers ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in admission plugins such as ResourceQuota. It runs only when the agent asks. If a matching webhook doesn't declare `sideEffects` as `None` or `NoneOnDryRun`, the API server rejects the dry run without calling that webhook. The provider then answers `unknown` with `retry: never`, not a decision, because the real request would still reach the webhook. | Yes, for admission at that moment |
 
 **Kubernetes Checks are tied to the agent's own tools.** Agents can't submit
 `kubernetes.*` actions. A direct one gets `action_not_reachable` (section 3, step 1).
@@ -547,7 +549,16 @@ classes, each with a closed set of codes:
     "Can't tell" means it knows neither the tool's effect class nor whether the request
     was sent, as with native and chat built-in tools today.
 - `authorization_failed`, an existing class, gains `transaction_scope_denied` and
-  `resource_authorization_denied`.
+  `resource_authorization_denied`. It also takes the broker's existing
+  `connection_required` code, which keeps its name. The broker returns it when the
+  requester's linked account is missing or can't be used: not linked, expired, not ready,
+  without a credential, ambiguous, not bound, revoked, or linked through a changed client.
+  Nothing was sent. Its `retry` is `never`: only the requester can link or re-link the
+  account, and Orka's own text, which names the provider and the fix, stays in `error` as
+  the guidance to relay. Approval settlement keeps the code for an approved call that
+  fails the same way, and approval recovery replays it. It isn't
+  `connection_binding_unavailable`, which means the binding couldn't be resolved at all
+  and trying later may help.
 - The Check-only code `action_not_reachable` (section 3) is never a refusal.
 
 **Which channel.** A refusal the model can act on comes back as an `isError` result,
@@ -590,6 +601,7 @@ Each happens before a request can be parsed, so neither can carry a classified r
 | Broker 409: an approval call doesn't match its stored action, or an approval call's operation conflicts with a previous call (a reused call ID with a different payload) | `-32002` | Protocol error: `session_invalid`. No new tool run starts. |
 | Broker 200 `isError` results the broker already shapes: `code: invalid_arguments` (registry argument rejection) and `code: tool_execution_failed` (a custom tool's failure, or a read-only tool's request deadline) | `isError` with those codes | Map them into the shared vocabulary:<br>- `invalid_arguments`: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- `tool_execution_failed` on a consequential tool: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. A failure isn't evidence of no effect;<br>- `tool_execution_failed` on a read-only tool: `internal_error` / `tool_failed`, with no `retry`. A read-only tool's request deadline currently arrives under the same code. A broker change gives it its own code, which maps to `transient`, `retry: later`.<br><br>A replayed receipt carries the same mapping as the original result. |
 | Broker 502: tool execution failed, or the tool returned an invalid result | `-32002` | `isError`, depending on the cause:<br>- consequential tool whose outcome is settled as unknown: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- tool that reported no effect: `no_effect` / `tool_failed_without_effect`, `retry: with_changes`;<br>- read-only tool: `internal_error` / `tool_failed`, with no `retry`. |
+| Broker 200 `isError` with `code: connection_required`: the requester's linked account is missing or can't be used, for an ordinary call or an approved one | `isError` with that code and Orka's guidance to link or re-link the account | `authorization_failed` / `connection_required`, `retry: never`. The code and the guidance stay the same. |
 | Broker: connection binding unavailable | `-32002` | `isError`: `transient` / `connection_binding_unavailable`, `retry: later` |
 | A discovery tool over its rate limit | Not yet possible | `isError`: `transient` / `rate_limited`, `retry: later` |
 | Approval outcomes | `isError` with a code | Codes stay the same; each gains `errorType` and `retry`:<br>- `approval_declined`: `approval`, `never`;<br>- `approval_expired`: `approval`, `after_approval`;<br>- `approval_cancelled`: `approval`, `never`;<br>- `approval_stale`: `approval`, `never`;<br>- `tool_outcome_unknown`: `outcome_unknown`, `never`;<br>- `tool_failed_without_effect`: `no_effect`, `with_changes`. |
@@ -613,7 +625,8 @@ operational state the agent can't see today, and the review must clear each item
 
 - broker availability, session capacity and request expiry (`broker_unavailable`,
   `session_at_capacity`, `request_expired`);
-- connection-binding state (`connection_binding_unavailable`);
+- connection-binding state (`connection_binding_unavailable`), and whether the requester's
+  linked account can be used (`connection_required`, which the broker already returns);
 - token-exchange availability (`token_exchange_unavailable`);
 - local preparation failures (`request_not_sent`, `arguments_rejected`);
 - session replacement and session integrity (`session_replaced`, `session_invalid`);
@@ -708,10 +721,10 @@ serves AuthZEN itself.
 | `domain` and `verb` | `action.name` |
 | `resource` | `resource` (`type`, `id`, `properties`) |
 | `allow`, `deny` | `decision: true`, `decision: false` |
-| `requires_approval`, `conditional` | `context` fields the adapter understands. Any other `false`, without an `error` in `context`, is `deny`. |
+| `requires_approval`, `conditional` | `context` fields the adapter understands. In a single evaluation, any other `false` without an `error` in `context` is `deny`. In an `evaluations` response, a bare `false` is `deny` only when the operator registered the decision point as one that puts an `error` in `context` for every evaluation that fails. Otherwise it's `unknown`, because AuthZEN lets a failed item in a batch come back as a bare `false`. |
 | `unknown` | A `decision: false` whose `context` carries `error` (AuthZEN 1.0 §7.2.1), or a 4xx or 5xx response. The adapter never treats either as `allow` or `deny`. |
 | Check with several actions | `evaluations`, with `execute_all` semantics |
-| Describe for one resource | Action search |
+| Describe for one resource | Action search, which returns only the actions permitted on the resource. The adapter reports those actions and marks the result `complete: false`. It reports no constraint values, sources or modes, because action search doesn't return them. |
 | Explain, Observe | No equivalent |
 
 ## Delivery
