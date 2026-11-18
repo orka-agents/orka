@@ -52,9 +52,12 @@ GET /api/v1/tasks/:id/events | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/stream | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/trace | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/approvals | get core.orka.ai:tasks protected
+GET /api/v1/attention | list core.orka.ai:tasks
+GET /api/v1/approvals | list core.orka.ai:tasks
 POST /api/v1/tasks/:id/approvals/:approvalID/decision | update core.orka.ai:tasks/approvals protected; patch core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/fork | get core.orka.ai:tasks protected; create core.orka.ai:tasks
 GET /api/v1/tasks/:id/result | get core.orka.ai:tasks protected
+GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories
 GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/children | get core.orka.ai:tasks protected; list core.orka.ai:tasks
 GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected
@@ -350,7 +353,7 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	f.config = ServerConfig{
 		WatchNamespace: "default", EnforceNamespaceIsolation: true, Clientset: f.clientset, APIReader: f.kube,
 		MemoryStore: f.store, MemoryProposalStore: f.store, SecurityStore: f.store, RepositoryMonitorStore: f.store,
-		SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
+		MemoryConsolidationStore: f.store, SessionStore: f.store, ResultStore: f.store, PlanStore: f.store, ArtifactStore: f.store,
 		ExecutionEventStore: f.store, GatewayEventStore: f.store, GatewayDeliveryStore: f.store,
 		Chat: ChatConfig{Enabled: true, Provider: "protected", Model: "fixture", MaxDuration: time.Second, MaxIterations: 1, MaxConcurrent: 2},
 		MCP:  MCPServerConfig{Enabled: true},

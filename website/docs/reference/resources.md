@@ -78,7 +78,7 @@ spec:
 | `prompt` | `ai`, `agent` | What to do. |
 | `image`, `command`, `args` | `container` | The container to run. See [Container tasks](../guides/container-tasks.md). |
 | `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. A container Task's `valueFrom.secretKeyRef` and `valueFrom.configMapKeyRef` follow the `secretRef` policy; see [Container tasks](../guides/container-tasks.md#other-fields). |
-| `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. |
+| `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. `ai.memoryConsolidation` makes the Task a [memory consolidation run](../concepts/memory.md#consolidation-runs). |
 | `workspace` | `agent`, `container` | The git repository to work in. See [Workspace](#workspace). |
 | `agentRuntime` | `agent` | Per-Task overrides of the Agent's runtime defaults: `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. |
 | `sessionRef` | `ai`, `agent` | Conversation continuity: `name`, `create` (default `false`), `append` (default `true`), and `maxMessages` (default `50`). Immutable after creation. |
@@ -918,6 +918,7 @@ spec:
 | `repair.allowForkPullRequests` | bool | No | Also repair pull requests from forks whose authors allow edits from maintainers, pushing to the fork's head branch. Defaults to `false`. |
 | `repair.includeLabels` | list | No | Limit automatic repair to pull requests with any of these labels. They are also reviewed, and each head is reviewed before it is repaired. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
 | `repair.ciOnlyLabels` | list | No | Repair only the CI that pull requests with any of these labels broke, without reviewing them. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
+| `repair.ciEvidence.text` | bool | No | Add CI free text (check run output titles and summaries, annotation titles and messages, commit status descriptions) to `fix_ci` repair prompts, redacted on a best-effort basis. It can expose credentials GitHub does not mask to anyone who can read Tasks in the namespace and to the model provider. Defaults to `false`: evidence is structured only. |
 | `review.requireGreenCI` | bool | No | Wait for green CI before selecting a pull request for review. |
 | `review.trigger` | string | No | `push` (default) reviews every new head, with a follow-up review of the new changes and open findings when the head builds on the last reviewed one. `open` reviews each pull request once; later heads need a `review` command, except pull requests automatic repair may fix. |
 | `review.blockingPriority` | string | No | Lowest open finding priority (`P0`–`P3`) that makes the verdict `needs_changes`. Defaults to `P1`. Findings outside a follow-up review's changes block only at `P1` or above. |

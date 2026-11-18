@@ -91,20 +91,22 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
-	TaskProvenanceProtected   bool
-	ControllerEpochs          ControllerEpochFenceSource
-	E2EPromptFaultEnabled     bool
-	Connectors                ConnectorConfig
-	ConnectorTools            ConnectorToolExecutionConfig
+	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	HealthChecker            store.HealthChecker
+	Clientset                kubernetes.Interface
+	APIReader                client.Reader
+	TaskProvenanceProtected  bool
+	ControllerEpochs         ControllerEpochFenceSource
+	E2EPromptFaultEnabled    bool
+	Connectors               ConnectorConfig
+	ConnectorTools           ConnectorToolExecutionConfig
 	// GitHubSignIn signs people in with GitHub and issues Orka sessions.
 	GitHubSignIn GitHubSignInConfig
 	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
@@ -132,6 +134,11 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -161,6 +168,8 @@ type Server struct {
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
 
+	memoryConsolidationStore store.MemoryConsolidationStore
+
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }
@@ -170,6 +179,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -192,6 +202,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore: config.MemoryProposalStore,
 		ExecutionEventStore: config.ExecutionEventStore,
 		GatewayEventStore:   config.GatewayEventStore,
+
+		memoryConsolidationStore: config.MemoryConsolidationStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -211,6 +223,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -480,15 +493,19 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.GetTask))
 	api.Delete("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.DeleteTask))
+	api.Post("/tasks/:id/cancel", s.handlers.ahpTaskPrivate(s.handlers.CancelTask))
 	api.Get("/tasks/:id/logs", s.handlers.ahpTaskPrivate(s.handlers.GetTaskLogs))
 	api.Get("/tasks/:id/events", s.handlers.ahpTaskPrivate(s.handlers.ListTaskEvents))
 	api.Get("/tasks/:id/stream", s.handlers.ahpTaskPrivate(s.handlers.StreamTaskEvents))
 	api.Get("/tasks/:id/trace", s.handlers.ahpTaskPrivate(s.handlers.GetTaskTrace))
 	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
+	// Cross-Task attention read models, computed on read for one namespace.
+	api.Get("/attention", s.handlers.ListAttention)
+	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.ahpTaskPrivate(s.handlers.DecideTaskApproval))
-	api.Post("/tasks/:id/cancel", s.handlers.ahpTaskPrivate(s.handlers.CancelTask))
 	api.Post("/tasks/:id/fork", s.handlers.ahpTaskPrivate(s.handlers.ForkTask))
 	api.Get("/tasks/:id/result", s.handlers.ahpTaskPrivate(s.handlers.GetTaskResult))
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.ahpTaskPrivate(s.handlers.GetTaskMemoryConsolidationReport))
 	api.Get("/tasks/:id/plan", s.handlers.ahpTaskPrivate(s.handlers.GetTaskPlan))
 	api.Get("/tasks/:id/children", s.handlers.ahpTaskPrivate(s.handlers.GetTaskChildren))
 	api.Get("/tasks/:id/artifacts", s.handlers.ahpTaskPrivate(s.handlers.ListTaskArtifacts))
@@ -710,15 +727,16 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:                  s.client,
-				APIReader:               s.config.APIReader,
-				MemoryStore:             s.MemoryStore,
-				MemoryProposalStore:     s.MemoryProposalStore,
-				ExecutionEventStore:     s.ExecutionEventStore,
-				GatewayEventStore:       s.GatewayEventStore,
-				GatewayService:          s.config.GatewayService,
-				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
-				ConnectorTools:          s.config.ConnectorTools,
+				Client:                   s.client,
+				APIReader:                s.config.APIReader,
+				MemoryStore:              s.MemoryStore,
+				MemoryProposalStore:      s.MemoryProposalStore,
+				MemoryConsolidationStore: s.memoryConsolidationStore,
+				ExecutionEventStore:      s.ExecutionEventStore,
+				GatewayEventStore:        s.GatewayEventStore,
+				GatewayService:           s.config.GatewayService,
+				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
+				ConnectorTools:           s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -759,6 +777,8 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
+		internal.Post("/memory-consolidation/:namespace/begin", s.internalHandlers.BeginMemoryConsolidation)
+		internal.Post("/memory-consolidation/:namespace/complete", s.internalHandlers.CompleteMemoryConsolidation)
 	}
 }
 

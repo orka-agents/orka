@@ -865,7 +865,7 @@ func ahpSessionConfig(mode string) *ahptypes.SessionConfigState {
 	values, _ := json.Marshal(mode)
 	available, _ := json.Marshal([]string{ahpApprovalManual, ahpApprovalAllowAll})
 	return &ahptypes.SessionConfigState{
-		Schema: ahptypes.SessionConfigSchema{Type: "object", Properties: map[string]ahptypes.SessionConfigPropertySchema{
+		Schema: ahptypes.SessionConfigSchema{Type: mcpSchemaTypeObject, Properties: map[string]ahptypes.SessionConfigPropertySchema{
 			ahpConfigApprovalMode: {Type: ahpSchemaString, Title: "Approvals", Description: &description, Enum: modes,
 				EnumLabels: []string{"Manual approvals", "Allow all"}, SessionMutable: &mutable},
 			ahpConfigAvailableModes: {Type: "array", Title: "Available approvals", ReadOnly: &readOnly, SessionMutable: &notMutable,
@@ -1019,7 +1019,7 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	// A Task that may still run keeps its session: disposal fails and can be
 	// retried, rather than leave a Task nothing can cancel or follow.
 	if record.ActiveTask != "" {
-		if err := b.cancelTask(ctx, principal, record.Namespace, record.ActiveTask); err != nil {
+		if err := b.cancelTask(ctx, principal, record.Namespace, record.ActiveTask, record.ActiveTaskUID); err != nil {
 			return fmt.Errorf("cancel the session's running Task: %w", err)
 		}
 	}
@@ -1063,15 +1063,20 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 
 // cancelTask asks a Task to stop. A Task that is gone, being deleted or
 // already finished needs nothing; any other failure is returned, because the
-// Task may still be running. The Task is read from the API server: a cache
-// that has not seen a Task just created would report it gone.
-func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal, namespace, name string) error {
+// Task may still be running. With a UID, only the Task created under it is
+// stopped: another created later under the name is not the turn's. The Task
+// is read from the API server: a cache that has not seen a Task just created
+// would report it gone.
+func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal, namespace, name, uid string) error {
 	task := &corev1alpha1.Task{}
 	if err := b.h.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return err
+	}
+	if uid != "" && string(task.UID) != uid {
+		return nil
 	}
 	ui := ahpPrincipalUserInfo(principal)
 	// Only the person whose turn created the Task cancels it here.
@@ -1287,15 +1292,15 @@ func (b *ahpBackend) cancelTurn(ctx context.Context, principal ahphost.Principal
 	if record.ActiveTask == "" {
 		return
 	}
-	b.keepCancelling(ctx, principal, record.Session, record.Namespace, record.ActiveTask)
+	b.keepCancelling(ctx, principal, record.Session, record.Namespace, record.ActiveTask, record.ActiveTaskUID)
 }
 
 // keepCancelling asks a cancelled turn's Task to stop through a passing
 // failure, off the action queue: the client already shows the turn cancelled.
-func (b *ahpBackend) keepCancelling(ctx context.Context, principal ahphost.Principal, session, namespace, task string) {
+func (b *ahpBackend) keepCancelling(ctx context.Context, principal ahphost.Principal, session, namespace, task, uid string) {
 	go func() {
 		err := retry.OnError(b.cancelBackoff, func(error) bool { return true }, func() error {
-			return b.cancelTask(ctx, principal, namespace, task)
+			return b.cancelTask(ctx, principal, namespace, task, uid)
 		})
 		if err != nil {
 			log.Error(err, "cancel AHP turn Task", "session", session, "task", task)

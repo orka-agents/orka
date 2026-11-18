@@ -194,6 +194,9 @@ type sessionCreationError struct {
 	stage               string
 	cause               error
 	workspaceResumeLost bool
+	// rejectedMessage marks a permanent, caller-visible rejection of the
+	// request itself; it must not contain workspace contents or secrets.
+	rejectedMessage string
 }
 
 const sessionCreationStageDurableResumeVerification = "durable resume verification"
@@ -234,6 +237,72 @@ func sessionCreationResumeLost(err error) error {
 func isSessionCreationResumeLost(err error) bool {
 	creation, ok := errors.AsType[*sessionCreationError](err)
 	return ok && creation.workspaceResumeLost
+}
+
+// workspaceRejectedError is returned by ProviderProfile.ValidateWorkspace when
+// the workspace itself is unsupported. publicMessage is one of the fixed
+// acp.*Message constants the controller surfaces; detail is logged only.
+type workspaceRejectedError struct {
+	publicMessage string
+	detail        string
+}
+
+func (e *workspaceRejectedError) Error() string {
+	return e.publicMessage + ": " + e.detail
+}
+
+func sessionCreationRejected(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := acp.WorkspaceValidationFailedMessage
+	if rejected, ok := errors.AsType[*workspaceRejectedError](err); ok {
+		message = rejected.publicMessage
+		slog.Warn("ACP runtime session workspace rejected", "reason", rejected.detail)
+	}
+	return &sessionCreationError{stage: "workspace validation", cause: err, rejectedMessage: message}
+}
+
+// validateWorkspaceAsSessionChild re-runs workspace validation for an idle
+// adapter restart. By then the session tree belongs to the child, and a
+// write-intent workspace is its private 0700 directory; the supervisor has no
+// DAC_OVERRIDE, so as itself it could not even look inside, and would retire
+// every clean session. The check runs as the child would see the tree. It only
+// inspects entries without following them, so anything the child changes can
+// at worst make the check fail, which retires the session.
+func validateWorkspaceAsSessionChild(validate func(acp.SessionPaths) error, paths acp.SessionPaths, uid, gid int) func() error {
+	return func() error {
+		return asSessionChild(uid, gid, func() error { return validate(paths) })
+	}
+}
+
+// quiesceOperatorsBeforeRelaunch closes operator admission for the session
+// whose exited adapter is about to be replaced and waits until every admitted
+// operation is gone. Operator commands run as the session child, so one that
+// ran between the workspace check and the replacement launch could change
+// what the provider loads. Admission reopens only when the replacement
+// accepts the prompt that triggered the restart (setSessionState); a failed
+// restart retires the session with admission still closed.
+func (s *Server) quiesceOperatorsBeforeRelaunch(sessionID harnessv2.RuntimeSessionID, runtime *acp.RuntimeSession) error {
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	current := state != nil && runtime != nil && state.runtime == runtime
+	s.mu.Unlock()
+	if !current {
+		return fmt.Errorf("runtime session changed before adapter relaunch")
+	}
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		return fmt.Errorf("quiesce operator access before adapter relaunch: %w", err)
+	}
+	return nil
+}
+
+func sessionCreationRejection(err error) (string, bool) {
+	creation, ok := errors.AsType[*sessionCreationError](err)
+	if !ok || creation.rejectedMessage == "" {
+		return "", false
+	}
+	return creation.rejectedMessage, true
 }
 
 func durableWorkspacePreparationFailed(expectResume bool, err error) error {
@@ -960,6 +1029,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
 				statusCode: statusCode, code: code, message: message, retryable: retryable,
 			}
+		} else if rejection, rejected := sessionCreationRejection(createErr); rejected {
+			// Retrying the same workspace cannot succeed: fail the attempt
+			// instead of consuming another child identity per retry.
+			statusCode = http.StatusBadRequest
+			code = harnessv2.ErrorCodeInvalidRequest
+			retryable = false
+			message = rejection
+			replay = &failedCreateReplay{
+				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
+				statusCode: statusCode, code: code, message: message, retryable: retryable,
+			}
 		}
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
@@ -1234,6 +1314,11 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
+	if s.cfg.Provider.ValidateWorkspace != nil {
+		if err := s.cfg.Provider.ValidateWorkspace(paths); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationRejected(err)
+		}
+	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
@@ -1279,7 +1364,8 @@ func (s *Server) createSession(
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
 	// Skills land in the session tree before ownership is finalized, so each
-	// private copy belongs to this session's identity alone.
+	// private copy belongs to this session's identity alone. Claude's go to a
+	// shared plugin folder no session identity owns.
 	if err := materializeSessionSkills(s.cfg.Provider.Kind, s.cfg.Skills, skillMountRoot, paths); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("skill projection", err)
 	}
@@ -1366,6 +1452,22 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	var (
+		validateAdapterRelaunch func() error
+		// relaunched is set once the RuntimeSession exists, before it is
+		// published; a relaunch happens only after that.
+		relaunched *acp.RuntimeSession
+	)
+	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
+		check := validateWorkspaceAsSessionChild(validate, paths, uid, gid)
+		sessionID := request.RuntimeSessionID
+		validateAdapterRelaunch = func() error {
+			if err := s.quiesceOperatorsBeforeRelaunch(sessionID, relaunched); err != nil {
+				return err
+			}
+			return check()
+		}
+	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
@@ -1379,17 +1481,21 @@ func (s *Server) createSession(
 			GID:           gid,
 			ClientOptions: acp.Options{MaxMessageBytes: s.cfg.Capabilities.Limits.MaxRequestBytes},
 		},
-		MCPServers:            []acp.MCPServer{mcpServer},
-		NewSessionMeta:        projection.NewSessionMeta,
-		RequiredModeID:        projection.RequiredModeID,
-		ResumeSessionID:       resumeSessionID,
-		AuthMethodID:          s.cfg.Provider.AuthMethodID,
-		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
-		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
-		PermissionTimeout:     defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
-		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
-		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
-		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
+		MCPServers:      []acp.MCPServer{mcpServer},
+		NewSessionMeta:  projection.NewSessionMeta,
+		RequiredModeID:  projection.RequiredModeID,
+		ResumeSessionID: resumeSessionID,
+		AuthMethodID:    s.cfg.Provider.AuthMethodID,
+		// The agent can write the workspace between prompts; an idle adapter
+		// restart must not launch the provider over configuration that
+		// creation would have refused.
+		ValidateAdapterRelaunch: validateAdapterRelaunch,
+		InitializeTimeout:       defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
+		PromptLease:             time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
+		PermissionTimeout:       defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
+		CancelGrace:             defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
+		MaxBufferedEvents:       s.cfg.Capabilities.Limits.MaxBufferedEvents,
+		MaxBufferedEventBytes:   supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
 		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
@@ -1398,6 +1504,7 @@ func (s *Server) createSession(
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	relaunched = runtimeSession
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
 		// creation that fails part-way leaves its binding pending, so the next

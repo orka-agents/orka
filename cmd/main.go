@@ -299,6 +299,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var providerUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
@@ -361,6 +362,7 @@ func main() {
 	var gatewayTaskPassCredentialsFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
+	var taskWebhookDeliveryWorkers int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -538,6 +540,9 @@ func main() {
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
+		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -659,6 +664,9 @@ func main() {
 		"Name of the Secret in --task-webhook-signing-namespace that holds the Ed25519 keys signing Task webhook "+
 			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
 			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
+	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
+		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
+			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -1014,6 +1022,11 @@ func main() {
 		watchNamespace, currentPodNamespace(), acpRuntimeNamespace, agentHostNamespace); err != nil {
 		// The logger is not set up yet, so setupLog would drop this.
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
+		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
+			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
 		os.Exit(1)
 	}
 
@@ -2060,6 +2073,7 @@ func main() {
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
+		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,
@@ -2087,6 +2101,7 @@ func main() {
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
@@ -2558,6 +2573,7 @@ func main() {
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               appStorage,
 		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
@@ -2586,11 +2602,12 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled:      dashboardEnabled,
-		AgentUseAuthorization: agentUseAuthorizationEnabled,
-		OperatorAccess:        api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
-		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
-		TaskWebhookKeys:       taskWebhookKeys,
+		DashboardEnabled:         dashboardEnabled,
+		AgentUseAuthorization:    agentUseAuthorizationEnabled,
+		ProviderUseAuthorization: providerUseAuthorizationEnabled,
+		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
+		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		TaskWebhookKeys:          taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2654,7 +2671,7 @@ func main() {
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
 				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil

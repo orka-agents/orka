@@ -1,22 +1,30 @@
--- Additive SQLite transition: 173-to-174 (schema version 6 to 7).
--- Source layout: the Agent Host Protocol layout (schema version 6).
--- Target definitions: GitHub sign-in sessions, schema version 7.
--- It adds only an empty table and its index, so a store whose key bootstrap
--- is unfinished can still finish it.
--- Frozen from the target's real schema statements; do not use mutable helpers.
+-- SQLite transition: 173-to-174 (schema version 6 to 7).
+-- Adds memory consolidation runs: one row per run, keyed by its Task UID,
+-- with the window of Sessions it reads, the input it read, its report and
+-- whether its Task was deleted,
+-- and an index that lists a namespace's Sessions by when they changed. It
+-- adds no rows, so a store whose key bootstrap is unfinished can still
+-- finish it.
 -- Transaction and complete-layout validation are owned by the caller.
 
-CREATE TABLE IF NOT EXISTS auth_sessions (
-			id         TEXT PRIMARY KEY,
-			token_hash TEXT NOT NULL UNIQUE,
-			issuer     TEXT NOT NULL,
-			subject    TEXT NOT NULL,
-			username   TEXT NOT NULL,
-			namespace  TEXT NOT NULL,
-			created_at TIMESTAMP NOT NULL,
-			expires_at TIMESTAMP NOT NULL,
-			revoked_at TIMESTAMP
-		);
+CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
+ namespace TEXT NOT NULL,
+ task_uid TEXT NOT NULL,
+ task_name TEXT NOT NULL,
+ mode TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL,
+ window_start TIMESTAMP NOT NULL,
+ window_end TIMESTAMP NOT NULL,
+ input BLOB,
+ report BLOB,
+ created_at TIMESTAMP NOT NULL,
+ completed_at TIMESTAMP,
+ task_deleted INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY (namespace, task_uid)
+);
 
-CREATE INDEX IF NOT EXISTS idx_auth_sessions_subject
-			ON auth_sessions(issuer, subject, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_consolidation_runs_cursor
+ ON memory_consolidation_runs(namespace, status, window_end);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_updated
+ ON sessions(namespace, updated_at);

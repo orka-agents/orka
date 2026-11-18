@@ -184,3 +184,88 @@ func TestScanIngestionRecordsReadsAndPreviewsOnlyAfterWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "open", stored.State)
 }
+
+// A consolidation proposal changes memories nobody named in the apply
+// request, so the client authorizes changing each of them before it commits.
+func TestApplyMemoryProposalAuthorizesEveryConsolidationTarget(t *testing.T) {
+	client, _ := newProtocolClient(t)
+	ctx := t.Context()
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, client.CreateMemory(ctx, &store.Memory{ID: id, Namespace: "tenant", Content: "content of " + id}))
+	}
+	proposal := &store.MemoryProposal{ID: "merge", Namespace: "tenant", Type: store.MemoryProposalTypeMerge, Title: "Merge",
+		Description: "Tags: ops", Content: "merged content",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}, {MemoryID: "mem-b", Generation: 1}}}
+	require.NoError(t, client.CreateMemoryProposal(ctx, proposal))
+	require.NoError(t, client.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
+		Namespace: "tenant", ID: proposal.ID, Status: store.MemoryProposalStatusAccepted, Reviewer: "reviewer",
+	}))
+
+	denied := errors.New("caller may not change this memory")
+	var checked []string
+	memory, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{
+		Namespace: "tenant", ID: proposal.ID, AppliedBy: "applier",
+		AuthorizeMemoryChange: func(_ context.Context, namespace, id string) error {
+			checked = append(checked, namespace+"/"+id)
+			if id == "mem-b" {
+				return denied
+			}
+			return nil
+		},
+	})
+	require.ErrorIs(t, err, denied)
+	require.Nil(t, memory)
+	require.Equal(t, []string{"tenant/mem-a", "tenant/mem-b"}, checked)
+	for _, id := range []string{"mem-a", "mem-b"} {
+		unchanged, err := client.GetMemory(ctx, "tenant", id)
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), unchanged.Generation, "a denied application changes nothing")
+		require.False(t, unchanged.Deleted)
+	}
+
+	memory, err = client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{
+		Namespace: "tenant", ID: proposal.ID, AppliedBy: "applier",
+		AuthorizeMemoryChange: func(context.Context, string, string) error { return nil },
+	})
+	require.NoError(t, err)
+	require.Equal(t, "merged content", memory.Content)
+	require.Equal(t, []string{"ops"}, memory.Tags, "a merged memory takes its tags from the proposal, as a memory proposal does")
+	retired, err := client.GetMemory(ctx, "tenant", "mem-a")
+	require.NoError(t, err)
+	require.Equal(t, memory.ID, retired.SupersededBy)
+
+	checked = nil
+	again, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{
+		Namespace: "tenant", ID: proposal.ID, AppliedBy: "applier",
+		AuthorizeMemoryChange: func(_ context.Context, namespace, id string) error {
+			checked = append(checked, id)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, memory.ID, again.ID)
+	require.Empty(t, checked, "replaying an applied proposal changes no memory, so it authorizes none")
+}
+
+// A stale consolidation proposal fails once with a conflict: resolving again
+// cannot make its targets current.
+func TestApplyMemoryProposalRefusesAStaleConsolidation(t *testing.T) {
+	client, _ := newProtocolClient(t)
+	ctx := t.Context()
+	require.NoError(t, client.CreateMemory(ctx, &store.Memory{ID: "mem-a", Namespace: "tenant", Content: "first"}))
+	proposal := &store.MemoryProposal{ID: "retire", Namespace: "tenant", Type: store.MemoryProposalTypeRetire, Title: "Retire",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}}
+	require.NoError(t, client.CreateMemoryProposal(ctx, proposal))
+	require.NoError(t, client.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
+		Namespace: "tenant", ID: proposal.ID, Status: store.MemoryProposalStatusAccepted, Reviewer: "reviewer",
+	}))
+	require.NoError(t, client.UpdateMemory(ctx, &store.Memory{ID: "mem-a", Namespace: "tenant", Content: "edited"}))
+
+	memory, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "tenant", ID: proposal.ID, AppliedBy: "applier"})
+	require.ErrorIs(t, err, store.ErrConflict)
+	require.Nil(t, memory)
+	current, err := client.GetMemory(ctx, "tenant", "mem-a")
+	require.NoError(t, err)
+	require.False(t, current.Disabled)
+	require.Equal(t, "edited", current.Content)
+}

@@ -1021,6 +1021,35 @@ func TestAHPBackendKeepsASessionWhoseTaskItCannotCancel(t *testing.T) {
 	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the Task was asked to stop")
 }
 
+// A cancel bound to a Task's UID leaves another Task created later under the
+// same name alone: it is not the turn's.
+func TestAHPBackendCancelsOnlyTheTaskItsTurnCreated(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "run", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser},
+			Model: &ahptypes.ModelSelection{Id: "claude-haiku-5.5"}},
+	}})
+	require.NoError(t, err)
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Issuer: "https://issuer.example",
+		Subject: "alice", Username: "alice", Namespace: ahpTestNamespace}
+	var record ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	task := env.waitForTask(record.OrkaSession + "-t1")
+	require.NotEmpty(t, task.UID)
+
+	require.NoError(t, env.backend.cancelTask(ctx, alice, task.Namespace, task.Name, "another-task-uid"))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task))
+	require.NotContains(t, task.Annotations, labels.AnnotationCancelRequested, "a Task under another UID is not stopped")
+
+	require.NoError(t, env.backend.cancelTask(ctx, alice, task.Namespace, task.Name, string(task.UID)))
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task))
+	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the turn's own Task is stopped")
+}
+
 // A root read of a file an agent changed comes from the user's running
 // workspace, where a terminal may have changed or deleted it since; the
 // reported contents serve only while no workspace runs.
@@ -3540,4 +3569,102 @@ func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 	var record ahpSession
 	require.ErrorIs(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record), store.ErrNotFound,
 		"the disposed session is not written back")
+}
+
+// A call the runtime announces before describing it starts once it is
+// described, so clients show its title, and a call named as a typed call
+// without the input that call reads is renamed so clients show its title.
+func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T) {
+	emitter := &ahpActionsEmitter{}
+	turn := &ahpTurn{id: "turn-1", ctx: t.Context(), emit: emitter, tools: map[string]*ahpToolCall{}}
+	starts := func() []*ahptypes.ChatToolCallStartAction {
+		emitter.mu.Lock()
+		defer emitter.mu.Unlock()
+		var out []*ahptypes.ChatToolCallStartAction
+		for _, action := range emitter.actions {
+			if start, ok := action.Value.(*ahptypes.ChatToolCallStartAction); ok {
+				out = append(out, start)
+			}
+		}
+		return out
+	}
+	startOf := func(id string) *ahptypes.ChatToolCallStartAction {
+		for _, start := range starts() {
+			if start.ToolCallId == id {
+				return start
+			}
+		}
+		return nil
+	}
+
+	// Announced without a title: nothing is shown yet.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Status: harnessv2.ToolCallStatusPending})
+	require.Empty(t, starts())
+	// Described: the call starts with its title, under a name no client types.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Title: "Viewing README.md", Status: harnessv2.ToolCallStatusPending})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Status: harnessv2.ToolCallStatusCompleted})
+	require.Len(t, starts(), 1)
+	require.Equal(t, "read_call", startOf("read-1").ToolName)
+	require.Equal(t, "Viewing README.md", startOf("read-1").DisplayName)
+
+	// A call that runs without ever being described still starts, by its kind.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Kind: "search", Status: harnessv2.ToolCallStatusPending})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "search_call", startOf("search-1").ToolName)
+
+	// The Copilot runtime names its calls by their kind and sends no input.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-2", Name: "read", Kind: "read", Title: "Viewing go.sum", Status: harnessv2.ToolCallStatusPending})
+	require.Equal(t, "read_call", startOf("read-2").ToolName)
+	// A search with a path but no pattern is renamed too.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "grep-1", Name: "grep", Title: "Searching", RawInput: json.RawMessage(`{"path":"."}`), Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "grep_call", startOf("grep-1").ToolName)
+
+	// With the input its typed call reads, a name is kept: announced early,
+	// the input is kept until the call starts.
+	input := json.RawMessage(`{"file_path":"README.md"}`)
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Name: "Read", Kind: "read", RawInput: input, Status: harnessv2.ToolCallStatusPending})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Title: "Read File", Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "Read", startOf("read-3").ToolName)
+	require.JSONEq(t, string(input), string(turn.tools["read-3"].input))
+	require.Empty(t, turn.heldTools)
+
+	// A call described with its input, then run by updates that do not
+	// repeat it, is ready with the input it started with.
+	// Its path is shown relative to the session's working directory.
+	turn.tool(&harnessv2.ToolCallUpdate{
+		ToolCallID: "read-4", Name: "read", Kind: "read", Title: "Viewing go.mod", Status: harnessv2.ToolCallStatusPending,
+		RawInput: json.RawMessage(`{"path":"/sessions/session-1/workspace/go.mod","view_range":[1,5]}`),
+	})
+	path := json.RawMessage(`{"path":"go.mod","view_range":[1,5]}`)
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-4", Status: harnessv2.ToolCallStatusCompleted})
+	require.Equal(t, "read", startOf("read-4").ToolName)
+	var ready *ahptypes.ChatToolCallReadyAction
+	emitter.mu.Lock()
+	for _, action := range emitter.actions {
+		if r, ok := action.Value.(*ahptypes.ChatToolCallReadyAction); ok && r.ToolCallId == "read-4" {
+			ready = r
+		}
+	}
+	emitter.mu.Unlock()
+	require.NotNil(t, ready)
+	require.NotNil(t, ready.ToolInput)
+	require.NotNil(t, ready.ToolInput.Inline)
+	require.JSONEq(t, string(path), *ready.ToolInput.Inline)
+
+	// Other names and kinds pass through.
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-1", Name: "bash", Kind: "execute", Title: "Run tests", Status: harnessv2.ToolCallStatusInProgress})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "exec-1", Name: "execute", Kind: "execute", Title: "List files", Status: harnessv2.ToolCallStatusInProgress})
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "other-1", Kind: "other", Title: "Thinking", Status: harnessv2.ToolCallStatusInProgress})
+	require.Equal(t, "bash", startOf("bash-1").ToolName)
+	require.Equal(t, "execute", startOf("exec-1").ToolName)
+	require.Equal(t, "other", startOf("other-1").ToolName)
+
+	// A held call that asks for permission starts with what it was announced
+	// with, and the confirmation shows its input.
+	command := json.RawMessage(`{"command":"make test"}`)
+	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-2", Kind: "execute", RawInput: command, Status: harnessv2.ToolCallStatusPending})
+	turn.onApproval(&liveevents.Approval{ID: "approval-1", ToolCallID: "bash-2", State: liveevents.ApprovalPending})
+	require.Equal(t, "execute", startOf("bash-2").ToolName)
+	require.JSONEq(t, string(command), string(turn.tools["bash-2"].input))
+	require.Empty(t, turn.heldTools)
 }

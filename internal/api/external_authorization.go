@@ -95,12 +95,22 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks/:id/stream":    coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/trace":     coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/approvals": coreAPIPolicy("get", "tasks", "id"),
+	// The attention views list Tasks; each Task then passes the ListTasks
+	// filters, and monitor items need their own list grants in the handler.
+	"GET /api/v1/attention": coreAPIPolicy("list", "tasks", ""),
+	"GET /api/v1/approvals": coreAPIPolicy("list", "tasks", ""),
 	"POST /api/v1/tasks/:id/approvals/:approvalID/decision": coreAPIPolicy("update", "tasks/approvals", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "patch", "id"}),
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "create", ""}),
 	"GET /api/v1/tasks/:id/result": coreAPIPolicy("get", "tasks", "id"),
-	"GET /api/v1/tasks/:id/plan":   coreAPIPolicy("get", "tasks", "id"),
+	// A run's full report holds text drawn from every Session and memory it
+	// read, so reading it needs what reading those inputs needs.
+	"GET /api/v1/tasks/:id/memory-consolidation-report": coreAPIPolicy("get", "tasks", "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, apiObjectList, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, gatewayVerbGet, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, memoriesResource, apiObjectList, ""}),
+	"GET /api/v1/tasks/:id/plan": coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/children": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
