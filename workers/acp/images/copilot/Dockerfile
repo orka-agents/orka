@@ -76,6 +76,16 @@ RUN set -eu; \
     test ! -e /usr/bin/git && test ! -e /usr/bin/ssh; \
     mkdir -p /sessions /usr/share/licenses/orka /usr/share/licenses/github-copilot-cli; \
     chmod 0711 /sessions
+# Copilot otherwise runs hook commands from the cloned repository
+# (.github/hooks, .github/copilot/settings.json, .claude/settings.json) and the
+# agent-writable COPILOT_HOME, outside the Orka tool policy. The CLI honors
+# this managed policy only from a root-owned file, and disableAllHooks does
+# not suppress those sources.
+RUN set -eu; \
+    install -d -o 0 -g 0 -m 0755 /etc/github-copilot; \
+    printf '%s\n' '{"allowManagedHooksOnly":true}' > /etc/github-copilot/managed-settings.json; \
+    chown 0:0 /etc/github-copilot/managed-settings.json; \
+    chmod 0644 /etc/github-copilot/managed-settings.json
 COPY --from=supervisor-builder /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime
 COPY --from=supervisor-builder /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper
 COPY --from=upstream-artifacts /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

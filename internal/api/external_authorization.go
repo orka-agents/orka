@@ -104,7 +104,15 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "create", ""}),
 	"GET /api/v1/tasks/:id/result": coreAPIPolicy("get", "tasks", "id"),
-	"GET /api/v1/tasks/:id/plan":   coreAPIPolicy("get", "tasks", "id"),
+	// A run's full report holds text drawn from every Session, memory and
+	// open proposal it read, so reading it needs what reading those inputs
+	// needs.
+	"GET /api/v1/tasks/:id/memory-consolidation-report": coreAPIPolicy("get", "tasks", "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, apiObjectList, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, gatewayVerbGet, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, memoriesResource, apiObjectList, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, memoryProposalsResource, apiObjectList, ""}),
+	"GET /api/v1/tasks/:id/plan": coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/children": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),

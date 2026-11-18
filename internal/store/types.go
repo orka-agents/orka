@@ -13,4 +13,8 @@ type MemoryProposalApply struct {
 	// each new target after a concurrent change. New memories are covered by
 	// the caller's separate create permission.
 	AuthorizeExistingMemory func(context.Context, string, string) error `json:"-"`
+	// AuthorizeMemoryChange authorizes changing one memory a consolidation
+	// proposal targets, before the storage client commits. It runs for every
+	// target, with no provider transaction open.
+	AuthorizeMemoryChange func(context.Context, string, string) error `json:"-"`
 }

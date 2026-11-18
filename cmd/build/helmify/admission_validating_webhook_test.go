@@ -274,7 +274,13 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 			foundAttachmentFence := false
 			foundProviderFence := false
 			foundWorkloadFence := false
+			foundPermanentTaint := false
 			for _, validation := range policy.Spec.Validations {
+				permanentTaint := "'acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations"
+				if strings.Contains(validation.Expression, permanentTaint) &&
+					!strings.Contains(validation.Expression, "authorizer") {
+					foundPermanentTaint = true
+				}
 				if strings.Contains(validation.Expression, "variables.providerMarkersUnchanged") &&
 					strings.Contains(validation.Expression, ".check('provider-status').allowed()") {
 					foundProviderFence = true
@@ -298,6 +304,9 @@ func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
 			}
 			if !foundProviderFence || !foundWorkloadFence {
 				t.Fatal("policy does not reserve provider observations and workload intent for their approved writers")
+			}
+			if !foundPermanentTaint {
+				t.Fatal("policy does not make the operator access taint permanent for every identity")
 			}
 		})
 	}

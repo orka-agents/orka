@@ -152,9 +152,13 @@ type TaskReconciler struct {
 	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
 	ACPToolboxPolicy ACPToolboxPolicy
 	// Identity configures external Agent identities (ADR 0039).
-	Identity                    agentidentity.Config
-	ACPRuntimeNamespace         string
-	EnforceNamespaceIsolation   bool
+	Identity                  agentidentity.Config
+	ACPRuntimeNamespace       string
+	EnforceNamespaceIsolation bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled.
+	// The controller then refuses an ai Task that takes a Provider from an
+	// Agent in another namespace; see ProvidersFromAgentInAnotherNamespace.
+	ProviderUseAuthorization    bool
 	MaxTasksPerNamespace        int32
 	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
@@ -194,12 +198,19 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // The controller, API, gateways, and monitors create Tasks for callers they
-// have already authorized, so they hold Agent `use` broadly.
+// have already authorized, so they hold Agent and Provider `use` broadly.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=use
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=use
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
+// The controller creates the scheduled runs of a memory consolidation Task,
+// which the memory consolidation admission policy checks for list on memories
+// and memoryproposals and, in Propose mode, create on memoryproposals, as it
+// checked the parent's creator.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=list;create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -843,6 +854,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+		if err := r.releaseMemoryConsolidationRun(ctx, task, true); err != nil {
+			return ctrl.Result{}, err
+		}
 		if r.ResultStore != nil {
 			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
 			if !ok {
@@ -1346,6 +1360,14 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 // resolveProvider fetches the Provider referenced by the task or agent, if any.
 func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
+	if r.ProviderUseAuthorization {
+		if names := corev1alpha1.ProvidersFromAgentInAnotherNamespace(task, agent); len(names) > 0 {
+			return nil, fmt.Errorf("provider use authorization refuses Providers %s taken from Agent %s/%s in another namespace "+
+				"than the Task's %q; set the Task's spec.ai.providerRef and use an Agent without model fallbacks, "+
+				"or use an Agent from the Task's namespace",
+				strings.Join(names, ", "), agent.Namespace, agent.Name, task.Namespace)
+		}
+	}
 	providerRef := r.resolveProviderRef(task, agent)
 	if providerRef == nil {
 		return nil, nil
@@ -1372,8 +1394,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+// isMemoryConsolidationTask reports a memory consolidation run (ADR 0051).
+// A run is one model call that submits one result, so it never iterates
+// autonomously or parks on an approval, whatever its Agent configures.
+func isMemoryConsolidationTask(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
+}
+
 func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	return task != nil &&
+		!isMemoryConsolidationTask(task) &&
 		task.Spec.Type == corev1alpha1.TaskTypeAI &&
 		agent != nil &&
 		agent.Spec.Coordination != nil &&
@@ -2931,12 +2961,34 @@ func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1al
 // Job cleanup included, then cancels what it delegated, and requeues it soon
 // while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	if err := r.releaseMemoryConsolidationRun(ctx, task, false); err != nil {
+		return ctrl.Result{}, err
+	}
 	result, err := r.handleCompleted(ctx, task)
 	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
 		result.RequeueAfter = 2 * time.Second
 	}
 	return result, err
+}
+
+// releaseMemoryConsolidationRun releases the run of a memory consolidation
+// Task that ended, abandoning a run it did not finish and clearing the
+// transcripts the run recorded. For a Task being deleted it also clears the
+// run's report and lets the store remove runs no cursor needs, so a recurring
+// run's history does not grow the store. Releasing again is a no-op.
+func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task, deleted bool) error {
+	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
+		return nil
+	}
+	runs, ok := r.ResultStore.(store.MemoryConsolidationStore)
+	if !ok {
+		return nil
+	}
+	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID), deleted); err != nil {
+		return fmt.Errorf("release memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return nil
 }
 
 // cascadeTaskCancellation cancels what a Task delegated once the Task's
@@ -5178,7 +5230,7 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 // taskAutonomousMode preserves lookup errors when the mode affects a terminal
 // decision. Other callers retain the existing best-effort boolean behavior.
 func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if task.Spec.AgentRef == nil {
+	if task.Spec.AgentRef == nil || isMemoryConsolidationTask(task) {
 		return false, nil
 	}
 

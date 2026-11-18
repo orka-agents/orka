@@ -41,12 +41,71 @@ func acpTaskOperatorTainted(ctx context.Context, reader client.Reader, task *cor
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: latest.Namespace, Name: name}, workspace); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("read ExecutionWorkspace operator taint: %w", err)
 		}
-		return false, fmt.Errorf("read ExecutionWorkspace operator taint: %w", err)
+	} else if string(workspace.UID) == uid && operatoraccess.Tainted(workspace.Annotations) {
+		return true, nil
 	}
-	return string(workspace.UID) == uid && operatoraccess.Tainted(workspace.Annotations), nil
+	// The linked Tasks are consulted by the Task's recorded incarnation, not
+	// the one the name currently resolves to: a delayed or recovery
+	// publication still carries data from that incarnation after it was
+	// deleted or replaced.
+	return acpIncarnationLinkedTaskTainted(ctx, reader, latest.Namespace, name, types.UID(uid))
+}
+
+// acpWorkspaceOperatorTainted reports whether operator access tainted this
+// exact ExecutionWorkspace incarnation. orka-api marks both the workspace and
+// the Task whose RuntimeSession was tainted. The Task marker and the Task's
+// workspace link are reserved to Orka's controller identities by Task
+// provenance admission, while the workspace marker is protected by a separate
+// admission policy, so a missing workspace marker alone never proves the
+// incarnation clean: every decision that would publish, reuse, cold-resume,
+// suspend, or checkpoint the incarnation also honours the marker of any Task
+// linked to its exact UID. It reads through the given (authoritative) reader
+// and fails closed on any read error.
+func acpWorkspaceOperatorTainted(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	if workspace == nil {
+		return false, nil
+	}
+	if operatoraccess.Tainted(workspace.Annotations) {
+		return true, nil
+	}
+	if workspace.UID == "" {
+		// Only a persisted incarnation has a UID, and a Task links to an
+		// incarnation solely by that UID: no Task can have tainted an object
+		// the API server never stored.
+		return false, nil
+	}
+	return acpIncarnationLinkedTaskTainted(ctx, reader, workspace.Namespace, workspace.Name, workspace.UID)
+}
+
+// acpIncarnationLinkedTaskTainted reports whether any Task linked to the
+// exact workspace incarnation (name and UID) carries the operator taint,
+// whether or not that incarnation still exists. It fails closed on read errors.
+func acpIncarnationLinkedTaskTainted(
+	ctx context.Context,
+	reader client.Reader,
+	namespace, name string,
+	uid types.UID,
+) (bool, error) {
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(namespace),
+		client.MatchingLabels{acpExecutionWorkspaceLinkLabel: name}); err != nil {
+		return false, fmt.Errorf("read operator taint of Tasks linked to ExecutionWorkspace %s: %w", name, err)
+	}
+	for i := range tasks.Items {
+		linked := &tasks.Items[i]
+		if strings.TrimSpace(linked.Annotations[acpExecutionWorkspaceUIDAnnotation]) == string(uid) &&
+			operatoraccess.Tainted(linked.Annotations) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // operatorTaintedPublicationMessage is the bounded terminal message recorded

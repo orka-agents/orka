@@ -1150,7 +1150,10 @@ func (h *OpenAICompatHandler) resolveCompatProvider(c fiber.Ctx, ctx context.Con
 			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
 		},
 		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+			if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model); err != nil {
+				return err
+			}
+			return authorizeChatProviderUse(c, h.kubeClient, "openAIChatCompletions", provider)
 		},
 		RequireModel: true,
 		// Enforced scoped context tokens get no implicit Provider selection.

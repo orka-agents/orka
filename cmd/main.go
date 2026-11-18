@@ -295,6 +295,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var providerUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
@@ -528,6 +529,9 @@ func main() {
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
+		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -2002,6 +2006,7 @@ func main() {
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
@@ -2442,6 +2447,7 @@ func main() {
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               appStorage,
 		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
@@ -2465,11 +2471,12 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled:      dashboardEnabled,
-		AgentUseAuthorization: agentUseAuthorizationEnabled,
-		OperatorAccess:        api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
-		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
-		TaskWebhookKeys:       taskWebhookKeys,
+		DashboardEnabled:         dashboardEnabled,
+		AgentUseAuthorization:    agentUseAuthorizationEnabled,
+		ProviderUseAuthorization: providerUseAuthorizationEnabled,
+		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
+		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		TaskWebhookKeys:          taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2533,7 +2540,7 @@ func main() {
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
 				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil

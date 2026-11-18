@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 159 authenticated external route registrations, including 64
+The table covers all 160 authenticated external route registrations, including 64
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -128,6 +128,33 @@ with each OIDC group prefixed the same way, so bind Roles to, for example,
 Display claims such as `preferred_username`, `email`, and `name` are not used.
 Permission to read, create, or edit an Agent does not grant `use`.
 
+Provider `use` is a separate opt-in check, enabled with
+`--provider-use-authorization-enabled` (Helm:
+`controller.providerUseAuthorization.enabled`). When it is on, the same
+identities need `use` on `providers` in `core.orka.ai`, with the Provider name
+and the Provider's namespace, to:
+
+- create a Task whose `spec.ai.providerRef` names the Provider;
+- create or edit an Agent so that its `spec.providerRef` or a
+  `spec.model.fallbacks[].providerRef` names the Provider. Fallbacks are checked
+  in the Agent's namespace, and Providers the Agent already named are not
+  checked again;
+- send a request through `POST /api/v1/chat`, `/openai/v1/chat/completions`,
+  `/openai/v1/responses`, or `/anthropic/v1/messages`. Every Provider the request
+  resolves is checked before its credential is read: one it names, its Agent's,
+  a fallback, or the configured default.
+
+A Task that runs its Agent's own Provider needs only Agent `use`. An Agent from
+another namespace is the exception: it may be in a namespace no policy checked,
+its fallbacks and a `providerRef` without a namespace resolve in the Task's
+namespace, and it can change after the Task is created. So while the check is
+on, an `ai` Task that would take a Provider from an Agent in another namespace,
+its `providerRef` when the Task sets none or any of its fallbacks, is refused: by
+the API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Set the Task's own `spec.ai.providerRef` and use
+an Agent without fallbacks, or use an Agent from the Task's namespace. Permission to read, create, or edit a Provider, or `create`
+on `chats`, does not grant `use`.
+
 Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
 `agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
 `agentidentities/entra`), the lowercased identity ID as the name, and the Agent
@@ -195,7 +222,7 @@ otherwise. In the additional-checks column:
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories` and `memoryproposals`, and in `Propose` mode `create` on `memoryproposals` |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
@@ -213,6 +240,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories` and `memoryproposals`; a transaction token also needs the session-read and memory-read scopes |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -250,7 +278,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `create` | empty | `B` | none |
 | `GET` | `/api/v1/memory-proposals/:id` | `core.orka.ai` | `memoryproposals` | `get` | `:id` | `Q` | none |
 | `POST` | `/api/v1/memory-proposals/:id/review` | `core.orka.ai` | `memoryproposals` | `review` | `:id`, trimmed | `BQ` | none |
-| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID |
+| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID; for a `memory_merge`, `memory_supersede` or `memory_retire` proposal not yet applied, also `update core.orka.ai/memories` on every target memory ID, and for a retire `get` on its first target |
 | `POST` | `/api/v1/memory-proposals/:id/archive` | `core.orka.ai` | `memoryproposals` | `update` | `:id`, trimmed | `Q` | none |
 | `GET` | `/api/v1/providers` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/providers` | `core.orka.ai` | `providers` | `create` | empty | `C` | none |
