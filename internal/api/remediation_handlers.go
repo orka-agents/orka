@@ -52,16 +52,16 @@ func remediationExplicitNamespace(c fiber.Ctx) (string, error) {
 	query := c.Request().URI().QueryArgs()
 	unknown := false
 	for key := range query.All() {
-		if string(key) != "namespace" {
+		if string(key) != toolNamespaceArg {
 			unknown = true
 			break
 		}
 	}
-	values := query.PeekMulti("namespace")
+	values := query.PeekMulti(toolNamespaceArg)
 	if unknown || len(values) > 1 || (len(values) == 1 && len(values[0]) == 0) {
 		return "", fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
 	}
-	explicit := c.Query("namespace")
+	explicit := c.Query(toolNamespaceArg)
 	if explicit != "" && len(kubevalidation.IsDNS1123Label(explicit)) != 0 {
 		return "", fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
 	}
