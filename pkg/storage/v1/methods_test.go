@@ -147,6 +147,8 @@ var classified = map[string]storagev1.CallClass{
 	"MaintainGatewayRecords":              storagev1.CallBackground,
 	"PruneOperationReceipts":              storagev1.CallBackground,
 	"PruneUsage":                          storagev1.CallBackground,
+	// A memory consolidation run lists the Sessions that changed in its window.
+	"ListMemoryConsolidationSessions": storagev1.CallBackground,
 
 	// Snapshot retention scans references and deletes snapshots that no
 	// longer have any.

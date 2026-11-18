@@ -321,7 +321,7 @@ func TestRepositoryMonitorRepairPromptAsksForEveryInstanceOnlyWhenFixingFindings
 		repositoryMonitorCommandIntentFixCI:        false,
 		repositoryMonitorCommandIntentUpdateBranch: false,
 	} {
-		prompt, err := r.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, intent, "orka-agents/orka", pr, &store.MonitorItem{})
+		prompt, err := r.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, intent, pr, &store.MonitorItem{})
 		if err != nil {
 			t.Fatal(err)
 		}

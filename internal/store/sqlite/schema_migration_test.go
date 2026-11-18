@@ -424,7 +424,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 			rows := applicationRows(t, db)
 			require.NotContains(t, rows, "operation_receipts")
 			rows["operation_receipts"] = nil
-			rows = stampedApplicationRows(t, rows)
+			rows = runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, rows)))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -432,7 +432,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -493,7 +493,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -620,14 +620,14 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 			path, db := schemaVersion2StoreDB(t, state.origin, state.complete, state.installation)
 			identity, err := readDataset(db)
 			require.NoError(t, err)
-			rows := stampedApplicationRows(t, applicationRows(t, db))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -740,7 +740,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, datasetBinding{installation: "installation-a"}, binding)
@@ -847,14 +847,14 @@ func TestSchemaVersion3StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, state.installation, binding.installation)
 			require.Equal(t, state.bound, binding.state == bindingStateBound)
-			rows := stampedApplicationRows(t, applicationRows(t, db))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -925,7 +925,7 @@ func TestSchemaVersion3UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)
@@ -1007,14 +1007,14 @@ func TestSchemaVersion4StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, state.installation, binding.installation)
 			require.Equal(t, state.bound, binding.state == bindingStateBound)
-			rows := stampedApplicationRows(t, applicationRows(t, db))
+			rows := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -1085,7 +1085,7 @@ func TestSchemaVersion4UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)
@@ -1132,40 +1132,40 @@ func TestSchemaVersion4StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	}
 }
 
-// version5StoreStates lists the schema version 5 dataset states the write
-// watermark step must keep: each version 3 state after the version 4 and
-// write stamp steps.
-var version5StoreStates = version3StoreStates
+// version7StoreStates lists the schema version 7 dataset states the write
+// watermark step must keep: each version 3 state after the version 4, write
+// stamp, memory generation and memory consolidation run steps.
+var version7StoreStates = version3StoreStates
 
-// schemaVersion5StoreDB returns a schema version 5 store built only from frozen
-// inputs: a version 4 store from schemaVersion4StoreDB, the immutable
-// 171-to-172.sql step and user_version = 5, as the version 4 to 5 step leaves
+// schemaVersion7StoreDB returns a schema version 7 store built only from frozen
+// inputs: a version 6 store from schemaVersion6StoreDB, the immutable
+// 173-to-174.sql step and user_version = 7, as the version 6 to 7 step leaves
 // it. It never uses the current schema constructor, so it keeps producing
-// version 5 stores after the layout moves on.
-func schemaVersion5StoreDB(t *testing.T, origin string, complete bool, installation string, bound bool) (string, *sql.DB) {
+// version 7 stores after the layout moves on.
+func schemaVersion7StoreDB(t *testing.T, origin string, complete bool, installation string, bound bool) (string, *sql.DB) {
 	t.Helper()
-	path, db := schemaVersion4StoreDB(t, origin, complete, installation, bound)
-	_, err := db.Exec(migration171To172 + `; PRAGMA user_version = 5`)
+	path, db := schemaVersion6StoreDB(t, origin, complete, installation, bound)
+	_, err := db.Exec(migration173To174 + `; PRAGMA user_version = 7`)
 	require.NoError(t, err)
 
 	schema, err := readSchema(db)
 	require.NoError(t, err)
-	// A literal digest, independent of schema172, as in historicalSchemaDB.
-	require.Equal(t, "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e", schemaFingerprint(schema))
+	// A literal digest, independent of schema174, as in historicalSchemaDB.
+	require.Equal(t, "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d", schemaFingerprint(schema))
 	version, err := readSchemaVersion(db)
 	require.NoError(t, err)
-	require.Equal(t, 5, version)
+	require.Equal(t, 7, version)
 	return path, db
 }
 
-// A version 5 store upgrades in place to the write watermark layout: it keeps
+// A version 7 store upgrades in place to the write watermark layout: it keeps
 // its identity row, binding, key bootstrap state, controller epoch, operation
 // receipts and every record, and starts with a write watermark of zero. A
 // second open is current and does not back up again.
-func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
-	for _, state := range version5StoreStates {
+func TestSchemaVersion7StoreUpgradesInPlace(t *testing.T) {
+	for _, state := range version7StoreStates {
 		t.Run(state.name, func(t *testing.T) {
-			path, db := schemaVersion5StoreDB(t, state.origin, state.complete, state.installation, state.bound)
+			path, db := schemaVersion7StoreDB(t, state.origin, state.complete, state.installation, state.bound)
 			identity, err := readDataset(db)
 			require.NoError(t, err)
 			binding, err := readDatasetBinding(t.Context(), db)
@@ -1183,7 +1183,7 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema173,
+					fingerprint:  schema175,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -1209,10 +1209,10 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 				backup := rawMigrationDB(t, backups[0])
 				backupSchema, err := readSchema(backup)
 				require.NoError(t, err)
-				require.Equal(t, schema172, schemaFingerprint(backupSchema))
+				require.Equal(t, schema174, schemaFingerprint(backupSchema))
 				backupVersion, err := readSchemaVersion(backup)
 				require.NoError(t, err)
-				require.Equal(t, 5, backupVersion)
+				require.Equal(t, 7, backupVersion)
 				backupIdentity, err := readDataset(backup)
 				require.NoError(t, err)
 				require.Equal(t, identity, backupIdentity)
@@ -1222,10 +1222,10 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 	}
 }
 
-// A failed write watermark step leaves the version 5 store unchanged,
+// A failed write watermark step leaves the version 7 store unchanged,
 // including its binding and records, and the next open upgrades it.
-func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
-	path, db := schemaVersion5StoreDB(t, datasetOriginNew, true, "installation-a", true)
+func TestSchemaVersion7UpgradeFailureRollsBack(t *testing.T) {
+	path, db := schemaVersion7StoreDB(t, datasetOriginNew, true, "installation-a", true)
 	before, err := readDataset(db)
 	require.NoError(t, err)
 	beforeBinding, err := readDatasetBinding(t.Context(), db)
@@ -1235,11 +1235,12 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	steps := versionUpgrades()
-	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 5 })
+	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 7 })
 	require.GreaterOrEqual(t, first, 0)
-	// The final step fails, so every step from version 5 rolls back together.
+	// The final step fails, so every step from version 7 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 5, schema172, steps[first:]))
+	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 7, schema174, steps[first:]), "no_such_function",
+		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
 	require.NoError(t, err)
@@ -1249,7 +1250,7 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	require.Equal(t, beforeBinding, afterBinding)
 	version, err := readSchemaVersion(db)
 	require.NoError(t, err)
-	require.Equal(t, 5, version)
+	require.Equal(t, 7, version)
 	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
 	require.Equal(t, beforeRows, applicationRows(t, db))
 	require.NoError(t, db.Close())
@@ -1257,33 +1258,33 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema173, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema175, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)
 	assertMigrationRecords(t, s.db, path)
 }
 
-// A fixture rebuilt from historical DDL plus every step through 171-to-172.sql
-// has the version 5 layout but no identity row. It takes the version 0 path
-// and is adopted, while every real version 5 store is refused there and takes
+// A fixture rebuilt from historical DDL plus every step through 173-to-174.sql
+// has the version 7 layout but no identity row. It takes the version 0 path
+// and is adopted, while every real version 7 store is refused there and takes
 // the version path, as for earlier versions.
-func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
+func TestSchemaVersion7StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	_, fixture := historicalSchemaDB(t, "abd2c040")
 	_, err := fixture.Exec(migration166To167 + migration167To168 + migration168To169 + migration169To170 + migration170To171 +
-		migration171To172)
+		migration171To172 + migration172To173 + migration173To174)
 	require.NoError(t, err)
 	schema, err := readSchema(fixture)
 	require.NoError(t, err)
-	require.Equal(t, schema172, schemaFingerprint(schema))
+	require.Equal(t, schema174, schemaFingerprint(schema))
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema172, migrationsFrom(t, schema172)))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema174, migrationsFrom(t, schema174)))
 	require.NoError(t, conn.Close())
 
-	for _, state := range version5StoreStates {
+	for _, state := range version7StoreStates {
 		t.Run(state.name, func(t *testing.T) {
-			_, db := schemaVersion5StoreDB(t, state.origin, state.complete, state.installation, state.bound)
+			_, db := schemaVersion7StoreDB(t, state.origin, state.complete, state.installation, state.bound)
 			before, err := readDataset(db)
 			require.NoError(t, err)
 			beforeBinding, err := readDatasetBinding(t.Context(), db)
@@ -1291,8 +1292,8 @@ func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			beforeRows := applicationRows(t, db)
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema172, migrationsFrom(t, schema172)),
-				"unsupported SQLite schema version 5 before upgrade")
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema174, migrationsFrom(t, schema174)),
+				"unsupported SQLite schema version 7 before upgrade")
 			require.NoError(t, conn.Close())
 			after, err := readDataset(db)
 			require.NoError(t, err)

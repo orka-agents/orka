@@ -115,9 +115,18 @@ describe('demo task API', () => {
     const pending = approvals.find((a) => a.status === 'pending')
     expect(pending?.id).toBe('apr-rollback-checkout')
 
+    // The cross-Task inbox and attention view list the same pending request.
+    const inbox = await json<{ items: Array<{ kind: string; approval?: { id: string; canApprove: boolean | null } }> }>('/approvals?status=pending')
+    expect(inbox.items.map((item) => item.approval?.id)).toContain('apr-rollback-checkout')
+    const attention = await json<{ items: Array<{ kind: string; task?: { name: string } }>; incomplete: boolean }>('/attention')
+    expect(attention.items[0]).toMatchObject({ kind: 'approval' })
+    expect(attention.incomplete).toBe(false)
+
     const decided = await json<{ status: string }>(`/tasks/${name}/approvals/${pending!.id}/decision`, post({ decision: 'approve' }))
     expect(decided.status).toBe('approved')
     expect((await call(`/tasks/${name}/approvals/${pending!.id}/decision`, post({ decision: 'approve' }))).status).toBe(409)
+    const afterInbox = await json<{ items: Array<{ approval?: { id: string } }> }>('/approvals?status=pending')
+    expect(afterInbox.items.map((item) => item.approval?.id)).not.toContain('apr-rollback-checkout')
 
     advanceClock(3 * 60_000)
     const after = taskSchema.parse(await json(`/tasks/${name}`))

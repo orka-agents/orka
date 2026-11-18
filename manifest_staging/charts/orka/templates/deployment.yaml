@@ -203,6 +203,9 @@ spec:
             {{- if dig "agentUseAuthorization" "enabled" false .Values.controller }}
             - --agent-use-authorization-enabled=true
             {{- end }}
+            {{- if dig "providerUseAuthorization" "enabled" false .Values.controller }}
+            - --provider-use-authorization-enabled=true
+            {{- end }}
             {{- $entraTenant := dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
             {{- $entraBlueprint := dig "agentIdentity" "entra" "blueprintClientID" "" .Values.controller }}
             {{- if or $entraTenant $entraBlueprint }}

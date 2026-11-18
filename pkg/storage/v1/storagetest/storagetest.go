@@ -75,6 +75,8 @@ var stateFamilies = []stateFamily{
 	{"sealed-connector-consents", runSealedConnectorConsents},
 	{"sealed-connector-listings", runSealedConnectorListings},
 	{"memory-proposal-application", runMemoryProposalApplication},
+	{"memory-consolidation", runMemoryConsolidation},
+	{"memory-consolidation-runs", runMemoryConsolidationRuns},
 	{"task-data-fences", runTaskDataFences},
 	{"artifact-fence", runArtifactFence},
 	{"result-write-order", runResultWriteOrder},
