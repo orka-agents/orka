@@ -77,6 +77,9 @@ func (r *TaskReconciler) planAgentExecution(
 		if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, true); reason != "" {
 			return rejectAgentExecutionPlan(reason)
 		}
+		if reason := r.ACPToolboxPolicy.agentSkillPlanRejection(task, agent, true); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
 		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
@@ -103,6 +106,9 @@ func (r *TaskReconciler) planAgentExecution(
 			if task.Spec.PriorTaskRef != nil {
 				return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by external v2 runtimes; use sessionRef")
 			}
+			if err := validateAgentRuntimeCeilingForRegistration(task, agent, runtime); err != nil {
+				return rejectAgentExecutionPlan(err.Error())
+			}
 			return agentExecutionPlan{path: agentExecutionPathExternal, externalRuntimeName: name}
 		default:
 			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q contractVersion %q is unsupported; explicit %s is required", name, runtime.RegisteredContractVersion(), corev1alpha1.AgentRuntimeContractHarnessV2))
@@ -117,6 +123,9 @@ func (r *TaskReconciler) planAgentExecution(
 
 	contract := agent.BuiltInContractVersion()
 	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
+		return rejectAgentExecutionPlan(reason)
+	}
+	if reason := r.ACPToolboxPolicy.agentSkillPlanRejection(task, agent, false); reason != "" {
 		return rejectAgentExecutionPlan(reason)
 	}
 	switch contract {

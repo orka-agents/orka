@@ -56,9 +56,10 @@ Available Commands:
 Flags:
   -h, --help                    help for orka
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
   -v, --version                 version for orka
@@ -86,9 +87,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -109,9 +111,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -129,9 +132,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -150,9 +154,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -171,9 +176,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -192,9 +198,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -219,9 +226,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -242,9 +250,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -262,9 +271,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -283,9 +293,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -307,9 +318,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -328,9 +340,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -384,9 +397,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -407,9 +421,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -431,9 +446,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -454,9 +470,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -475,9 +492,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -502,9 +520,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -530,9 +549,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -552,9 +572,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -572,9 +593,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -593,9 +615,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -613,9 +636,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -637,9 +661,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -664,9 +689,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -687,9 +713,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -707,9 +734,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -728,9 +756,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -749,9 +778,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -770,9 +800,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -780,7 +811,7 @@ Global Flags:
 ## `orka dashboard`
 
 ```text
-Create a ServiceAccount token (or use --token) and open the Orka dashboard in your browser, signed in with it. The token goes only to the browser; other orka commands do not use it. The controller serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.
+Create a ServiceAccount token (or use --token or --token-file) and open the Orka dashboard in your browser, signed in with it. The token goes only to the browser; other orka commands do not use it, and this command does not use ORKA_TOKEN or the config file's token. The browser opens --server, ORKA_SERVER or the configured server, else http://localhost:8080; unlike other commands, dashboard does not find the server through the kubeconfig. The ServiceAccount is in --namespace, ORKA_NAMESPACE or the configured namespace, else "default". The controller serves the dashboard only when it runs with --dashboard-enabled; every other orka command works without it.
 
 Usage:
   orka dashboard [flags]
@@ -790,12 +821,13 @@ Flags:
       --no-open                  Print the dashboard URL without opening a browser
       --service-account string   ServiceAccount name (default "default")
       --show-token               Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal
+  -t, --token string             Token to sign the dashboard in with (prefer --token-file, which keeps it out of process arguments; ORKA_TOKEN is not used)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -821,9 +853,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -847,9 +880,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -870,9 +904,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -894,9 +929,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -918,9 +954,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -941,9 +978,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -965,9 +1003,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -990,9 +1029,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1013,9 +1053,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1043,9 +1084,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1064,9 +1106,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1088,9 +1131,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1111,9 +1155,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1140,9 +1185,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1161,9 +1207,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1185,9 +1232,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1210,9 +1258,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1233,9 +1282,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1254,9 +1304,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1274,9 +1325,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1304,9 +1356,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1330,9 +1383,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1350,9 +1404,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1370,9 +1425,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1390,9 +1446,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1411,9 +1468,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1443,9 +1501,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1470,9 +1529,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1492,9 +1552,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1512,9 +1573,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1533,9 +1595,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1560,9 +1623,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1582,9 +1646,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1606,9 +1671,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1629,9 +1695,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1653,9 +1720,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1695,9 +1763,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1721,9 +1790,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1744,9 +1814,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1772,9 +1843,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1797,9 +1869,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -1824,9 +1897,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1845,9 +1919,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1873,9 +1948,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1894,9 +1970,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1914,9 +1991,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1935,9 +2013,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1964,9 +2043,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -1985,9 +2065,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2009,9 +2090,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2032,9 +2114,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2059,9 +2142,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2091,9 +2175,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2114,9 +2199,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2135,9 +2221,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2158,9 +2245,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2181,9 +2269,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2204,9 +2293,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2227,9 +2317,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2248,9 +2339,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2269,9 +2361,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2290,9 +2383,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2311,9 +2405,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2332,9 +2427,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2353,9 +2449,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2377,9 +2474,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2400,9 +2498,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2425,9 +2524,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2455,9 +2555,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2479,9 +2580,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2503,9 +2605,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2526,9 +2629,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2554,9 +2658,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2585,9 +2690,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2609,9 +2715,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2631,9 +2738,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2655,9 +2763,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2678,9 +2787,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2699,9 +2809,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2722,9 +2833,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2745,9 +2857,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2767,9 +2880,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2789,9 +2903,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2810,9 +2925,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2832,9 +2948,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2854,9 +2971,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2877,9 +2995,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2903,9 +3022,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2926,9 +3046,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -2949,9 +3070,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2970,9 +3092,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -2992,9 +3115,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3016,9 +3140,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3039,9 +3164,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3069,9 +3195,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3096,9 +3223,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3119,9 +3247,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3139,9 +3268,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3160,9 +3290,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3184,9 +3315,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3205,9 +3337,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3234,9 +3367,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3258,9 +3392,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3281,9 +3416,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3305,9 +3441,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3328,9 +3465,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3354,9 +3492,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3382,9 +3521,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3407,9 +3547,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3437,9 +3578,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3467,9 +3609,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3489,9 +3632,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3510,9 +3654,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3540,9 +3685,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3561,9 +3707,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3582,9 +3729,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3603,9 +3751,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3623,9 +3772,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3643,9 +3793,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3670,9 +3821,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3693,9 +3845,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3713,9 +3866,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3734,9 +3888,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3758,9 +3913,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3779,9 +3935,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3804,9 +3961,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3830,9 +3988,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3850,9 +4009,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3879,9 +4039,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3903,9 +4064,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3926,9 +4088,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3951,9 +4114,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -3975,9 +4139,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -3998,9 +4163,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4021,9 +4187,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4037,6 +4204,7 @@ Usage:
   orka session [command]
 
 Available Commands:
+  cancel      Stop a session's current turn
   delete      Delete a session resource
   events      List session execution events
   follow      Follow session execution events
@@ -4049,13 +4217,38 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka session [command] --help" for more information about a command.
+```
+
+## `orka session cancel`
+
+```text
+Stop the session's in-flight chat request, if any, and cancel its
+Pending and Running tasks. The session keeps its history and accepts the next
+message.
+
+Usage:
+  orka session cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the turn is being stopped
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session delete`
@@ -4071,9 +4264,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4149,9 +4343,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4171,9 +4366,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4192,9 +4388,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4216,9 +4413,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4241,9 +4439,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -4268,9 +4467,10 @@ Flags:
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
       --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4293,9 +4493,10 @@ Flags:
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
       --max-bundle-bytes int    Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default (default 8388608)
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4324,9 +4525,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -4346,9 +4548,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4367,9 +4570,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4387,9 +4591,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4408,9 +4613,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4430,9 +4636,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4453,9 +4660,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4474,9 +4682,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4495,9 +4704,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4516,9 +4726,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4536,9 +4747,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4559,9 +4771,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -4588,9 +4801,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -4611,9 +4825,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4631,9 +4846,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4652,9 +4868,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4676,9 +4893,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4697,9 +4915,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4716,12 +4935,15 @@ Available Commands:
   approvals   List task approvals, or wait for one
   approve     Approve a pending task approval
   artifacts   List artifacts for a task
+  cancel      Stop a running task and keep its history
   children    List child tasks
+  cp          Copy one file out of or into a Task's execution workspace (operator debugging)
   create      Create a new task
   decline     Decline a pending task approval
   delete      Delete a task
   download    Download task artifacts
   events      List task execution events
+  exec        Run a command in a running Task's execution workspace (operator debugging)
   follow      Follow task execution events
   fork        Fork a task from an execution event checkpoint
   get         Get task details
@@ -4738,9 +4960,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -4773,9 +4996,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4797,9 +5021,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4818,9 +5043,34 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task cancel`
+
+```text
+Stop a Pending or Running task. Unlike delete, cancel keeps the task's
+result, artifacts, plan and events. Cancelling an already cancelled task
+changes nothing.
+
+Usage:
+  orka task cancel <name> [flags]
+
+Flags:
+  -h, --help            help for cancel
+      --reason string   Why the task is being cancelled
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4839,9 +5089,45 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task cp`
+
+```text
+Copy a single regular file between the local machine and the execution
+workspace of a running or retained ACP Task. Workspace paths are relative to the
+workspace root (the agent's working directory); a leading "/" names that root.
+Use "-" as the local path for stdout or stdin.
+
+Copying out requires the class opt-in "read" or "exec" and the "get" permission
+on tasks/files; it does not taint the session. Copying in requires the class
+opt-in "exec" and the "update" permission on tasks/files, and taints the session:
+it will never be published, reused, checkpointed, or continued.
+
+Usage:
+  orka task cp <task>:<path> <local> | <local> <task>:<path> [flags]
+
+Examples:
+  orka task cp my-task:src/main.go ./main.go
+  orka task cp ./fix.patch my-task:/tmp-fix.patch
+
+Flags:
+  -h, --help            help for cp
+      --max-bytes int   Refuse files larger than this when copying out (default 67108864, at most 268435456)
+  -q, --quiet           Do not print the session taint notice
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4895,9 +5181,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4919,9 +5206,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4942,9 +5230,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -4963,9 +5252,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5041,9 +5331,48 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka task exec`
+
+```text
+Run one command inside the execution workspace of a running or retained ACP Task.
+
+The command runs as the Task session's own unprivileged child identity, never as
+the supervisor, and is bounded by --timeout and an output limit. It requires the
+--operator-workspace-access-enabled controller flag, an ExecutionWorkspaceClass
+opted in with the acp.workspace.orka.ai/operator-access=exec annotation, and the
+"create" permission on the tasks/exec subresource.
+
+Every exec taints the Task's session: it will never be published, reused,
+checkpointed for forks, or continued. Every exec is audited.
+
+Usage:
+  orka task exec <task> [-i] [-t] -- <command> [args...] [flags]
+
+Examples:
+  orka task exec my-task -- git status
+  orka task exec my-task -it -- bash
+
+Flags:
+  -h, --help               help for exec
+  -q, --quiet              Do not print the session taint notice
+  -i, --stdin              Pass stdin to the command
+      --timeout duration   Maximum command duration (at most 1h0m0s) (default 15m0s)
+      --token string       Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+  -t, --tty                Allocate a terminal for the command (implies -i)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5063,9 +5392,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5088,9 +5418,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5110,9 +5441,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5153,9 +5485,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5174,9 +5507,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5195,9 +5529,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5216,9 +5551,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5241,9 +5577,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5262,9 +5599,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5283,9 +5621,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5310,9 +5649,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -5333,9 +5673,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5353,9 +5694,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5374,9 +5716,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5398,9 +5741,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5419,9 +5763,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5444,9 +5789,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -5476,9 +5822,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5506,9 +5853,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5534,9 +5882,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5554,9 +5903,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
@@ -5577,9 +5927,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
@@ -5600,9 +5951,10 @@ Flags:
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
-  -n, --namespace string        Kubernetes namespace (default "default")
-  -s, --server string           Orka server URL (default "http://localhost:8080")
-  -t, --token string            Bearer token for authentication
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```

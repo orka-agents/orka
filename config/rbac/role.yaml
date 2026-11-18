@@ -130,13 +130,11 @@ rules:
   resources:
   - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -218,6 +216,26 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  - providers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connectorproviders
   verbs:
   - get
@@ -225,6 +243,18 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryproposals
+  verbs:
+  - create
 - apiGroups:
   - core.orka.ai
   resources:

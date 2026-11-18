@@ -81,10 +81,13 @@ func validateProviderRESTUpdate(spec, existing corev1alpha1.ProviderSpec) error 
 }
 
 func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
+	if toolSpecHasEgressCredential(spec) {
+		return true
+	}
 	if spec.HTTP == nil {
 		return false
 	}
-	if spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
+	if spec.HTTP.GatewayTaskPass || spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
 		return true
 	}
 	for name := range spec.HTTP.Headers {
@@ -95,9 +98,35 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	return false
 }
 
+// toolSpecHasEgressCredential reports whether a Substrate MCP actor asks
+// the egress gateway to inject a Secret.
+func toolSpecHasEgressCredential(spec corev1alpha1.ToolSpec) bool {
+	if spec.MCP == nil || spec.MCP.SubstrateActor == nil {
+		return false
+	}
+	for _, rule := range spec.MCP.SubstrateActor.Egress {
+		if rule.Credential != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func validateToolRESTMutation(spec corev1alpha1.ToolSpec) error {
+	if toolSpecHasEgressCredential(spec) {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.mcp.substrateActor.egress[].credential is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
+	}
 	if spec.HTTP == nil {
 		return nil
+	}
+	if spec.HTTP.GatewayTaskPass {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.http.gatewayTaskPass is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
 	}
 	if spec.HTTP.AuthSecretRef != nil {
 		return fiber.NewError(

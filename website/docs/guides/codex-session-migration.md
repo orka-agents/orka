@@ -108,17 +108,19 @@ storage, and encrypted database usage; choose them for the expected workload.
 
 ## Explicit API target and authentication
 
-Native migration requires `--server` or a saved API endpoint. Automatic
-Kubernetes Service discovery is not used: a familiar name, labels, and Service
-UID do not establish the application's identity. Select the trusted Orka API
-endpoint explicitly before sending portable history.
+Native migration requires `--server`, `ORKA_SERVER` or a saved API endpoint.
+Automatic Kubernetes Service discovery is not used: a familiar name, labels, and
+Service UID do not establish the application's identity. Select the trusted Orka
+API endpoint explicitly before sending portable history.
 
-Provide an API bearer credential (`--token`, a saved Orka token, or a static
-kubeconfig bearer credential) or a supported transaction token. Kubernetes exec,
-auth-provider, and certificate credentials are not automatically resolved into
-an Orka API credential. Missing API authentication fails before capture or
-persistence of the migration bundle. Configure the endpoint and authentication
-before running the commands below.
+Provide an API bearer credential (`--token`, `--token-file`, `ORKA_TOKEN`, or a
+saved Orka token) or a supported transaction token. The CLI never sends a
+kubeconfig credential to an endpoint named this way, and Kubernetes exec,
+auth-provider, and certificate credentials are not API credentials. Name the
+namespace with `--namespace`, `ORKA_NAMESPACE`, or a saved namespace: the
+journal and the import receipt are bound to it. Missing API authentication or
+namespace fails before capture or persistence of the migration bundle. Configure
+the endpoint, authentication, and namespace before running the commands below.
 
 ## Import a local thread
 

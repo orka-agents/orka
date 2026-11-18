@@ -234,6 +234,25 @@ func run(transcriptPath string) (err error) {
 	// concrete serving provider while still covering the whole logical model call.
 	llmProvider = llm.NewTracingProvider(llmProvider)
 
+	// A memory consolidation run registers no tools and loads no memory or
+	// skills: the controller supplies its inputs and validates its result.
+	if strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != "" {
+		result, err := runMemoryConsolidation(ctx, llmProvider, model, settings, prompt)
+		if err != nil {
+			return fmt.Errorf("memory consolidation failed: %w", err)
+		}
+		if err := writeResult(ctx, result); err != nil {
+			return fmt.Errorf("failed to write result: %w", err)
+		}
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("Memory consolidation run submitted its report"),
+			common.WithEventContent(eventContent(map[string]any{logFieldResultLength: len(result)})),
+		)
+		fmt.Printf("Memory consolidation run %s/%s completed%s\n", taskNamespace, taskName, transactionLogFields)
+		return nil
+	}
+
 	// Parse enabled tools
 	enabledTools := normalizeEnabledTools(workerEnv.Tools)
 
@@ -399,7 +418,10 @@ func prepareAIWorkerInput(
 	if err != nil {
 		return nil, modelSettings{}, err
 	}
-	if err := workerEnv.ValidateRequired(promptIncluded); err != nil {
+	// A memory consolidation run's prompt is only an optional focus: the run
+	// has a fixed instruction of its own.
+	consolidation := strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != ""
+	if err := workerEnv.ValidateRequired(promptIncluded || consolidation); err != nil {
 		return nil, modelSettings{}, err
 	}
 	settings, err := parseModelSettings(workerEnv)
@@ -767,8 +789,12 @@ func buildLLMTools(
 			continue
 		}
 
-		// Check if it's a custom tool
+		// Check if it's a custom tool. A forwarding Tool serves a
+		// command-line client in an ACP runtime and is never a function.
 		if tool, ok := customTools[name]; ok {
+			if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
+				continue
+			}
 			var params json.RawMessage
 			if tool.Spec.Parameters != nil {
 				params = tool.Spec.Parameters.Raw
@@ -1380,8 +1406,7 @@ func executeAgentLoopWithEvents(
 		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
-			stepSpan.SetStatus(codes.Error, errType)
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			tracing.RecordSpanErrorType(stepSpan, errType)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
@@ -1420,9 +1445,7 @@ func executeAgentLoopWithEvents(
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
 		if completionErr != nil {
-			stepSpan.RecordError(completionErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(completionErr))
 			stepSpan.End()
 			return "", completionErr
 		}
@@ -1464,9 +1487,7 @@ func executeAgentLoopWithEvents(
 			baseToolCtx,
 		)
 		if approvalErr != nil {
-			stepSpan.RecordError(approvalErr)
-			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
-			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(approvalErr)))
+			tracing.RecordSpanErrorType(stepSpan, aiWorkerErrorType(approvalErr))
 			stepSpan.End()
 			return "", approvalErr
 		}
@@ -1503,7 +1524,7 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
+				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled")
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
 					stepCtx,
@@ -1559,7 +1580,7 @@ func executeAgentLoopWithEvents(
 					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
 						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
 						if execErr != nil {
-							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments", execErr.Error())
+							tools.RecordRejectedToolCall(execCtx, toolName, tc.ID, "invalid_arguments")
 						}
 					}
 				}
@@ -1638,7 +1659,7 @@ func aiWorkerErrorType(err error) string {
 	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
 		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
 	}
-	return fmt.Sprintf("%T", err)
+	return tracing.ErrorType(err)
 }
 
 func startAgentStepSpan(

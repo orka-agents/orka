@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -19,11 +20,11 @@ type pendingSessionCleanupStore struct {
 	cleanupErr error
 }
 
-func (s *pendingSessionCleanupStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (s *pendingSessionCleanupStore) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	if s.cleanupErr != nil {
 		return s.cleanupErr
 	}
-	return s.SessionStore.DeleteSession(ctx, namespace, name)
+	return s.SessionStore.DeleteSession(ctx, namespace, name, now)
 }
 
 func TestHandlers_DeleteSession_UnsettledRuntimeCleanup(t *testing.T) {

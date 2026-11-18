@@ -81,8 +81,11 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskChildrenCmd())
 	cmd.AddCommand(newTaskWaitCmd())
 	cmd.AddCommand(newTaskDeleteCmd())
+	cmd.AddCommand(newTaskCancelCmd())
 	cmd.AddCommand(newTaskArtifactsCmd())
 	cmd.AddCommand(newTaskDownloadCmd())
+	cmd.AddCommand(newTaskExecCmd())
+	cmd.AddCommand(newTaskCopyCmd())
 	return cmd
 }
 
@@ -505,6 +508,9 @@ func newTaskWaitCmd() *cobra.Command {
 			}
 
 			c := newClientFromCmd(cmd)
+			// A Task held on an approval would otherwise look like a plain
+			// wait; say once, on stderr, that it needs a person.
+			announced := false
 			return waitForTaskPhase(
 				ctx,
 				args[0],
@@ -513,6 +519,12 @@ func newTaskWaitCmd() *cobra.Command {
 					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
 					if err != nil {
 						return "", err
+					}
+					if waitingOn := taskWaitingOn(*detail); waitingOn == "" {
+						announced = false
+					} else if !announced {
+						announced = true
+						fmt.Fprintf(cmd.ErrOrStderr(), "Task %s is waiting on %s.\n", args[0], waitingOn) //nolint:errcheck
 					}
 					return client.StringField(*detail, "status", "phase"), nil
 				},
@@ -800,9 +812,13 @@ func resolveDefaultProviderName(ctx context.Context, c *client.Client) (string, 
 	if len(ready) == 1 {
 		return ready[0], nil
 	}
+	where := "the server's namespace"
+	if c.Namespace != "" {
+		where = fmt.Sprintf("namespace %q", c.Namespace)
+	}
 	if len(names) == 0 {
-		return "", fmt.Errorf("no --provider given and namespace %q has no Providers; create one first", c.Namespace)
+		return "", fmt.Errorf("no --provider given and %s has no Providers; create one first", where)
 	}
 	sort.Strings(names)
-	return "", fmt.Errorf("no --provider given and namespace %q has %d Providers (%s); pass --provider", c.Namespace, len(names), strings.Join(names, ", "))
+	return "", fmt.Errorf("no --provider given and %s has %d Providers (%s); pass --provider", where, len(names), strings.Join(names, ", "))
 }

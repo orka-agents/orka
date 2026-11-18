@@ -133,6 +133,17 @@ spec:
       only the Orka core controller may set or change ExecutionWorkspace
       attachment intent (attachment and attachmentEpoch)
     reason: Forbidden
+  - expression: >-
+      oldObject == null || !has(oldObject.metadata.annotations) ||
+      !('acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations) ||
+      (has(object.metadata.annotations) &&
+       'acp.workspace.orka.ai/operator-tainted' in object.metadata.annotations &&
+       object.metadata.annotations['acp.workspace.orka.ai/operator-tainted'] ==
+         oldObject.metadata.annotations['acp.workspace.orka.ai/operator-tainted'])
+    message: >-
+      the operator access taint of an ExecutionWorkspace is permanent; no
+      identity may remove or change it
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

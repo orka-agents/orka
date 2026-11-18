@@ -29,6 +29,8 @@ type Server struct {
 	mux                    *http.ServeMux
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
+	genai                  *supervisorGenAI
+	azureAuthority         azureGatewayAuthority
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
@@ -45,7 +47,15 @@ type Server struct {
 	foundryIdentity    *harnessv2.FoundryBrokerIdentity
 	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
 	promptSlots        chan struct{}
+	operator           operatorAccessState
 }
+
+// Session-creation filesystem steps, replaceable in tests that check their
+// order.
+var (
+	recordSessionWorkspaceIdentity = acp.RecordWorkspaceIdentity
+	finalizeSessionOwnership       = acp.FinalizeSessionOwnership
+)
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
 
@@ -156,6 +166,9 @@ type sessionTombstone struct {
 	// Late cancellation records stay separate so explicit deletion replays
 	// continue to return the original immutable wire tombstone.
 	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
+	// drainCleaned marks a session retired by drain cleanup rather than by an
+	// authenticated delete, so a fresh prompt for it is provably unaccepted.
+	drainCleaned bool
 }
 
 // A retired prompt retains proof, never its input, output, or capabilities.
@@ -181,6 +194,9 @@ type sessionCreationError struct {
 	stage               string
 	cause               error
 	workspaceResumeLost bool
+	// rejectedMessage marks a permanent, caller-visible rejection of the
+	// request itself; it must not contain workspace contents or secrets.
+	rejectedMessage string
 }
 
 const sessionCreationStageDurableResumeVerification = "durable resume verification"
@@ -221,6 +237,72 @@ func sessionCreationResumeLost(err error) error {
 func isSessionCreationResumeLost(err error) bool {
 	creation, ok := errors.AsType[*sessionCreationError](err)
 	return ok && creation.workspaceResumeLost
+}
+
+// workspaceRejectedError is returned by ProviderProfile.ValidateWorkspace when
+// the workspace itself is unsupported. publicMessage is one of the fixed
+// acp.*Message constants the controller surfaces; detail is logged only.
+type workspaceRejectedError struct {
+	publicMessage string
+	detail        string
+}
+
+func (e *workspaceRejectedError) Error() string {
+	return e.publicMessage + ": " + e.detail
+}
+
+func sessionCreationRejected(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := acp.WorkspaceValidationFailedMessage
+	if rejected, ok := errors.AsType[*workspaceRejectedError](err); ok {
+		message = rejected.publicMessage
+		slog.Warn("ACP runtime session workspace rejected", "reason", rejected.detail)
+	}
+	return &sessionCreationError{stage: "workspace validation", cause: err, rejectedMessage: message}
+}
+
+// validateWorkspaceAsSessionChild re-runs workspace validation for an idle
+// adapter restart. By then the session tree belongs to the child, and a
+// write-intent workspace is its private 0700 directory; the supervisor has no
+// DAC_OVERRIDE, so as itself it could not even look inside, and would retire
+// every clean session. The check runs as the child would see the tree. It only
+// inspects entries without following them, so anything the child changes can
+// at worst make the check fail, which retires the session.
+func validateWorkspaceAsSessionChild(validate func(acp.SessionPaths) error, paths acp.SessionPaths, uid, gid int) func() error {
+	return func() error {
+		return asSessionChild(uid, gid, func() error { return validate(paths) })
+	}
+}
+
+// quiesceOperatorsBeforeRelaunch closes operator admission for the session
+// whose exited adapter is about to be replaced and waits until every admitted
+// operation is gone. Operator commands run as the session child, so one that
+// ran between the workspace check and the replacement launch could change
+// what the provider loads. Admission reopens only when the replacement
+// accepts the prompt that triggered the restart (setSessionState); a failed
+// restart retires the session with admission still closed.
+func (s *Server) quiesceOperatorsBeforeRelaunch(sessionID harnessv2.RuntimeSessionID, runtime *acp.RuntimeSession) error {
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	current := state != nil && runtime != nil && state.runtime == runtime
+	s.mu.Unlock()
+	if !current {
+		return fmt.Errorf("runtime session changed before adapter relaunch")
+	}
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		return fmt.Errorf("quiesce operator access before adapter relaunch: %w", err)
+	}
+	return nil
+}
+
+func sessionCreationRejection(err error) (string, bool) {
+	creation, ok := errors.AsType[*sessionCreationError](err)
+	if !ok || creation.rejectedMessage == "" {
+		return "", false
+	}
+	return creation.rejectedMessage, true
 }
 
 func durableWorkspacePreparationFailed(expectResume bool, err error) error {
@@ -266,6 +348,13 @@ type sessionState struct {
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
+	// operators registers admitted operator processes (nil while starting).
+	// Leaving an operator-admitting state revokes and kills all of them.
+	operators   map[uint64]*operatorRegistration
+	operatorSeq uint64
+	// operatorsClosed is set by the freeze/deletion barrier and cleared when
+	// the session returns to an operator-admitting state.
+	operatorsClosed bool
 }
 
 type promptState struct {
@@ -296,6 +385,8 @@ type promptState struct {
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
+	// genai records the prompt's GenAI spans and metrics; nil when disabled.
+	genai *promptGenAI
 }
 
 type promptMutationExecutor interface {
@@ -457,6 +548,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		mux:                    http.NewServeMux(),
 		providerProxy:          proxy,
 		mcpProxy:               mcp,
+		genai:                  newSupervisorGenAI(cfg.GenAITracer, cfg.Meter, cfg.Provider.Kind, cfg.Provider.Model),
 		identityLock:           identityLock,
 		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
 		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,
@@ -494,6 +586,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}", s.handleResolvePermission)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", s.handleCancelPrompt)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
+	s.registerOperatorRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -519,7 +612,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	if r.Header.Get(OperatorAccessCapabilityHeader) != "1" {
+		capabilities.SupportsOperatorAccess = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
@@ -788,7 +884,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "requested provider profile is not available in this image", nil, false)
 		return
 	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+	if request.MCPConfiguration.ApprovalPolicy.NeedsRuntimeApprovals(request.MCPConfiguration.ToolPolicy) &&
+		!s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
 		return
 	}
@@ -917,6 +1014,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
 				statusCode: statusCode, code: code, message: message, retryable: retryable,
 			}
+		} else if rejection, rejected := sessionCreationRejection(createErr); rejected {
+			// Retrying the same workspace cannot succeed: fail the attempt
+			// instead of consuming another child identity per retry.
+			statusCode = http.StatusBadRequest
+			code = harnessv2.ErrorCodeInvalidRequest
+			retryable = false
+			message = rejection
+			replay = &failedCreateReplay{
+				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
+				statusCode: statusCode, code: code, message: message, retryable: retryable,
+			}
 		}
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
@@ -987,6 +1095,7 @@ func (s *Server) createSession(
 		if !cleanup {
 			return
 		}
+		paths.ReleaseWorkspaceIdentity()
 		if nativeJournalDir == "" {
 			_ = os.RemoveAll(paths.Root)
 			return
@@ -1190,6 +1299,11 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
+	if s.cfg.Provider.ValidateWorkspace != nil {
+		if err := s.cfg.Provider.ValidateWorkspace(paths); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationRejected(err)
+		}
+	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
@@ -1234,6 +1348,17 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	// Skills land in the session tree before ownership is finalized, so each
+	// private copy belongs to this session's identity alone. Claude's go to a
+	// shared plugin folder no session identity owns.
+	if err := materializeSessionSkills(s.cfg.Provider.Kind, s.cfg.Skills, skillMountRoot, paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("skill projection", err)
+	}
+	azureEnvironment, err := s.attachAzureGateway(mcpProxy, request.MCPConfiguration, paths.Home, uid, gid)
+	if err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
+	}
+	maps.Copy(envValues, azureEnvironment)
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1259,7 +1384,18 @@ func (s *Server) createSession(
 		}
 		resumeSessionID = snapshot.ProviderSessionID
 	}
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
+	// Operator file copies reopen the workspace by path once the child, which
+	// may own the session root, is running, so its identity is pinned here and
+	// the directory is held open until the session ends: a deleted workspace's
+	// inode number could otherwise be given to a directory the child creates.
+	// It must precede the ownership handoff: afterwards the 0700 child-owned
+	// session root is no longer traversable by a supervisor that runs without
+	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not
+	// change the directory's identity, and nothing later replaces it.
+	if err := recordSessionWorkspaceIdentity(&paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
+	}
+	if err := finalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
 	if projection.Instructions != nil {
@@ -1271,7 +1407,7 @@ func (s *Server) createSession(
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
 		// tree is re-assigned to exactly this session's UID.
-		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+		if err := finalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
@@ -1301,6 +1437,22 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	var (
+		validateAdapterRelaunch func() error
+		// relaunched is set once the RuntimeSession exists, before it is
+		// published; a relaunch happens only after that.
+		relaunched *acp.RuntimeSession
+	)
+	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
+		check := validateWorkspaceAsSessionChild(validate, paths, uid, gid)
+		sessionID := request.RuntimeSessionID
+		validateAdapterRelaunch = func() error {
+			if err := s.quiesceOperatorsBeforeRelaunch(sessionID, relaunched); err != nil {
+				return err
+			}
+			return check()
+		}
+	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
@@ -1314,16 +1466,20 @@ func (s *Server) createSession(
 			GID:           gid,
 			ClientOptions: acp.Options{MaxMessageBytes: s.cfg.Capabilities.Limits.MaxRequestBytes},
 		},
-		MCPServers:            []acp.MCPServer{mcpServer},
-		NewSessionMeta:        projection.NewSessionMeta,
-		ResumeSessionID:       resumeSessionID,
-		AuthMethodID:          s.cfg.Provider.AuthMethodID,
-		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
-		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
-		PermissionTimeout:     defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
-		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
-		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
-		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
+		MCPServers:      []acp.MCPServer{mcpServer},
+		NewSessionMeta:  projection.NewSessionMeta,
+		ResumeSessionID: resumeSessionID,
+		AuthMethodID:    s.cfg.Provider.AuthMethodID,
+		// The agent can write the workspace between prompts; an idle adapter
+		// restart must not launch the provider over configuration that
+		// creation would have refused.
+		ValidateAdapterRelaunch: validateAdapterRelaunch,
+		InitializeTimeout:       defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
+		PromptLease:             time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
+		PermissionTimeout:       defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
+		CancelGrace:             defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
+		MaxBufferedEvents:       s.cfg.Capabilities.Limits.MaxBufferedEvents,
+		MaxBufferedEventBytes:   supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
 		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
@@ -1332,6 +1488,7 @@ func (s *Server) createSession(
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	relaunched = runtimeSession
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
 		// creation that fails part-way leaves its binding pending, so the next
@@ -1609,7 +1766,7 @@ func (s *Server) beginDrainLocked(reason string, now time.Time) []drainCleanupCa
 			RequestedAt:          now,
 			Reason:               reason,
 		}
-		s.lifecycle = harnessv2.SupervisorLifecycleDraining
+		s.lifecycle = drainingLifecycle(s.lifecycle)
 	}
 	cleanup := make([]drainCleanupCandidate, 0, len(s.sessions))
 	for id, state := range s.sessions {
@@ -1659,6 +1816,10 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.failDrainCleanup(sessionID, state, "operator_quiesce_unproven")
+		return
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
@@ -1684,7 +1845,9 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
-		s.tombstoneSessionLocked(state, deletedAt)
+		tombstone := s.tombstoneSessionLocked(state, deletedAt)
+		tombstone.drainCleaned = true
+		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()
 }
@@ -1765,6 +1928,13 @@ func (s *Server) Close(ctx context.Context) error {
 				continue
 			}
 		}
+		if state.runtime != nil {
+			if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+				// Keep the session's resources; the pool is replaced instead.
+				errs = append(errs, fmt.Errorf("runtime session operator quiesce: %w", err))
+				continue
+			}
+		}
 		if state.mcpProxy != nil {
 			state.mcpProxy.close()
 		}
@@ -1823,7 +1993,7 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
-	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}
@@ -1846,7 +2016,17 @@ func (s *Server) BeginDrain(reason string) {
 		RequestedAt:          time.Now().UTC(),
 		Reason:               reason,
 	}
-	s.lifecycle = harnessv2.SupervisorLifecycleDraining
+	s.lifecycle = drainingLifecycle(s.lifecycle)
+}
+
+// drainingLifecycle is the lifecycle after a drain request. Terminating is
+// final: Close does not record a drain, and a later request must not reopen
+// what teardown, including operator admission, has closed.
+func drainingLifecycle(current harnessv2.SupervisorLifecycle) harnessv2.SupervisorLifecycle {
+	if current == harnessv2.SupervisorLifecycleTerminating {
+		return current
+	}
+	return harnessv2.SupervisorLifecycleDraining
 }
 
 // durableResumeTransitionAuthorized reports whether a committed durable

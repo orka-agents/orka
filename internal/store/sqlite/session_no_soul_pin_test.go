@@ -18,7 +18,7 @@ func TestSessionSoulPinExplicitAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "first", "first-uid", ""); err != nil {
+		if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "first", OwnerUID: "first-uid", Now: time.Now().UTC()}, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -29,25 +29,25 @@ func TestSessionSoulPinExplicitAbsence(t *testing.T) {
 	if transcript, err := s.LoadTranscript(ctx, "team", "s", 50); err != nil || len(transcript) != 0 {
 		t.Fatal("absence pin was exposed as transcript content")
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "first", "", ""); !errors.Is(err, store.ErrConflict) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "first", OwnerUID: "", Now: time.Now().UTC()}, ""); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("matching absence bypassed exact Task UID ownership: %v", err)
 	}
 	if err := s.ReleaseLock(ctx, "team", "s", "first", "first-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid"); err != nil {
+	if err := s.AcquireLock(ctx, "team", "s", "second", "second-uid", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "first", "first-uid", ""); !errors.Is(err, store.ErrConflict) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "first", OwnerUID: "first-uid", Now: time.Now().UTC()}, ""); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("old owner could pin the no-soul revision: %v", err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "second", "second-uid", agentcontext.Digest("new persona")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "second", OwnerUID: "second-uid", Now: time.Now().UTC()}, agentcontext.Digest("new persona")); !errors.Is(err, store.ErrSessionConfigurationMismatch) {
 		t.Fatalf("later Task acquired a first soul: %v", err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "second", "second-uid", ""); err != nil {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "second", OwnerUID: "second-uid", Now: time.Now().UTC()}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnsureSessionSoulWithLock(ctx, "team", "s", "second", "second-uid", " "); !errors.Is(err, store.ErrValidation) {
+	if err := s.EnsureSessionSoulWithLock(ctx, store.SessionOwnerWrite{Namespace: "team", Name: "s", OwnerName: "second", OwnerUID: "second-uid", Now: time.Now().UTC()}, " "); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("nonempty malformed digest was accepted: %v", err)
 	}
 	var anchors int

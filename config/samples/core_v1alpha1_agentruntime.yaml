@@ -19,7 +19,6 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: sample-external-v2-runtime
 spec:
-  contractVersion: orka.harness.v2
   deployment:
     mode: external-endpoint
     endpoint: http://sample-external-v2-runtime.default.svc.cluster.local:8080

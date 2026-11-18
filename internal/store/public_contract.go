@@ -143,7 +143,11 @@ type (
 	PromptResultReceipt                       = storagev1.PromptResultReceipt
 	PromptResultReceiptStore                  = storagev1.PromptResultReceiptStore
 	SessionStore                              = storagev1.SessionStore
+	SessionCreationReader                     = storagev1.SessionCreationReader
 	SessionTurnCommitter                      = storagev1.SessionTurnCommitter
+	AcquireChatTurnRequest                    = storagev1.AcquireChatTurnRequest
+	CommitSessionTurnRequest                  = storagev1.CommitSessionTurnRequest
+	SessionOwnerWrite                         = storagev1.SessionOwnerWrite
 	FencedSessionWriteStore                   = storagev1.FencedSessionWriteStore
 	GatewayEventStore                         = storagev1.GatewayEventStore
 	GatewayDeliveryStore                      = storagev1.GatewayDeliveryStore
@@ -151,7 +155,7 @@ type (
 	ArtifactStore                             = storagev1.ArtifactStore
 	RepositoryMonitorStore                    = storagev1.RepositoryMonitorStore
 	Message                                   = storagev1.Message
-	MessageStore                              = storagev1.MessageStore
+	ConsumeMessagesRequest                    = storagev1.ConsumeMessagesRequest
 	TaskJobIdentity                           = storagev1.TaskJobIdentity
 	TaskJobAuthorityStore                     = storagev1.TaskJobAuthorityStore
 	SessionRecord                             = storagev1.SessionRecord
@@ -181,11 +185,17 @@ type (
 	UsageStore                                = storagev1.UsageStore
 	Memory                                    = storagev1.Memory
 	MemoryFilter                              = storagev1.MemoryFilter
+	MemoryRecall                              = storagev1.MemoryRecall
 	MemoryProposal                            = storagev1.MemoryProposal
 	MemoryProposalFilter                      = storagev1.MemoryProposalFilter
 	MemoryProposalReview                      = storagev1.MemoryProposalReview
 	MemoryProposalApplyTarget                 = storagev1.MemoryProposalApplyTarget
 	MemoryProposalApplication                 = storagev1.MemoryProposalApplication
+	MemoryProposalTarget                      = storagev1.MemoryProposalTarget
+	MemoryConsolidationRun                    = storagev1.MemoryConsolidationRun
+	MemoryConsolidationCompletion             = storagev1.MemoryConsolidationCompletion
+	MemoryConsolidationStore                  = storagev1.MemoryConsolidationStore
+	MemoryProposalSource                      = storagev1.MemoryProposalSource
 	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
 )
@@ -256,12 +266,30 @@ const (
 	MemorySourceProposal              = storagev1.MemorySourceProposal
 	MemoryProposalTypeSkill           = storagev1.MemoryProposalTypeSkill
 	MemoryProposalTypeMemory          = storagev1.MemoryProposalTypeMemory
+	MemoryProposalTypeMerge           = storagev1.MemoryProposalTypeMerge
+	MemoryProposalTypeSupersede       = storagev1.MemoryProposalTypeSupersede
+	MemoryProposalTypeRetire          = storagev1.MemoryProposalTypeRetire
+	MaxMemoryProposalTargets          = storagev1.MaxMemoryProposalTargets
+	MaxMemoryProposalSources          = storagev1.MaxMemoryProposalSources
+	MemoryConsolidationRunning        = storagev1.MemoryConsolidationRunning
+	MemoryConsolidationModePropose    = storagev1.MemoryConsolidationModePropose
+	MemoryConsolidationCompleted      = storagev1.MemoryConsolidationCompleted
+	MemoryConsolidationSkipped        = storagev1.MemoryConsolidationSkipped
+	MaxMemoryConsolidationReportBytes = storagev1.MaxMemoryConsolidationReportBytes
+	MaxMemoryConsolidationProposals   = storagev1.MaxMemoryConsolidationProposals
+	MemoryConsolidationRunLease       = storagev1.MemoryConsolidationRunLease
+	MemoryConsolidationAbandoned      = storagev1.MemoryConsolidationAbandoned
+	MaxMemoryConsolidationInputBytes  = storagev1.MaxMemoryConsolidationInputBytes
+	MaxMemoryConsolidationSessions    = storagev1.MaxMemoryConsolidationSessions
 	MemoryProposalStatusPending       = storagev1.MemoryProposalStatusPending
 	MemoryProposalStatusAccepted      = storagev1.MemoryProposalStatusAccepted
 	MemoryProposalStatusRejected      = storagev1.MemoryProposalStatusRejected
 	MemoryProposalStatusArchived      = storagev1.MemoryProposalStatusArchived
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
+	MaxMessageBatch                   = storagev1.MaxMessageBatch
+	MaxMemoryRecallIDs                = storagev1.MaxMemoryRecallIDs
+	MaxResultBytes                    = storagev1.MaxResultBytes
 )
 
 var (
@@ -397,4 +425,10 @@ func ValidateUsageObservation(observation UsageObservation) error {
 
 func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) string {
 	return storagev1.UsageWorkID(namespace, monitorUID, repository, kind, number)
+}
+
+// IsMemoryConsolidationProposalType reports whether proposalType is one of
+// the consolidation proposal types, which change existing memories.
+func IsMemoryConsolidationProposalType(proposalType string) bool {
+	return storagev1.IsMemoryConsolidationProposalType(proposalType)
 }

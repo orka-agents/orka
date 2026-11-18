@@ -741,7 +741,7 @@ func TestRuntimePoolToolboxFailureClassification(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			reason, message, ok := runtimePoolToolboxFailure(tc.pods, tc.toolboxes, runtimePoolTestNow)
+			reason, message, ok := runtimePoolToolboxFailure(tc.pods, runtimePoolBoundImages(tc.toolboxes, nil), runtimePoolTestNow)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v (%q), want %v", ok, message, tc.ok)
 			}
@@ -769,16 +769,16 @@ func TestRuntimePoolToolboxImagePullRecoveryWindow(t *testing.T) {
 					pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
 				}
 				setToolboxPullObservation(t, &pod, runtimePoolTestNow)
-				_, _, immediate := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow)
+				_, _, immediate := runtimePoolToolboxFailure([]corev1.Pod{pod}, runtimePoolBoundImages(toolboxes, nil), runtimePoolTestNow)
 				if immediate != (reason == podWaitingReasonInvalidImageName) {
 					t.Fatalf("immediate failure = %t", immediate)
 				}
 				if reason != podWaitingReasonInvalidImageName {
-					if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow-time.Nanosecond)); failed {
+					if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, runtimePoolBoundImages(toolboxes, nil), runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow-time.Nanosecond)); failed {
 						t.Fatal("failed before retry window expired")
 					}
 				}
-				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow)); !failed {
+				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, runtimePoolBoundImages(toolboxes, nil), runtimePoolTestNow.Add(runtimePoolToolboxPullRetryWindow)); !failed {
 					t.Fatal("persistent pull failure was not bounded")
 				}
 				if copyMode {
@@ -786,7 +786,7 @@ func TestRuntimePoolToolboxImagePullRecoveryWindow(t *testing.T) {
 				} else {
 					pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 				}
-				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, toolboxes, runtimePoolTestNow.Add(2*runtimePoolToolboxPullRetryWindow)); failed {
+				if _, _, failed := runtimePoolToolboxFailure([]corev1.Pod{pod}, runtimePoolBoundImages(toolboxes, nil), runtimePoolTestNow.Add(2*runtimePoolToolboxPullRetryWindow)); failed {
 					t.Fatal("recovered pull retained a terminal failure")
 				}
 			})
@@ -830,10 +830,10 @@ func TestRuntimePoolToolboxPullObservationsSurviveControllerRestart(t *testing.T
 			setStatus(&pod, status)
 			r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool, &pod)
 			pods := []corev1.Pod{pod}
-			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), runtimePoolTestNow); failed {
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil), runtimePoolTestNow); failed {
 				t.Fatal("first pull failure inherited unrelated startup delay")
 			}
 			restarted := &RuntimePoolReconciler{Client: r.Client, ControllerEpoch: r.ControllerEpoch + 1,
@@ -843,10 +843,10 @@ func TestRuntimePoolToolboxPullObservationsSurviveControllerRestart(t *testing.T
 				t.Fatal(err)
 			}
 			pods = []corev1.Pod{*fresh}
-			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), restarted.now()); !failed {
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil), restarted.now()); !failed {
 				t.Fatal("persistent pull was not bounded across controller restart")
 			}
 			fresh = &pods[0]
@@ -855,7 +855,7 @@ func TestRuntimePoolToolboxPullObservationsSurviveControllerRestart(t *testing.T
 			if err := r.Status().Update(ctx, fresh); err != nil {
 				t.Fatal(err)
 			}
-			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 				t.Fatal(err)
 			}
 			if pods[0].Annotations[runtimePoolToolboxPullFailuresAnnotation] != "" {
@@ -867,10 +867,10 @@ func TestRuntimePoolToolboxPullObservationsSurviveControllerRestart(t *testing.T
 			if err := r.Status().Update(ctx, fresh); err != nil {
 				t.Fatal(err)
 			}
-			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+			if err := restarted.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), restarted.now()); failed {
+			if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil), restarted.now()); failed {
 				t.Fatal("new failure episode inherited an expired retry window")
 			}
 		})
@@ -1158,7 +1158,7 @@ func TestRuntimePoolToolboxPullDeadlineSurvivesWaitingReasonChanges(t *testing.T
 			}
 			r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool, &pod)
 			pods := []corev1.Pod{pod}
-			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+			if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 				t.Fatal(err)
 			}
 			first := pods[0].Annotations[runtimePoolToolboxPullFailuresAnnotation]
@@ -1173,14 +1173,14 @@ func TestRuntimePoolToolboxPullDeadlineSurvivesWaitingReasonChanges(t *testing.T
 				if err := r.Status().Update(ctx, current); err != nil {
 					t.Fatal(err)
 				}
-				if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolTestToolboxes()); err != nil {
+				if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil)); err != nil {
 					t.Fatal(err)
 				}
 				if current.Annotations[runtimePoolToolboxPullFailuresAnnotation] != first {
 					t.Fatalf("%s reset the same failure episode", reason)
 				}
 				if reason == podWaitingReasonImagePullBackOff || reason == podWaitingReasonRegistryUnavailable {
-					if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolTestToolboxes(), r.now()); !failed {
+					if _, _, failed := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(runtimePoolTestToolboxes(), nil), r.now()); !failed {
 						t.Fatalf("%s hid the expired pull deadline", reason)
 					}
 				}

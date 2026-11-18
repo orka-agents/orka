@@ -282,3 +282,35 @@ func TestAutonomousPauseBetweenIterationsStopsDispatch(t *testing.T) {
 		t.Fatal("a paused autonomous iteration started a Job")
 	}
 }
+
+// A memory consolidation run sends none of its Agent's prompts, so the
+// Agent's soul is neither read nor bound: a soul whose ConfigMap is missing
+// cannot block the run.
+func TestMemoryConsolidationRunNeverBindsTheAgentsSoul(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "curator", UID: "agent-uid", Generation: 1},
+		Spec: corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{
+			ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "missing", Key: "soul.md"},
+			Digest:       "sha256:" + strings.Repeat("0", 64)}}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "consolidate", UID: "task-uid", Generation: 1},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "curator"},
+			AI: &corev1alpha1.AISpec{Prompt: "Focus on releases", MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, agent).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	prepared, err := r.prepareAISoul(context.Background(), task, agent)
+	if err != nil || prepared != nil {
+		t.Fatalf("prepareAISoul = (%v, %v), want no soul and no error", prepared, err)
+	}
+	if task.Status.SoulBinding != nil {
+		t.Fatal("a consolidation run must not bind the Agent's soul")
+	}
+	if err := validatePreparedAISoul(task, agent, nil); err != nil {
+		t.Fatalf("validatePreparedAISoul = %v, want nil for a consolidation run", err)
+	}
+}

@@ -122,11 +122,13 @@ func currentSchemaStatements() []string {
 			PRIMARY KEY (namespace, task_uid, job_uid)
 		)`,
 		`CREATE TABLE IF NOT EXISTS results (
-			namespace  TEXT NOT NULL,
-			task_name  TEXT NOT NULL,
-			data       BLOB NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			namespace   TEXT NOT NULL,
+			task_name   TEXT NOT NULL,
+			data        BLOB NOT NULL,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch INTEGER NOT NULL DEFAULT 0,
+			write_seq   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
@@ -285,7 +287,9 @@ func currentSchemaStatements() []string {
 			created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_recalled_at TIMESTAMP,
-			recalled_count   INTEGER NOT NULL DEFAULT 0
+			recalled_count   INTEGER NOT NULL DEFAULT 0,
+			generation       INTEGER NOT NULL DEFAULT 1,
+			superseded_by    TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_recall
 			ON memories(namespace, deleted, disabled, updated_at DESC)`,
@@ -313,12 +317,33 @@ func currentSchemaStatements() []string {
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			reviewed_at       TIMESTAMP,
-			applied_at        TIMESTAMP
+			applied_at        TIMESTAMP,
+			targets_json      TEXT NOT NULL DEFAULT '[]',
+			sources_json      TEXT NOT NULL DEFAULT '[]'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_task
 			ON memory_proposals(namespace, task_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
+			namespace    TEXT NOT NULL,
+			task_uid     TEXT NOT NULL,
+			task_name    TEXT NOT NULL,
+			mode         TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL,
+			window_start TIMESTAMP NOT NULL,
+			window_end   TIMESTAMP NOT NULL,
+			input        BLOB,
+			report       BLOB,
+			created_at   TIMESTAMP NOT NULL,
+			completed_at TIMESTAMP,
+			task_deleted INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, task_uid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_consolidation_runs_cursor
+			ON memory_consolidation_runs(namespace, status, window_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_updated
+			ON sessions(namespace, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace   TEXT NOT NULL,
@@ -339,6 +364,8 @@ func currentSchemaStatements() []string {
 			size         INTEGER NOT NULL,
 			data         BLOB NOT NULL,
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch  INTEGER NOT NULL DEFAULT 0,
+			write_seq    INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name, filename)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,
