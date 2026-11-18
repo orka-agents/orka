@@ -174,6 +174,11 @@ const (
 	ServiceAccountToken     = "ORKA_SA_TOKEN"
 	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
 
+	// MemoryConsolidationMode makes a native AI worker run memory
+	// consolidation (ADR 0051) in the named mode, DryRun or Propose. The
+	// controller owns it.
+	MemoryConsolidationMode = "ORKA_MEMORY_CONSOLIDATION_MODE"
+
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"

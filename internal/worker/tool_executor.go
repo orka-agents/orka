@@ -140,7 +140,8 @@ type ToolExecutor struct {
 	checkedPolicies             map[string]outboundaccess.PolicyIdentity
 	// sendGate, when set, is judged after every lookup and credential
 	// resolution and immediately before the request leaves the process.
-	sendGate func(context.Context) error
+	sendGate        func(context.Context) error
+	gatewayTaskPass func(context.Context, *corev1alpha1.Tool) (string, error)
 
 	// substrateMCPRouter is set only inside the Orka manager, whose pod
 	// certificate is the router's allowlisted identity. Workers use
@@ -983,6 +984,14 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+		if e.gatewayTaskPass == nil {
+			return preparedToolRequest{}, errors.New("gateway task pass requires controller authority")
+		}
+		if err := ValidateGatewayTaskPassTool(tool); err != nil {
+			return preparedToolRequest{}, err
+		}
+	}
 	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
 		return e.prepareRemoteMCPRequest(ctx, tool, args, false)
 	}
@@ -1003,6 +1012,12 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 
 	var authToken string
+	if httpConfig.GatewayTaskPass {
+		authToken, err = e.gatewayTaskPass(ctx, tool)
+		if err != nil || authToken == "" {
+			return preparedToolRequest{}, errors.New("gateway task pass is unavailable")
+		}
+	}
 	if httpConfig.AuthSecretRef != nil {
 		token, err := e.getSecretKey(ctx, httpConfig.AuthSecretRef.Name, httpConfig.AuthSecretRef.Key)
 		if err != nil {
@@ -1055,7 +1070,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 
 	transactionToken := ""
 	policyBacked := tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil
-	if !policyBacked {
+	if !policyBacked && !httpConfig.GatewayTaskPass {
 		transactionToken, err = e.outboundTransactionToken(ctx, tool)
 		if err != nil {
 			return preparedToolRequest{}, err
@@ -1071,6 +1086,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		authToken:        authToken,
 		transactionToken: transactionToken,
 		redactionSecrets: compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
+		gateway:          httpConfig.GatewayTaskPass,
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
 		if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {

@@ -167,6 +167,18 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 	return nil
 }
 
+// validateOperatorAccessSecurityConfig fails operator workspace access closed
+// without Task provenance admission. The durable operator taint and the
+// workspace link it is read through are reserved acp.workspace.orka.ai/ Task
+// metadata; without the webhook any direct Task writer could strip them and
+// release a tainted workspace for publication or continuation.
+func validateOperatorAccessSecurityConfig(enabled, provenanceProtected bool) error {
+	if enabled && !provenanceProtected {
+		return fmt.Errorf("--operator-workspace-access-enabled requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the operator taint")
+	}
+	return nil
+}
+
 func validateStaticTrustedServiceReferences(
 	watchNamespace string,
 	trust outboundaccess.TrustConfig,
@@ -283,6 +295,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var providerUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
@@ -336,8 +349,10 @@ func main() {
 	var storageFlags storageconfig.Flags
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
+	var gatewayTaskPassCredentialsFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
+	var taskWebhookDeliveryWorkers int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -367,6 +382,7 @@ func main() {
 	var acpToolboxMountMethod string
 	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
+	var operatorWorkspaceAccessEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
@@ -513,6 +529,9 @@ func main() {
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
+		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -588,6 +607,8 @@ func main() {
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
+	flag.StringVar(&gatewayTaskPassCredentialsFile, "gateway-task-pass-credentials-file", "",
+		"Controller-only mounted JSON map of Gateway UID to {endpoint,token} for task passes. Endpoint pins the trusted HTTPS origin. Never mount in workers or use delivery bearers.")
 	storageFlags.AddFlags(flag.CommandLine)
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
@@ -602,6 +623,9 @@ func main() {
 		"Name of the Secret in --task-webhook-signing-namespace that holds the Ed25519 keys signing Task webhook "+
 			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
 			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
+	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
+		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
+			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -656,6 +680,11 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&operatorWorkspaceAccessEnabled, "operator-workspace-access-enabled", false,
+		"Serve the operator workspace debugging API (orka task exec / orka task cp). Each call additionally "+
+			"requires the ExecutionWorkspaceClass acp.workspace.orka.ai/operator-access opt-in and the dedicated "+
+			"tasks/exec or tasks/files permission. Write-capable access taints the session so it is never published, "+
+			"reused, checkpointed, or continued.")
 	flag.BoolVar(&acpSkillsEnabled, "acp-skills-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_SKILLS_ENABLED"), "true"),
 		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
@@ -951,6 +980,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
+		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
+			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
+		os.Exit(1)
+	}
 
 	if !enableLeaderElection {
 		fmt.Fprintln(os.Stderr, "--leader-elect=true is required for an isolated controller installation")
@@ -1145,6 +1179,10 @@ func main() {
 		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
 	}
+	if err := validateOperatorAccessSecurityConfig(operatorWorkspaceAccessEnabled, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "operator workspace access fails closed without Task provenance admission")
+		os.Exit(1)
+	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
 		taskProvenanceAdmissionEnabled,
 		workspaceClassUseAdmissionEnabled,
@@ -1226,24 +1264,8 @@ func main() {
 
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
-	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
-		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
-		Opencode: acpOpencodeRuntimeImage,
-	}, nil)
-	if err != nil {
-		// Not fatal: AI and container Tasks do not need these images.
-		// Agent Tasks fail closed until the controller restarts with
-		// registry access or digest-pinned runtime images.
-		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
-			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
-			"digests, or set them to empty strings to run without coding agents")
-	}
-	acpCodexRuntimeImage = images.Codex
-	acpClaudeRuntimeImage = images.Claude
-	acpCopilotRuntimeImage = images.Copilot
-	acpOpencodeRuntimeImage = images.Opencode
 	restConfig := ctrl.GetConfigOrDie()
-	acpToolboxPolicy, err := resolveACPToolboxPolicy(restConfig, acpToolboxesEnabled, acpToolboxAllowedRegistries,
+	acpToolboxPolicy, err := resolveACPToolboxPolicy(acpToolboxesEnabled, acpToolboxAllowedRegistries,
 		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
 	if err != nil {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
@@ -1279,11 +1301,19 @@ func main() {
 		mgrOptions.Cache = agentHostCacheOptions(mgrOptions.Cache, agentHostNamespace)
 	}
 
-	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
+	// Manager construction makes the first API server request: the cache
+	// resolves each per-object setting through discovery.
+	startupRetries := newStartupRetry(setupLog, time.Now())
+	mgr, err := retryStartupStep(processCtx, startupRetries, "Kubernetes API server", isTransientConnectError,
+		func() (ctrl.Manager, error) {
+			return ctrl.NewManager(restConfig, mgrOptions)
+		})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Reads the API server version, so it runs once the API server is reachable.
+	acpToolboxPolicy = checkACPToolboxImageVolumeSupport(restConfig, acpToolboxPolicy)
 	// Record whether Agent use is enforced before anything serves requests,
 	// so work created while it was off can never bind an Agent identity. A
 	// new period starts only once this controller leads.
@@ -1292,7 +1322,7 @@ func main() {
 		setupLog.Error(err, "unable to identify the leader election Lease")
 		os.Exit(1)
 	}
-	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
+	if err := establishAgentUseEnforcementPeriod(processCtx, startupRetries, mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
 		setupLog.Error(err, "unable to record the Agent use enforcement period")
 		os.Exit(1)
 	}
@@ -1749,11 +1779,30 @@ func main() {
 		setupLog.Error(err, "unable to add ACP artifact retention")
 		os.Exit(1)
 	}
-	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv()
+	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv(
+		processCtx, startupRetries)
 	if err != nil {
 		setupLog.Error(err, "unable to configure Workspace/Publisher client")
 		os.Exit(1)
 	}
+	// Tag resolution needs cluster DNS, which comes up with the node like the
+	// API server and the Publisher, so it runs after both are reachable.
+	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
+		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+		Opencode: acpOpencodeRuntimeImage,
+	}, nil)
+	if err != nil {
+		// Not fatal: AI and container Tasks do not need these images.
+		// Agent Tasks fail closed until the controller restarts with
+		// registry access or digest-pinned runtime images.
+		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
+			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
+			"digests, or set them to empty strings to run without coding agents")
+	}
+	acpCodexRuntimeImage = images.Codex
+	acpClaudeRuntimeImage = images.Claude
+	acpCopilotRuntimeImage = images.Copilot
+	acpOpencodeRuntimeImage = images.Opencode
 
 	sessionManager.SetGatewayEventStore(appStorage)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
@@ -1769,6 +1818,11 @@ func main() {
 		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), appStorage, appStorage, appStorage, gatewayConfig)
+	gatewayService.TaskPassCredentials, err = gatewayruntime.LoadTaskPassCredentials(gatewayTaskPassCredentialsFile)
+	if err != nil {
+		setupLog.Error(err, "unable to load gateway task pass credentials")
+		os.Exit(1)
+	}
 	gatewayService.APIReader = mgr.GetAPIReader()
 	if kubeControlStore != nil {
 		gatewayService.SessionCleanup = kubeControlStore
@@ -1920,9 +1974,11 @@ func main() {
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		TaskProvenanceProtected:      taskProvenanceProtected,
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
+		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,
@@ -1950,6 +2006,7 @@ func main() {
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
@@ -2390,6 +2447,7 @@ func main() {
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               appStorage,
 		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
@@ -2413,10 +2471,12 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled:      dashboardEnabled,
-		AgentUseAuthorization: agentUseAuthorizationEnabled,
-		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
-		TaskWebhookKeys:       taskWebhookKeys,
+		DashboardEnabled:         dashboardEnabled,
+		AgentUseAuthorization:    agentUseAuthorizationEnabled,
+		ProviderUseAuthorization: providerUseAuthorizationEnabled,
+		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
+		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		TaskWebhookKeys:          taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2434,8 +2494,10 @@ func main() {
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-		SubstrateMCPRouter: substrateMCPRouter,
-		Reader:             mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		TaskProvenanceProtected: taskProvenanceProtected,
+		GatewayService:          gatewayService,
+		SubstrateMCPRouter:      substrateMCPRouter,
+		Reader:                  mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
 		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,
@@ -2478,7 +2540,7 @@ func main() {
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
 				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil
@@ -2572,7 +2634,9 @@ func workspacePublicationReclaimer(publisherClient *publisherservice.Client) con
 	return publisherClient
 }
 
-func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64, error) {
+func workspacePublisherClientFromEnv(
+	ctx context.Context, retry startupRetry,
+) (*publisherservice.Client, []byte, int64, error) {
 	artifactSecretPath := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE"))
 	var artifactSecret []byte
 	if artifactSecretPath != "" {
@@ -2606,9 +2670,13 @@ func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64,
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	capabilities, err := client.Capabilities(ctx)
+	// The Publisher can restart with the node and be unreachable for a while.
+	capabilities, err := retryStartupStep(ctx, retry, "Workspace/Publisher", isTransientPublisherError,
+		func() (publisherservice.CapabilitiesResponse, error) {
+			readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return client.Capabilities(readCtx)
+		})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("read Workspace/Publisher capabilities: %w", err)
 	}
@@ -2632,12 +2700,9 @@ func envDurationDefault(name string, fallback time.Duration) time.Duration {
 	return value
 }
 
-// resolveACPToolboxPolicy builds the controller-wide toolbox policy. With the
-// imageVolume mount method it reads the API server version through discovery
-// (readable by every authenticated client) and, below 1.36, marks toolbox
-// mounting unavailable instead of silently falling back to copying.
+// resolveACPToolboxPolicy builds the controller-wide toolbox policy from flags.
+// It needs no API server, so invalid flags fail before startup waits for one.
 func resolveACPToolboxPolicy(
-	restConfig *rest.Config,
 	enabled bool,
 	allowedRegistries, imagePullSecrets, nodeSelector, mountMethod string,
 ) (controller.ACPToolboxPolicy, error) {
@@ -2661,8 +2726,18 @@ func resolveACPToolboxPolicy(
 		}
 		policy.NodeSelector = selector
 	}
-	if !enabled || method != controller.ACPToolboxMountImageVolume {
-		return policy, nil
+	return policy, nil
+}
+
+// checkACPToolboxImageVolumeSupport applies to the imageVolume mount method:
+// it reads the API server version through discovery (readable by every
+// authenticated client) and, below 1.36, marks toolbox mounting unavailable
+// instead of silently falling back to copying.
+func checkACPToolboxImageVolumeSupport(
+	restConfig *rest.Config, policy controller.ACPToolboxPolicy,
+) controller.ACPToolboxPolicy {
+	if !policy.Enabled || policy.MountMethod != controller.ACPToolboxMountImageVolume {
+		return policy
 	}
 	// Only imageVolume toolboxes depend on this capability check, so a failed
 	// discovery read must not take the whole controller down: fail closed by
@@ -2677,15 +2752,15 @@ func resolveACPToolboxPolicy(
 	}
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
-		return unavailable(fmt.Errorf("create discovery client: %w", err)), nil
+		return unavailable(fmt.Errorf("create discovery client: %w", err))
 	}
 	serverVersion, err := discoveryClient.ServerVersion()
 	if err != nil {
-		return unavailable(fmt.Errorf("read API server version: %w", err)), nil
+		return unavailable(fmt.Errorf("read API server version: %w", err))
 	}
 	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
 	if err != nil {
-		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)), nil
+		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err))
 	}
 	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
 		policy.UnavailableReason = fmt.Sprintf(
@@ -2694,7 +2769,7 @@ func resolveACPToolboxPolicy(
 		)
 		setupLog.Error(errors.New(policy.UnavailableReason), "toolbox image volumes are unavailable; Agents with toolboxes are rejected")
 	}
-	return policy, nil
+	return policy
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {
@@ -2823,7 +2898,7 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 // establishAgentUseEnforcementPeriod records this run's Agent use
 // enforcement with a direct client, since the manager's cache is not running
 // yet, and stores when the current enforcement period began.
-func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
+func establishAgentUseEnforcementPeriod(ctx context.Context, retry startupRetry, mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
 	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
 	if err != nil {
 		return err
@@ -2831,9 +2906,14 @@ func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Confi
 	period := &agentidentity.EnforcementPeriod{}
 	config.Enforcement = period
 	if !config.AgentUseAuthorization {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+		// This runs before the manager starts, so a connection error just
+		// after a node restart is retried within the shared startup budget.
+		// Deleting the marker is idempotent, so a repeated attempt is safe.
+		if _, err := retryStartupStep(ctx, retry, "Kubernetes API server", isTransientConnectError, func() (struct{}, error) {
+			attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			return struct{}{}, agentidentity.EndEnforcementPeriod(attemptCtx, directClient, namespace)
+		}); err != nil {
 			return err
 		}
 		period.Start(time.Time{})

@@ -4,8 +4,10 @@ Date: 2026-11-06
 
 ## Status
 
-Accepted. Replaces the best-effort, unsigned `spec.webhookURL` sender. It leaves
-per-receiver secrets, non-terminal events, and webhook egress through a proxy open.
+Accepted, partly superseded by [ADR 0054](0054-task-webhook-delivery-workers.md),
+which moves delivery attempts out of the Task reconcile. Replaces the best-effort,
+unsigned `spec.webhookURL` sender. It leaves per-receiver secrets, non-terminal
+events, and webhook egress through a proxy open.
 
 ## Context
 
@@ -99,3 +101,13 @@ lease.
 - Each attempt costs two Task status writes, and attempts are bounded.
 - The payload gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`.
   Existing fields are unchanged.
+- 2026-11-16: A parked agent Task (ADR 0041) is `Succeeded` for its own turn
+  while its work continues, so its notice follows `status.wait`. Nothing is sent
+  while the wait is active or after it resumes, since the continuation inherits
+  `spec.webhookURL` and reports. A wait that ends without resuming sends one
+  notice: `task.cancelled` if cancelled, and `task.failed` if expired or if it
+  was abandoned after a successful turn. `phase` in that body stays the Task's own
+  phase. The event set is unchanged.
+- 2026-11-16: [ADR 0053](0053-approval-webhook-events.md) adds opt-in approval
+  events through `spec.webhookEvents`, recorded in `status.approvalWebhooks` and
+  sent on this delivery path. Terminal notices are unchanged.

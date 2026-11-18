@@ -307,6 +307,9 @@ const (
 	// TaskDeliveryReasonCancellationRequestedAfterPublish records that publication
 	// won the durable CAS and must continue reconciliation despite cancellation.
 	TaskDeliveryReasonCancellationRequestedAfterPublish TaskDeliveryReason = "CancellationRequestedAfterPublish"
+	// TaskDeliveryReasonOperatorTainted records that publication was refused
+	// because operator access (orka task exec or cp) tainted the workspace.
+	TaskDeliveryReasonOperatorTainted TaskDeliveryReason = "OperatorTainted"
 )
 
 // TaskPullRequestReceipt is the bounded, non-secret receipt for an explicitly

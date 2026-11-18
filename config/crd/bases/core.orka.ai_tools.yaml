@@ -140,6 +140,11 @@ spec:
                     required:
                     - protocol
                     type: object
+                  gatewayTaskPass:
+                    description: |-
+                      GatewayTaskPass requires controller-only, per-call gateway authority.
+                      It cannot coexist with other authentication, headers, MCP or forwarding.
+                    type: boolean
                   headers:
                     additionalProperties:
                       type: string

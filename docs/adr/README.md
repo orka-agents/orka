@@ -67,6 +67,7 @@ not do with a running agent's memory. See
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
 | [0049](0049-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
 | [0041](0041-data-only-parked-turns.md) | Release runtime capacity while an agent waits: data-only parked turns | Accepted |
+| [0044](0044-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
 | [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
 | [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
 
@@ -116,10 +117,13 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 | [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
 | [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
-| [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted |
+| [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted, partly superseded by 0054 |
 | [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted |
 | [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
 | [0050](0050-agent-policy-discovery.md) | Tell agents which policies apply before they act | Proposed |
+| [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
+| [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
+| [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
 
 ### Agent hosts and the Agent Host Protocol
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -27,6 +28,12 @@ func authorizeKubernetesTaskCreate(ctx context.Context, reader client.Reader, cl
 		return err
 	}
 	if err := authorizeTaskAgentUse(ctx, clientset, userInfo, task); err != nil {
+		return err
+	}
+	if err := authorizeTaskProviderUse(ctx, reader, clientset, userInfo, task); err != nil {
+		return err
+	}
+	if err := authorizeTaskMemoryConsolidation(ctx, clientset, userInfo, task); err != nil {
 		return err
 	}
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
@@ -106,11 +113,32 @@ func authorizeKubernetesResourceAction(
 	userInfo *UserInfo,
 	namespace, verb, group, resource, name string,
 ) error {
+	allowed, err := kubernetesResourceActionAllowed(ctx, clientset, userInfo, namespace, verb, group, resource, name)
+	if err != nil || !allowed {
+		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	return nil
+}
+
+// errKubernetesAccessReviewUnavailable reports a SubjectAccessReview that did
+// not return a usable answer, as opposed to an explicit denial.
+var errKubernetesAccessReviewUnavailable = errors.New("kubernetes access review is unavailable")
+
+// kubernetesResourceActionAllowed is authorizeKubernetesResourceAction's
+// three-way form for read-side hints: it reports allowed, denied, or (with an
+// error) that the review gave no usable answer. Callers that enforce access
+// must use authorizeKubernetesResourceAction, which refuses in both cases.
+func kubernetesResourceActionAllowed(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	userInfo *UserInfo,
+	namespace, verb, group, resource, name string,
+) (bool, error) {
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
-		return nil
+		return true, nil
 	}
 	if kubernetesClientsetIsNil(clientset) {
-		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+		return false, nil
 	}
 	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
 	for key, values := range userInfo.Extra {
@@ -125,10 +153,16 @@ func authorizeKubernetesResourceAction(
 			},
 		},
 	}, metav1.CreateOptions{})
-	if err != nil || review == nil || !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
-		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	if err != nil || review == nil {
+		return false, errKubernetesAccessReviewUnavailable
 	}
-	return nil
+	if review.Status.Denied {
+		return false, nil
+	}
+	if review.Status.EvaluationError != "" {
+		return false, errKubernetesAccessReviewUnavailable
+	}
+	return review.Status.Allowed, nil
 }
 
 // workerServiceAccountNames are the ServiceAccount names worker Pods run as
@@ -189,4 +223,54 @@ func isWorkerServiceAccount(userInfo *UserInfo) bool {
 	}
 	name := userInfo.Username[strings.LastIndex(userInfo.Username, ":")+1:]
 	return slices.Contains(workerServiceAccountNames, name)
+}
+
+// memoriesResource is the Kubernetes resource name of durable memories.
+const memoriesResource = "memories"
+
+// authorizeTaskMemoryConsolidation checks, as the original caller, the grants
+// a memory consolidation run needs: it reads every user's Sessions and the
+// namespace's memories, and in Propose mode creates memory proposals. The API
+// creates Tasks with its own identity, so the admission policy alone would
+// check the controller rather than the caller. It fails closed for any caller
+// it cannot review.
+func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.AI == nil || task.Spec.AI.MemoryConsolidation == nil {
+		return nil
+	}
+	denied := fiber.NewError(fiber.StatusForbidden,
+		"not authorized to create a memory consolidation run: it needs list and get on sessions, list on memories, "+
+			"and create on memoryproposals in Propose mode")
+	// The caller is reviewed as its canonical identity: a TokenReview user as
+	// Kubernetes authenticated it, and an OIDC or transaction-token caller
+	// as issuer#subject with issuer-prefixed groups, never as a display name
+	// it may have chosen, as for Agent use.
+	subject, reviewable := agentUseReviewSubject(userInfo)
+	if !reviewable || strings.TrimSpace(subject.User) == "" || strings.TrimSpace(task.Namespace) == "" || kubernetesClientsetIsNil(clientset) {
+		return denied
+	}
+	checks := []authorizationv1.ResourceAttributes{
+		{Verb: apiObjectList, Resource: usageSessionResource},
+		{Verb: gatewayVerbGet, Resource: usageSessionResource},
+		{Verb: apiObjectList, Resource: memoriesResource},
+	}
+	if task.Spec.AI.MemoryConsolidation.Mode == corev1alpha1.MemoryConsolidationPropose {
+		checks = append(checks, authorizationv1.ResourceAttributes{Verb: externalToolCreateVerb, Resource: "memoryproposals"})
+	}
+	for _, check := range checks {
+		check.Namespace = task.Namespace
+		check.Group = corev1alpha1.GroupVersion.Group
+		check.Version = corev1alpha1.GroupVersion.Version
+		spec := subject
+		spec.Groups = append([]string(nil), subject.Groups...)
+		spec.ResourceAttributes = &check
+		review, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{Spec: spec},
+			metav1.CreateOptions{})
+		if err != nil || review == nil || !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
+			log.Info("memory consolidation run authorization denied", "user", subject.User, "namespace", task.Namespace,
+				"task", task.Name, "verb", check.Verb, "resource", check.Resource)
+			return denied
+		}
+	}
+	return nil
 }

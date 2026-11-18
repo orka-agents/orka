@@ -168,6 +168,12 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.updateRemoteMCPStatus(ctx, tool, nil)
 	}
 
+	if tool.Spec.HTTP.GatewayTaskPass {
+		// There is no controller-wide probe authority; issuance and readiness
+		// are verified under the bound Task on every call.
+		return r.updateStatus(ctx, tool, true, "")
+	}
+
 	// Perform health check on the HTTP endpoint
 	if err := r.healthCheck(ctx, tool); err != nil {
 		logger.Info("Tool health check failed", "tool", tool.Name, "error", err.Error())
@@ -213,6 +219,9 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	// Validate description
 	if tool.Spec.Description == "" {
 		return fmt.Errorf("description is required")
+	}
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+		return workerexecutor.ValidateGatewayTaskPassTool(tool)
 	}
 	if aitools.IsRemoteMCP(tool) {
 		if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {

@@ -32,6 +32,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
@@ -87,20 +88,24 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
-	TaskProvenanceProtected   bool
-	ControllerEpochs          ControllerEpochFenceSource
-	E2EPromptFaultEnabled     bool
-	Connectors                ConnectorConfig
-	ConnectorTools            ConnectorToolExecutionConfig
+	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	HealthChecker            store.HealthChecker
+	Clientset                kubernetes.Interface
+	APIReader                client.Reader
+	TaskProvenanceProtected  bool
+	ControllerEpochs         ControllerEpochFenceSource
+	E2EPromptFaultEnabled    bool
+	Connectors               ConnectorConfig
+	ConnectorTools           ConnectorToolExecutionConfig
+	// OperatorAccess configures `orka task exec` / `orka task cp`.
+	OperatorAccess OperatorAccessConfig
 	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
 	// Substrate MCP actor Tools through the manager's router identity.
 	SubstrateMCPProxy SubstrateMCPProxyConfig
@@ -114,6 +119,11 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
@@ -141,6 +151,8 @@ type Server struct {
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
 
+	memoryConsolidationStore store.MemoryConsolidationStore
+
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }
@@ -150,6 +162,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -172,6 +185,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore: config.MemoryProposalStore,
 		ExecutionEventStore: config.ExecutionEventStore,
 		GatewayEventStore:   config.GatewayEventStore,
+
+		memoryConsolidationStore: config.MemoryConsolidationStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -191,6 +206,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -264,6 +280,14 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if isOperatorFileUpload(header) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: int(operatoraccess.MaxFileBytes), ReadTimeout: 10 * time.Minute}
+	}
+	if isOperatorFileDownload(header) {
+		// The streamed copy-out body is bounded like its supervisor transfer;
+		// a client that stops reading cannot pin the response and its audit.
+		return fasthttp.RequestConfig{WriteTimeout: operatorFileTransferTimeout}
+	}
 	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
@@ -277,6 +301,30 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
 	}
 	return config
+}
+
+// isOperatorFileUpload matches PUT /api/v1/tasks/{task}/files, whose bounded
+// body is streamed to the runtime supervisor.
+func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
+	return string(header.Method()) == fiber.MethodPut && isOperatorFilesPath(header)
+}
+
+// isOperatorFileDownload matches GET /api/v1/tasks/{task}/files, whose body is
+// streamed from the runtime supervisor.
+func isOperatorFileDownload(header *fasthttp.RequestHeader) bool {
+	return string(header.Method()) == fiber.MethodGet && isOperatorFilesPath(header)
+}
+
+func isOperatorFilesPath(header *fasthttp.RequestHeader) bool {
+	var uri fasthttp.URI
+	if uri.Parse(header.Host(), header.RequestURI()) != nil {
+		return false
+	}
+	// Fiber routes case-insensitively, so this must match every spelling the
+	// upload route accepts.
+	parts := strings.Split(strings.Trim(string(uri.PathOriginal()), "/"), "/")
+	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], externalToolTaskResource) && strings.EqualFold(parts[4], "files")
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
@@ -400,13 +448,25 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
 	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
 	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	// Cross-Task attention read models, computed on read for one namespace.
+	api.Get("/attention", s.handlers.ListAttention)
+	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.GetTaskMemoryConsolidationReport)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
 	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
+	// each call also needs the class opt-in and the dedicated tasks/exec or
+	// tasks/files permission.
+	// Their audit envelope precedes route authorization so dedicated
+	// permission denials are audited too.
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.HandleOperatorExec)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.HandleOperatorFileDownload)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.HandleOperatorFileUpload)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
@@ -606,15 +666,16 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:                  s.client,
-				APIReader:               s.config.APIReader,
-				MemoryStore:             s.MemoryStore,
-				MemoryProposalStore:     s.MemoryProposalStore,
-				ExecutionEventStore:     s.ExecutionEventStore,
-				GatewayEventStore:       s.GatewayEventStore,
-				GatewayService:          s.config.GatewayService,
-				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
-				ConnectorTools:          s.config.ConnectorTools,
+				Client:                   s.client,
+				APIReader:                s.config.APIReader,
+				MemoryStore:              s.MemoryStore,
+				MemoryProposalStore:      s.MemoryProposalStore,
+				MemoryConsolidationStore: s.memoryConsolidationStore,
+				ExecutionEventStore:      s.ExecutionEventStore,
+				GatewayEventStore:        s.GatewayEventStore,
+				GatewayService:           s.config.GatewayService,
+				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
+				ConnectorTools:           s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -655,6 +716,8 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
+		internal.Post("/memory-consolidation/:namespace/begin", s.internalHandlers.BeginMemoryConsolidation)
+		internal.Post("/memory-consolidation/:namespace/complete", s.internalHandlers.CompleteMemoryConsolidation)
 	}
 }
 

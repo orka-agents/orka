@@ -76,7 +76,9 @@ backlogged runs.
 
 - **History is pruned automatically.** Only the most recent successful and
   failed children (per the history limits) are kept; raise the limits if you
-  audit past runs.
+  audit past runs. A run whose
+  [approval notices](task-webhooks.md#approval-events) are still pending is
+  kept until they are delivered or fail, even with a limit of `0`.
 - **`Forbid` is the safe default** for agent work. An agent run that overlaps
   itself — two children editing the same repository, for example — rarely does
   what you want. Use `Allow` only for idempotent, read-only work.

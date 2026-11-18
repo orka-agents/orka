@@ -836,7 +836,7 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 			_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
 			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				_, _ = d.cancelPreparedPublication(cancelCtx, task)
+				_, _ = d.cancelPreparedPublication(cancelCtx, task, "")
 				stop()
 				cancel()
 				return
@@ -2312,7 +2312,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		status := corev1alpha1.TaskDeliveryStatus{
 			State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
-			Reason: "WorkspaceValidationFailed", Message: validationMessage, LastTransitionTime: nowMeta(),
+			Reason: acpWorkspaceValidationFailedReason, Message: validationMessage, LastTransitionTime: nowMeta(),
 		}
 		_ = d.patchDeliveryStatus(ctx, task, status)
 		if err := d.guardNativeSessionSettlement(ctx, task, sessionExecution, nil); err != nil {
@@ -6508,7 +6508,9 @@ func runtimeSessionStartFailureMessage(err error) string {
 		"runtime session failed during provider proxy setup",
 		"runtime session failed during MCP proxy setup",
 		"runtime session failed during provider environment setup",
-		"runtime session failed during provider adapter initialization":
+		"runtime session failed during provider adapter initialization",
+		acp.WorkspaceValidationFailedMessage,
+		acp.OpenCodeProjectConfigurationRejectedMessage:
 		return clientErr.Message
 	default:
 		return fallback
@@ -6521,6 +6523,10 @@ func runtimeSessionStartFailureMessage(err error) string {
 // operators do not need controller logs to learn why a delta was refused.
 // The supervisor already bounds and categorizes the message; only the client
 // error text is used and it is re-bounded here.
+// acpWorkspaceValidationFailedReason is the delivery reason for a Task whose
+// runtime rejected its workspace delta, so nothing was published.
+const acpWorkspaceValidationFailedReason = "WorkspaceValidationFailed"
+
 func acpWorkspaceValidationFailureMessage(err error) string {
 	const generic = "workspace validation failed before a trusted delta was established"
 	var clientErr *harnessv2.ClientError
