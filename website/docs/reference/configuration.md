@@ -688,11 +688,24 @@ readiness and Task binding fail closed.
 | `idleTimeout` | class lifecycle | Idle suspended workspaces expire; idle `Ready` workspaces take the class default action. |
 | `maxLifetime` | class lifecycle | Hard cleanup bound, always. |
 | `spec.retention.maxSuspendedWorkspaces` | provider-owned workspace profile | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
+| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. No default. |
 
 A queued continuation may take a still-`Ready` workspace directly. Deletion policies that
 retain data past workspace deletion are rejected.
 
-ADRs 0026–0030 carry the full contract.
+`suspendAfterDetach` must be positive and at most one hour, and shorter than the class
+`idleTimeout` and `maxLifetime` when they are set. The class must allow Suspend with a
+`DataOnly` profile and Session reuse. The window is frozen into each new workspace, so
+changing the profile affects only new workspaces. A follow-up turn that arrives within the
+window attaches the running workspace and skips the cold resume. A turn that parked, an
+uncommitted, failed, or quarantined workspace, and a workspace tainted by operator access
+never stay warm; a taint during the window ends it at once and deletes the workspace,
+and its runtime is stopped without a data-preserving suspension. A warm workspace does not
+count against `maxSuspendedWorkspaces`. If that cap is full when the window ends, the
+runtime stops and the workspace stays `Ready`; retention applies the pending Suspend once
+the cap has room. Each warm workspace holds one private worker Pod for up to the window.
+
+ADRs 0026–0030 and 0055 carry the full contract.
 
 ### External API OIDC authentication
 

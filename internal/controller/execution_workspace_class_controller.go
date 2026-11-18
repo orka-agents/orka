@@ -293,7 +293,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		if err != nil {
 			return providerName, reasonRequiredFeatures, "provider profile is unavailable", err
 		}
-		if _, _, err := externalACPProfilePolicy(profile, class); err != nil {
+		if _, err := externalACPProfilePolicy(profile, class); err != nil {
 			return providerName, reasonRequiredFeatures, err.Error(), nil
 		}
 	}

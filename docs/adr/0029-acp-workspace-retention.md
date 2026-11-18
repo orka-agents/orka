@@ -7,6 +7,9 @@ Date: 2026-08-22
 Accepted. Implements the ACP-scoped subset of issue #424 on the class binding
 (ADR 0026) and the cold-suspension contracts (ADRs 0027/0028).
 
+Amended by [ADR 0055](0055-substrate-warm-detach-window.md): retention also ends a
+warm-detach window, before and independently of `idleTimeout`.
+
 ## Context
 
 Suspended workspaces retain provider compute objects, durable volumes, and

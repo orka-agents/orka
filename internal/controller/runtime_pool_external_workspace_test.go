@@ -9,11 +9,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -923,6 +925,158 @@ func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *te
 	}
 	if err := workspaceprovider.ValidateWorkloadRetirement(workspace.Spec.Workload, workspace.Status.Allocation, workspace.Spec.Retirement, workspacev1alpha1.WorkloadRetirementStop); err != nil {
 		t.Fatalf("provider Stop validation rejects the quarantine authorization: %v", err)
+	}
+}
+
+// retireExternalPoolInstance drives the drain of the served instance until
+// Core authorizes its exact retirement.
+func (f *externalRuntimePoolFixture) retireExternalPoolInstance(t *testing.T, pod *corev1.Pod) *workspacev1alpha1.ExecutionWorkspace {
+	t.Helper()
+	for range 6 {
+		runtimePoolReconcile(t, f.r, f.pool)
+		if f.supervisor.drainCalls > 0 {
+			f.supervisor.probe = runtimePoolValidProbe(f.pool, pod, "external-boot", true)
+		}
+		if workspace := f.currentWorkspace(t); workspace.Spec.Retirement != nil {
+			return workspace
+		}
+	}
+	t.Fatalf("no exact retirement was authorized: %#v", runtimePoolTestGetPool(t, f.r, f.pool).Status)
+	return nil
+}
+
+func (f *externalRuntimePoolFixture) suspendCapableWorkspace(t *testing.T, mutate func(*workspacev1alpha1.ExecutionWorkspace)) {
+	t.Helper()
+	workspace := f.currentWorkspace(t)
+	workspace.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
+	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = "DataOnly"
+	if mutate != nil {
+		mutate(workspace)
+	}
+	if err := f.r.Update(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *externalRuntimePoolFixture) taintWorkspace(t *testing.T) {
+	t.Helper()
+	workspace := f.currentWorkspace(t)
+	workspace.Annotations[operatoraccess.TaintAnnotation] = "x"
+	if err := f.r.Update(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Operator access forfeits retention (ADR 0044). A tainted workspace of a
+// Suspend-capable class must never earn a Suspend retirement, whichever
+// controller observes the taint first.
+func TestExternalRuntimePoolTaintAuthorizesStopForSuspendCapableClass(t *testing.T) {
+	ctx := context.Background()
+	t.Run("warm window scale-down before retention", func(t *testing.T) {
+		f := newExternalRuntimePoolFixture(t)
+		f.suspendCapableWorkspace(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339Nano)
+		})
+		_, pod := f.serve(t)
+		demand := &WorkspaceRuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.Client}
+		if _, err := demand.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.workspace)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != 1 {
+			t.Fatalf("open warm window released the runtime: replicas=%d", got)
+		}
+		// The taint lands during the window and the pool reconciles before
+		// retention deletes the workspace.
+		f.taintWorkspace(t)
+		if _, err := demand.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.workspace)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != 0 {
+			t.Fatalf("tainted warm workspace still holds the runtime: replicas=%d", got)
+		}
+		workspace := f.retireExternalPoolInstance(t, &pod)
+		if workspace.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementStop {
+			t.Fatalf("tainted warm workspace retirement = %s, want Stop", workspace.Spec.Retirement.Action)
+		}
+		if f.supervisor.drainReason != harnessv2.DrainReasonWorkspaceRetirement {
+			t.Fatalf("drain reason = %q, want a retirement that does not preserve data", f.supervisor.drainReason)
+		}
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			t.Fatalf("pool retirement changed desired state to %s", workspace.Spec.DesiredState)
+		}
+	})
+	t.Run("attached workspace rollover", func(t *testing.T) {
+		f := newExternalRuntimePoolFixture(t)
+		f.suspendCapableWorkspace(t, nil)
+		_, pod := f.serve(t)
+		f.taintWorkspace(t)
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		pool.Annotations[externalRuntimeRetirementRequestedAnnotation] = booleanTrueValue
+		if err := f.r.Update(ctx, &pool); err != nil {
+			t.Fatal(err)
+		}
+		workspace := f.retireExternalPoolInstance(t, &pod)
+		if workspace.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementStop {
+			t.Fatalf("tainted workspace rollover retirement = %s, want Stop", workspace.Spec.Retirement.Action)
+		}
+		if err := workspaceprovider.ValidateWorkloadRetirement(workspace.Spec.Workload, workspace.Status.Allocation, workspace.Spec.Retirement, workspacev1alpha1.WorkloadRetirementStop); err != nil {
+			t.Fatalf("provider Stop validation rejects the taint authorization: %v", err)
+		}
+	})
+	t.Run("Suspend authorized before the taint stays stable", func(t *testing.T) {
+		f := newExternalRuntimePoolFixture(t)
+		f.suspendCapableWorkspace(t, nil)
+		_, pod := f.serve(t)
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		pool.Spec.DesiredReplicas = 0
+		if err := f.r.Update(ctx, &pool); err != nil {
+			t.Fatal(err)
+		}
+		workspace := f.retireExternalPoolInstance(t, &pod)
+		if workspace.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend {
+			t.Fatalf("untainted retirement = %s, want Suspend", workspace.Spec.Retirement.Action)
+		}
+		authorized := workspace.Spec.Retirement.DeepCopy()
+		// The provider may already be capturing; a later taint does not
+		// rewrite the exact authorization mid-flight.
+		f.taintWorkspace(t)
+		runtimePoolReconcile(t, f.r, f.pool)
+		if got := f.currentWorkspace(t).Spec.Retirement; !reflect.DeepEqual(got, authorized) {
+			t.Fatalf("taint rewrote an authorized Suspend: %#v, want %#v", got, authorized)
+		}
+	})
+}
+
+func TestExternalRetirementActionRefusesSuspendForTaintedWorkspace(t *testing.T) {
+	identity := workspacev1alpha1.InstanceIdentity{AllocationID: "allocation", InstanceID: "instance", RequestRevision: "rev"}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{operatoraccess.TaintAnnotation: "x"}}}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachSuspend}
+	workspace.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 2}
+	workspace.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: 2, Identity: identity}
+	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+		t.Fatalf("tainted retirement = %s, want Stop", got)
+	}
+	if externalWorkspaceSuspendable(workspace) {
+		t.Fatal("tainted workspace announced a data-only eviction suspension")
+	}
+	if got := externalRetirementAction(workspace, true); got != workspacev1alpha1.WorkloadRetirementDelete {
+		t.Fatalf("tainted deletion retirement = %s, want Delete", got)
+	}
+	// Only a Suspend authorized for the exact current instance is kept.
+	workspace.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: 1, Identity: identity, Action: workspacev1alpha1.WorkloadRetirementSuspend}
+	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+		t.Fatalf("stale Suspend authorization kept for a tainted workspace: %s", got)
+	}
+	workspace.Spec.Retirement.Sequence = 2
+	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementSuspend {
+		t.Fatalf("exact in-flight Suspend authorization = %s, want it kept", got)
+	}
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+		t.Fatalf("quarantined tainted retirement = %s, want Stop", got)
 	}
 }
 
