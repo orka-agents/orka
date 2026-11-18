@@ -183,7 +183,13 @@ func (b *ahpBackend) workspaceFor(ctx context.Context, principal ahphost.Princip
 	if !b.workspaces.enabled() {
 		return nil, false
 	}
-	return b.workspaces.running(ctx, principal)
+	pod, ok := b.workspaces.running(ctx, principal)
+	// A workspace whose token cannot be known is not read: its files could
+	// carry that token unredacted.
+	if !ok || b.workspaces.recoverToken(ctx, principal, pod) != nil {
+		return nil, false
+	}
+	return pod, true
 }
 
 // readWorkspaceFile serves a file from the user's running workspace. running

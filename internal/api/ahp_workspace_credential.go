@@ -8,11 +8,13 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/orka-agents/orka/internal/ahphost"
@@ -121,6 +123,47 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 		return time.Time{}, false
 	}
 	return now, true
+}
+
+// recoverToken remembers the token a workspace already holds, once per Pod
+// for this process: an earlier run of this server may have installed it, and
+// what the workspace shows, in terminals and file reads, is redacted for it.
+// An error means the token could not be read, and nothing in the workspace
+// may be shown until it is.
+func (w *ahpWorkspaces) recoverToken(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod) error {
+	if w.b == nil || w.b.cfg.RepositoryCredential == nil {
+		return nil
+	}
+	w.mu.Lock()
+	done := w.recovered[principal.UserKey] == pod.UID
+	w.mu.Unlock()
+	if done {
+		return nil
+	}
+	read := w.readToken
+	if read == nil {
+		read = w.execReadToken
+	}
+	token, err := read(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("read the workspace's git token: %w", err)
+	}
+	if token = strings.TrimSpace(token); token != "" && !strings.ContainsAny(token, "\n\r") {
+		w.rememberToken(principal.UserKey, token)
+	}
+	w.mu.Lock()
+	if w.recovered == nil {
+		w.recovered = map[string]types.UID{}
+	}
+	w.recovered[principal.UserKey] = pod.UID
+	w.mu.Unlock()
+	return nil
+}
+
+// execReadToken reads the workspace's token file; a missing file is no token.
+func (w *ahpWorkspaces) execReadToken(ctx context.Context, pod *corev1.Pod) (string, error) {
+	out, err := w.output(ctx, pod, 4<<10, ahpShell, "-c", `[ -f "$1" ] || exit 0; exec cat -- "$1"`, "sh", ahpGitTokenFile)
+	return string(out), err
 }
 
 // rememberToken records a token given to a user's workspace. Terminal output

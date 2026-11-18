@@ -194,6 +194,9 @@ type ahpBackend struct {
 	lifecycle map[string]*sync.Mutex
 	// changes serializes, per user, changes to session changesets.
 	changes map[string]*sync.Mutex
+	// releasing holds, per session changeset, contents released by a change
+	// that could not delete them, for the next change to retry.
+	releasing map[string]map[string]bool
 	// sessionRetry is the first wait before a session update the store
 	// refused is tried again; each next wait doubles, up to 32 times it.
 	// Zero is a second.
@@ -1060,6 +1063,7 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	// after.
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	delete(b.releasing, hash)
 	return b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordSession, session)
 }
 
