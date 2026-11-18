@@ -292,9 +292,10 @@ the agent unclassified:
 - Orka's own local authorization refusals are 403s too, such as the compatibility API's
   "not authorized". They carry neither the authorizer's form nor an admission form.
 
-**Orka's own policies without a `reason`.** These guard controller-owned objects, so
-agents don't normally reach them:
+**Orka's own policies without a `reason`.** These guard controller-owned objects, or hold
+the AI worker to the objects it creates itself, so agents don't normally reach them:
 
+- `config/admission/ai_worker_identity_protection.yaml`;
 - `config/admission/gateway_task_protection.yaml`;
 - `config/admission/acp_workspace_lease_protection.yaml`;
 - `config/admission/namespace_mode_protection.yaml`.

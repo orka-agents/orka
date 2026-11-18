@@ -93,12 +93,12 @@ beforehand.
   - It binds evidence to the exact Pod, container and RuntimeSession, and checks the
     prompt's start time.
 
-**The #512 pattern.** The storage provider work for #512 (open PRs #887 and #917) proposes
-a pattern for pluggable providers in Orka, `pkg/storage`:
+**The #512 pattern.** The storage provider work for #512 sets a pattern for pluggable
+providers in Orka, `pkg/storage/v1`:
 
-- a contract module with no Orka imports;
-- a shared provider test suite;
-- a gRPC wire;
+- a contract package with no Orka imports;
+- a shared provider test suite, `pkg/storage/v1/storagetest`;
+- a gRPC wire, in open PR #1165;
 - an in-process default.
 
 ## Decision
@@ -366,7 +366,7 @@ A provider failure never produces `allow` by itself.
 **Out-of-process providers** implement the same operations as the gRPC service
 `orka.policy.v1alpha1.DiscoveryProvider`. It uses mTLS and bounded messages. It is a
 gRPC contract of the same kind as `orka.enforcement.v1` (#952) and `orka.storage.v1`
-(#917).
+(#1165).
 
 The default providers need nothing extra installed:
 
