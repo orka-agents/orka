@@ -71,7 +71,7 @@ not do with a running agent's memory. See
 | [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
 | [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
 | [0055](0055-substrate-warm-detach-window.md) | Keep a detached Substrate workspace warm before suspending it | Accepted |
-| [0056](0056-substrate-shared-workers.md) | Let opted-in Substrate profiles share workers, with interim termination evidence | Accepted (interim) |
+| [0056](0056-substrate-shared-workers.md) | Let opted-in Substrate profiles share workers on a dedicated install, with interim termination evidence | Accepted (interim) |
 
 ### The Substrate control plane
 
