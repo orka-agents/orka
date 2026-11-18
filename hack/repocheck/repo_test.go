@@ -8,6 +8,7 @@ package repocheck
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,17 @@ func trackedFiles(t *testing.T, root string) []trackedFile {
 	}
 	if len(files) == 0 {
 		t.Fatal("git ls-files listed no files")
+	}
+	// The test cache tracks only files a test opens or stats. Stat the
+	// index so staging a file invalidates a cached pass.
+	cmd = exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", "index")
+	cmd.Dir = root
+	index, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --git-path index: %v", err)
+	}
+	if _, err := os.Stat(strings.TrimSpace(string(index))); err != nil {
+		t.Fatalf("stat git index: %v", err)
 	}
 	return files
 }

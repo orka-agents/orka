@@ -43,7 +43,7 @@ linters:
           pkg: ^go\.opentelemetry\.io/otel/trace$
           msg: RecordError exports the error message; use tracing.RecordSpanError.
         # Scoped to internal/ by the exclusion rules below.
-        - pattern: ^log\.(Print|Fatal|Panic)(f|ln)?$
+        - pattern: ^log\.(Logger\.)?(Print|Fatal|Panic)(f|ln)?$
           pkg: ^log$
           msg: "Unstructured logging: internal/ packages log through controller-runtime; use log := log.FromContext(ctx); log.Info(\"msg\", \"key\", val), or return the error."
         - pattern: ^fmt\.Print(f|ln)?$
