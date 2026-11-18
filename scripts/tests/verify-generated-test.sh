@@ -51,9 +51,9 @@ STUB_GENERATOR='echo "// regenerated" >> api/v1alpha1/zz_generated.deepcopy.go; 
 [[ ${status} -eq 1 ]] || { echo "FAIL: stale files exited ${status}, want 1" >&2; exit 1; }
 assert_contains "${fixture_dir}/out" "Generated files are stale."
 assert_contains "${fixture_dir}/out" "api/v1alpha1/zz_generated.deepcopy.go"
-assert_contains "${fixture_dir}/out" "fix: make generate"
+assert_contains "${fixture_dir}/out" "(fix: make generate)"
 assert_contains "${fixture_dir}/out" "config/crd/bases/core.orka.ai_new.yaml"
-assert_contains "${fixture_dir}/out" "fix: make manifests"
+assert_contains "${fixture_dir}/out" "(fix: make manifests)"
 assert_contains "${fixture_dir}/out" "Never edit generated files by hand."
 
 # A dirty tree is refused before any generator runs.

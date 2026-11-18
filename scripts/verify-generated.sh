@@ -46,7 +46,7 @@ fi
   echo
   echo "Generated files are stale. These files differ from what their generators produce:"
   while IFS= read -r file; do
-    printf '  %-90s fix: %s\n' "${file}" "$(regenerate_command "${file}")"
+    printf '  %s (fix: %s)\n' "${file}" "$(regenerate_command "${file}")"
   done <<<"${stale}"
   echo
   echo "Never edit generated files by hand. Change the source (*_types.go, kubebuilder"

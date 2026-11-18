@@ -80,7 +80,7 @@ func TestKubebuilderScaffoldMarkerListIsComplete(t *testing.T) {
 		listed[m.file+"\x00"+m.marker] = true
 	}
 	for _, f := range trackedFiles(t, root) {
-		if f.path == "AGENTS.md" || f.path == "hack/repocheck/scaffold_test.go" || f.mode != "100644" && f.mode != "100755" {
+		if f.mode != "100644" && f.mode != "100755" {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(root, f.path))
@@ -92,7 +92,8 @@ func TestKubebuilderScaffoldMarkerListIsComplete(t *testing.T) {
 		}
 		for _, marker := range scaffoldLines(data) {
 			if !listed[f.path+"\x00"+marker] {
-				t.Errorf("%s: scaffold marker %q is not listed; add {%q, %q} to scaffoldMarkers in hack/repocheck/scaffold_test.go.",
+				t.Errorf("%s: scaffold marker %q is not listed; "+
+					"add {%q, %q} to scaffoldMarkers in hack/repocheck/scaffold_test.go.",
 					f.path, marker, f.path, marker)
 			}
 		}
