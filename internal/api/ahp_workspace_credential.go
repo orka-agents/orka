@@ -166,28 +166,56 @@ func (w *ahpWorkspaces) execReadToken(ctx context.Context, pod *corev1.Pod) (str
 	return string(out), err
 }
 
-// rememberToken records a token given to a user's workspace. Terminal output
-// stays redacted for every token the workspace was given while this server
-// runs: a token may never expire, and a shell can hold one long after it was
-// replaced. The list grows only with distinct tokens, and a person's token
-// changes only when it is refreshed near its expiry.
-func (w *ahpWorkspaces) rememberToken(userKey, token string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if slices.Contains(w.tokens[userKey], token) {
-		return
-	}
-	if w.tokens == nil {
-		w.tokens = map[string][]string{}
-	}
-	w.tokens[userKey] = append(w.tokens[userKey], token)
+// ahpGivenToken is a token given to a workspace, and when it last was.
+type ahpGivenToken struct {
+	value string
+	at    time.Time
 }
 
-// tokensFor returns the git tokens a user's workspace was given, oldest first.
+const (
+	// ahpTokenRedactionKeep is how long output stays redacted for a token
+	// after it was last given. A token that is never replaced, such as one
+	// from a Secret, is given again at every refresh and so stays; one that
+	// was replaced was a rotating user token, expired well before this.
+	ahpTokenRedactionKeep = 24 * time.Hour
+	// ahpTokenRedactionMax bounds the tokens output is redacted for.
+	ahpTokenRedactionMax = 128
+)
+
+// rememberToken records a token given to a user's workspace. Terminal output
+// and file reads stay redacted for it until ahpTokenRedactionKeep after it was
+// last given, as a shell can hold a token long after it was replaced; at most
+// ahpTokenRedactionMax tokens are kept, the most recently given.
+func (w *ahpWorkspaces) rememberToken(userKey, token string) {
+	now := time.Now()
+	if w.b != nil && w.b.now != nil {
+		now = w.b.now()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.tokens == nil {
+		w.tokens = map[string][]ahpGivenToken{}
+	}
+	given := slices.DeleteFunc(w.tokens[userKey], func(t ahpGivenToken) bool {
+		return t.value == token || now.Sub(t.at) > ahpTokenRedactionKeep
+	})
+	given = append(given, ahpGivenToken{value: token, at: now})
+	if extra := len(given) - ahpTokenRedactionMax; extra > 0 {
+		given = given[extra:]
+	}
+	w.tokens[userKey] = given
+}
+
+// tokensFor returns the git tokens a user's workspace was given, least
+// recently given first.
 func (w *ahpWorkspaces) tokensFor(userKey string) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return slices.Clone(w.tokens[userKey])
+	tokens := make([]string, 0, len(w.tokens[userKey]))
+	for _, given := range w.tokens[userKey] {
+		tokens = append(tokens, given.value)
+	}
+	return tokens
 }
 
 // execWriteToken writes a token to the workspace. It travels on standard

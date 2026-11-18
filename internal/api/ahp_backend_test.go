@@ -2203,6 +2203,74 @@ func TestAHPChangesRetryContentsTheyCouldNotDrop(t *testing.T) {
 	require.Equal(t, []string{v2, v3}, stored(), "the next change drops what earlier ones could not")
 }
 
+// ahpFlakyEmitter refuses changeset actions while armed and records the rest.
+type ahpFlakyEmitter struct {
+	ahpActionsEmitter
+	fail atomic.Bool
+}
+
+func (e *ahpFlakyEmitter) Emit(ctx context.Context, channel string, actions ...ahptypes.StateAction) error {
+	if e.fail.Load() {
+		return errors.New("journal unavailable")
+	}
+	return e.ahpActionsEmitter.Emit(ctx, channel, actions...)
+}
+
+// A file change clients could not be shown, as the journal refused it, is
+// shown with the session's next change, as the file is stored then.
+func TestAHPChangesShowAgainWhatClientsMissed(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	principal := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Namespace: ahpTestNamespace}
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, principal.UserKey, ahpRecordSession, ahpTestSession, &record))
+	emitter := &ahpFlakyEmitter{}
+	newChanges := func() *ahpChanges {
+		return &ahpChanges{b: env.backend, ctx: ctx, principal: principal, session: record, emit: emitter}
+	}
+	shown := func() map[string]string {
+		emitter.mu.Lock()
+		defer emitter.mu.Unlock()
+		state := map[string]string{}
+		for _, action := range emitter.actions {
+			switch a := action.Value.(type) {
+			case *ahptypes.ChangesetFileSetAction:
+				state[a.File.Id] = *a.File.Edit.After.Content.Nonce
+			case *ahptypes.ChangesetFileRemovedAction:
+				delete(state, a.FileId)
+			}
+		}
+		return state
+	}
+	dir := ahpTestDir[len("file://"):]
+	v0, v1, v2 := "v0\n", "v1\n", "v2\n"
+	a, b := ahpHash(dir + "/a.go")[:16], ahpHash(dir + "/b.go")[:16]
+
+	emitter.fail.Store(true)
+	changes := newChanges()
+	changes.change(func() {
+		changes.setFile(dir+"/a.go", &v0, &v1, false)
+		changes.setFile(dir+"/b.go", &v0, &v1, false)
+	})
+	require.Empty(t, shown())
+	emitter.fail.Store(false)
+	changes = newChanges()
+	changes.change(func() { changes.setFile(dir+"/b.go", &v1, &v0, true) })
+	require.Equal(t, map[string]string{a: "sha256:" + ahpHash(v1)}, shown(),
+		"the missed a.go is shown as stored, and b.go, edited back, is not")
+
+	emitter.fail.Store(true)
+	changes = newChanges()
+	changes.change(func() { changes.setFile(dir+"/a.go", &v1, &v2, false) })
+	emitter.fail.Store(false)
+	changes = newChanges()
+	changes.change(func() {})
+	require.Equal(t, map[string]string{a: "sha256:" + ahpHash(v2)}, shown())
+	require.NotContains(t, shown(), b, "b.go no longer differs")
+}
+
 func TestAHPChangesFollowTheBranch(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
