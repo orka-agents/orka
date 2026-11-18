@@ -1450,12 +1450,13 @@ artifact-fence cases run only in process.
   the provider runs, the server refuses a call that leaves it out or names it
   twice (`VALIDATION`) or names another dataset (`DATASET_MISMATCH`), and,
   when its provider's `Describe` fails, a call that names one (the provider's
-  error, or `UNAVAILABLE`). The server compares against the dataset its
-  provider last described: it describes the provider on the first call that
-  names a dataset and again on every `Describe`, so a provider whose dataset
-  can change while it serves is described again before the check sees the
-  change. A write is still checked by its envelope's dataset. A client without
-  a dataset can call only `Describe` and `HealthCheck`, and a bound client
+  error, or `UNAVAILABLE`). The server describes the provider again before
+  every read or administrative call that names a dataset, so a provider whose
+  dataset changed while it serves never answers such a call for the dataset
+  it served before. A write is compared against the dataset the provider last
+  described, on the first call that names a dataset or on any later
+  `Describe` or read, and is still checked by its envelope's dataset. A
+  client without a dataset can call only `Describe` and `HealthCheck`, and a bound client
   leaves the dataset off those two, so its `Describe` reports whichever
   dataset the server serves, as in process. Responses name the contract, the
   server's revision and, once the server knows it, the serving dataset; a
@@ -1465,8 +1466,9 @@ artifact-fence cases run only in process.
   same way, unless the server can send that error before its dataset check
   (`UNAUTHENTICATED`, `CONTRACT_MISMATCH`, `UNSUPPORTED_FIELD`,
   `DATASET_MISMATCH`, `UNAVAILABLE` or `INCOMPATIBLE`), so another dataset's
-  `NOT_FOUND` or refused write is never taken as an answer for its own. A write's `WriteEnvelope` travels as the
-  binary header `orka-storage-envelope-bin`, and the server puts it in the
+  `NOT_FOUND` or refused write is never taken as an answer for its own. A
+  write's `WriteEnvelope` travels as the binary header
+  `orka-storage-envelope-bin`, and the server puts it in the
   provider's context with `WithWriteEnvelope`. A read or an administrative
   call never carries one: the client leaves it off, and the server refuses one
   (`VALIDATION`). A call made under a Task data fence carries the
@@ -1498,7 +1500,8 @@ artifact-fence cases run only in process.
   `ErrConflict` and an `ErrDatasetDetached` that matches `ErrNotReady`. Only
   `VALIDATION`, `FENCED`, `PRECONDITION_FAILED` and `CONFLICT` forward their
   message, bounded and stripped of control characters: the first three the
-  message of the typed error, so `errors.As` finds the text it finds in process,
+  message of the typed error, whether the provider wrapped its value or a
+  pointer to it, so `errors.As` finds the text it finds in process,
   and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
   its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
   a second status detail. A failed authentication is `ErrUnauthenticated`, and a

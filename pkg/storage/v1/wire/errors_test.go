@@ -153,19 +153,24 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 	require.ErrorIs(t, precondition, storagev1.ErrConflict)
 
 	// The provider's wrapping text stays on the server: the client finds the
-	// typed message an in-process caller finds, whether the provider returned
-	// the typed error's value or a pointer to it.
-	for _, typed := range []struct{ err, sentinel error }{
-		{storagev1.ValidationErrorf("x"), storagev1.ErrValidation},
-		{&storagev1.ValidationError{Message: "x"}, storagev1.ErrValidation},
-		{storagev1.FencedErrorf("x"), storagev1.ErrFenced},
-		{&storagev1.FencedError{Message: "x"}, storagev1.ErrFenced},
-		{storagev1.PreconditionFailedErrorf("x"), storagev1.ErrPreconditionFailed},
-		{&storagev1.PreconditionFailedError{Message: "x"}, storagev1.ErrPreconditionFailed},
+	// typed message an in-process caller finds.
+	for _, typed := range []error{
+		storagev1.ValidationErrorf("x"), storagev1.FencedErrorf("x"), storagev1.PreconditionFailedErrorf("x"),
 	} {
-		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed.err))
-		require.Equal(t, "x", wrapped.Error(), "%T", typed.err)
-		require.ErrorIs(t, wrapped, typed.sentinel)
+		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed))
+		require.Equal(t, "x", wrapped.Error())
+		require.ErrorIs(t, wrapped, typed)
+	}
+	// A provider that returns a pointer to the typed error is treated as one
+	// that returns the value.
+	for typed, sentinel := range map[error]error{
+		&storagev1.ValidationError{Message: "x"}:         storagev1.ErrValidation,
+		&storagev1.FencedError{Message: "x"}:             storagev1.ErrFenced,
+		&storagev1.PreconditionFailedError{Message: "x"}: storagev1.ErrPreconditionFailed,
+	} {
+		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed))
+		require.Equal(t, "x", wrapped.Error(), "%T", typed)
+		require.ErrorIs(t, wrapped, sentinel, "%T", typed)
 	}
 	bare := serverToClient(t, writeMethod, fmt.Errorf("plan: %w", storagev1.ErrValidation))
 	require.ErrorIs(t, bare, storagev1.ErrValidation)

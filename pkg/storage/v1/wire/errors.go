@@ -180,7 +180,7 @@ func asTyped[T error, P interface {
 	if typed, ok := errors.AsType[T](err); ok {
 		return typed, true
 	}
-	if typed, ok := errors.AsType[P](err); ok && (*T)(typed) != nil {
+	if typed, ok := errors.AsType[P](err); ok && typed != nil {
 		return *typed, true
 	}
 	var zero T
@@ -189,7 +189,9 @@ func asTyped[T error, P interface {
 
 // typedMessage returns the message of the typed error T in err's chain, so
 // the client's errors.As finds the message an in-process caller finds. A
-// provider that wrapped the bare sentinel instead sends its error's text.
+// provider that wrapped the bare sentinel instead sends its error's text. A
+// provider that returned a pointer to the typed error gets the same treatment
+// as one that returned the value, so its wrapping text never crosses.
 func typedMessage[T error, P interface {
 	*T
 	error
