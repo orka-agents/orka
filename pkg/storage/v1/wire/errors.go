@@ -172,10 +172,18 @@ func contractStatus(err error) (encoded error, ok bool) {
 
 // typedMessage returns the message of the typed error T in err's chain, so
 // the client's errors.As finds the message an in-process caller finds. A
-// provider that wrapped the bare sentinel instead sends its error's text.
-func typedMessage[T error](err error) string {
+// provider that wrapped the bare sentinel instead sends its error's text. A
+// provider that returned a pointer to the typed error gets the same treatment
+// as one that returned the value, so its wrapping text never crosses.
+func typedMessage[T error, P interface {
+	*T
+	error
+}](err error) string {
 	if typed, ok := errors.AsType[T](err); ok {
 		return typed.Error()
+	}
+	if pointer, ok := errors.AsType[P](err); ok && pointer != nil {
+		return (*pointer).Error()
 	}
 	return err.Error()
 }

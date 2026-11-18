@@ -161,6 +161,17 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 		require.Equal(t, "x", wrapped.Error())
 		require.ErrorIs(t, wrapped, typed)
 	}
+	// A provider that returns a pointer to the typed error is treated as one
+	// that returns the value.
+	for typed, sentinel := range map[error]error{
+		&storagev1.ValidationError{Message: "x"}:         storagev1.ErrValidation,
+		&storagev1.FencedError{Message: "x"}:             storagev1.ErrFenced,
+		&storagev1.PreconditionFailedError{Message: "x"}: storagev1.ErrPreconditionFailed,
+	} {
+		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed))
+		require.Equal(t, "x", wrapped.Error(), "%T", typed)
+		require.ErrorIs(t, wrapped, sentinel, "%T", typed)
+	}
 	bare := serverToClient(t, writeMethod, fmt.Errorf("plan: %w", storagev1.ErrValidation))
 	require.ErrorIs(t, bare, storagev1.ErrValidation)
 	require.Equal(t, "plan: validation error", bare.Error(), "a bare sentinel sends the provider's text")

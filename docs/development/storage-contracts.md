@@ -1494,7 +1494,8 @@ artifact-fence cases run only in process.
   `ErrConflict` and an `ErrDatasetDetached` that matches `ErrNotReady`. Only
   `VALIDATION`, `FENCED`, `PRECONDITION_FAILED` and `CONFLICT` forward their
   message, bounded and stripped of control characters: the first three the
-  message of the typed error, so `errors.As` finds the text it finds in process,
+  message of the typed error, whether the provider wrapped its value or a
+  pointer to it, so `errors.As` finds the text it finds in process,
   and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
   its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
   a second status detail. A failed authentication is `ErrUnauthenticated`, and a
