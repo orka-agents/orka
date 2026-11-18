@@ -51,6 +51,10 @@
 // that cannot serve the contract revision a call needs, or the dataset's
 // schema, returns [ErrIncompatible]; neither commits anything.
 //
+// [VerificationStore] additionally has domain outcomes that can durably
+// invalidate evidence. Those outcomes are recorded and replayed with their
+// operation receipts rather than treated as storage-level refusals.
+//
 // # Validation and health
 //
 // Before Orka uses a provider, and again while it runs, it validates the
@@ -144,8 +148,9 @@ const (
 	// [MemoryStore.RecordMemoryRecall]. Revision 10 adds memory generations
 	// and the consolidation proposal types, whose application changes the
 	// memories they target only at the generations they name. Revision 11
-	// adds [MemoryConsolidationStore].
-	ContractRevision = 11
+	// adds [MemoryConsolidationStore]. Revision 12 adds the private, fenced
+	// [VerificationStore] family to state.v1.
+	ContractRevision = 12
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -178,6 +183,7 @@ type StateProvider interface {
 
 	ResultStore
 	PromptResultReceiptStore
+	VerificationStore
 	PlanStore
 	MessageStore
 

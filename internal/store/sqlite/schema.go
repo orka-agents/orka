@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 
@@ -51,7 +52,11 @@ func initializeSchema(db *sql.DB) error {
 	}
 	statements := currentSchemaStatements()
 	if len(existing) > 0 {
-		if err := validateSchema(existing, statements); err != nil {
+		core, _, err := splitOptionalValidationSchema(existing)
+		if err != nil {
+			return err
+		}
+		if err := validateSchema(core, statements); err != nil {
 			return err
 		}
 		if version != SchemaVersion {
@@ -60,7 +65,7 @@ func initializeSchema(db *sql.DB) error {
 		if _, err := readDataset(tx); err != nil {
 			return err
 		}
-		_, err := readDatasetBinding(context.Background(), tx)
+		_, err = readDatasetBinding(context.Background(), tx)
 		return err
 	}
 	if version != 0 {
@@ -75,6 +80,40 @@ func initializeSchema(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Only complete known optional layouts, or the standalone initialization lock,
+// are separated from core. Unknown objects remain in core and fail its exact
+// validation/fingerprint checks; a prefix never exempts an object.
+func splitOptionalValidationSchema(existing map[string]string) (core, optional map[string]string, err error) {
+	var statements []string
+	_, patchInitialized := existing["patch_verification_runs"]
+	_, kubernetesInitialized := existing["validation_submissions"]
+	if patchInitialized || kubernetesInitialized {
+		statements = append(statements, patchVerificationWriteLockSchema)
+		statements = append(statements, patchVerificationSchemaStatements()...)
+	} else if _, locked := existing["patch_verification_write_lock"]; locked {
+		statements = append(statements, patchVerificationWriteLockSchema)
+	}
+	if kubernetesInitialized {
+		statements = append(statements, kubernetesValidationTableStatements()...)
+		statements = append(statements, kubernetesValidationIndexStatements()...)
+	}
+	core, optional = maps.Clone(existing), make(map[string]string)
+	for _, statement := range statements {
+		name, _, err := schemaObjectDefinition(statement)
+		if err != nil {
+			return nil, nil, err
+		}
+		if definition, exists := core[name]; exists {
+			optional[name] = definition
+			delete(core, name)
+		}
+	}
+	if err := validateSchema(optional, statements); err != nil {
+		return nil, nil, err
+	}
+	return core, optional, nil
 }
 
 func readSchemaVersion(q schemaQuerier) (int, error) {
@@ -128,14 +167,11 @@ func validateSchema(existing map[string]string, statements []string) error {
 		return fmt.Errorf("unsupported SQLite schema: #700 layout at b5265055 (161 objects) requires changes to existing connector tables; no rewrite path is supported; see website/docs/operations/upgrading.md (https://github.com/orka-agents/orka/blob/main/website/docs/operations/upgrading.md)")
 	}
 	for _, statement := range statements {
-		// Every definition uses CREATE ... IF NOT EXISTS <name>. SQLite omits
-		// IF NOT EXISTS when it stores the definition in sqlite_schema.
-		prefix, definition, ok := strings.Cut(statement, "IF NOT EXISTS ")
-		if !ok {
-			return fmt.Errorf("invalid current schema definition")
+		name, definition, err := schemaObjectDefinition(statement)
+		if err != nil {
+			return err
 		}
-		name := strings.Fields(definition)[0]
-		if normalizeSchemaSQL(existing[name]) != normalizeSchemaSQL(prefix+definition) {
+		if normalizeSchemaSQL(existing[name]) != normalizeSchemaSQL(definition) {
 			return fmt.Errorf("unsupported SQLite schema: %s is missing or incompatible; only exact documented layouts can be upgraded through OpenLockedStore", name)
 		}
 	}
@@ -143,6 +179,17 @@ func validateSchema(existing map[string]string, statements []string) error {
 		return fmt.Errorf("unsupported SQLite schema: unexpected schema objects; only exact documented layouts can be upgraded through OpenLockedStore")
 	}
 	return nil
+}
+
+func schemaObjectDefinition(statement string) (name, definition string, err error) {
+	// Every definition uses CREATE ... IF NOT EXISTS <name>. SQLite omits
+	// IF NOT EXISTS when it stores the definition in sqlite_schema.
+	prefix, definition, ok := strings.Cut(statement, "IF NOT EXISTS ")
+	fields := strings.Fields(definition)
+	if !ok || len(fields) == 0 {
+		return "", "", fmt.Errorf("invalid current schema definition")
+	}
+	return strings.ToLower(fields[0]), prefix + definition, nil
 }
 
 // Compare SQL tokens so formatting does not affect reopening. Preserve string

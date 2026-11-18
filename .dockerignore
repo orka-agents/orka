@@ -19,6 +19,7 @@
 !workers/
 !workers/**/
 !workers/**/*.go
+!workers/general/gitlauncher/*.c
 !examples/
 !*.go
 **/*_test.go

@@ -114,9 +114,11 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader  client.Reader
-	Scheme     *runtime.Scheme
-	JobBuilder *JobBuilder
+	APIReader                 client.Reader
+	Scheme                    *runtime.Scheme
+	JobBuilder                *JobBuilder
+	ValidationTaskReconciler  ValidationTaskReconciler
+	RemediationTaskReconciler RemediationTaskReconciler
 	// TaskProvenanceProtected is the existing built-in/external admission declaration.
 	// Child gateway grants require it; root grants do not.
 	TaskProvenanceProtected      bool
@@ -334,6 +336,30 @@ func taskPhaseCountsTowardConcurrency(phase corev1alpha1.TaskPhase) bool {
 	}
 }
 
+type ValidationTaskReconciler interface {
+	ReconcileValidationTask(context.Context, *corev1alpha1.Task) (ctrl.Result, bool, error)
+}
+
+type RemediationTaskReconciler interface {
+	ReconcileRemediationTask(context.Context, *corev1alpha1.Task) (ctrl.Result, bool, error)
+}
+
+func (r *TaskReconciler) reconcileStandaloneTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if r.RemediationTaskReconciler != nil {
+		result, handled, err := r.RemediationTaskReconciler.ReconcileRemediationTask(ctx, task)
+		if handled || err != nil {
+			return result, true, err
+		}
+	}
+	if r.ValidationTaskReconciler != nil {
+		result, handled, err := r.ValidationTaskReconciler.ReconcileValidationTask(ctx, task)
+		if handled || err != nil {
+			return result, true, err
+		}
+	}
+	return ctrl.Result{}, false, nil
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -356,6 +382,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		stopErr := r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 		_ = r.cascadeTaskCancellation(ctx, task)
 		return ctrl.Result{}, stopErr
+	}
+	if result, handled, err := r.reconcileStandaloneTask(ctx, task); handled {
+		return result, err
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}

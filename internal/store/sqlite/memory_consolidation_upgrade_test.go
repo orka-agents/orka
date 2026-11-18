@@ -156,7 +156,7 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	require.GreaterOrEqual(t, first, 0)
 	// The final step fails, so every step from version 5 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 5, schema172, steps[first:]), "no_such_function",
+	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 5, schema172, nil, steps[first:]), "no_such_function",
 		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
@@ -195,7 +195,7 @@ func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	require.Equal(t, schema172, schemaFingerprint(schema))
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema172, migrationsFrom(t, schema172)))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema172, nil, migrationsFrom(t, schema172)))
 	require.NoError(t, conn.Close())
 
 	for _, state := range version3StoreStates {
@@ -206,7 +206,7 @@ func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			beforeRows := applicationRows(t, db)
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema172, migrationsFrom(t, schema172)),
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema172, nil, migrationsFrom(t, schema172)),
 				"unsupported SQLite schema version 5 before upgrade")
 			require.NoError(t, conn.Close())
 			after, err := readDataset(db)

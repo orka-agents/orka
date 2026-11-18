@@ -16,7 +16,7 @@ func TestContractPackagesDoNotImportOrkaInternals(t *testing.T) {
 		t.Fatal("cannot locate test source")
 	}
 	contractDir := filepath.Dir(file)
-	for _, dir := range []string{contractDir, filepath.Join(contractDir, "storagetest")} {
+	for _, dir := range []string{contractDir, filepath.Join(contractDir, "storagetest"), filepath.Join(contractDir, "verification")} {
 		pkg, err := build.ImportDir(dir, 0)
 		if err != nil {
 			t.Fatalf("read package %s: %v", dir, err)

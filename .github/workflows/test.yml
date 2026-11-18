@@ -53,6 +53,32 @@ jobs:
             bash "scripts/tests/${suite}-test.sh"
           done
 
+  remediation-worker:
+    name: Remediation worker isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Load the pinned compiler fixture
+        run: docker pull docker.io/library/golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+
+      - name: Build isolated remediation worker images
+        run: |
+          docker build --platform linux/amd64 -f workers/validation/Dockerfile -t orka-validation-helper:ci .
+          docker build --platform linux/amd64 -f workers/application/Dockerfile -t orka-application-worker:ci .
+
+      - name: Exercise real supervisor, guard, listener, and cleanup
+        run: make test-remediation-worker
+
   test:
     name: Go Tests
     runs-on: ubuntu-latest
@@ -89,6 +115,30 @@ jobs:
           path: |
             cover.out
             coverage-functions.txt
+
+  remediation-windows:
+    name: Remediation Windows credential files
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Test real Windows credential and patch ACLs
+        shell: pwsh
+        run: |
+          if (-not (Test-Path internal/uiembed/dist)) {
+            New-Item -ItemType Directory -Path internal/uiembed/dist | Out-Null
+            Set-Content internal/uiembed/dist/index.html '<!doctype html><title>test stub</title>'
+          }
+          go test ./cmd/cli -run '^TestRemediationWindows' -count=1 -timeout=10m
 
   native-codex:
     name: Native Codex handoff
