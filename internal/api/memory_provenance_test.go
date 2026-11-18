@@ -251,3 +251,88 @@ func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
 	}
 	require.Equal(t, 1, linked)
 }
+
+// Applying a merge or supersede creates the replacing memory with apply's
+// provenance, leaves the provenance of the memories it replaces as it was, and
+// a client cannot change the new memory's provenance afterwards.
+func TestConsolidationApplyRecordsServerOwnedProvenance(t *testing.T) {
+	for _, proposalType := range []string{store.MemoryProposalTypeMerge, store.MemoryProposalTypeSupersede} {
+		t.Run(proposalType, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			protected, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			targets := []store.MemoryProposalTarget{{MemoryID: "protected", Generation: protected.Generation}}
+			if proposalType == store.MemoryProposalTypeMerge {
+				require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "second", Namespace: "default", Content: "second memory"}))
+				targets = append(targets, store.MemoryProposalTarget{MemoryID: "second", Generation: 1})
+			}
+			proposal := &store.MemoryProposal{ID: "consolidate", Namespace: "default", Type: proposalType, Title: "consolidate",
+				Content: "replacement", Targets: targets}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
+			f.allowAll()
+
+			status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/consolidate/apply", `{}`)
+			require.Equal(t, http.StatusOK, status, body)
+			var applied store.Memory
+			require.NoError(t, json.Unmarshal([]byte(body), &applied))
+			require.Equal(t, store.MemorySourceProposal, applied.Source)
+			require.Equal(t, proposal.ID, applied.SourceProposalID)
+			for _, target := range targets {
+				replaced, err := f.store.GetMemory(t.Context(), "default", target.MemoryID)
+				require.NoError(t, err)
+				require.Equal(t, applied.ID, replaced.SupersededBy)
+				require.Equal(t, "manual", replaced.Source)
+				require.Empty(t, replaced.SourceProposalID)
+			}
+
+			for _, route := range memoryUpdateRoutes {
+				status, body = f.request(t, http.MethodPut, route+applied.ID, `{"content":"edited","sourceProposalId":"other"}`)
+				require.Equal(t, http.StatusOK, status, body)
+				before := f.changes(t)
+				status, body = f.request(t, http.MethodPut, route+applied.ID, `{"source":"user"}`)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, "source of a memory applied from a proposal cannot be changed by clients")
+				require.Equal(t, before, f.changes(t))
+				stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+				require.NoError(t, err)
+				require.Equal(t, store.MemorySourceProposal, stored.Source)
+				require.Equal(t, proposal.ID, stored.SourceProposalID)
+			}
+		})
+	}
+}
+
+// A retire creates no memory: it disables its targets and leaves their
+// provenance as it was, so a retired memory is not labeled as applied from the
+// proposal.
+func TestRetireApplyLeavesTargetProvenance(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	protected, err := f.store.GetMemory(t.Context(), "default", "protected")
+	require.NoError(t, err)
+	proposal := &store.MemoryProposal{ID: "retire", Namespace: "default", Type: store.MemoryProposalTypeRetire, Title: "retire",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "protected", Generation: protected.Generation}}}
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+	require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+		Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+	}))
+	f.allowAll()
+
+	status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/retire/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	var returned store.Memory
+	require.NoError(t, json.Unmarshal([]byte(body), &returned))
+	require.Equal(t, "protected", returned.ID)
+
+	stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+	require.NoError(t, err)
+	require.True(t, stored.Disabled)
+	require.Equal(t, "manual", stored.Source)
+	require.Empty(t, stored.SourceProposalID)
+	applied, err := f.store.GetMemoryProposal(t.Context(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, "applied", applied.Status)
+	require.Equal(t, "protected", applied.AppliedMemoryID)
+}

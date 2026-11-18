@@ -375,3 +375,52 @@ func TestMemoryConsolidationReportsAWindowCutPastMaxLookback(t *testing.T) {
 	require.NotNil(t, report.WindowCutFrom, "and so does its report")
 	require.True(t, old.Equal(*report.WindowCutFrom))
 }
+
+// A run submits operations only. Orka builds each proposal, so a submission
+// cannot choose a proposal's ID, namespace or attribution, record a review or
+// apply outcome, or set the provenance of a memory.
+func TestMemoryConsolidationSubmissionCannotSetServerOwnedFields(t *testing.T) {
+	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
+	f.seedSessions(t, 5)
+	for _, id := range []string{"mem-a", "mem-b"} {
+		require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: id, Namespace: "default", Content: "Release with make test"}))
+	}
+	var begin memoryconsolidation.BeginResponse
+	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
+
+	submission := map[string]any{"summary": "Two memories say the same thing.", "operations": []any{map[string]any{
+		"type": "merge", "title": "Release checklist", "content": "Run make test, then tag the release.", "reason": "Duplicates",
+		"targets": []any{map[string]any{"memoryId": "mem-a", "generation": 1}, map[string]any{"memoryId": "mem-b", "generation": 1}},
+		"sources": []any{map[string]any{"sessionName": "session-0", "messageId": "session-0-assistant"}},
+		"id":      "mprop-chosen", "namespace": "other", "taskName": "other-task", "agentName": "other-agent",
+		"status": "applied", "reviewer": "forged", "reviewNote": "forged", "reviewedAt": "2026-01-01T00:00:00Z",
+		"appliedMemoryId": "mem-a", "appliedBy": "forged", "appliedAt": "2026-01-01T00:00:00Z",
+		"source": store.MemorySourceProposal, "sourceProposalId": "mprop-chosen",
+	}}}
+	var report memoryconsolidation.Report
+	require.Equal(t, http.StatusOK, f.post(t, "complete", submission, &report))
+	require.Equal(t, []string{memoryconsolidation.ProposalID("task-uid", 0)}, report.ProposalIDs)
+
+	proposal, err := f.store.GetMemoryProposal(t.Context(), "default", report.ProposalIDs[0])
+	require.NoError(t, err)
+	require.Equal(t, "default", proposal.Namespace)
+	require.Equal(t, "task-a", proposal.TaskName)
+	require.Equal(t, "curator", proposal.AgentName)
+	require.Equal(t, store.MemoryProposalStatusPending, proposal.Status)
+	require.Empty(t, proposal.Reviewer)
+	require.Empty(t, proposal.ReviewNote)
+	require.Nil(t, proposal.ReviewedAt)
+	require.Empty(t, proposal.AppliedMemoryID)
+	require.Empty(t, proposal.AppliedBy)
+	require.Nil(t, proposal.AppliedAt)
+	_, err = f.store.GetMemoryProposal(t.Context(), "default", "mprop-chosen")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	for _, id := range []string{"mem-a", "mem-b"} {
+		memory, err := f.store.GetMemory(t.Context(), "default", id)
+		require.NoError(t, err)
+		require.Equal(t, store.MemorySourceManual, memory.Source)
+		require.Empty(t, memory.SourceProposalID)
+		require.False(t, memory.Deleted)
+	}
+}
