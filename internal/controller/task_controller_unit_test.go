@@ -1975,11 +1975,13 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *te
 func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
 	tests := []struct {
 		name     string
+		jobLabel string
 		ownerUID types.UID
 		wantWait bool
 	}{
-		{name: "owned job", ownerUID: "sibling-uid", wantWait: true},
-		{name: "job of a deleted task with the same name", ownerUID: "previous-sibling-uid", wantWait: false},
+		{name: "owned job", jobLabel: "sibling", ownerUID: "sibling-uid", wantWait: true},
+		{name: "job of a deleted task with the same name", jobLabel: "sibling", ownerUID: "previous-sibling-uid", wantWait: false},
+		{name: "job labeled for another sibling", jobLabel: "other", ownerUID: "sibling-uid", wantWait: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1987,11 +1989,13 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 			parentTask, parentAgent := coordinationConcurrencyFixture(1)
 			sibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
 			sibling.UID = "sibling-uid"
+			other := coordinationChildTask("other", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			other.UID = "other-uid"
 			job := &batchv1.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sibling-job",
 					Namespace: "default",
-					Labels:    map[string]string{labels.LabelTask: "sibling"},
+					Labels:    map[string]string{labels.LabelTask: tt.jobLabel},
 					OwnerReferences: []metav1.OwnerReference{{
 						APIVersion: corev1alpha1.GroupVersion.String(),
 						Kind:       "Task",
@@ -2002,13 +2006,16 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 			}
 			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
 
-			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, job, childTask)
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, other, job, childTask)
 			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
 			if err != nil {
 				t.Fatalf("validateCoordinationConstraints() error = %v", err)
 			}
 			if done != tt.wantWait {
 				t.Fatalf("done = %t, want %t (result %+v)", done, tt.wantWait, result)
+			}
+			if tt.wantWait && result.RequeueAfter != 10*time.Second {
+				t.Fatalf("RequeueAfter = %s, want 10s (result %+v)", result.RequeueAfter, result)
 			}
 		})
 	}

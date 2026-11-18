@@ -472,25 +472,38 @@ var _ = Describe("Controller Feature Tests", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			By("waiting a moment for scheduling to occur")
-			time.Sleep(15 * time.Second)
+			By("sampling child phases until two children have run in turn")
+			// Sample while the children run, so overlapping admission fails the
+			// spec even if both children finish between reads. Requiring two
+			// Succeeded children also proves waiting children are admitted.
+			deadline := time.Now().Add(3 * time.Minute)
+			maxRunning, admitted := 0, false
+			for {
+				cmd = exec.Command("kubectl", "get", "tasks",
+					"-l", fmt.Sprintf("orka.ai/parent-task=%s", parentTaskName),
+					"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
+					"-n", namespace)
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
 
-			By("verifying at most 1 child is Running at a time")
-			cmd = exec.Command("kubectl", "get", "tasks",
-				"-l", fmt.Sprintf("orka.ai/parent-task=%s", parentTaskName),
-				"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
-				"-n", namespace)
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			runningCount := strings.Count(output, "=Running")
-			_, _ = fmt.Fprintf(GinkgoWriter, "Child task phases: %s (running=%d)\n", output, runningCount)
-			Expect(runningCount).To(BeNumerically("<=", 1),
-				"At most 1 child should be Running with maxConcurrentChildren=1")
-			Expect(output).NotTo(ContainSubstring("=Failed"),
-				"coordinated children should wait for a slot, not fail admission")
-			Expect(runningCount+strings.Count(output, "=Succeeded")).To(BeNumerically(">=", 1),
-				"at least one child should have been admitted")
+				runningCount := strings.Count(output, "=Running")
+				succeededCount := strings.Count(output, "=Succeeded")
+				maxRunning = max(maxRunning, runningCount)
+				admitted = admitted || runningCount+succeededCount > 0
+				_, _ = fmt.Fprintf(GinkgoWriter, "Child task phases: %s (running=%d)\n", output, runningCount)
+				Expect(runningCount).To(BeNumerically("<=", 1),
+					"At most 1 child should be Running with maxConcurrentChildren=1")
+				Expect(output).NotTo(ContainSubstring("=Failed"),
+					"coordinated children should wait for a slot, not fail admission")
+				if succeededCount >= 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					Fail(fmt.Sprintf("children did not run in turn before the deadline (admitted=%t, max running=%d): %s",
+						admitted, maxRunning, output))
+				}
+				time.Sleep(time.Second)
+			}
 		})
 	})
 

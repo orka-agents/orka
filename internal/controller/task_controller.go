@@ -366,7 +366,9 @@ func (r *TaskReconciler) countChildSiblingSlots(
 	limit int32,
 ) (int32, error) {
 	active := int32(0)
-	unmarked := map[types.UID]struct{}{}
+	// unmarked maps each Pending sibling without markers to its orka.ai/task
+	// label value; a Job counts only when it is labeled for and owned by it.
+	unmarked := map[types.UID]string{}
 	var unmarkedNames []string
 	for i := range siblings {
 		s := &siblings[i]
@@ -378,8 +380,8 @@ func (r *TaskReconciler) countChildSiblingSlots(
 				return active, nil
 			}
 		case s.Status.Phase == corev1alpha1.TaskPhasePending:
-			unmarked[s.UID] = struct{}{}
-			unmarkedNames = append(unmarkedNames, labels.SelectorValue(s.Name))
+			unmarked[s.UID] = labels.SelectorValue(s.Name)
+			unmarkedNames = append(unmarkedNames, unmarked[s.UID])
 		}
 	}
 	if len(unmarked) == 0 {
@@ -397,7 +399,7 @@ func (r *TaskReconciler) countChildSiblingSlots(
 	}
 	for i := range jobs.Items {
 		for _, ref := range jobs.Items[i].OwnerReferences {
-			if _, ok := unmarked[ref.UID]; !ok {
+			if label, ok := unmarked[ref.UID]; !ok || jobs.Items[i].Labels[labels.LabelTask] != label {
 				continue
 			}
 			delete(unmarked, ref.UID)
