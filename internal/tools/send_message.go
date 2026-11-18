@@ -125,6 +125,12 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return fmt.Sprintf("Message sent to %s", target), nil
 	}
 
+	return sendMessageViaController(ctx, targetTask, a.Content)
+}
+
+// sendMessageViaController sends a message through the controller's internal
+// API, for a worker without an in-process message store.
+func sendMessageViaController(ctx context.Context, targetTask, content string) (string, error) {
 	taskName := os.Getenv(envOrkaTaskName)
 	namespace := os.Getenv(envOrkaTaskNamespace)
 	parentTask := os.Getenv(envOrkaParentTask)
@@ -138,7 +144,7 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		"fromTask":   taskName,
 		"toTask":     targetTask,
 		"parentTask": parentTask,
-		"content":    a.Content,
+		"content":    content,
 	})
 
 	endpoint := fmt.Sprintf("%s/internal/v1/messages/%s", controllerURL, namespace)
@@ -169,7 +175,7 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	if resp.StatusCode == http.StatusRequestEntityTooLarge {
-		return "", errMessageContentTooLarge(len(a.Content))
+		return "", errMessageContentTooLarge(len(content))
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return "", fmt.Errorf("failed to send message: HTTP %d: %s", resp.StatusCode, string(respBody))
