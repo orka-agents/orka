@@ -54,6 +54,14 @@ func acpTaskOperatorTainted(ctx context.Context, reader client.Reader, task *cor
 	return acpIncarnationLinkedTaskTainted(ctx, reader, latest.Namespace, name, types.UID(uid))
 }
 
+// ACPTaskOperatorTainted is acpTaskOperatorTainted for orka-api: the
+// credential broker refuses forge write credentials when operator access
+// tainted the Task, its linked workspace incarnation, or any Task linked to
+// that incarnation. reader must be authoritative (uncached).
+func ACPTaskOperatorTainted(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (bool, error) {
+	return acpTaskOperatorTainted(ctx, reader, task)
+}
+
 // acpWorkspaceOperatorTainted reports whether operator access tainted this
 // exact ExecutionWorkspace incarnation. orka-api marks both the workspace and
 // the Task whose RuntimeSession was tainted. The Task marker and the Task's
