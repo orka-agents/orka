@@ -22,10 +22,12 @@ import (
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/pruning"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/yaml"
 )
 
@@ -578,6 +580,177 @@ func TestExternalRuntimePoolClearsTelemetryReadyWithoutTelemetry(t *testing.T) {
 	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady); condition != nil {
 		t.Fatalf("stale TelemetryReady kept: %+v", condition)
 	}
+}
+
+// loseNextPublishStatusWrite makes the API server refuse the next RuntimePool
+// status write that reports a published workload request, as when the drain,
+// session or supervisor probe path advances the pool first. It counts the
+// writes it refused.
+func (f *externalRuntimePoolFixture) loseNextPublishStatusWrite() *int {
+	lost := new(int)
+	f.r.Client = interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, object client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+			if pool, ok := object.(*corev1alpha1.RuntimePool); ok && *lost == 0 && strings.HasPrefix(pool.Status.Message, "public workload request published") {
+				*lost++
+				return apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("runtimepools").GroupResource(), pool.Name, errors.New("the object has been modified"))
+			}
+			return c.SubResource(subresource).Patch(ctx, object, patch, options...)
+		},
+	})
+	return lost
+}
+
+// reducedNativeTelemetryEnv configures separate OTLP/HTTP collectors whose
+// exporter settings differ per signal: six entries, more than the room a
+// native runtime that cannot suspend leaves, while traces alone fit.
+var reducedNativeTelemetryEnv = map[string]string{
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
+	"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
+	"OTEL_EXPORTER_OTLP_TRACES_INSECURE":  "true",
+	"OTEL_EXPORTER_OTLP_METRICS_INSECURE": "false",
+}
+
+func assertTelemetryReady(t *testing.T, pool corev1alpha1.RuntimePool, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
+	if status == "" {
+		if condition != nil {
+			t.Fatalf("TelemetryReady = %+v, want none", condition)
+		}
+		return
+	}
+	if condition == nil || condition.Status != status || condition.Reason != reason || condition.Message == "" {
+		t.Fatalf("TelemetryReady = %+v, want %s/%s", condition, status, reason)
+	}
+}
+
+// Only the publishing reconcile fits telemetry. When its status write loses
+// the optimistic lock, the requeued reconcile does not publish again, so it
+// must re-derive TelemetryReady from the frozen request for the pool to serve
+// with the condition.
+func TestExternalRuntimePoolTelemetryReadySurvivesLostPublishStatusWrite(t *testing.T) {
+	for name, test := range map[string]struct {
+		env    map[string]string
+		status metav1.ConditionStatus
+		reason string
+	}{
+		"every signal projected": {
+			env:    map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc.cluster.local:4317", "OTEL_EXPORTER_OTLP_INSECURE": "true"},
+			status: metav1.ConditionTrue, reason: corev1alpha1.RuntimePoolReasonTelemetryProjected,
+		},
+		"metrics reduced to fit": {
+			env:    reducedNativeTelemetryEnv,
+			status: metav1.ConditionFalse, reason: corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			f := newExternalRuntimePoolFixture(t)
+			f.r.EnableTelemetry, f.r.TelemetryCollectorEgress = true, true
+			f.advertiseNativeProcess(t)
+			f.advertiseSubstrateV1Backend(t)
+			lost := f.loseNextPublishStatusWrite()
+			routeRuntimeFixture(t, f, nil)
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if *lost != 1 {
+				t.Fatalf("lost %d publishing status writes, want 1", *lost)
+			}
+			assertTelemetryReady(t, pool, "", "")
+			w := f.currentWorkspace(t)
+			if err := f.r.bindExternalRuntimeInstanceEvidence(t.Context(), &pool, w); err != nil {
+				t.Fatal(err)
+			}
+			attested, err := f.r.attestExternalWorkspaceStartup(t.Context(), w.Spec.Workload, w.Status.Allocation.Startup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.supervisor.probe = runtimePoolValidProbe(&pool, attested, "routed-boot", false)
+			for range 3 {
+				runtimePoolReconcile(t, f.r, f.pool)
+			}
+			pool = runtimePoolTestGetPool(t, f.r, f.pool)
+			if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing {
+				t.Fatalf("routed runtime did not serve: %s: %s", pool.Status.Lifecycle, pool.Status.Message)
+			}
+			assertTelemetryReady(t, pool, test.status, test.reason)
+		})
+	}
+}
+
+// A republished request re-derives TelemetryReady even when its own publishing
+// status write is lost: the predecessor's condition must not describe the new
+// runtime.
+func TestExternalRuntimePoolRepublishRederivesTelemetryReady(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	for name, test := range map[string]struct {
+		change func(*testing.T, *externalRuntimePoolFixture)
+		status metav1.ConditionStatus
+		reason string
+	}{
+		"telemetry disabled": {change: func(_ *testing.T, f *externalRuntimePoolFixture) { f.r.EnableTelemetry = false }},
+		"metrics reduced to fit": {
+			change: func(t *testing.T, _ *externalRuntimePoolFixture) {
+				t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+				t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "")
+				for key, value := range reducedNativeTelemetryEnv {
+					t.Setenv(key, value)
+				}
+			},
+			status: metav1.ConditionFalse, reason: corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newExternalRuntimePoolFixture(t)
+			f.r.EnableTelemetry = true
+			f.advertiseNativeProcess(t)
+			w := f.publish(t)
+			assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
+			// The provider reports the first, never-started instance stopped.
+			identity := workspacev1alpha1.InstanceIdentity{AllocationID: "first-allocation", InstanceID: "first-instance", RequestRevision: w.Spec.Workload.Revision}
+			w.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: w.Spec.Workload.Sequence, Key: w.Spec.Workload.Key, Identity: identity, State: workspacev1alpha1.AllocationStopped}
+			w.Status.ObservedGeneration = w.Generation
+			if err := f.r.Status().Update(t.Context(), w); err != nil {
+				t.Fatal(err)
+			}
+			test.change(t, f)
+			lost := f.loseNextPublishStatusWrite()
+			for range 6 {
+				runtimePoolReconcile(t, f.r, f.pool)
+				if w = f.currentWorkspace(t); w.Spec.Workload.Sequence == 2 {
+					break
+				}
+			}
+			if w.Spec.Workload.Sequence != 2 || *lost != 1 {
+				t.Fatalf("republished sequence %d, lost %d publishing status writes; want 2 and 1", w.Spec.Workload.Sequence, *lost)
+			}
+			assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
+			runtimePoolReconcile(t, f.r, f.pool)
+			assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), test.status, test.reason)
+		})
+	}
+}
+
+// A request published under another controller telemetry configuration keeps
+// the condition recorded with it: re-fitting it to the current configuration
+// would describe a projection the runtime does not have.
+func TestExternalRuntimePoolKeepsTelemetryReadyAcrossConfigurationChange(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
+	f := newExternalRuntimePoolFixture(t)
+	f.r.EnableTelemetry = true
+	f.advertiseNativeProcess(t)
+	f.publish(t)
+	assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
+	f.r.EnableTelemetry = false
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Status.Message == "public workload request published; waiting for provider materialization" {
+		t.Fatal("reconcile did not recompute status after publication")
+	}
+	assertTelemetryReady(t, pool, metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
 }
 
 // Empty model limits are equivalent to unset ones for both the supervisor
