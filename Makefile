@@ -147,9 +147,13 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate DeepCopy implementations and the storage client's write envelope decorators.
+generate: controller-gen ## Generate DeepCopy implementations, the storage client's write envelope decorators, and the storage fault wrappers.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
-	go generate ./internal/storageclient
+	go generate ./internal/storageclient ./internal/storageclient/storagefault
+
+.PHONY: verify-generated
+verify-generated: ## Fail when `make generate manifests` changes any file. Needs a clean working tree.
+	MAKE="$(MAKE)" scripts/verify-generated.sh
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

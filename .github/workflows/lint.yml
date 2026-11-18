@@ -59,6 +59,29 @@ jobs:
           version: v2.14.0
           install-mode: goinstall
 
+  generated:
+    name: Generated files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Test the freshness check
+        run: bash scripts/tests/verify-generated-test.sh
+
+      # Prints each stale file with the command that regenerates it.
+      - name: Fail on stale generated files
+        run: make verify-generated
+
   ui-lint:
     name: UI Lint
     runs-on: ubuntu-latest
@@ -79,3 +102,14 @@ jobs:
 
       - name: Run UI linter
         run: bun run lint
+
+      - name: Fail on a stale route tree
+        run: |
+          set -euo pipefail
+          bun run build
+          if ! git diff --quiet -- src/routeTree.gen.ts; then
+            echo "ui/src/routeTree.gen.ts is stale. TanStack Router generates it from ui/src/routes/, so never edit it by hand." >&2
+            echo "Fix: cd ui && bun run build, then commit ui/src/routeTree.gen.ts." >&2
+            git --no-pager diff --stat -- src/routeTree.gen.ts >&2
+            exit 1
+          fi
