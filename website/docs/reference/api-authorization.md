@@ -222,7 +222,7 @@ otherwise. In the additional-checks column:
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories`, and in `Propose` mode `create` on `memoryproposals` |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories` and `memoryproposals`, and in `Propose` mode `create` on `memoryproposals` |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
@@ -240,7 +240,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
-| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories`; a transaction token also needs the session-read and memory-read scopes |
+| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories` and `memoryproposals`; a transaction token also needs the session-read and memory-read scopes |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
