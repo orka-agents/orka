@@ -998,6 +998,16 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 		t.Fatalf("session ends at %v, want with the kept link's token at %v", session.ExpiresAt, kept)
 	}
 
+	// When custody cannot be read, a refresh token just submitted does not
+	// lengthen the session: the link kept may be one that cannot refresh.
+	h.identity = nil
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{}
+	before = time.Now()
+	_, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+	if session.ExpiresAt.After(before.Add(maxGitHubAccessTokenLife + time.Minute)) {
+		t.Fatalf("session ends at %v, want no later than %s from now", session.ExpiresAt, maxGitHubAccessTokenLife)
+	}
+
 	// A link that can refresh keeps the full session.
 	h.identity = nil
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice"}

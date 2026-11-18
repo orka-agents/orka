@@ -429,8 +429,10 @@ func (h *Handlers) newSession(ui *UserInfo, deadline time.Time) (string, store.A
 // signInSessionDeadline is when a sign-in's session must end: with the token
 // custody holds for the link when that token cannot refresh, as the session
 // could not renew past it. A repeat sign-in may keep an earlier link, so the
-// link's own token decides, not the one just submitted; when custody cannot
-// be read, the submitted token stands in for it.
+// link's own token decides, not the one just submitted. When custody cannot
+// be read, the link it keeps may be one that cannot refresh, so the session
+// ends no later than a token obtained now would: a link that can refresh
+// only renews sooner.
 func (h *Handlers) signInSessionDeadline(ctx context.Context, connection *corev1alpha1.Connection, tokens githubauth.Tokens) time.Time {
 	cfg := h.githubSignIn
 	if cfg.Credentials != nil {
@@ -441,9 +443,6 @@ func (h *Handlers) signInSessionDeadline(ctx context.Context, connection *corev1
 			}
 			return held.ExpiresAt
 		}
-	}
-	if tokens.RefreshToken != "" {
-		return time.Time{}
 	}
 	return gitHubTokenExpiry(cfg.now(), tokens.ExpiresIn)
 }
