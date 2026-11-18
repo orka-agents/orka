@@ -29,7 +29,7 @@ It describes current behavior. The contract for changing that behavior is
 | Surface | Enforced by | Known before acting | What the agent sees when refused | Checkable ahead of time |
 | --- | --- | --- | --- | --- |
 | Brokered tool policy (ACP) | Supervisor MCP proxy, then the controller broker | Partly: `tools/list` gives names, descriptions and input schemas | JSON-RPC error `-32001` "MCP tool call is not authorized" | Partly. Whether the tool is allowed: yes, exactly, from the frozen tool policy. Whether the prompt's authority is still active is session state at call time. |
-| Approval-required brokered tools (ACP, AgentKit and Foundry runtimes) | Controller broker | No; `tools/list` doesn't mark them | An `isError` result with an approval code and plain guidance; the Task shows `WaitingForApproval` | Yes, from the frozen approval policy; the outcome needs a person |
+| Approval-required brokered tools (ACP: AgentKit and Foundry runtimes, and forwarded command-line writes on any runtime) | Controller broker | No; `tools/list` doesn't mark them | An `isError` result with an approval code and plain guidance; the Task shows `WaitingForApproval`. A forwarded command-line write gets an HTTP refusal at the command-line client instead of the `isError` result; the Task still shows `WaitingForApproval` while it waits. | Yes, from the frozen approval policy; the outcome needs a person |
 | Broker session checks and supervisor failures: fence, policy digest, operation capability, prompt state, connection binding, transport, deadlines, capacity, argument size | Controller broker and supervisor MCP proxy | No | JSON-RPC error `-32002` "MCP broker call failed" for nearly every cause; `-32003` or HTTP 429 at capacity; `-32600` for a request body over the size limit | No; these describe session state, not policy |
 | Provider-native tools (`Read`, `Bash`, `WebFetch` and others) | Runtime session configuration, plus ACP permission requests Orka resolves | Through the runtime's own tool list | Runtime-specific | Yes, from the frozen tool policy |
 | Workspace intent and publication | Filesystem permissions for read intent; the controller and the Publisher | Only by reading the Task spec | A filesystem error for a write under read intent; a Task-level failure for publication | Yes, from the frozen execution plan, except an operator taint, which is live state |
@@ -138,9 +138,14 @@ the JSON-RPC errors above is a tool execution error. Only the 200 `isError` resu
 **Which runtimes support them.**
 
 - `MCPApprovalPolicy.requiredTools` lists the tools that need approval.
-- Approval-required brokered tools are supported only on AgentKit and Foundry runtimes
-  (`runtimeSupportsMCPApprovals`).
+- Approval-required brokered tools that the runtime's own MCP client calls are supported
+  only on AgentKit and Foundry runtimes (`runtimeSupportsMCPApprovals`).
 - On the built-in runtimes, connector write tools are hidden instead.
+- Forwarding write tools (ADR 0040) are the exception, and can require approval on any
+  runtime (`MCPApprovalPolicy.NeedsRuntimeApprovals`). Only the supervisor's client
+  forwarder calls them. It holds the command-line client's request while the broker waits,
+  then answers the client with an HTTP refusal, such as a 403 `OrkaApprovalNotGranted`, not
+  an MCP result the model reads (`workers/acp/supervisor/azure_gateway.go`).
 
 **What the agent sees.**
 
