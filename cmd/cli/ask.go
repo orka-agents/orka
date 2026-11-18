@@ -81,13 +81,22 @@ namespace, so asking needs permission to create Tasks there.`,
 
 			if _, err := c.GetAgent(ctx, agent, client.GetOptions{Namespace: c.Namespace}); err != nil &&
 				strings.Contains(err.Error(), "HTTP 404") {
-				return fmt.Errorf("no Agent %q in namespace %q: the Orka guide exists when the Helm chart sets guide.enabled=true. "+
-					"Pass -n with the installation's namespace, or --agent to ask another Agent", agent, c.Namespace)
+				where := "the namespace the Orka server watches"
+				if c.Namespace != "" {
+					where = fmt.Sprintf("namespace %q", c.Namespace)
+				}
+				return fmt.Errorf("no Agent %q in %s: the Orka guide exists when the Helm chart sets guide.enabled=true. "+
+					"Pass -n with the installation's namespace, or --agent to ask another Agent", agent, where)
 			}
 
-			name, err := createAskTask(ctx, c, agent, question)
+			name, namespace, err := createAskTask(ctx, c, agent, question)
 			if err != nil {
 				return err
+			}
+			if namespace != "" {
+				// Without -n the server chose the namespace; read the Task
+				// and print commands there.
+				c.Namespace = namespace
 			}
 			answer := askAnswer{Task: name, Agent: agent}
 			if noWait {
@@ -105,7 +114,7 @@ namespace, so asking needs permission to create Tasks there.`,
 			if err != nil {
 				if waitCtx.Err() != nil {
 					return fmt.Errorf("no answer yet; the question is still running as task %s. "+
-						"Get the answer later with: orka task result %s -n %s", name, name, c.Namespace)
+						"Get the answer later with: orka task result %s%s", name, name, namespaceArg(c.Namespace))
 				}
 				return err
 			}
@@ -118,17 +127,17 @@ namespace, so asking needs permission to create Tasks there.`,
 				switch {
 				case errors.Is(waitCtx.Err(), context.DeadlineExceeded):
 					return fmt.Errorf("task %s finished, but reading its answer outlasted --timeout. "+
-						"Get the answer with: orka task result %s -n %s", name, name, c.Namespace)
+						"Get the answer with: orka task result %s%s", name, name, namespaceArg(c.Namespace))
 				case waitCtx.Err() != nil:
 					return fmt.Errorf("task %s finished, but reading its answer was interrupted. "+
-						"Get the answer with: orka task result %s -n %s", name, name, c.Namespace)
+						"Get the answer with: orka task result %s%s", name, name, namespaceArg(c.Namespace))
 				}
 				return fmt.Errorf("read the answer from task %s: %w", name, err)
 			}
 			answer.Answer = result.Result
 			if strings.TrimSpace(answer.Answer) == "" {
-				return fmt.Errorf("task %s succeeded without an answer. See orka task logs %s -n %s",
-					name, name, c.Namespace)
+				return fmt.Errorf("task %s succeeded without an answer. See orka task logs %s%s",
+					name, name, namespaceArg(c.Namespace))
 			}
 			if format != outputTable {
 				return printStructuredTo(cmd.OutOrStdout(), format, answer)
@@ -208,7 +217,9 @@ func credentialPathReadsStdin(path string) bool {
 	return err == nil && os.SameFile(file, stdin)
 }
 
-func createAskTask(ctx context.Context, c *client.Client, agent, question string) (string, error) {
+// createAskTask creates the question Task and returns its name and the
+// namespace the server created it in, which is "" when the response omits it.
+func createAskTask(ctx context.Context, c *client.Client, agent, question string) (string, string, error) {
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
 	request := client.CreateTaskRequest{
@@ -222,17 +233,30 @@ func createAskTask(ctx context.Context, c *client.Client, agent, question string
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return "", fmt.Errorf("marshal task request: %w", err)
+		return "", "", fmt.Errorf("marshal task request: %w", err)
 	}
 	created, err := c.CreateTaskRaw(ctx, body)
 	if err != nil {
 		// Name the Task: when the request's outcome is unknown, it may exist.
-		return "", fmt.Errorf("create the question task %s: %w", request.Name, err)
+		return "", "", fmt.Errorf("create the question task %s: %w", request.Name, err)
 	}
-	if name := client.StringField(*created, "metadata", "name"); name != "" {
-		return name, nil
+	name := request.Name
+	if created == nil {
+		return name, "", nil
 	}
-	return request.Name, nil
+	if createdName := client.StringField(*created, "metadata", "name"); createdName != "" {
+		name = createdName
+	}
+	return name, client.StringField(*created, "metadata", "namespace"), nil
+}
+
+// namespaceArg returns the -n argument of a printed command, or "" when the
+// namespace is unknown and the server's default applies.
+func namespaceArg(namespace string) string {
+	if namespace == "" {
+		return ""
+	}
+	return " -n " + namespace
 }
 
 // waitForAskTask polls the Task until it reaches a terminal phase.
@@ -271,7 +295,8 @@ func askTaskFailure(name, namespace string, detail client.TaskDetail) error {
 	if reason := taskFailureReason(nestedMap(detail, "status"), detail); reason != "" && reason != phase {
 		message += ": " + reason
 	}
-	return errors.New(message + fmt.Sprintf(". See orka task get %s -n %s and orka task logs %s -n %s", name, namespace, name, namespace))
+	return errors.New(message + fmt.Sprintf(". See orka task get %s%s and orka task logs %s%s",
+		name, namespaceArg(namespace), name, namespaceArg(namespace)))
 }
 
 // printAskAnswer prints the answer as written, rendered as Markdown on a

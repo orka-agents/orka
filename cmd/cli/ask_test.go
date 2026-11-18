@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,8 @@ type askServer struct {
 	stalledOnce  sync.Once
 	created      map[string]any
 	resultReads  int
+	namespace    string   // when set, the Task create response names this namespace
+	readSpaces   []string // the namespace query of each Task read
 }
 
 func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
@@ -70,7 +73,11 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 				return
 			}
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": s.created["name"]}})
+			metadata := map[string]any{"name": s.created["name"]}
+			if s.namespace != "" {
+				metadata["namespace"] = s.namespace
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": metadata})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result"):
 			s.resultReads++
 			_ = json.NewEncoder(w).Encode(map[string]any{"result": s.answer})
@@ -79,6 +86,7 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"task not found"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
+			s.readSpaces = append(s.readSpaces, r.URL.Query().Get("namespace"))
 			phase := s.phases[0]
 			if len(s.phases) > 1 {
 				s.phases = s.phases[1:]
@@ -107,7 +115,15 @@ func runAsk(t *testing.T, srv *askServer, stdin string, args ...string) (string,
 
 func runAskContext(ctx context.Context, t *testing.T, srv *askServer, stdin string, args ...string) (string, string, error) {
 	t.Helper()
+	return runAskIn(ctx, t, srv, stdin, append(args, "-n", "orka-system")...)
+}
+
+// runAskIn runs orka ask with args as given, so without -n the server chooses
+// the namespace.
+func runAskIn(ctx context.Context, t *testing.T, srv *askServer, stdin string, args ...string) (string, string, error) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ORKA_NAMESPACE", "")
 	previousInterval, previousGrace := askPollInterval, askNotFoundGrace
 	askPollInterval, askNotFoundGrace = 10*time.Millisecond, time.Second
 	t.Cleanup(func() { askPollInterval, askNotFoundGrace = previousInterval, previousGrace })
@@ -117,7 +133,7 @@ func runAskContext(ctx context.Context, t *testing.T, srv *askServer, stdin stri
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
 	root.SetIn(strings.NewReader(stdin))
-	root.SetArgs(append(append([]string{"ask"}, args...), "--server", srv.URL, "-n", "orka-system"))
+	root.SetArgs(append(append([]string{"ask"}, args...), "--server", srv.URL))
 	err := root.ExecuteContext(ctx)
 	return stdout.String(), stderr.String(), err
 }
@@ -244,6 +260,28 @@ func TestAskTimeoutLeavesTaskRunning(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "still running as task ask-") ||
 		!strings.Contains(err.Error(), "orka task result ask-") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAskUsesTheNamespaceTheServerChose(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Running")
+	srv.namespace = "orka-system"
+	_, _, err := runAskIn(context.Background(), t, srv, "", "q", "--timeout", "50ms")
+	if err == nil || !strings.Contains(err.Error(), "-n orka-system") {
+		t.Fatalf("err = %v, want a recovery command in the server's namespace", err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.readSpaces) == 0 || slices.ContainsFunc(srv.readSpaces, func(ns string) bool { return ns != "orka-system" }) {
+		t.Fatalf("Task reads used namespaces %q, want only orka-system", srv.readSpaces)
+	}
+}
+
+func TestAskOmitsAnUnknownNamespaceFromCommands(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Running")
+	_, _, err := runAskIn(context.Background(), t, srv, "", "q", "--timeout", "50ms")
+	if err == nil || strings.Contains(err.Error(), "-n") || !strings.Contains(err.Error(), "orka task result ask-") {
+		t.Fatalf("err = %v, want a recovery command without an empty -n", err)
 	}
 }
 
