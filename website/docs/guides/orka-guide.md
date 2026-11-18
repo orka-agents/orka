@@ -122,8 +122,11 @@ On a terminal it prints the answer as rendered Markdown.
 
 Each question is an ordinary Task, so asking needs the same Orka API
 permissions as any agent Task: `create` and `get` on `tasks` in
-`core.orka.ai`, in the guide's namespace. With `get` on `agents` too,
-`orka ask` can tell you when the guide isn't enabled. Each question starts a
+`core.orka.ai`, in the guide's namespace. With Agent use authorization on
+(`controller.agentUseAuthorization.enabled`), it also needs `use` on the
+`orka-guide` Agent; see [API authorization](../reference/api-authorization.md).
+With `get` on `agents` too, `orka ask` can tell you when the guide isn't
+enabled. Each question starts a
 runtime session and spends model tokens.
 
 ## Limits
