@@ -94,6 +94,23 @@ var acpPreDispatch = newACPPreDispatchTimings(time.Now)
 // mark records the first time an agent Task reaches milestone. Later calls
 // for the same milestone keep the first time.
 func (t *acpPreDispatchTimings) mark(task *corev1alpha1.Task, milestone acpPreDispatchMilestone) {
+	t.record(task, milestone, false)
+}
+
+// markQueueWriteIssued records the queued milestone immediately before the
+// Queued status write is issued. The write is watch-visible before it
+// returns, so the dispatcher can scan and even start the Task first; marking
+// beforehand keeps queued ahead of every dispatcher milestone and leaves no
+// late mark to recreate a record a start already reported. Each call
+// replaces the earlier time: a write that fails cleanly leaves the Task
+// unqueued, and the retried queue pass records its own write. A write that
+// fails but committed queued the Task, so its mark is correct; a Task never
+// retried leaves a record that retention prunes.
+func (t *acpPreDispatchTimings) markQueueWriteIssued(task *corev1alpha1.Task) {
+	t.record(task, acpPreDispatchQueued, true)
+}
+
+func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPreDispatchMilestone, replace bool) {
 	if t == nil || task == nil || task.UID == "" || task.Spec.Type != corev1alpha1.TaskTypeAgent ||
 		milestone < 0 || milestone >= acpPreDispatchMilestoneCount {
 		return
@@ -112,7 +129,7 @@ func (t *acpPreDispatchTimings) mark(task *corev1alpha1.Task, milestone acpPreDi
 		record = &acpPreDispatchRecord{created: task.CreationTimestamp.Time}
 		t.records[task.UID] = record
 	}
-	if record.marks[milestone].IsZero() {
+	if replace || record.marks[milestone].IsZero() {
 		record.marks[milestone] = now
 	}
 	record.touched = now

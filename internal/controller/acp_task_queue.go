@@ -290,10 +290,10 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			ObservedAt:    &now,
 		}.Status()
 	}
+	acpPreDispatch.markQueueWriteIssued(task)
 	if err := r.Status().Patch(ctx, task, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, err
 	}
-	acpPreDispatch.mark(task, acpPreDispatchQueued)
 	if r.Recorder != nil {
 		if externalDispatch {
 			r.Recorder.Eventf(task, corev1.EventTypeNormal, "ACPTaskQueued", "Queued attempt %d for external AgentRuntime %s", attemptNumber, externalRuntime.Name)

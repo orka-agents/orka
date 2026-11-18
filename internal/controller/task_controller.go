@@ -3530,11 +3530,19 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
+// updateAgentLastUsed moves the Agent's LastUsed forward to at. Tasks of one
+// Agent can complete in either order, concurrently when Tasks reconcile in
+// parallel, and the Agent TTL counts from LastUsed, so every attempt re-reads
+// the Agent and never moves it backward; the optimistic Update makes a
+// concurrent newer write win.
 func (r *TaskReconciler) updateAgentLastUsed(ctx context.Context, namespace, name string, at metav1.Time) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		agent := &corev1alpha1.Agent{}
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
 			return err
+		}
+		if agent.Status.LastUsed != nil && !agent.Status.LastUsed.Before(&at) {
+			return nil
 		}
 		agent.Status.LastUsed = &at
 		return r.Status().Update(ctx, agent)
