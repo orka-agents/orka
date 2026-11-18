@@ -4539,11 +4539,17 @@ func (*trustedServiceReadCleanupRunnable) NeedLeaderElection() bool { return tru
 // effectiveTaskMaxConcurrentReconciles applies the default to an unset
 // worker count and rejects one outside 1..MaxTaskMaxConcurrentReconciles.
 func effectiveTaskMaxConcurrentReconciles(configured int) (int, error) {
+	return effectiveMaxConcurrentReconciles("task", configured, DefaultTaskMaxConcurrentReconciles, MaxTaskMaxConcurrentReconciles)
+}
+
+// effectiveMaxConcurrentReconciles applies a controller's default to an unset
+// worker count and rejects one outside 1..maximum.
+func effectiveMaxConcurrentReconciles(controllerName string, configured, defaultValue, maximum int) (int, error) {
 	if configured == 0 {
-		return DefaultTaskMaxConcurrentReconciles, nil
+		return defaultValue, nil
 	}
-	if configured < 1 || configured > MaxTaskMaxConcurrentReconciles {
-		return 0, fmt.Errorf("task controller concurrent reconciles must be between 1 and %d, got %d", MaxTaskMaxConcurrentReconciles, configured)
+	if configured < 1 || configured > maximum {
+		return 0, fmt.Errorf("%s controller concurrent reconciles must be between 1 and %d, got %d", controllerName, maximum, configured)
 	}
 	return configured, nil
 }

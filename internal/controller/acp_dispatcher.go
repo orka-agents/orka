@@ -142,7 +142,11 @@ type ACPDispatcher struct {
 	// Session retries them.
 	parkedRuntimeReleases map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease
 	finalizedTurns        map[types.UID]string
-	staleRecoveryMu       sync.Mutex
+	// settledDeliveryRecoveries caches, per Task, the exact Task version and
+	// controller epoch at which delivery recovery found nothing left to
+	// recover from settled durable state; see deliveryRecoverySettled.
+	settledDeliveryRecoveries map[types.UID]acpSettledDeliveryRecovery
+	staleRecoveryMu           sync.Mutex
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
@@ -335,6 +339,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 	if err != nil {
 		return err
 	}
+	d.pruneSettledDeliveryRecoveries(tasks)
 	d.scheduleStaleAttemptRecoveries(ctx, tasks, fence)
 	for i := range tasks {
 		task := &tasks[i]
@@ -349,6 +354,9 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			continue
 		}
 		if task.Status.Execution.Attempt < 1 || strings.TrimSpace(task.Status.Execution.PromptID) == "" {
+			continue
+		}
+		if d.deliveryRecoverySettled(task, fence.Epoch) {
 			continue
 		}
 		attemptID, idErr := promptAttemptIDFromTask(task)
@@ -391,6 +399,9 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			}
 		}
 		if recoveryKind == "" {
+			if acpDeliveryRecoveryVerdictSettled(task, attempt, cleanupPending) {
+				d.rememberDeliveryRecoverySettled(task, fence.Epoch)
+			}
 			continue
 		}
 		select {

@@ -354,6 +354,7 @@ func main() {
 	var taskWebhookSigningSecret string
 	var taskWebhookDeliveryWorkers int
 	var taskMaxConcurrentReconciles int
+	var runtimePoolMaxConcurrentReconciles int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -627,6 +628,11 @@ func main() {
 	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
 		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
 			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
+	flag.IntVar(&runtimePoolMaxConcurrentReconciles, "runtime-pool-max-concurrent-reconciles",
+		controller.DefaultRuntimePoolMaxConcurrentReconciles,
+		fmt.Sprintf("Different RuntimePools the RuntimePool controller reconciles at once (1-%d); a pool is never "+
+			"reconciled concurrently with itself, so concurrent cold starts publish their workloads without "+
+			"queueing behind each other.", controller.MaxRuntimePoolMaxConcurrentReconciles))
 	flag.IntVar(&taskMaxConcurrentReconciles, "task-max-concurrent-reconciles", controller.DefaultTaskMaxConcurrentReconciles,
 		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
 			"concurrently with itself. Above 1, --max-tasks-per-namespace and coordination maxConcurrentChildren "+
@@ -988,6 +994,11 @@ func main() {
 	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
 		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
 			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
+		os.Exit(1)
+	}
+	if runtimePoolMaxConcurrentReconciles < 1 || runtimePoolMaxConcurrentReconciles > controller.MaxRuntimePoolMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --runtime-pool-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			runtimePoolMaxConcurrentReconciles, controller.MaxRuntimePoolMaxConcurrentReconciles)
 		os.Exit(1)
 	}
 	if taskMaxConcurrentReconciles < 1 || taskMaxConcurrentReconciles > controller.MaxTaskMaxConcurrentReconciles {
@@ -1915,12 +1926,13 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
-		SubstrateRouter:      runtimePoolSubstrateRouter,
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Scheme:               mgr.GetScheme(),
-		RuntimeNamespace:     acpRuntimeNamespace,
-		WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
+		MaxConcurrentReconciles: runtimePoolMaxConcurrentReconciles,
+		SubstrateRouter:         runtimePoolSubstrateRouter,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Scheme:                  mgr.GetScheme(),
+		RuntimeNamespace:        acpRuntimeNamespace,
+		WorkspaceCleanupOnly:    !workspaceProviderAPIEnabled,
 	}
 	providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 	if err != nil {
