@@ -7,7 +7,9 @@ Date: 2026-11-06
 Accepted. Supersedes the direct-egress, Actor DNS routing, worker capacity, and
 `DrainWorker` termination evidence in ADR 0031, and the Substrate-minted session
 identity in the core workspace executor. The data-only cold path of ADR 0031 and the
-full-memory restore gate of ADR 0030 stay in force.
+full-memory restore gate of ADR 0030 stay in force. For Substrate profiles that set
+`spec.placement.sharedWorkers`, ADR 0056 supersedes the Single-Actor workers bullet and
+the worker Pod UID absence termination clause.
 
 ## Context
 

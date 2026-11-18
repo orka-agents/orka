@@ -6,7 +6,9 @@ Date: 2026-09-06
 
 Accepted. Supersedes the fork-specific DataOnly ActorSnapshot and atomic resume
 requirements in ADRs 0027 and 0030 for the native cold path. The full-memory
-restore gate in ADR 0030 stays closed.
+restore gate in ADR 0030 stays closed. For Substrate profiles that set
+`spec.placement.sharedWorkers`, ADR 0056 supersedes the single-Actor worker requirement
+and the worker Pod deletion and observation before reporting suspension.
 
 ## Context
 
