@@ -65,7 +65,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - `deploy/**`, `charts/orka/**` — `make promote-staging-manifest` (release-preparation only)
 - `**/zz_generated.*.go`, `**/envelope_gen.go`, `internal/storageclient/storagefault/wrappers_gen.go` — `make generate`
 - `PROJECT` — kubebuilder CLI
-- `ui/src/routeTree.gen.ts` — TanStack Router (`bun run build`; checked by UI Lint)
+- `ui/src/routeTree.gen.ts` — TanStack Router (`cd ui && bunx vite build`; checked by UI Lint)
 
 ## Code Style
 

@@ -106,10 +106,12 @@ jobs:
       - name: Fail on a stale route tree
         run: |
           set -euo pipefail
-          bun run build
+          # Vite alone: bun run build type-checks first, which fails on a new
+          # route before the router plugin can regenerate the tree.
+          bunx vite build
           if ! git diff --quiet -- src/routeTree.gen.ts; then
             echo "ui/src/routeTree.gen.ts is stale. TanStack Router generates it from ui/src/routes/, so never edit it by hand." >&2
-            echo "Fix: cd ui && bun run build, then commit ui/src/routeTree.gen.ts." >&2
+            echo "Fix: cd ui && bunx vite build, then commit ui/src/routeTree.gen.ts." >&2
             git --no-pager diff --stat -- src/routeTree.gen.ts >&2
             exit 1
           fi
