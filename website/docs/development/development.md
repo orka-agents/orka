@@ -57,7 +57,7 @@ For a normal manifest or chart contribution:
 3. Review and commit the source changes together with all changes under `manifest_staging/`.
 4. Do not promote the chart in an ordinary feature PR. The root snapshots may intentionally remain at the current release while staging contains the next release.
 
-`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
+`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make verify-generated` on a clean working tree for the same drift check locally. It also covers `make generate` output and names the command that fixes each stale file.
 
 Release preparation runs the staged release targets:
 

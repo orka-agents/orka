@@ -76,10 +76,17 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
+	# controller-gen leaves the CRD of a removed kind behind, so generate CRDs
+	# into an empty directory and replace the bases only once it succeeds.
+	# workspace-crds has already copied the workspace.orka.ai CRDs in.
 	# A module pattern excludes nested provider checkouts used by local conformance.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
-	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
-	rm -f config/crd/bases/acp.workspace.orka.ai_*.yaml config/crd/bases/fake.workspace.orka.ai_*.yaml
+	@set -euo pipefail; \
+		crds="$$(mktemp -d)"; \
+		trap 'rm -rf "$$crds"' EXIT; \
+		"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config="$$crds"; \
+		rm -f "$$crds"/acp.workspace.orka.ai_*.yaml "$$crds"/fake.workspace.orka.ai_*.yaml; \
+		find config/crd/bases -name '*.yaml' ! -name 'workspace.orka.ai_*' -delete; \
+		cp "$$crds"/*.yaml config/crd/bases/
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -160,9 +167,13 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate DeepCopy implementations and the storage client's write envelope decorators.
+generate: controller-gen ## Generate DeepCopy implementations, the storage client's write envelope decorators, and the storage fault wrappers.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
-	go generate ./internal/storageclient
+	go generate ./internal/storageclient ./internal/storageclient/storagefault
+
+.PHONY: verify-generated
+verify-generated: ## Fail when `make generate manifests` changes any file. Needs a clean working tree.
+	MAKE="$(MAKE)" scripts/verify-generated.sh
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
