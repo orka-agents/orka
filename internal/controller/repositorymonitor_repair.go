@@ -191,10 +191,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || item == nil {
 		return false, 0, nil
 	}
-	// A command's handoff creates a Task or writes to GitHub, so it never
-	// relies on a reviewer's or labeller's permission an earlier poll read:
-	// remembered permissions serve only scheduling, readiness, and evidence.
-	ctx = withRepositoryMonitorFreshPermissions(ctx)
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
 	if err != nil {
 		if errorsIsStoreNotFound(err) {
@@ -427,6 +423,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	}
 }
 
+//nolint:gocyclo // Branch update safety gates, including the authorization recheck before every PUT, are intentionally explicit.
 func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 	ctx context.Context,
 	monitor *corev1alpha1.RepositoryMonitor,
@@ -524,6 +521,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		}
 	}
 
+	if refused, err := r.refuseRepositoryMonitorWithdrawnUpdateBranch(ctx, monitor, run, command, owner, repository, pr, item, mutation); err != nil || refused {
+		return true, 0, err
+	}
 	requestID, err := r.updateRepositoryMonitorPullRequestBranch(ctx, owner, repository, token, pr.Number, command.HeadSHA)
 	if err != nil {
 		return r.recordRepositoryMonitorUpdateBranchSubmissionError(ctx, monitor, run, command, item, mutation, pr, err)
@@ -548,6 +548,24 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		return true, 0, pendingMutationProjectionError("event", err)
 	}
 	return true, 0, nil
+}
+
+// refuseRepositoryMonitorWithdrawnUpdateBranch rechecks, uncached, the
+// authorization a branch update's PUT rests on, before every PUT: the first
+// submission, a resubmission, and the recovery of a submission a crash left
+// recorded, which the handoff's own recheck does not reach. A push whose
+// grant was withdrawn is recorded failed, so no later reconcile sends it.
+func (r *RepositoryMonitorReconciler) refuseRepositoryMonitorWithdrawnUpdateBranch(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem, mutation *store.GitHubMutationRecord) (bool, error) {
+	reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
+	if err != nil || reason == "" {
+		return false, err
+	}
+	mutation.Status = repositoryMonitorRunPhaseFailed
+	mutation.Error = reason
+	if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+		return true, err
+	}
+	return true, r.blockRepositoryMonitorWithdrawnPolicyRepair(ctx, monitor, run, command, pr, item, reason)
 }
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorUpdateBranchSubmissionError(

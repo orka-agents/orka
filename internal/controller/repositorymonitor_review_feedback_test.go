@@ -475,7 +475,7 @@ func TestRepositoryMonitorReviewFeedbackReadsNewestReviewsFirst(t *testing.T) {
 	github := &repositoryMonitorFeedbackGitHub{t: t, reviewPages: pages, permissions: map[string]string{"writer": "write", "other": "write"}}
 	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,6 +524,9 @@ type repositoryMonitorFeedbackGitHub struct {
 	// makes every thread page too large.
 	maxThreadPageSize int
 	permissions       map[string]string
+	// defaultPermission, when set, answers accounts permissions does not
+	// name instead of "not a collaborator".
+	defaultPermission string
 	failPermission    map[string]int
 	requests          []string
 }
@@ -540,6 +543,9 @@ func (g *repositoryMonitorFeedbackGitHub) ServeHTTP(w http.ResponseWriter, req *
 			return
 		}
 		permission, ok := g.permissions[login]
+		if !ok && g.defaultPermission != "" {
+			permission, ok = g.defaultPermission, true
+		}
 		if !ok {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return
@@ -647,7 +653,7 @@ func TestRepositoryMonitorReviewFeedbackPaginatesAndLooksUpPermissions(t *testin
 	}
 	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +688,7 @@ func TestRepositoryMonitorReviewFeedbackShrinksOversizedThreadPages(t *testing.T
 	}
 	r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +704,7 @@ func TestRepositoryMonitorReviewFeedbackShrinksOversizedThreadPages(t *testing.T
 	// other read failure.
 	tooLarge := &repositoryMonitorFeedbackGitHub{t: t, threadPages: github.threadPages, permissions: github.permissions, maxThreadPageSize: -1}
 	r, monitor = repositoryMonitorFeedbackTestReconciler(t, tooLarge)
-	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +753,7 @@ func TestRepositoryMonitorReviewFeedbackPartialReads(t *testing.T) {
 			tc.github.permissions = map[string]string{"writer": "write"}
 			r, monitor := repositoryMonitorFeedbackTestReconciler(t, tc.github)
 			pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
-			snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+			snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -775,7 +781,7 @@ func TestRepositoryMonitorReviewFeedbackExcludesPublishedOrkaReviews(t *testing.
 	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: repositoryMonitorFeedbackTestHead}
 	policy := repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec)
 	// Before Orka records publishing review 77, its comments look human.
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, policy)
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -785,7 +791,7 @@ func TestRepositoryMonitorReviewFeedbackExcludesPublishedOrkaReviews(t *testing.
 	if err := r.Store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: repositoryMonitorFeedbackTestHead, Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "77"}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, policy)
+	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +819,7 @@ func TestRepositoryMonitorReviewFeedbackExcludesOtherMonitorsOrkaReviews(t *test
 	if err := r.Store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-elsewhere", MonitorNamespace: "elsewhere", MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: repositoryMonitorFeedbackTestHead, Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "77"}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, second, pr, policy)
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, second, pr, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +831,7 @@ func TestRepositoryMonitorReviewFeedbackExcludesOtherMonitorsOrkaReviews(t *test
 	if err := r.Store.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: repositoryMonitorFeedbackTestHead, Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "77"}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, second, pr, policy)
+	snapshot, err = r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, second, pr, policy)
 	if err != nil {
 		t.Fatal(err)
 	}

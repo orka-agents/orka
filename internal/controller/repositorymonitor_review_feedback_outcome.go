@@ -350,12 +350,21 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorFeedbackTaskEnd(ctx
 // feedback outcomes that are not marked projected, and reports whether it
 // projected any. It runs on every repair ingestion, so a controller that
 // stopped between recording an outcome and its projections, even one whose
-// Task is gone, records them on a later reconcile.
+// Task is gone, records them on a later reconcile. Each pass resumes where
+// the last stopped and wraps around, so outcomes whose projection keeps
+// failing cannot keep the others from being projected.
 func (r *RepositoryMonitorReconciler) settleRepositoryMonitorFeedbackOutcomes(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
-	outcomes, _, err := r.Store.ListMonitorFeedbackOutcomes(ctx, store.MonitorFeedbackOutcomeFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Unprojected: true, Limit: repositoryMonitorFeedbackProjectionBatch})
+	cursor := ""
+	if value, ok := r.feedbackProjectCursors.Load(monitor.UID); ok {
+		cursor = value.(string)
+	}
+	outcomes, next, err := r.Store.ListMonitorFeedbackOutcomes(ctx, store.MonitorFeedbackOutcomeFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Unprojected: true, Limit: repositoryMonitorFeedbackProjectionBatch, Cursor: cursor})
 	if err != nil {
+		// A cursor the store no longer accepts starts over.
+		r.feedbackProjectCursors.Delete(monitor.UID)
 		return false, err
 	}
+	r.feedbackProjectCursors.Store(monitor.UID, next)
 	// One outcome's failure does not hold up the others.
 	var errs []error
 	for _, outcome := range outcomes {
@@ -450,8 +459,9 @@ func (r *RepositoryMonitorReconciler) projectRepositoryMonitorFeedbackOutcome(ct
 		}
 	}
 	// A write the workflow refused, or one a concurrent writer undid, must
-	// never count as projected: the records are read back first.
-	contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+	// never count as projected: the records are read back first, and the
+	// work action this projection wrote must exist.
+	contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome, true)
 	if err != nil {
 		return err
 	}
@@ -485,7 +495,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorPullRequestWorkActi
 		if !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
 			continue
 		}
-		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome, false)
 		if err == nil && contradicted {
 			err = r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome)
 		}
@@ -563,7 +573,7 @@ func (r *RepositoryMonitorReconciler) verifyProjectedRepositoryMonitorFeedbackOu
 		if outcome.ProjectedAt == nil || !store.IsMonitorFeedbackOutcomeTerminal(outcome.State) {
 			continue
 		}
-		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome)
+		contradicted, err := r.repositoryMonitorFeedbackProjectionContradicted(ctx, monitor, outcome, false)
 		if err == nil && contradicted {
 			if err = r.projectRepositoryMonitorFeedbackOutcome(ctx, monitor, outcome); err == nil {
 				corrected = true
@@ -576,8 +586,11 @@ func (r *RepositoryMonitorReconciler) verifyProjectedRepositoryMonitorFeedbackOu
 
 // repositoryMonitorFeedbackProjectionContradicted reports whether the repair
 // job, push mutation, or work action of a terminal outcome records anything
-// other than the outcome's end.
-func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackProjectionContradicted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome store.MonitorFeedbackOutcome) (bool, error) {
+// other than the outcome's end. A missing work action contradicts it only
+// when requireAction is set, as it is right after projection wrote one; a
+// record that was never made, or that retention removed later, otherwise
+// contradicts nothing.
+func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackProjectionContradicted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, outcome store.MonitorFeedbackOutcome, requireAction bool) (bool, error) {
 	want := repositoryMonitorFeedbackProjectionFor(outcome)
 	jobID := "repair-" + repositoryMonitorShortHash(outcome.CommandEventID)
 	job, err := r.Store.GetRepairJob(ctx, monitor.Namespace, jobID)
@@ -598,11 +611,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackProjectionContrad
 	case !errors.Is(err, store.ErrNotFound):
 		return false, err
 	}
-	// A record that does not exist contradicts nothing.
 	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(outcome.CommandEventID, store.RepositoryMonitorDesiredActionForIntent(repositoryMonitorCommandIntentFix)))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return false, nil
+		return requireAction, nil
 	case err != nil:
 		return false, err
 	}

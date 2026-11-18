@@ -102,6 +102,9 @@ type RepositoryMonitorReconciler struct {
 	// feedbackVerifyCursors holds, by monitor UID, where the next check of
 	// projected feedback outcomes resumes.
 	feedbackVerifyCursors sync.Map
+	// feedbackProjectCursors holds, by monitor UID, where the next pass over
+	// the monitor's unprojected feedback outcomes resumes.
+	feedbackProjectCursors sync.Map
 	// monitorUIDs maps each monitor's namespace/name to the UID whose
 	// in-memory state the controller holds, so a deleted or recreated
 	// monitor's state can be evicted.

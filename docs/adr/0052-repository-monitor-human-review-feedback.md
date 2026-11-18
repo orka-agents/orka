@@ -222,8 +222,11 @@ resumes from the record:
   bulk cancel, such as a stop command's, projects again every ended feedback
   repair of the pull request it cancelled, and projection may settle a
   cancelled action, which no other writer may reopen. The projector reads
-  its records back and marks an outcome projected only when they record it;
-  a write that was refused is retried. Each repair ingestion also checks a
+  its records back and marks an outcome projected only when they record it,
+  and only once the work action it wrote exists; a write that was refused
+  is retried. Each pass over unprojected outcomes resumes where the last
+  stopped and wraps around, so outcomes whose projection keeps failing
+  cannot keep others from being projected. Each repair ingestion also checks a
   rotating window of 20 projected outcomes and projects again any whose job,
   push mutation, or work action a later writer contradicted. One repair's
   ingestion or projection error is logged and retried without holding up the
@@ -298,13 +301,27 @@ reservation is passed over for that poll rather than holding up later ones.
 The memory is kept per monitor UID: a deleted monitor's is evicted when its
 reconcile finds it gone, a monitor recreated under the same name drops the
 one it replaced, and memories unused for an hour, or beyond 1,024 monitors,
-are swept. A repair
-handoff never uses a remembered permission: every command handoff, of a
-feedback repair, any other fix, a CI fix, or a branch update, reads the
-permissions its repair label and feedback rest on fresh, because it creates
-a Task or writes to GitHub. Remembered permissions serve only scheduling,
-readiness, and evidence. The memory
-is the controller's; a restart starts afresh.
+are swept. The memory is the controller's; a restart starts afresh.
+
+A cached permission may only make automation more cautious, never less:
+
+- **Authorization for a write is never cached.** Every decision that writes
+  to GitHub or creates a Task reads the permissions it rests on from GitHub
+  then, using neither the poll's cache nor the memory: every command
+  handoff (a feedback repair, any other fix, a CI fix, or a branch update),
+  the repair label check before a policy repair is admitted, and the
+  recheck before every branch update `PUT`, including a resubmission and
+  the recovery of a submission a crash left recorded. A recovered
+  submission whose grant was withdrawn is recorded failed and never sent.
+  These lookups count toward the poll's budget but are never refused by it.
+- **Only authority is remembered.** The poll's cache and the memory answer
+  scheduling and readiness only with a permission that grants the authority
+  the caller checks for. A reviewer or labeller without it, read-only or not
+  a collaborator, is looked up again by each evaluation, so readiness
+  concludes that someone lacks authority only from a lookup it made itself.
+  A lookup the budget refuses leaves authority unknown, which gives
+  `incomplete_retry`, never success. This spends more lookups on reviewers
+  without authority, which the budget's fairness accepts.
 
 ### Budgets and maxRounds
 

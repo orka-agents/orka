@@ -97,7 +97,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	id := "policy-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s|%d|%d", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, intent, prCount, headCount))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
-		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled)
+		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, repositoryMonitorPermissionForWrite, monitor, owner, repo, pr, full, labelled)
 		if err != nil {
 			return false, err
 		}

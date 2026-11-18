@@ -156,6 +156,7 @@ func TestRepositoryMonitorReviewFeedbackReplayCorrectsProjectedOutcomes(t *testi
 // pull request is still served. (Codex review probe and Copilot thread.)
 func TestRepositoryMonitorPermissionLookupsSurviveReviewerChurn(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.grantEveryoneWrite()
 	lastComplete := map[int]int{}
 	for poll := 1; poll <= 12; poll++ {
 		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
@@ -167,7 +168,7 @@ func TestRepositoryMonitorPermissionLookupsSurviveReviewerChurn(t *testing.T) {
 				if pr == 3 && poll >= 2 {
 					generation = 1
 				}
-				_, err := f.reconciler.repositoryMonitorCollaboratorPermission(scoped, f.reconciler.GitHubAPIBaseURL, "orka-agents", "orka", "forge-token", fmt.Sprintf("pr%d-gen%d-reviewer%02d", pr, generation, reviewer))
+				_, err := f.schedulingPermission(scoped, fmt.Sprintf("pr%d-gen%d-reviewer%02d", pr, generation, reviewer))
 				switch {
 				case errors.Is(err, errRepositoryMonitorPermissionLookupBudget):
 					complete = false

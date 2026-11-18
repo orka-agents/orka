@@ -47,6 +47,9 @@ type repositoryMonitorFeedbackRepairFixture struct {
 	// onThreadRead, when set, runs before the nth review-thread read is
 	// answered, numbered from 1.
 	onThreadRead func(n int)
+	// handle, when set, answers any request it reports handled before the
+	// fixture's own routes.
+	handle func(w http.ResponseWriter, req *http.Request) bool
 }
 
 func newRepositoryMonitorFeedbackRepairFixture(t *testing.T, configure func(*corev1alpha1.RepositoryMonitor)) *repositoryMonitorFeedbackRepairFixture {
@@ -65,6 +68,9 @@ func newRepositoryMonitorFeedbackRepairFixture(t *testing.T, configure func(*cor
 	fixture := &repositoryMonitorFeedbackRepairFixture{}
 	threadReads := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if fixture.handle != nil && fixture.handle(w, req) {
+			return
+		}
 		switch {
 		case req.URL.Path == "/graphql":
 			body, _ := io.ReadAll(req.Body)
@@ -972,7 +978,7 @@ func TestRepositoryMonitorReviewFeedbackTruncatedPartialNeedsPerson(t *testing.T
 		pages = append(pages, "["+strings.Join(threads, ",")+"]")
 	}
 	f.github.threadPages = pages
-	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 	if err != nil || !snapshot.Partial || snapshot.Availability != repositoryMonitorEvidenceTruncated {
 		t.Fatalf("snapshot partial=%t availability=%q err=%v, want partial and truncated", snapshot.Partial, snapshot.Availability, err)
 	}
@@ -1013,7 +1019,7 @@ func TestRepositoryMonitorReviewFeedbackReadinessCountsIncompleteThreads(t *test
 	long := strings.Repeat("Please look at this again. ", 150)
 	// The writer's middle reply is the only authorized feedback.
 	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackRepairThreadJSON("T1", 11, long, "outsider", "writer", "outsider") + "]"}
-	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 	if err != nil || len(snapshot.Threads) != 1 || snapshot.Threads[0].OmittedComments != 1 || len(snapshot.authorizedFeedback()) != 0 {
 		t.Fatalf("snapshot threads = %+v authorized = %+v err=%v, want the authorized reply dropped", snapshot.Threads, snapshot.authorizedFeedback(), err)
 	}
@@ -1034,7 +1040,7 @@ func TestRepositoryMonitorReviewFeedbackReadinessCountsIncompleteThreads(t *test
 		t.Fatal(err)
 	}
 	f.github.threadPages = []string{"[" + repositoryMonitorFeedbackRepairThreadJSON("T1", 11, long, "orka-bot", "writer", "outsider", "outsider") + "]"}
-	snapshot, err = f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	snapshot, err = f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 	if err != nil || len(snapshot.Threads) != 1 || !snapshot.Threads[0].OrkaFindingThread || snapshot.Threads[0].OmittedComments == 0 {
 		t.Fatalf("Orka finding thread = %+v err=%v, want it shown with omitted replies", snapshot.Threads, err)
 	}

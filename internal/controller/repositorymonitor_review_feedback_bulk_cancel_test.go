@@ -142,7 +142,7 @@ func TestRepositoryMonitorQueuedBranchUpdateRechecksRevokedPermission(t *testing
 	pr.Labels = []string{"orka:fix"}
 	// A poll remembers the labeller's write access.
 	poll, end := f.reconciler.withRepositoryMonitorPermissionPoll(ctx, f.monitor)
-	if reason, err := f.reconciler.repositoryMonitorRepairLabelActorRefusal(poll, f.monitor, "orka-agents", "orka", pr, true, true); err != nil || reason != "" {
+	if reason, err := f.reconciler.repositoryMonitorRepairLabelActorRefusal(poll, repositoryMonitorPermissionForScheduling, f.monitor, "orka-agents", "orka", pr, true, true); err != nil || reason != "" {
 		t.Fatalf("labeller refused before revocation: %q err=%v", reason, err)
 	}
 	end()

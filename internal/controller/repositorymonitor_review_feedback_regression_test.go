@@ -188,10 +188,11 @@ func TestRepositoryMonitorReviewFeedbackStaleCacheDoesNotFinalize(t *testing.T) 
 
 // Accounts a poll defers for lack of budget are served first by the next
 // poll, so pull requests visited late in every poll are not starved; a
-// remembered permission answers later polls within its TTL, except in a
-// repair handoff, which reads fresh.
+// remembered permission answers later polls within its TTL, except an
+// authorization for a write, which reads fresh.
 func TestRepositoryMonitorPermissionLookupsRotateAcrossPolls(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.grantEveryoneWrite()
 	baseURL := f.reconciler.GitHubAPIBaseURL
 	requests := func(login string) int {
 		count := 0
@@ -212,7 +213,7 @@ func TestRepositoryMonitorPermissionLookupsRotateAcrossPolls(t *testing.T) {
 		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
 		defer end()
 		for _, login := range logins {
-			if _, err := f.reconciler.repositoryMonitorCollaboratorPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", login); errors.Is(err, errRepositoryMonitorPermissionLookupBudget) {
+			if _, err := f.schedulingPermission(ctx, login); errors.Is(err, errRepositoryMonitorPermissionLookupBudget) {
 				refused = append(refused, login)
 			} else if err != nil {
 				t.Fatal(err)
@@ -251,10 +252,10 @@ func TestRepositoryMonitorPermissionLookupsRotateAcrossPolls(t *testing.T) {
 	if refused := poll([]string{"late0"}); len(refused) != 0 || requests("late0") != before {
 		t.Fatalf("remembered permission was looked up again: refused %v requests %d", refused, requests("late0"))
 	}
-	// A repair handoff reads fresh.
+	// Authorization for a write reads fresh.
 	ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
 	defer end()
-	if _, err := f.reconciler.repositoryMonitorCollaboratorPermission(withRepositoryMonitorFreshPermissions(ctx), baseURL, "orka-agents", "orka", "forge-token", "late0"); err != nil || requests("late0") != before+1 {
+	if _, err := f.reconciler.repositoryMonitorAuthorizationPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", "late0"); err != nil || requests("late0") != before+1 {
 		t.Fatalf("fresh lookup err=%v requests %d, want a new request", err, requests("late0"))
 	}
 }
@@ -306,7 +307,7 @@ func TestRepositoryMonitorReviewFeedbackProjectionResumesAfterJobEnds(t *testing
 // reserves at most half its budget for them and keeps making progress.
 func TestRepositoryMonitorPermissionLookupsProgressPastLargeDeferrals(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
-	baseURL := f.reconciler.GitHubAPIBaseURL
+	f.grantEveryoneWrite()
 	accounts := make([]string, 0, 2*repositoryMonitorPermissionLookupBudget+1)
 	for i := range 2*repositoryMonitorPermissionLookupBudget + 1 {
 		accounts = append(accounts, fmt.Sprintf("account%03d", i))
@@ -316,7 +317,7 @@ func TestRepositoryMonitorPermissionLookupsProgressPastLargeDeferrals(t *testing
 		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
 		served := 0
 		for _, account := range accounts {
-			_, err := f.reconciler.repositoryMonitorCollaboratorPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", account)
+			_, err := f.schedulingPermission(ctx, account)
 			switch {
 			case err == nil:
 				served++
@@ -389,7 +390,7 @@ func TestRepositoryMonitorReviewFeedbackCreatingRepairIsNotRecreated(t *testing.
 // few polls instead of the same ones every time. (Autoreview finding.)
 func TestRepositoryMonitorPermissionLookupsServeEveryAccountInOrderOfWaiting(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
-	baseURL := f.reconciler.GitHubAPIBaseURL
+	f.grantEveryoneWrite()
 	accounts := make([]string, 0, 2*repositoryMonitorPermissionLookupBudget+1)
 	for i := range 2*repositoryMonitorPermissionLookupBudget + 1 {
 		accounts = append(accounts, fmt.Sprintf("account%03d", i))
@@ -398,7 +399,7 @@ func TestRepositoryMonitorPermissionLookupsServeEveryAccountInOrderOfWaiting(t *
 	for poll := 1; poll <= 12; poll++ {
 		ctx, end := f.reconciler.withRepositoryMonitorPermissionPoll(context.Background(), f.monitor)
 		for _, account := range accounts {
-			_, err := f.reconciler.repositoryMonitorCollaboratorPermission(ctx, baseURL, "orka-agents", "orka", "forge-token", account)
+			_, err := f.schedulingPermission(ctx, account)
 			switch {
 			case err == nil:
 				lastServed[account] = poll

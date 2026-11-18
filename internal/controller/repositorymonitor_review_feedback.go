@@ -575,9 +575,10 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorReviewFeedback(ctx c
 }
 
 // buildRepositoryMonitorReviewFeedback reads and normalizes the review
-// feedback of pr's head. GitHub failures degrade to a snapshot that says why;
-// only an invalid repository URL or a store failure is returned.
-func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, policy repositoryMonitorReviewFeedbackPolicy) (repositoryMonitorReviewFeedbackSnapshot, error) {
+// feedback of pr's head, reading reviewers' permissions as use requires.
+// GitHub failures degrade to a snapshot that says why; only an invalid
+// repository URL or a store failure is returned.
+func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx context.Context, use repositoryMonitorPermissionUse, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, policy repositoryMonitorReviewFeedbackPolicy) (repositoryMonitorReviewFeedbackSnapshot, error) {
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return repositoryMonitorReviewFeedbackSnapshot{}, err
@@ -597,7 +598,9 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewFeedback(ctx c
 	raw := r.fetchRepositoryMonitorReviewFeedback(ctx, token, owner, repository, pr.Number)
 	baseURL := repositoryMonitorGitHubBaseURL(r)
 	permissionOf := func(login string) (string, error) {
-		return r.repositoryMonitorCollaboratorPermission(ctx, baseURL, owner, repository, token, login)
+		return r.repositoryMonitorPermission(ctx, use, baseURL, owner, repository, token, login, func(permission string) bool {
+			return repositoryMonitorPermissionMeets(policy.MinPermission, policy.AllowedPermissions, permission)
+		})
 	}
 	return normalizeRepositoryMonitorReviewFeedback(snapshot, pr, raw, orkaReviews, policy, permissionOf), nil
 }

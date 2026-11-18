@@ -248,7 +248,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorFeedbackRepair(ctx con
 	if !repositoryMonitorHumanFeedbackEnabled(monitor.Spec) || monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 		return false, nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return false, err
 	}
@@ -291,7 +291,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorFeedbackRepair(ctx con
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
 		full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
-		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled)
+		reason, err := r.repositoryMonitorRepairLabelActorRefusal(ctx, repositoryMonitorPermissionForWrite, monitor, owner, repo, pr, full, labelled)
 		if err != nil {
 			return false, err
 		}
@@ -373,7 +373,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackHandoff(ctx conte
 	if !repositoryMonitorRepairCarriesFeedback(monitor, command) {
 		return nil, "", nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), repositoryMonitorPermissionForWrite, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return nil, "", err
 	}
@@ -540,7 +540,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 	if !full {
 		return "", "", false, nil
 	}
-	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
+	snapshot, err := r.buildRepositoryMonitorReviewFeedback(repositoryMonitorFeedbackPermissionScope(ctx, pr), repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(monitor.Spec))
 	if err != nil {
 		return "", "", false, err
 	}
@@ -567,7 +567,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFeedbackReadiness(ctx con
 	}
 	if reason == "" {
 		owner, repo, _ := strings.Cut(snapshot.Repo, "/")
-		if reason, err = r.repositoryMonitorRepairLabelActorRefusal(ctx, monitor, owner, repo, pr, full, labelled); err != nil {
+		if reason, err = r.repositoryMonitorRepairLabelActorRefusal(ctx, repositoryMonitorPermissionForScheduling, monitor, owner, repo, pr, full, labelled); err != nil {
 			return "", "", false, err
 		}
 	}

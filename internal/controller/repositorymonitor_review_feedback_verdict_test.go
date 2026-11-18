@@ -70,8 +70,10 @@ func TestRepositoryMonitorReviewFeedbackVerdict(t *testing.T) {
 	}
 }
 
-// A poll looks each reviewer's permission up once across every pull request
-// and readiness check, and stops at its lookup budget. A lookup the budget
+// A poll looks each authorized reviewer's permission up once across every
+// pull request and readiness check, and stops at its lookup budget. A
+// reviewer without authority is looked up by every evaluation, since a
+// cached absence of authority could let readiness clear. A lookup the budget
 // refuses, like a throttled one, leaves the snapshot to be read again rather
 // than asking for a person.
 func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
@@ -88,7 +90,7 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
 	}
 	ctx := withRepositoryMonitorPermissionCache(context.Background())
 	for range 3 {
-		snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+		snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,23 +101,33 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// writer, outsider, and maintainer, each once.
-	if got := permissionRequests(); got != 3 {
-		t.Fatalf("permission requests = %d (%v), want one per reviewer", got, f.github.requests)
+	// writer and maintainer once; outsider once by each of the 3 snapshots
+	// and 3 readiness checks.
+	authorized, outsider := 0, 0
+	for _, request := range f.github.requests {
+		switch request {
+		case "permission:writer", "permission:maintainer":
+			authorized++
+		case "permission:outsider":
+			outsider++
+		}
+	}
+	if authorized != 2 || outsider != 6 {
+		t.Fatalf("permission requests: authorized %d outsider %d (%v), want 2 and 6", authorized, outsider, f.github.requests)
 	}
 
 	// A new poll whose budget is spent makes no request and reads again.
 	spent := withRepositoryMonitorPermissionCache(context.Background())
 	spent.Value(repositoryMonitorPermissionCacheKey{}).(*repositoryMonitorPermissionCache).lookups = repositoryMonitorPermissionLookupBudget
 	before := permissionRequests()
-	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(spent, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+	snapshot, err := f.reconciler.buildRepositoryMonitorReviewFeedback(spent, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if verdict, _ := snapshot.verdict(); verdict != repositoryMonitorFeedbackIncompleteRetry || permissionRequests() != before {
 		t.Fatalf("verdict = %q requests %d→%d, want a retry without requests", verdict, before, permissionRequests())
 	}
-	if _, err := f.reconciler.repositoryMonitorCollaboratorPermission(spent, "https://api.github.com", "orka-agents", "orka", "token", "someone"); !errors.Is(err, errRepositoryMonitorPermissionLookupBudget) {
+	if _, err := f.schedulingPermission(spent, "someone"); !errors.Is(err, errRepositoryMonitorPermissionLookupBudget) {
 		t.Fatalf("lookup past the budget err=%v", err)
 	}
 	// A throttled lookup is cached for the poll, so it is not retried in
@@ -124,7 +136,7 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
 	throttled := withRepositoryMonitorPermissionCache(context.Background())
 	before = permissionRequests()
 	for range 2 {
-		snapshot, err = f.reconciler.buildRepositoryMonitorReviewFeedback(throttled, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
+		snapshot, err = f.reconciler.buildRepositoryMonitorReviewFeedback(throttled, repositoryMonitorPermissionForScheduling, f.monitor, pr, repositoryMonitorReviewFeedbackPolicyFor(f.monitor.Spec))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,8 +144,10 @@ func TestRepositoryMonitorReviewFeedbackPermissionLookupsPerPoll(t *testing.T) {
 			t.Fatalf("throttled verdict = %q, want incomplete_retry", verdict)
 		}
 	}
-	if got := permissionRequests() - before; got != 3 {
-		t.Fatalf("throttled poll made %d permission requests, want one per reviewer", got)
+	// writer's throttled lookup and maintainer once, outsider by both
+	// snapshots.
+	if got := permissionRequests() - before; got != 4 {
+		t.Fatalf("throttled poll made %d permission requests, want one per authorized or throttled reviewer and one per snapshot for outsider", got)
 	}
 }
 
@@ -155,7 +169,7 @@ func TestRepositoryMonitorReviewFeedbackVerdictForTooLargeResponses(t *testing.T
 			github := &repositoryMonitorFeedbackGitHub{t: t, threadPages: []string{"[" + repositoryMonitorFeedbackTestThreadJSON("T1", 11, "writer", "Fix one.") + "]"},
 				permissions: map[string]string{"writer": "write"}, maxThreadPageSize: tc.maxSize}
 			r, monitor := repositoryMonitorFeedbackTestReconciler(t, github)
-			snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
+			snapshot, err := r.buildRepositoryMonitorReviewFeedback(ctx, repositoryMonitorPermissionForScheduling, monitor, pr, repositoryMonitorDefaultReviewFeedbackPolicy(monitor.Spec))
 			if err != nil {
 				t.Fatal(err)
 			}

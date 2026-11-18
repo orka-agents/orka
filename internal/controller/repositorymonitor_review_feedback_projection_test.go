@@ -156,7 +156,7 @@ func pollFeedbackSnapshots(t *testing.T, f *repositoryMonitorFeedbackRepairFixtu
 		scoped := withRepositoryMonitorPermissionScope(ctx, fmt.Sprintf("pull_request:%d", pr))
 		complete[pr] = true
 		for reviewer := range reviewers {
-			_, err := f.reconciler.repositoryMonitorCollaboratorPermission(scoped, f.reconciler.GitHubAPIBaseURL, "orka-agents", "orka", "forge-token", fmt.Sprintf("pr%d-reviewer%02d", pr, reviewer))
+			_, err := f.schedulingPermission(scoped, fmt.Sprintf("pr%d-reviewer%02d", pr, reviewer))
 			switch {
 			case errors.Is(err, errRepositoryMonitorPermissionLookupBudget):
 				complete[pr] = false
@@ -166,6 +166,22 @@ func pollFeedbackSnapshots(t *testing.T, f *repositoryMonitorFeedbackRepairFixtu
 		}
 	}
 	return complete
+}
+
+// schedulingPermission looks login up for scheduling, as readiness does, for
+// a caller any write permission satisfies.
+func (f *repositoryMonitorFeedbackRepairFixture) schedulingPermission(ctx context.Context, login string) (string, error) {
+	return f.reconciler.repositoryMonitorSchedulingPermission(ctx, f.reconciler.GitHubAPIBaseURL, "orka-agents", "orka", "forge-token", login, func(permission string) bool {
+		return repositoryMonitorPermissionMeets("", nil, permission)
+	})
+}
+
+// grantEveryoneWrite makes every account the fixture's GitHub does not name
+// a writer, so lookups made only to exercise the budget are remembered.
+func (f *repositoryMonitorFeedbackRepairFixture) grantEveryoneWrite() {
+	f.github.mu.Lock()
+	f.github.defaultPermission = "write"
+	f.github.mu.Unlock()
 }
 
 func forgetRememberedPermissions(f *repositoryMonitorFeedbackRepairFixture) {
@@ -183,6 +199,7 @@ func forgetRememberedPermissions(f *repositoryMonitorFeedbackRepairFixture) {
 // together. (Codex review probe.)
 func TestRepositoryMonitorPermissionLookupsCompleteEverySnapshot(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.grantEveryoneWrite()
 	lastComplete := map[int]int{}
 	for poll := 1; poll <= 12; poll++ {
 		for pr, complete := range pollFeedbackSnapshots(t, f, 5, 20) {
@@ -203,6 +220,7 @@ func TestRepositoryMonitorPermissionLookupsCompleteEverySnapshot(t *testing.T) {
 // waiting, so the next inventory poll still serves them. (Copilot thread.)
 func TestRepositoryMonitorPermissionLookupsSurviveIdleReconciles(t *testing.T) {
 	f := newRepositoryMonitorFeedbackRepairFixture(t, nil)
+	f.grantEveryoneWrite()
 	first := pollFeedbackSnapshots(t, f, 5, 20)
 	if first[3] || first[4] {
 		t.Fatalf("first poll completed %v, want the last pull requests cut short", first)
