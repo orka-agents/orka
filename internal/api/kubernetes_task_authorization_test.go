@@ -348,7 +348,7 @@ func TestAuthorizeTaskMemoryConsolidationReviewsTheCanonicalIdentity(t *testing.
 	for _, authType := range []string{AuthTypeOIDC, AuthTypeContextToken} {
 		specs := review(&UserInfo{AuthType: authType, Username: "cluster-admin", Issuer: "https://issuer.example",
 			Subject: "subject-1", Groups: []string{"system:masters"}})
-		require.Len(t, specs, 3)
+		require.Len(t, specs, 4)
 		for _, spec := range specs {
 			require.Equal(t, "https://issuer.example#subject-1", spec.User, "%s: never the chosen display name", authType)
 			require.Equal(t, []string{"https://issuer.example#system:masters"}, spec.Groups, "%s: groups carry the issuer", authType)

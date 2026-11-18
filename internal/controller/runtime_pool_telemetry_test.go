@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRuntimePoolTelemetryProjection(t *testing.T) {
@@ -105,10 +107,16 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	}
 	getenv := func(name string) string { return values[name] }
 	// Different OTLP/HTTP collectors per signal need an endpoint each plus the
-	// protocol, past the native budget, so traces win and metrics are dropped.
+	// protocol. A Pod-backed runtime has no environment limit, so both signals
+	// are projected; only a native runtime's fit may drop metrics.
 	env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, getenv))
-	if len(env) != 3 || env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "http://traces.otel.svc:4318/v1/traces" || env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "http/protobuf" {
-		t.Fatalf("over-budget metrics projection = %v", env)
+	if want := map[string]string{
+		"ORKA_ENABLE_TELEMETRY":               "true",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc:4318/v1/traces",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://collector.otel.svc:4318/v1/metrics",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
+	}; !maps.Equal(env, want) {
+		t.Fatalf("separate-collector metrics projection = %v, want %v", env, want)
 	}
 	// Over gRPC the generic URL is the metrics endpoint, projected under the
 	// metrics name; trace-specific settings keep precedence for traces.
@@ -261,7 +269,7 @@ func TestValidateRuntimeTelemetryCollectorEgress(t *testing.T) {
 	env := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
 	}
-	valid := env(map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.otel.svc:4317"})
+	valid := env(map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.otel.svc.cluster.local:4317"})
 	if err := ValidateRuntimeTelemetryCollectorEgress(false, false, valid); err != nil {
 		t.Fatalf("opt-out rejected: %v", err)
 	}
@@ -287,6 +295,44 @@ func TestValidateRuntimeTelemetryCollectorEgress(t *testing.T) {
 		if err := ValidateRuntimeTelemetryCollectorEgress(true, true, env(values)); err == nil {
 			t.Errorf("%s: invalid collector endpoint admitted", name)
 		}
+	}
+}
+
+// The opt-in admits collectors only for gateway-enforced runtimes, whose
+// admission refuses a short Service name and whose egress rule follows the
+// endpoint scheme. Startup refuses what every such runtime would fail on: a
+// short name, and an OTLP INSECURE setting that contradicts the scheme.
+func TestValidateRuntimeTelemetryCollectorEgressRefusesWhatNativeRuntimesCannotUse(t *testing.T) {
+	const qualified = "collector.otel.svc.cluster.local"
+	for name, test := range map[string]struct {
+		values map[string]string
+		want   string
+	}{
+		"short Service name":           {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4317"}, want: "short Kubernetes Service name"},
+		"short metrics Service name":   {values: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4317"}, want: "short Kubernetes Service name"},
+		"https sent as cleartext":      {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_INSECURE": "true"}, want: "INSECURE"},
+		"http sent with TLS":           {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_INSECURE": "false"}, want: "INSECURE"},
+		"metrics-only insecure":        {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_METRICS_INSECURE": "TRUE"}, want: "metrics collector"},
+		"agreeing insecure":            {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_INSECURE": "true"}},
+		"agreeing secure":              {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://" + qualified + ":4317", "OTEL_EXPORTER_OTLP_INSECURE": "false"}},
+		"fully qualified, no INSECURE": {values: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://" + qualified + ":4317"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateRuntimeTelemetryCollectorEgress(true, true, func(key string) string { return test.values[key] })
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("valid configuration refused: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want one naming %q", err, test.want)
+			}
+		})
+	}
+	// Without the opt-in the operator owns collector egress.
+	if err := ValidateRuntimeTelemetryCollectorEgress(true, false, func(string) string { return "http://collector.otel.svc:4317" }); err != nil {
+		t.Fatalf("configuration refused without the opt-in: %v", err)
 	}
 }
 
@@ -399,32 +445,53 @@ func resolveOTLPSignal(t *testing.T, getenv func(string) string, signal, signalP
 	return parsed.String(), protocol, true
 }
 
-// Every endpoint and protocol combination fits the native budget, keeps each
-// exported signal's SDK URL and protocol, drops metrics rather than letting
-// them fall back to another collector, and keeps metrics whenever they fit.
+// runtimePoolNativeTelemetryRoom is the room a native supervisor that cannot
+// suspend leaves for telemetry: it already needs 29 of the 32 entries.
+const runtimePoolNativeTelemetryRoom = 3
+
+// Every endpoint and protocol combination keeps each exported signal's SDK URL
+// and protocol and never lets a dropped signal fall back to another collector.
+// A Pod-backed runtime, which has no environment limit, exports every
+// configured signal. A native runtime with three free entries fits within
+// them, dropping metrics only when they do not fit.
 func TestRuntimePoolTelemetryFitsNativeBudget(t *testing.T) {
+	base := make([]corev1.EnvVar, nativeRuntimeEnvironmentLimit-runtimePoolNativeTelemetryRoom)
+	for i := range base {
+		base[i] = corev1.EnvVar{Name: fmt.Sprintf("ORKA_ACP_FIXTURE_%d", i), Value: "x"}
+	}
 	for name, combination := range runtimePoolTelemetryCombinations() {
 		t.Run(name, func(t *testing.T) {
 			input := func(key string) string { return combination.values[key] }
-			projected := runtimePoolTelemetryEnv(true, input)
-			if len(projected) > runtimePoolTelemetryEnvBudget {
-				t.Fatalf("projected %d telemetry entries (budget %d): %v", len(projected), runtimePoolTelemetryEnvBudget, projected)
+			_, configured, _ := runtimePoolTelemetrySignals(true, input)
+			pod := runtimePoolTelemetryEnv(true, input)
+			native, _, _ := fitNativeRuntimeTelemetry(append(slices.Clone(base), pod...), true, input)
+			native = runtimeTelemetryEnv(native)
+			if len(native) > runtimePoolNativeTelemetryRoom {
+				t.Fatalf("native projection uses %d telemetry entries (room %d): %v", len(native), runtimePoolNativeTelemetryRoom, native)
 			}
-			env := runtimePoolLiteralEnvironment(projected)
-			output := func(key string) string { return env[key] }
-			if env["ORKA_ENABLE_TELEMETRY"] != "true" {
-				t.Fatalf("traces disabled: %v", projected)
-			}
-			wantURL, wantProtocol, _ := resolveOTLPSignal(t, input, "TRACES", "/v1/traces")
-			if gotURL, gotProtocol, ok := resolveOTLPSignal(t, output, "TRACES", "/v1/traces"); !ok || gotURL != wantURL || gotProtocol != wantProtocol {
-				t.Fatalf("traces resolve to %s %s, want %s %s: %v", gotProtocol, gotURL, wantProtocol, wantURL, projected)
-			}
-			gotURL, gotProtocol, ok := resolveOTLPSignal(t, output, "METRICS", "/v1/metrics")
-			if ok != combination.metrics {
-				t.Fatalf("metrics exported = %t, want %t: %v", ok, combination.metrics, projected)
-			}
-			if wantURL, wantProtocol, _ := resolveOTLPSignal(t, input, "METRICS", "/v1/metrics"); ok && (gotURL != wantURL || gotProtocol != wantProtocol) {
-				t.Fatalf("metrics resolve to %s %s, want %s %s: %v", gotProtocol, gotURL, wantProtocol, wantURL, projected)
+			for projection, test := range map[string]struct {
+				env     []corev1.EnvVar
+				metrics bool
+			}{
+				"pod":    {pod, configured != nil},
+				"native": {native, combination.metrics},
+			} {
+				env := runtimePoolLiteralEnvironment(test.env)
+				output := func(key string) string { return env[key] }
+				if env["ORKA_ENABLE_TELEMETRY"] != "true" {
+					t.Fatalf("%s: traces disabled: %v", projection, test.env)
+				}
+				wantURL, wantProtocol, _ := resolveOTLPSignal(t, input, "TRACES", "/v1/traces")
+				if gotURL, gotProtocol, ok := resolveOTLPSignal(t, output, "TRACES", "/v1/traces"); !ok || gotURL != wantURL || gotProtocol != wantProtocol {
+					t.Fatalf("%s: traces resolve to %s %s, want %s %s: %v", projection, gotProtocol, gotURL, wantProtocol, wantURL, test.env)
+				}
+				gotURL, gotProtocol, ok := resolveOTLPSignal(t, output, "METRICS", "/v1/metrics")
+				if ok != test.metrics {
+					t.Fatalf("%s: metrics exported = %t, want %t: %v", projection, ok, test.metrics, test.env)
+				}
+				if wantURL, wantProtocol, _ := resolveOTLPSignal(t, input, "METRICS", "/v1/metrics"); ok && (gotURL != wantURL || gotProtocol != wantProtocol) {
+					t.Fatalf("%s: metrics resolve to %s %s, want %s %s: %v", projection, gotProtocol, gotURL, wantProtocol, wantURL, test.env)
+				}
 			}
 		})
 	}

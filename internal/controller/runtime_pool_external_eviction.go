@@ -414,6 +414,43 @@ func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alp
 	return record != nil && !r.now().Before(record.Deadline)
 }
 
+// externalSuspendNotAfter bounds a Suspend authorization by the exact
+// instance's recorded eviction deadline. Core cannot withdraw the
+// authorization once written, so the provider enforces the deadline: it never
+// starts a suspension after notAfter and stops the instance instead. A bound
+// already written is kept, or moved earlier by a shorter window, but never
+// removed or extended. Any other action carries no bound, which also clears it
+// when deletion supersedes the Suspend.
+func externalSuspendNotAfter(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, action workspacev1alpha1.WorkloadRetirementAction) *metav1.Time {
+	if action != workspacev1alpha1.WorkloadRetirementSuspend {
+		return nil
+	}
+	var notAfter *metav1.Time
+	if existing := w.Spec.Retirement; existing != nil && existing.Action == workspacev1alpha1.WorkloadRetirementSuspend &&
+		existing.Sequence == w.Spec.Workload.Sequence && existing.NotAfter != nil {
+		notAfter = existing.NotAfter.DeepCopy()
+	}
+	if record, malformed := currentExternalRuntimeEviction(pool, w); !malformed && record != nil {
+		// The API stores whole seconds, truncating, so the stored bound never
+		// extends the window, and the stored value then wins over the record.
+		deadline := metav1.NewTime(record.Deadline)
+		if notAfter == nil || deadline.Before(notAfter) {
+			notAfter = &deadline
+		}
+	}
+	return notAfter
+}
+
+// externalProviderSuspendDeadlineExceeded reports that the Suspend
+// authorization's notAfter, less the provider's clock-skew margin, passed
+// before the provider started the suspension, so it stopped the instance
+// without preserving its data.
+func externalProviderSuspendDeadlineExceeded(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	condition := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
+	return condition != nil && condition.ObservedGeneration == w.Generation &&
+		condition.Reason == string(workspacev1alpha1.ReasonSuspendDeadlineExceeded)
+}
+
 // externalEvictionSettlementPending reports whether an eviction still needs
 // its outcome recorded before the markers that hold the pool in retirement are
 // removed. That is the case while the persisted condition reports an eviction
@@ -478,6 +515,11 @@ func externalEvictionOutcome(w *workspacev1alpha1.ExecutionWorkspace) (string, s
 	a := (*workspacev1alpha1.AllocationObservation)(nil)
 	if w != nil {
 		a = w.Status.Allocation
+	}
+	if w != nil && externalProviderSuspendDeadlineExceeded(w) {
+		// The provider's report wins over any retained data it also shows.
+		return corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
+			"the suspension authorization expired before the provider started suspending the runtime, so it stopped without its data; its last checkpoint is retained and uncertain work is never replayed"
 	}
 	if a != nil && a.State == workspacev1alpha1.AllocationStopped && a.RetainedData != nil && w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		return corev1alpha1.RuntimePoolReasonEvictionSuspended, "the evicted runtime was suspended with its data and resumes on a new worker"

@@ -861,7 +861,7 @@ how settings reach workers and runtime supervisors, collector routing, and priva
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
-| `--runtime-telemetry-collector-egress` / `ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS` | `false` | Admit projected collector origins to Agent Substrate runtime egress allowlists (fails startup on IP, single-label, wildcard or scheme-less endpoints) |
+| `--runtime-telemetry-collector-egress` / `ORKA_RUNTIME_TELEMETRY_COLLECTOR_EGRESS` | `false` | Admit projected collector origins to Agent Substrate runtime egress allowlists (fails startup on IP, single-label, wildcard, short `<service>.<namespace>.svc` or scheme-less endpoints, and on an OTLP `INSECURE` setting that contradicts the endpoint scheme) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default `localhost:4317` | OTLP collector endpoint for traces and metrics |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Trace-specific OTLP endpoint |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-specific OTLP endpoint |

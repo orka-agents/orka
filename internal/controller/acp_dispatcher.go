@@ -1358,6 +1358,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		workspace.ExpectDurableResumeMinGeneration = resumeFloor
 	}
 	workspaceAuthorization := preparedWorkspace.authorization
+	if sessionExecution == nil && task.Status.Execution.RuntimeSessionWorkspaceDigest != preparedWorkspace.bindingDigest {
+		// A task-scoped RuntimeSession has no Session binding to carry its
+		// workspace identity. Record it before the session exists so recovery
+		// of an abandoned validation barrier can prove the rebuilt baseline is
+		// the one this exact session was created with.
+		if err := d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
+			execution.RuntimeSessionWorkspaceDigest = preparedWorkspace.bindingDigest
+		}); err != nil {
+			return err
+		}
+	}
 	if sessionExecution != nil {
 		previousRuntimeFence := runtimeFence
 		bound, workspaceChanged, bindErr := bindACPRuntimeSessionWorkspace(
@@ -6205,6 +6216,18 @@ func taskScopedRuntimeSessionCleanupUnconfirmed(task *corev1alpha1.Task) bool {
 		!runtimeSessionCleanupCompleteForUID(task, acpTaskControlUID(task))
 }
 
+// taskScopedRuntimeSessionReleasedUnretired reports whether the Task names a
+// RuntimeSession without a cleanup receipt that attempt does not own: one the
+// attempt released, and that must be retired before another generation.
+func taskScopedRuntimeSessionReleasedUnretired(task *corev1alpha1.Task, attempt *store.PromptAttempt) bool {
+	if !taskScopedRuntimeSessionCleanupUnconfirmed(task) {
+		return false
+	}
+	execution := task.Status.Execution
+	return attempt == nil || attempt.RuntimeInstanceID != execution.RuntimeInstanceID || attempt.SessionUID != execution.RuntimeSessionUID ||
+		attempt.SessionLeaseGeneration != execution.RuntimeSessionGeneration
+}
+
 // settleRetainedTaskScopedRuntimeSession retires a task-scoped RuntimeSession
 // that the Task still names without a cleanup receipt before another
 // generation is planned, because planning overwrites that binding. A binding
@@ -6221,14 +6244,10 @@ func (d *ACPDispatcher) settleRetainedTaskScopedRuntimeSession(
 	attempt *store.PromptAttempt,
 	runtimeFence harnessv2.Fence,
 ) (bool, error) {
-	if !taskScopedRuntimeSessionCleanupUnconfirmed(task) {
+	if !taskScopedRuntimeSessionReleasedUnretired(task, attempt) {
 		return false, nil
 	}
 	execution := task.Status.Execution
-	if attempt != nil && attempt.RuntimeInstanceID == execution.RuntimeInstanceID && attempt.SessionUID == execution.RuntimeSessionUID &&
-		attempt.SessionLeaseGeneration == execution.RuntimeSessionGeneration {
-		return false, nil
-	}
 	hold := func(cause error) (bool, error) {
 		return true, d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, cause)
 	}
@@ -6479,7 +6498,11 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 		}
 		pool, identity, err := d.claimRuntimePoolReservation(ctx, task, target.pool.Name, fence, 0)
 		if err != nil {
-			if errors.Is(err, errACPRuntimePoolNotAdmitting) && runtimePoolHasExternalWorkspace(target.pool) {
+			// A retiring instance can refuse for capacity too: its running
+			// prompts may still hold every slot. The prompt was never
+			// accepted, so either refusal requeues it for the replacement.
+			if (errors.Is(err, errACPRuntimePoolNotAdmitting) || errors.Is(err, errACPRuntimePoolAtCapacity)) &&
+				runtimePoolHasExternalWorkspace(target.pool) {
 				if retiring, retiringErr := d.externalWorkspacePoolRetiring(ctx, target.pool); retiringErr == nil && retiring {
 					return nil, errACPPromptAdmissionInstanceRetiring
 				}
@@ -6489,7 +6512,11 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 			}
 			return nil, err
 		}
-		if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(expectedInstance) {
+		// A prompt-only reservation is not gated on admission, so capacity
+		// freed on an instance that started retiring during the wait is not
+		// used: the prompt is requeued for the replacement.
+		retiring := runtimePoolHasExternalWorkspace(target.pool) && runtimePoolWorkspaceInstanceRetiring(pool)
+		if retiring || pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(expectedInstance) {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			releaseErr := d.releaseRuntimePoolReservation(releaseCtx, *identity)
 			cancel()
@@ -7011,6 +7038,13 @@ const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a te
 // Task with ExecutionEventPersistenceFailed.
 const acpInterruptedOutputFlushTimeout = 60 * time.Second
 
+// acpPromptLifecyclePersistTimeout bounds the detached journal append that
+// records a prompt's stream failure or settlement. It shares the journal's
+// single SQLite connection for the same reason as
+// acpInterruptedOutputFlushTimeout, so it gets the same deadline: a failed
+// append fails the Task with ExecutionEventPersistenceFailed.
+const acpPromptLifecyclePersistTimeout = acpInterruptedOutputFlushTimeout
+
 const (
 	acpCancelLogKeyNamespace = "namespace"
 	acpCancelLogKeyTask      = "task"
@@ -7115,7 +7149,7 @@ func appendPromptStreamFailureLifecycleDetached(
 	journalState *v2eventjournal.State,
 	streamErr error,
 ) error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptLifecyclePersistTimeout)
 	defer cancel()
 	return appendPromptStreamFailureLifecycleIfNew(persistCtx, journalState, time.Now().UTC(), streamErr)
 }
@@ -7126,7 +7160,7 @@ func appendPromptSettlementLifecycleDetached(
 	settlement harnessv2.PromptSettlement,
 	cancellationReason harnessv2.CancelReason,
 ) error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptLifecyclePersistTimeout)
 	defer cancel()
 	_, _, err := journalState.AppendPromptSettlementIfNew(persistCtx, settlement, cancellationReason)
 	return err

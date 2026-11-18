@@ -91,6 +91,13 @@ func newRoutedRuntimeFixture(t *testing.T, substrateV1 bool, mutate func(*worksp
 	if substrateV1 {
 		f.advertiseSubstrateV1Backend(t)
 	}
+	return routeRuntimeFixture(t, f, mutate)
+}
+
+// routeRuntimeFixture publishes and materializes a native fixture as a routed
+// process.
+func routeRuntimeFixture(t *testing.T, f *externalRuntimePoolFixture, mutate func(*workspacev1alpha1.AllocationObservation)) *routedRuntimeFixture {
+	t.Helper()
 	router := &routedRecordingTransport{}
 	f.r.SubstrateRouter = &RuntimePoolSubstrateRouter{URL: routedTestRouterURL, HTTPClient: &http.Client{Transport: router}}
 	direct := &nativeIngressReviewTransport{}

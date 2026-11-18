@@ -843,6 +843,22 @@ func RegisterBrokeredWebTools(r *Registry) error {
 	return nil
 }
 
+// BrokeredBuiltInToolNames returns the names RegisterBrokeredCoordinationTools,
+// RegisterBrokeredWebTools, and RegisterBrokeredConnectionTools register: the
+// built-ins the controller MCP broker serves to ACP runtimes ahead of any Tool
+// resource of the same name. It only classifies names. A runtime still reaches
+// one of these tools only when its allowlist names it.
+func BrokeredBuiltInToolNames() []string {
+	return []string{
+		delegateTaskToolName, waitForTasksToolName, RunValidationToolName,
+		sendMessageToolName, checkMessagesToolName,
+		"recall_memory", "remember", "propose_memory", "search_transcript",
+		ParkUntilToolName,
+		webSearchToolName, webFetchToolName,
+		ListConnectionsToolName,
+	}
+}
+
 // RegisterChatTools registers the chat/management tools into the given registry.
 func RegisterChatTools(r *Registry) {
 	r.Register(&CreateAITaskTool{})

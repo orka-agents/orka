@@ -94,9 +94,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	// A provider-reported Failed instance is terminal: retire it, never replace it.
+	// A provider-reported Failed instance is terminal: retire it, never replace
+	// it. So is one the provider stopped because its Suspend authorization
+	// expired first: like an instance the worker killed, it kept no data, and
+	// a data-only class admits a successor only with verified retained data.
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
-		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
+		externalProviderSuspendDeadlineExceeded(w)
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
@@ -173,10 +177,10 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		if w.Spec.Workload != nil {
 			a := w.Status.Allocation
 			if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || a.Key != w.Spec.Workload.Key || a.Sequence != w.Spec.Workload.Sequence || a.Identity.RequestRevision != w.Spec.Workload.Revision || !a.Identity.Valid() || a.Startup != nil || w.Status.ObservedGeneration != w.Generation {
-				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "stopped allocation does not prove the current runtime terminated")
+				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleDegraded, "stopped allocation does not prove the current runtime terminated")
 			}
 			if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
-				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
+				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
 		}
 		if externalEvictionSettlementPending(pool, w) {
@@ -190,7 +194,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 				return ctrl.Result{}, err
 			}
 			if rotating {
-				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "rotating private credentials before cold boot")
+				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStarting, "rotating private credentials before cold boot")
 			}
 		}
 		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret)
@@ -239,12 +243,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	nonce := string(auth.Data[runtimePoolBootstrapNonceKey])
 	if w.Status.Allocation.Startup.Process != nil {
 		if _, err := r.seedExternalNativeCredentials(ctx, w, auth, providerSecret); err != nil {
-			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for process-bound credential bootstrap")
+			return r.externalPoolRequestProgress(ctx, pool, request, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for process-bound credential bootstrap")
 		}
 	} else if _, err := r.seedWorkspaceSupervisorCredentials(ctx, w.Status.Allocation.Startup.Endpoint, nonce, auth, providerSecret); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for exact-instance credential bootstrap")
+		return r.externalPoolRequestProgress(ctx, pool, request, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for exact-instance credential bootstrap")
 	}
 	status := r.baseRuntimePoolStatus(pool, 1)
+	r.deriveExternalRuntimeTelemetryReady(pool, &status, request)
 	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
 		func(ctx context.Context, _ *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 			current, err := r.externalPoolWorkspace(ctx, pool)
@@ -278,7 +283,16 @@ func (r *RuntimePoolReconciler) externalPoolWorkspaceProgress(ctx context.Contex
 	if report := externalProviderOperationReport(w); report != "" {
 		message += "; provider reports: " + report
 	}
-	return r.externalPoolProgress(ctx, pool, lifecycle, message)
+	return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, lifecycle, message)
+}
+
+// externalPoolRequestProgress is externalPoolProgress for a reconcile that
+// read the workspace's published request: it also re-derives TelemetryReady
+// from that request.
+func (r *RuntimePoolReconciler) externalPoolRequestProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, request *workspacev1alpha1.WorkloadRequest, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
+	status := r.externalPoolProgressStatus(pool, lifecycle, message)
+	r.deriveExternalRuntimeTelemetryReady(pool, &status, request)
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 func externalProviderOperationReport(w *workspacev1alpha1.ExecutionWorkspace) string {
@@ -430,21 +444,76 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	status := r.externalPoolProgressStatus(pool, corev1alpha1.RuntimePoolLifecycleStarting,
 		"public workload request published; waiting for provider materialization")
-	switch {
-	case telemetryMessage == "":
-		// This request carries no supervisor telemetry; a condition from an
-		// earlier request would describe a runtime that no longer exists.
-		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
-	case telemetryFits:
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
-			corev1alpha1.RuntimePoolReasonTelemetryProjected, telemetryMessage)
-	default:
+	if telemetryMessage != "" && !telemetryFits {
 		log.FromContext(ctx).Info("Reduced supervisor telemetry to fit the native environment limit",
 			"runtimePool", pool.Name, "detail", telemetryMessage)
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionFalse,
-			corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit, telemetryMessage)
 	}
+	// This write may lose the status optimistic lock. Every later reconcile of
+	// the published request re-derives the same condition from the request.
+	r.setExternalRuntimeTelemetryReady(pool, &status, telemetryFits, telemetryMessage)
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
+// setExternalRuntimeTelemetryReady records whether a request's supervisor
+// telemetry projection carries every configured signal. A request without
+// supervisor telemetry has no condition: one from an earlier request would
+// describe a runtime that no longer exists.
+func (r *RuntimePoolReconciler) setExternalRuntimeTelemetryReady(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, fits bool, message string) {
+	switch {
+	case message == "":
+		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionTelemetryReady)
+	case fits:
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionTrue,
+			corev1alpha1.RuntimePoolReasonTelemetryProjected, message)
+	default:
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionTelemetryReady, metav1.ConditionFalse,
+			corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit, message)
+	}
+}
+
+// deriveExternalRuntimeTelemetryReady re-derives TelemetryReady from the
+// telemetry projection frozen in the published request, so the condition does
+// not depend on the publishing reconcile's status write landing. Only a native
+// request is fitted to the backend environment limit; a Pod-backed request, or
+// none, carries no condition. Fitting is deterministic, so re-fitting the
+// frozen environment reproduces the publish-time verdict. The verdict is
+// against the signals the controller configures now: when a changed
+// configuration still yields the frozen projection, the runtime exports
+// exactly what that configuration asks for, and a signal turned off is not
+// reported as dropped. A request the current configuration would project
+// differently was published under another configuration, so its recorded
+// condition is kept.
+func (r *RuntimePoolReconciler) deriveExternalRuntimeTelemetryReady(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, request *workspacev1alpha1.WorkloadRequest) {
+	if request == nil || (request.Runtime != nil && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)) {
+		r.setExternalRuntimeTelemetryReady(pool, status, true, "")
+		return
+	}
+	if request.Runtime == nil {
+		return
+	}
+	for _, container := range request.Runtime.Template.Spec.Containers {
+		if container.Name != request.Runtime.ContainerName {
+			continue
+		}
+		fitted, fits, message := fitNativeRuntimeTelemetry(container.Env, r.EnableTelemetry, os.Getenv)
+		if !reflect.DeepEqual(runtimeTelemetryEnv(fitted), runtimeTelemetryEnv(container.Env)) {
+			return
+		}
+		r.setExternalRuntimeTelemetryReady(pool, status, fits, message)
+		return
+	}
+}
+
+// runtimeTelemetryEnv returns an environment's supervisor telemetry entries,
+// in order.
+func runtimeTelemetryEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	var telemetry []corev1.EnvVar
+	for _, variable := range env {
+		if isRuntimePoolTelemetryEnvName(variable.Name) {
+			telemetry = append(telemetry, variable)
+		}
+	}
+	return telemetry
 }
 
 func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
@@ -944,7 +1013,17 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	action := externalRetirementAction(w, deleting)
-	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
+	if w.Spec.Retirement != nil && w.Spec.Retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && action == workspacev1alpha1.WorkloadRetirementSuspend {
+		// Termination can begin after Suspend was authorized and before the
+		// provider started it. Keep collecting the exact worker's signal while
+		// the instance still serves startup evidence, so the authorization
+		// below gains, or moves earlier to, the eviction deadline. Admission
+		// lets a written Suspend only narrow; the drain is never repeated.
+		if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, action); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action, NotAfter: externalSuspendNotAfter(pool, w, action)}
 	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
 		// Recheck immediately before authorizing: the drain probe above can
 		// outlast a short eviction window.

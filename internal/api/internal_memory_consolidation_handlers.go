@@ -26,6 +26,7 @@ type memoryConsolidationSource struct {
 	store.SessionStore
 	store.MemoryStore
 	store.MemoryConsolidationStore
+	store.MemoryProposalStore
 }
 
 // memoryConsolidationCaller returns the authenticated worker's Task when it is
@@ -37,7 +38,7 @@ func (h *InternalHandlers) memoryConsolidationCaller(c fiber.Ctx) (string, *core
 	if namespace == "" {
 		return "", nil, fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
-	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil {
+	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil || h.memoryProposalStore == nil {
 		return "", nil, fiber.NewError(fiber.StatusNotImplemented, "memory consolidation is not configured")
 	}
 	task, err := h.internalCallerAuthorizer().resolveActiveTaskCaller(c, namespace)
@@ -86,7 +87,7 @@ func (h *InternalHandlers) BeginMemoryConsolidation(c fiber.Ctx) error {
 // authorized just before the revocation.
 func (h *InternalHandlers) withMemoryConsolidationRun(c fiber.Ctx,
 	access func(ctx context.Context, namespace string, task *corev1alpha1.Task) error) error {
-	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil {
+	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil || h.memoryProposalStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "memory consolidation is not configured")
 	}
 	var namespace string
@@ -151,7 +152,7 @@ func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespa
 	}
 	now := memoryConsolidationNow().UTC()
 	start, end := memoryconsolidation.Window(cursor, now, settings.Lookback)
-	input, err := memoryconsolidation.CollectInputs(ctx, memoryConsolidationSource{h.sessionStore, h.memoryStore, h.memoryConsolidationStore},
+	input, err := memoryconsolidation.CollectInputs(ctx, memoryConsolidationSource{h.sessionStore, h.memoryStore, h.memoryConsolidationStore, h.memoryProposalStore},
 		namespace, start, end)
 	if err != nil {
 		return nil, err
@@ -225,6 +226,21 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 	current, err := h.currentTargetGenerations(ctx, namespace, input)
 	if err != nil {
 		return nil, consolidationStoreError("read memory consolidation targets", err)
+	}
+	// Proposals created while the run ran are not repeated either. A reload
+	// that reached a limit marks the report's input truncated, since those
+	// left out were not checked.
+	var laterTruncated bool
+	input.LaterProposals, laterTruncated, err = memoryconsolidation.OpenProposals(ctx, h.memoryProposalStore, namespace)
+	if err != nil {
+		return nil, consolidationStoreError("read open memory proposals", err)
+	}
+	input.Truncated = input.Truncated || laterTruncated
+	// A proposal the run read may have been applied, rejected or archived
+	// while it ran; an operation may then not cover it.
+	input.ClosedProposals, err = memoryconsolidation.ClosedProposals(ctx, h.memoryProposalStore, namespace, input.Proposals)
+	if err != nil {
+		return nil, consolidationStoreError("read memory proposals the run read", err)
 	}
 	kept, rejected, conflicts := memoryconsolidation.Validate(submission, input, current, settings.MaxOperations)
 	var proposals []store.MemoryProposal

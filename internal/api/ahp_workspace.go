@@ -80,6 +80,12 @@ func ahpValidBranch(branch string) bool {
 	return !strings.Contains(branch, "..")
 }
 
+// ahpBranchesClash reports whether Git could not hold both branches: they are
+// the same, or one names a directory of the other's ref ("a" and "a/b").
+func ahpBranchesClash(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
 type ahpWorkspaces struct {
 	b         *ahpBackend
 	clientset kubernetes.Interface
