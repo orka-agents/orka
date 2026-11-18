@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -213,21 +214,29 @@ func TestStampExternalRuntimeStopRequestedOnlyOnFirstAuthorization(t *testing.T)
 	w := &workspacev1alpha1.ExecutionWorkspace{Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 		Retirement: &workspacev1alpha1.WorkloadRetirement{Sequence: 3, Action: workspacev1alpha1.WorkloadRetirementSuspend},
 	}}
-	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(2*time.Second))
-	if got, ok := parseExternalRuntimeMilestone(w.Annotations[externalRuntimeStopRequestedAnnotation], 3); !ok || !got.Equal(requested) {
+	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(2*time.Second), false)
+	stamped := formatExternalRuntimeMilestone(3, requested)
+	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
 		t.Fatalf("stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
 	}
-	// A Delete that follows the Suspend of the same sequence did not drain.
+	// Deletion superseding a Suspend that has not stopped the instance keeps
+	// the start of the one stop.
 	previous := w.Spec.Retirement.DeepCopy()
 	w.Spec.Retirement.Action = workspacev1alpha1.WorkloadRetirementDelete
-	r.stampExternalRuntimeStopRequested(w, previous, "pool", requested.Add(time.Hour))
+	r.externalTimings.observeRetirement("pool", 3, false, requested.Add(time.Minute))
+	r.stampExternalRuntimeStopRequested(w, previous, "pool", requested.Add(time.Hour), false)
+	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
+		t.Fatalf("unfinished re-authorization stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
+	}
+	// A Delete that follows a finished Suspend of the same sequence did not drain.
+	r.stampExternalRuntimeStopRequested(w, previous, "pool", requested.Add(time.Hour), true)
 	if raw, present := w.Annotations[externalRuntimeStopRequestedAnnotation]; present {
-		t.Fatalf("re-authorization kept stop start %q", raw)
+		t.Fatalf("re-authorization after the stop kept stop start %q", raw)
 	}
 	// An unknown start leaves no stale one behind.
-	w.Annotations[externalRuntimeStopRequestedAnnotation] = formatExternalRuntimeMilestone(3, requested)
+	w.Annotations[externalRuntimeStopRequestedAnnotation] = stamped
 	w.Spec.Retirement.Sequence = 4
-	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(time.Hour))
+	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(time.Hour), false)
 	if raw, present := w.Annotations[externalRuntimeStopRequestedAnnotation]; present {
 		t.Fatalf("unknown start kept %q", raw)
 	}
@@ -396,9 +405,9 @@ func suspendFixtureToAuthorization(t *testing.T, f *externalRuntimePoolFixture, 
 	return workspace, pod
 }
 
-// stopSuspendedFixture models settlement suspending the workspace after the
+// settleSuspendedFixture models settlement suspending the workspace after the
 // authorization, as the cold Suspend path does, and the provider's stop.
-func stopSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *runtimeTimingClock, ctx context.Context, pod corev1.Pod) {
+func settleSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *runtimeTimingClock, ctx context.Context, pod corev1.Pod) {
 	t.Helper()
 	clock.now = clock.now.Add(time.Second)
 	workspace := f.currentWorkspace(t)
@@ -418,11 +427,51 @@ func stopSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *ru
 		t.Fatal(err)
 	}
 	clock.now = clock.now.Add(2 * time.Second)
+}
+
+func stopSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *runtimeTimingClock, ctx context.Context, pod corev1.Pod) {
+	t.Helper()
+	settleSuspendedFixture(t, f, clock, ctx, pod)
 	for range 3 {
 		runtimePoolReconcileContext(t, ctx, f.r, f.pool)
 	}
 	if status := runtimePoolTestGetPool(t, f.r, f.pool).Status; status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
 		t.Fatalf("runtime did not stop: %s/%s", status.Lifecycle, status.Message)
+	}
+}
+
+// A Stopped write that fails after Core proved the stop is retried later; the
+// provider's retirement still ends at the first proof.
+func TestExternalRuntimePoolStopEndsAtFirstProofDespiteFailedWrite(t *testing.T) {
+	ctx, lines := captureRuntimeTimingLines(t)
+	f := newExternalRuntimePoolFixture(t)
+	clock := &runtimeTimingClock{now: time.Now().UTC()}
+	f.r.Now = clock.Now
+	_, pod := suspendFixtureToAuthorization(t, f, clock, ctx, -1)
+	settleSuspendedFixture(t, f, clock, ctx, pod)
+	original := f.r.Client
+	failed := false
+	f.r.Client = interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, delegate client.Client, subResource string, object client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if pool, ok := object.(*corev1alpha1.RuntimePool); ok && !failed && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+				failed = true
+				return apierrors.NewServiceUnavailable("injected")
+			}
+			return delegate.SubResource(subResource).Patch(ctx, object, patch, opts...)
+		},
+	})
+	runtimePoolTestSyncBootEpoch(t, f.r)
+	if _, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)}); err == nil || !failed {
+		t.Fatalf("Stopped write did not fail: %v", err)
+	}
+	f.r.Client = original
+	clock.now = clock.now.Add(5 * time.Second)
+	for range 3 {
+		runtimePoolReconcileContext(t, ctx, f.r, f.pool)
+	}
+	stopped := runtimeStoppedLines(*lines)
+	if len(stopped) != 1 || stopped[0]["providerRetirementMs"] != float64(3000) || stopped[0]["stopTotalMs"] != float64(6000) {
+		t.Fatalf("stop lines = %v", stopped)
 	}
 }
 
@@ -658,5 +707,27 @@ func TestExternalRuntimePoolDeletionRecordsStop(t *testing.T) {
 	}
 	if got := runtimePhaseSamples(t, "delete", externalRuntimePhaseProviderRetirement) - retirement; got != 1 {
 		t.Fatalf("delete provider_retirement samples = %d, want one", got)
+	}
+}
+
+// When Core itself requests the retirement, here to retire an old runtime
+// fence, the drain starts at that request rather than at the next pass.
+func TestExternalRuntimePoolStartsDrainWhereCoreRequestsRetirement(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	clock := &runtimeTimingClock{now: time.Now().UTC()}
+	f.r.Now = clock.Now
+	workspace, _ := f.serve(t)
+	requested := clock.now.Add(time.Second)
+	clock.now = requested
+	f.r.ControllerEpoch++
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != booleanTrueValue {
+		t.Fatalf("old runtime fence was not retired: %s", pool.Status.Message)
+	}
+	clock.now = clock.now.Add(2 * time.Second)
+	runtimePoolReconcile(t, f.r, f.pool)
+	if got, ok := f.r.externalTimings.retirementRequested(pool.UID, workspace.Spec.Workload.Sequence); !ok || !got.Equal(requested) {
+		t.Fatalf("retirement start = %s, %v, want %s", got, ok, requested)
 	}
 }

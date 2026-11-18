@@ -180,16 +180,29 @@ func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped 
 
 // stampExternalRuntimeStopRequested adds the observed start of the stop to the
 // patch that first authorizes the sequence's retirement. A later
-// authorization of the same sequence, such as a Delete after a Suspend,
-// retires an instance whose drain already ended, so it carries no start.
-func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool types.UID, authorized time.Time) {
+// authorization of the same sequence, such as deletion superseding a Suspend,
+// keeps that start while the instance still runs, and drops it once the
+// instance already stopped: its drain had ended.
+func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool types.UID, authorized time.Time, retired bool) {
 	sequence := w.Spec.Retirement.Sequence
-	delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
 	if previous != nil && previous.Sequence == sequence {
+		if retired {
+			delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
+		}
 		return
 	}
+	delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
 	if requested, ok := r.externalTimings.retirementRequested(pool, sequence); ok && !requested.After(authorized) {
 		setExternalRuntimeMilestone(w, externalRuntimeStopRequestedAnnotation, sequence, requested)
+	}
+}
+
+// noteExternalRuntimeStopProven keeps when Core first proved the authorized
+// retirement's termination, so a Stopped write that fails and is retried
+// does not count Core's retry delay as the provider's retirement.
+func (r *RuntimePoolReconciler) noteExternalRuntimeStopProven(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) {
+	if w.Spec.Retirement != nil {
+		r.externalTimings.noteStopProven(pool.UID, externalRuntimeStopKey(w.Spec.Retirement), r.now())
 	}
 }
 
