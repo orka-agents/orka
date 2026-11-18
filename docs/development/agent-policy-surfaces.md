@@ -32,8 +32,9 @@ It describes current behavior. The contract for changing that behavior is
 | Approval-required brokered tools (ACP, AgentKit and Foundry runtimes) | Controller broker | No; `tools/list` doesn't mark them | An `isError` result with an approval code and plain guidance; the Task shows `WaitingForApproval` | Yes, from the frozen approval policy; the outcome needs a person |
 | Broker session checks and supervisor failures: fence, policy digest, operation capability, prompt state, connection binding, transport, deadlines, capacity, argument size | Controller broker and supervisor MCP proxy | No | JSON-RPC error `-32002` "MCP broker call failed" for nearly every cause; `-32003` or HTTP 429 at capacity; `-32600` for a request body over the size limit | No; these describe session state, not policy |
 | Provider-native tools (`Read`, `Bash`, `WebFetch` and others) | Runtime session configuration, plus ACP permission requests Orka resolves | Through the runtime's own tool list | Runtime-specific | Yes, from the frozen tool policy |
-| Workspace intent and publication | Filesystem permissions for read intent; the controller and the Publisher | Only by reading the Task spec | A filesystem error for a write under read intent; a Task-level failure for publication | Yes, from the frozen execution plan |
+| Workspace intent and publication | Filesystem permissions for read intent; the controller and the Publisher | Only by reading the Task spec | A filesystem error for a write under read intent; a Task-level failure for publication | Yes, from the frozen execution plan, except an operator taint, which is live state |
 | Orka API authorization in built-in tools: namespace scope, API authorization checks including context-token scopes, Task creation limits | Orka API and the tools | No | A tool result with `permission_denied`, `authorization_failed` or `limit_reached`, plus a message and suggestion. `code_exec`'s resource authorization is the exception: an unclassified "resource authorization: …" error. | Yes |
+| Agent runtime ceilings (`Agent.spec.runtime.ceiling`, ADR 0048) | Controller, when it binds a Task and again until the Task starts | No | Nothing when the call is made: `delegate_task` creates the child Task, which then fails with a message such as "agent … ceiling forbids Bash, …" | Yes, from the target Agent's current ceiling and the child's resolved settings |
 | Per-namespace active-Task cap (`--max-tasks-per-namespace`) | Controller | No | No refusal. A child Task over the cap doesn't start; it's requeued every 10 seconds, with a `NamespaceTaskLimitReached` event. | Yes, from the controller setting and the current count |
 | Delegation limits in the parent Agent's `spec.coordination`: `allowedAgents`, `maxDepth` and `maxConcurrentChildren` | `delegate_task` checks the allowed agents and the depth. It reads them from the parent Agent on ACP, and on native AI workers from the worker's environment, set when its Job was built. The controller checks all three again, against the parent Agent's current spec, whenever the child Task reconciles. | No | From `delegate_task`, a raw error such as "coordination depth exceeded: …" or "agent … is not in the allowed agents list"; an ACP agent sees `-32002`. From the controller, a depth or allowed-agents failure fails the child Task. At `maxConcurrentChildren`, nothing is refused: the child Task is requeued every 10 seconds. | Yes, from the parent Agent's current spec and the current count of active children |
 | Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, an unavailable binding is the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
@@ -42,6 +43,7 @@ It describes current behavior. The contract for changing that behavior is
 | Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object |
 | Network egress from ACP RuntimePools, Kubernetes `code_exec` Jobs and validation Tasks | Kubernetes NetworkPolicy (default deny for RuntimePools), plus runtime enforcement where installed | No, though the fixed rules are documented | A connection failure or timeout that looks like an outage | Fixed rules: yes. Runtime enforcement policies: no |
 | Filesystem layout: read-only root filesystems; private per-session paths and UIDs for ACP children | Pod security context and the ACP supervisor | No | An ordinary filesystem error, such as `EROFS` or `EACCES` | Yes; the layout is fixed |
+| Repository agent configuration (built-in ACP runtimes) | Runtime launch settings, and the supervisor's OpenCode workspace check | No | Claude, Codex and Copilot ignore repository settings, hooks and MCP servers without saying so. For OpenCode, a workspace root with `.opencode/`, `opencode.json` or `opencode.jsonc` fails the Task with `RuntimeSessionStartFailed`. If the agent writes one of these, or adds configuration to its OpenCode configuration folder or `~/.opencode`, the session is retired at the next idle adapter restart, and its replacement starts only if the workspace passes the check. | Yes; the rules are fixed for each runtime |
 | Model and provider route (ACP) | The supervisor's per-session provider proxy, checked against the immutable session profile | No | The runtime's provider call fails; what the model sees depends on the runtime | Yes, from the session profile |
 | Outbound transaction tokens for HTTP Tool calls (native AI workers) | Token exchange before the call | No | An unclassified tool error ("Error executing tool: …") | Partly, like child scopes |
 | OutboundAccessPolicy on an HTTP Tool (ADR 0011) | The outbound access resolver, in the native worker and the ACP broker | No | An unclassified error, "resolve outbound access policy: …": "Error executing tool: …" in native workers, `-32002` through the ACP broker | Partly, from the referenced policy and the Task's frozen Connections |
@@ -196,6 +198,9 @@ These come from the frozen Task spec, but the agent isn't told about them. If th
 the publication fails, the agent or the caller sees a Task-level failure only after the
 turn.
 
+Publication is also refused when operator write access has tainted the Task or its
+workspace (ADR 0044). That state isn't in the Task spec.
+
 ### Orka API authorization in built-in tools
 
 Built-in tools return a `ChatToolResult` (`internal/tools/registry.go`) shaped like
@@ -292,8 +297,9 @@ the agent unclassified:
 - Orka's own local authorization refusals are 403s too, such as the compatibility API's
   "not authorized". They carry neither the authorizer's form nor an admission form.
 
-**Orka's own policies without a `reason`.** These guard controller-owned objects, or hold
-the AI worker to the objects it creates itself, so agents don't normally reach them:
+**Orka's own policies without a `reason`.** These guard controller-owned objects, or limit
+the AI worker's Secret, ServiceAccount and Job writes to the forms `code_exec` and
+child-Task credentials use, so agents don't normally reach them:
 
 - `config/admission/ai_worker_identity_protection.yaml`;
 - `config/admission/gateway_task_protection.yaml`;
