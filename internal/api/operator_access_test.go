@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	cliclient "github.com/orka-agents/orka/internal/cli/client"
@@ -963,4 +964,130 @@ func TestOperatorFileDownloadRequestConfigBoundsTheWrite(t *testing.T) {
 	if server.requestConfig(&exec).WriteTimeout != 0 {
 		t.Fatal("only the copy-out route gets the download write deadline")
 	}
+}
+
+// The broker backstop honours the taint wherever orka-api wrote it: on the
+// linked workspace incarnation or on another Task that shared it, not only on
+// the requesting Task. A marker on a different incarnation does not count.
+func TestPublicationCredentialRefusedForOperatorTaintedWorkspace(t *testing.T) {
+	const (
+		workspaceName = "ws"
+		workspaceUID  = "ws-uid"
+		linkLabel     = "acp.workspace.orka.ai/execution-workspace"
+		uidAnnotation = "acp.workspace.orka.ai/execution-workspace-uid"
+	)
+	cases := map[string]struct {
+		workspaceTainted bool
+		siblingUID       string
+		siblingTainted   bool
+		want             string
+	}{
+		"clean":                       {},
+		"workspace marker":            {workspaceTainted: true, want: "operator-tainted"},
+		"sibling on same incarnation": {siblingUID: workspaceUID, siblingTainted: true, want: "operator-tainted"},
+		"sibling on other incarnation": {
+			siblingUID: "older-ws-uid", siblingTainted: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			require.NoError(t, workspacev1alpha1.AddToScheme(scheme))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "settled", UID: "settled-task-uid",
+					Labels:      map[string]string{linkLabel: workspaceName},
+					Annotations: map[string]string{uidAnnotation: workspaceUID},
+				},
+				Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+					Intent: corev1alpha1.WorkspaceIntentWrite, PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "git-publish"},
+				}},
+				Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+					State: corev1alpha1.TaskExecutionStateSucceeded, Attempt: 1, PromptID: "prompt", PublicationCredentialResourceVersion: "11",
+				}},
+			}
+			workspace := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: workspaceName, UID: workspaceUID, Annotations: map[string]string{}},
+			}
+			if tc.workspaceTainted {
+				workspace.Annotations[operatoraccess.TaintAnnotation] = "x"
+			}
+			publicationID := controller.ACPPublicationIDForTask(task)
+			publication := &corev1alpha1.Publication{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publication"},
+				Spec:       corev1alpha1.PublicationSpec{ID: publicationID, TaskUID: string(task.UID)},
+				Status:     corev1alpha1.PublicationStatus{State: corev1alpha1.PublicationControlState("Publishing")},
+			}
+			objects := []client.Object{task, workspace, publication}
+			if tc.siblingUID != "" {
+				sibling := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "sibling", UID: "sibling-task-uid",
+					Labels:      map[string]string{linkLabel: workspaceName},
+					Annotations: map[string]string{uidAnnotation: tc.siblingUID},
+				}}
+				if tc.siblingTainted {
+					sibling.Annotations[operatoraccess.TaintAnnotation] = "x"
+				}
+				objects = append(objects, sibling)
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			server := &Server{client: kubeClient, config: ServerConfig{APIReader: kubeClient}}
+			_, _, _, _, err := server.authorizePublicationCredential(context.Background(), publisherservice.CredentialMaterialRequest{
+				ParentOperation: publisherservice.OperationPublicationPublish,
+				Metadata: publisherservice.OperationMetadata{
+					Namespace: "default", PublicationID: publicationID, OperationID: controller.ACPPublicationOperationID("publish", task),
+				},
+				Reference: publisherservice.CredentialReference{Name: "git-publish", Kind: publisherservice.CredentialHTTPExtraHeader},
+			})
+			if tc.want == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+			}
+		})
+	}
+}
+
+// When the taint cannot be read, the broker refuses rather than issuing forge
+// write credentials.
+func TestPublicationCredentialFailsClosedWhenTaintIsUnreadable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, workspacev1alpha1.AddToScheme(scheme))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "settled", UID: "settled-task-uid",
+			Labels:      map[string]string{"acp.workspace.orka.ai/execution-workspace": "ws"},
+			Annotations: map[string]string{"acp.workspace.orka.ai/execution-workspace-uid": "ws-uid"},
+		},
+		Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+			Intent: corev1alpha1.WorkspaceIntentWrite, PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "git-publish"},
+		}},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateSucceeded, Attempt: 1, PromptID: "prompt", PublicationCredentialResourceVersion: "11",
+		}},
+	}
+	publicationID := controller.ACPPublicationIDForTask(task)
+	publication := &corev1alpha1.Publication{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publication"},
+		Spec:       corev1alpha1.PublicationSpec{ID: publicationID, TaskUID: string(task.UID)},
+		Status:     corev1alpha1.PublicationStatus{State: corev1alpha1.PublicationControlState("Publishing")},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, publication).
+		WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*workspacev1alpha1.ExecutionWorkspace); ok {
+				return errors.New("apiserver unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		}}).Build()
+	server := &Server{client: kubeClient, config: ServerConfig{APIReader: kubeClient}}
+	_, _, _, _, err := server.authorizePublicationCredential(context.Background(), publisherservice.CredentialMaterialRequest{
+		ParentOperation: publisherservice.OperationPublicationPublish,
+		Metadata: publisherservice.OperationMetadata{
+			Namespace: "default", PublicationID: publicationID, OperationID: controller.ACPPublicationOperationID("publish", task),
+		},
+		Reference: publisherservice.CredentialReference{Name: "git-publish", Kind: publisherservice.CredentialHTTPExtraHeader},
+	})
+	require.ErrorContains(t, err, "publication credential is unavailable")
 }

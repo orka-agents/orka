@@ -146,6 +146,10 @@ func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatal("eviction changed the workspace's desired state")
 	}
+	// Core cannot withdraw the authorization, so it expires at the deadline.
+	if want := metav1.NewTime(evictionRecord(t, f).Deadline.Truncate(time.Second)); retirement.NotAfter == nil || !retirement.NotAfter.Equal(&want) {
+		t.Fatalf("eviction Suspend notAfter = %v, want the eviction deadline %v", retirement.NotAfter, want)
+	}
 }
 
 func TestExternalNativeEvictionNeverAuthorizesSuspendAfterDeadline(t *testing.T) {
@@ -453,14 +457,18 @@ func TestExternalTerminatingWorkerIsReachableOnlyForCleanup(t *testing.T) {
 
 func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		retained bool
-		failed   bool
-		want     string
+		name              string
+		retained          bool
+		failed            bool
+		lateAuthorization bool
+		staleReport       bool
+		want              string
 	}{
 		{name: "suspended", retained: true, want: corev1alpha1.RuntimePoolReasonEvictionSuspended},
 		{name: "no retained data", want: corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded},
 		{name: "failed", retained: true, failed: true, want: corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded},
+		{name: "provider observed the authorization after its deadline", retained: true, lateAuthorization: true, want: corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded},
+		{name: "stale breach report from an earlier generation", retained: true, lateAuthorization: true, staleReport: true, want: corev1alpha1.RuntimePoolReasonEvictionSuspended},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f, w, _, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
@@ -475,6 +483,14 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 			}
 			if test.failed {
 				w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+			}
+			if test.lateAuthorization {
+				// The provider's breach report wins even over retained data.
+				meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady), Status: metav1.ConditionFalse,
+					Reason: string(workspacev1alpha1.ReasonSuspendDeadlineExceeded), Message: workspaceprovider.SuspendDeadlineExceededMessage, ObservedGeneration: w.Generation})
+				if test.staleReport {
+					w.Generation++
+				}
 			}
 			pool = runtimePoolTestGetPool(t, f.r, f.pool)
 			if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
@@ -498,6 +514,91 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 				t.Fatalf("settled eviction condition = %#v, want %s", condition, test.want)
 			}
 		})
+	}
+}
+
+// A Suspend authorized outside an eviction never expires. Once an eviction of
+// the exact instance is recorded, Core bounds the existing authorization by
+// its deadline, and a shorter window moves the bound earlier, never later.
+func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T) {
+	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	startRetirementDrain(t, f)
+	f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	runtimePoolReconcile(t, f.r, f.pool)
+	w := f.currentWorkspace(t)
+	if retirement := w.Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter != nil {
+		t.Fatalf("Suspend without an eviction = %#v, want no deadline", retirement)
+	}
+	bound := func(deadline time.Time) {
+		t.Helper()
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		if _, err := f.r.recordExternalRuntimeEviction(t.Context(), &pool, f.currentWorkspace(t), externalEvictionSourceSupervisor, runtimePoolTestNow, deadline, false); err != nil {
+			t.Fatal(err)
+		}
+		runtimePoolReconcile(t, f.r, f.pool)
+		written := f.currentWorkspace(t)
+		retirement := written.Spec.Retirement
+		want := metav1.NewTime(deadline.Truncate(time.Second))
+		if retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter == nil || !retirement.NotAfter.Equal(&want) {
+			t.Fatalf("Suspend notAfter = %#v, want %v", retirement, want)
+		}
+		// The stored bound is stable: later passes do not rewrite it.
+		runtimePoolReconcile(t, f.r, f.pool)
+		if current := f.currentWorkspace(t); current.ResourceVersion != written.ResourceVersion {
+			t.Fatalf("stored notAfter was rewritten: resourceVersion %s -> %s", written.ResourceVersion, current.ResourceVersion)
+		}
+	}
+	bound(runtimePoolTestNow.Add(10*time.Minute + 500*time.Millisecond))
+	bound(runtimePoolTestNow.Add(5 * time.Minute))
+	// A later signal with a longer window never extends the bound.
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if _, err := f.r.recordExternalRuntimeEviction(t.Context(), &pool, f.currentWorkspace(t), externalEvictionSourceSupervisor, runtimePoolTestNow, runtimePoolTestNow.Add(time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	before := f.currentWorkspace(t)
+	for range 2 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	after := f.currentWorkspace(t)
+	if want := metav1.NewTime(runtimePoolTestNow.Add(5 * time.Minute)); after.Spec.Retirement.NotAfter == nil || !after.Spec.Retirement.NotAfter.Equal(&want) || after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("a settled bound was rewritten or extended: %v (resourceVersion %s -> %s)", after.Spec.Retirement.NotAfter, before.ResourceVersion, after.ResourceVersion)
+	}
+	// Without the eviction record, the written bound still stands.
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	delete(pool.Annotations, externalRuntimeEvictionAnnotation)
+	if err := f.r.Update(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, f.r, f.pool)
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement == nil || retirement.NotAfter == nil || !retirement.NotAfter.Equal(after.Spec.Retirement.NotAfter) {
+		t.Fatalf("the eviction bound was removed with its record: %#v", retirement)
+	}
+}
+
+// Worker termination that begins after an unbounded Suspend was authorized,
+// before the provider started it, still bounds the authorization by the
+// worker's eviction deadline.
+func TestExternalWorkerEvictionAfterSuspendAuthorizationBoundsIt(t *testing.T) {
+	f, _, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	startRetirementDrain(t, f)
+	f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	runtimePoolReconcile(t, f.r, f.pool)
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter != nil {
+		t.Fatalf("Suspend without an eviction = %#v, want no deadline", retirement)
+	}
+	drains := f.supervisor.drainCalls
+	terminateNativeWorker(t, f, worker)
+	runtimePoolReconcile(t, f.r, f.pool)
+	record := evictionRecord(t, f)
+	if record == nil || !record.matches(f.currentWorkspace(t)) || record.Source != externalEvictionSourceWorker {
+		t.Fatalf("worker termination after authorization was not recorded: %#v", record)
+	}
+	want := metav1.NewTime(record.Deadline.Truncate(time.Second))
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter == nil || !retirement.NotAfter.Equal(&want) {
+		t.Fatalf("Suspend notAfter after worker termination = %#v, want %v", retirement, want)
+	}
+	if f.supervisor.drainCalls != drains {
+		t.Fatal("bounding the authorization repeated the drain")
 	}
 }
 
@@ -698,6 +799,50 @@ func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
 				t.Fatal("recorded eviction never resumed the workspace on a replacement instance")
 			}
 		})
+	}
+}
+
+// A provider that observed the eviction-bounded Suspend only after its
+// deadline stops the instance without data. Core records the lost eviction and
+// keeps the stopped instance terminal, as for an instance the worker killed:
+// it never publishes a successor that a data-only class would reject.
+func TestExternalSuspendDeadlineBreachIsTerminal(t *testing.T) {
+	f, w, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	sequence := w.Spec.Workload.Sequence
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if _, err := f.r.beginExternalRuntimeEviction(t.Context(), &pool, w, externalEvictionSourceWorker, runtimePoolTestNow, runtimePoolTestNow.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	runtimePoolReconcile(t, f.r, f.pool)
+	w = f.currentWorkspace(t)
+	if retirement := w.Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter == nil {
+		t.Fatalf("evicted runtime did not earn a deadline-bound Suspend: %#v", retirement)
+	}
+	w.Status.Allocation.State = workspacev1alpha1.AllocationStopped
+	w.Status.Allocation.Startup = nil
+	w.Status.State = workspacev1alpha1.ExecutionWorkspaceStatePending
+	w.Status.ObservedGeneration = w.Generation
+	meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady), Status: metav1.ConditionFalse,
+		Reason: string(workspacev1alpha1.ReasonSuspendDeadlineExceeded), Message: workspaceprovider.SuspendDeadlineExceededMessage, ObservedGeneration: w.Generation})
+	if err := f.r.Status().Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	for range 6 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+		t.Fatalf("eviction outcome = %#v, want EvictionDeadlineExceeded", condition)
+	}
+	current := f.currentWorkspace(t)
+	if current.Spec.Workload.Sequence != sequence || current.Spec.Retirement == nil {
+		t.Fatalf("a breached instance was replaced: sequence %d -> %d", sequence, current.Spec.Workload.Sequence)
+	}
+	if pool := runtimePoolTestGetPool(t, f.r, f.pool); pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped || pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("breached pool lifecycle = %s admission = %s, want Stopped and closed", pool.Status.Lifecycle, pool.Status.AdmissionState)
 	}
 }
 

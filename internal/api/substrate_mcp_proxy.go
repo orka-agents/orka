@@ -49,7 +49,10 @@ const (
 	// it never cuts short a response the Actor is still allowed to send.
 	substrateMCPProxyWriteTimeout  = substrateMCPProxyMaxTimeout + time.Second
 	substrateMCPProxyMaxTokenBytes = 16 << 10
-	substrateMCPProxyAction        = "callSubstrateMCPTool"
+	// substrateMCPProxyRequestReadTimeout bounds reading one proxied request,
+	// body included, so a stalled upload costs only its own connection.
+	substrateMCPProxyRequestReadTimeout = 30 * time.Second
+	substrateMCPProxyAction             = "callSubstrateMCPTool"
 	// substrateMCPProxyCallNameMember is the tools/call member naming the callable.
 	substrateMCPProxyCallNameMember = apiFieldName
 )
@@ -131,6 +134,12 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	method := c.Method()
 	var body []byte
 	if method == fiber.MethodPost {
+		// Refuse a body declared past the limit before reading any of it, and
+		// read a streamed one at most one byte past the limit.
+		if c.Request().Header.ContentLength() > substrateMCPProxyMaxRequestBytes ||
+			!readBoundedRawBody(c, substrateMCPProxyMaxRequestBytes) {
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "MCP request body is too large")
+		}
 		body = c.Body()
 		if len(body) > substrateMCPProxyMaxRequestBytes {
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "MCP request body is too large")

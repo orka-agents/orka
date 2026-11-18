@@ -331,6 +331,10 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 	}
 	if isSubstrateMCPProxyRoute(header) {
 		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
+		if header.IsPost() {
+			config.MaxRequestBodySize = substrateMCPProxyMaxRequestBytes
+			config.ReadTimeout = substrateMCPProxyRequestReadTimeout
+		}
 	}
 	return config
 }

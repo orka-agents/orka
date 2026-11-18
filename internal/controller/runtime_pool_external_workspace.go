@@ -94,9 +94,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	// A provider-reported Failed instance is terminal: retire it, never replace it.
+	// A provider-reported Failed instance is terminal: retire it, never replace
+	// it. So is one the provider stopped because its Suspend authorization
+	// expired first: like an instance the worker killed, it kept no data, and
+	// a data-only class admits a successor only with verified retained data.
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
-		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
+		externalProviderSuspendDeadlineExceeded(w)
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
@@ -1009,7 +1013,17 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	action := externalRetirementAction(w, deleting)
-	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
+	if w.Spec.Retirement != nil && w.Spec.Retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && action == workspacev1alpha1.WorkloadRetirementSuspend {
+		// Termination can begin after Suspend was authorized and before the
+		// provider started it. Keep collecting the exact worker's signal while
+		// the instance still serves startup evidence, so the authorization
+		// below gains, or moves earlier to, the eviction deadline. Admission
+		// lets a written Suspend only narrow; the drain is never repeated.
+		if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, action); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action, NotAfter: externalSuspendNotAfter(pool, w, action)}
 	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
 		// Recheck immediately before authorizing: the drain probe above can
 		// outlast a short eviction window.
