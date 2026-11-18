@@ -57,6 +57,10 @@ const adapterExitAfterPromptMode = "exit-after-prompt"
 const adapterResumeModelCallMode = "resume-after-exit-model-call"
 const helperResumeModelCallFile = "acp-helper-resume-model-call"
 const helperProviderSessionFile = "acp-helper-provider-session"
+
+// adapterSessionNewFailureMode completes initialize and rejects session/new,
+// so session creation fails inside the adapter handshake.
+const adapterSessionNewFailureMode = "session-new-fails"
 const testPromptOneID = "prompt-1"
 const testPromptTwoID = "prompt-2"
 const testPromptOperationTwo = "prompt-operation-2"
@@ -118,7 +122,7 @@ func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
 
 	server := &Server{cfg: cfg}
 	_, _, _, _, _, _, _, err := server.createSession(
-		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(), nil,
 	)
 	if err == nil || !isSessionCreationResumeLost(err) ||
 		sessionCreationStage(err) != sessionCreationStageDurableResumeVerification ||
@@ -248,7 +252,7 @@ func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testin
 
 	server := &Server{cfg: cfg}
 	_, _, _, _, _, _, _, err := server.createSession(
-		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(), nil,
 	)
 	if !errors.Is(err, injected) || sessionCreationStage(err) != "workspace materialization" {
 		t.Fatalf("createSession error = %v, want injected materialization failure", err)
@@ -1581,6 +1585,13 @@ func TestSupervisorACPHelper(t *testing.T) {
 				// The child's HOME is the session home, which real agents use
 				// for the state a fresh adapter process resumes from.
 				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
+			}
+			if mode == adapterSessionNewFailureMode {
+				writeHelperMessage(writer, map[string]any{
+					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
+					"error": map[string]any{"code": -32603, "message": "provider session unavailable"},
+				})
+				continue
 			}
 			if mode == providerProjectionCanaryMode && !validSupervisorProjection(message.Params) {
 				writeHelperMessage(writer, map[string]any{
