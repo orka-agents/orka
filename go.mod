@@ -21,7 +21,7 @@ require (
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/opencontainers/go-digest v1.0.0
-	github.com/orka-agents/orka-workspace v0.1.0-alpha.6.0.20261118054643-78593bbc54b0
+	github.com/orka-agents/orka-workspace v0.1.0-alpha.7
 	github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
