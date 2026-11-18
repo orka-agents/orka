@@ -464,9 +464,9 @@ func TestExternalRuntimePoolSuspendableNativeEnvironmentFitsWithTelemetry(t *tes
 }
 
 func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
-	// Separate OTLP/HTTP collectors need four entries: the Pod projection's
-	// fixed budget of three drops metrics, while a native runtime with room
-	// for four keeps both signals.
+	// Separate OTLP/HTTP collectors need four entries. A Pod-backed runtime has
+	// no environment limit and keeps both signals, and so does a native
+	// runtime with room for four.
 	values := map[string]string{
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
@@ -481,8 +481,8 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 		return env
 	}
 	pod := runtimePoolTelemetryEnv(true, split)
-	if len(pod) != 3 || slices.ContainsFunc(pod, func(v corev1.EnvVar) bool { return v.Name == "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" }) {
-		t.Fatalf("Pod projection = %v, want trace-only within three entries", pod)
+	if len(pod) != 4 || !slices.ContainsFunc(pod, func(v corev1.EnvVar) bool { return v.Name == "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" }) {
+		t.Fatalf("Pod projection = %v, want both signals in four entries", pod)
 	}
 	both := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL"}
 	traces := []string{"ORKA_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"}
