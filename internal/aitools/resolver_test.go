@@ -277,3 +277,16 @@ func aiToolTask(labelsMap, annotations map[string]string, tools []string) *corev
 		},
 	}
 }
+
+func TestResolveGivesAMemoryConsolidationRunNoTools(t *testing.T) {
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,
+		AI: &corev1alpha1.AISpec{Tools: []string{"web_search", "code_exec"}, MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{{Name: "file_read"}}}}
+	if got := Resolve(task, agent); len(got) != 0 {
+		t.Fatalf("Resolve() = %v, want no tools for a consolidation run", got)
+	}
+	task.Spec.AI.MemoryConsolidation = nil
+	if got := Resolve(task, agent); len(got) == 0 {
+		t.Fatal("an ordinary Task keeps its tools")
+	}
+}

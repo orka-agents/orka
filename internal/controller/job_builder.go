@@ -1314,6 +1314,24 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		connectorWrite = nil
 	}
 
+	// A memory consolidation run calls no tools and reads no injected memory:
+	// it receives its inputs from the controller and submits one structured
+	// result. The mode is controller-owned, so Task env cannot start or stop
+	// a run.
+	consolidationMode := ""
+	if task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil {
+		consolidationMode = string(task.Spec.AI.MemoryConsolidation.Mode)
+		if consolidationMode == "" {
+			consolidationMode = string(corev1alpha1.MemoryConsolidationDryRun)
+		}
+		// aitools.Resolve gives a run no tools; keep the list empty here too.
+		cfg.tools = nil
+		connectorWrite = nil
+		digests = nil
+		envVars = setControllerEnvValue(envVars, workerenv.MemoryContextEnabled, "false")
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.MemoryConsolidationMode, consolidationMode)
+
 	// The tool list is always controller-owned, even when empty, so Task env
 	// and Agent Secret EnvFrom cannot supply it.
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
@@ -2488,6 +2506,11 @@ func workspaceWorkingDir(task *corev1alpha1.Task) string {
 // with concatenated skill content, and mounts it at /workspace/.skills/.
 func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	logger := log.FromContext(ctx)
+	// A memory consolidation run loads no skills, so a missing Skill never
+	// blocks it.
+	if task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil {
+		return nil
+	}
 
 	// Collect skill references: agent-level first, then task-level
 	var skillRefs []corev1alpha1.SkillReference
