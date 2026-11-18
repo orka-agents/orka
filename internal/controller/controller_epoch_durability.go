@@ -896,6 +896,17 @@ func (t *storageTakeover) checkSwitch(
 				info.DatasetID, state.Epoch.Epoch, t.acquired.Epoch),
 		}, true
 	}
+	// A dataset that holds a later epoch, or this epoch for another holder,
+	// was taken over by another controller. This controller's fences stay
+	// closed: the check does not finish, so nothing it admits reaches a
+	// dataset it no longer owns, and it raises no hold on the new owner's
+	// behalf.
+	if state.Epoch.Epoch != t.acquired.Epoch || state.Epoch.HolderID != t.acquired.HolderID {
+		log.Info("A switched storage dataset holds another controller's epoch; keeping its fences closed",
+			"storedEpoch", state.Epoch.Epoch, "storedHolder", state.Epoch.HolderID,
+			"acquiredEpoch", t.acquired.Epoch, "acquiredHolder", t.acquired.HolderID)
+		return nil, false
+	}
 	watermark, err := tracked.dataset.GetWriteWatermark(ctx)
 	if err != nil {
 		log.Error(err, "Reading the write watermark of a switched storage dataset failed; checking again later")
