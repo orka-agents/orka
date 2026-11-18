@@ -217,11 +217,15 @@ func TestACPWorkspaceTaskWakePredicate(t *testing.T) {
 }
 
 func TestACPRuntimePoolTaskWakePredicate(t *testing.T) {
+	observed := metav1.Now()
 	base := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "pool", Generation: 2},
 		Status: corev1alpha1.RuntimePoolStatus{
 			ObservedGeneration: 2, Lifecycle: corev1alpha1.RuntimePoolLifecycleServing,
 			AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+				PodName: "runtime-0", PodUID: "pod-uid", BootID: "boot-1", LastObservedTime: &observed,
+			},
 		},
 	}
 	predicate := acpRuntimePoolTaskWakePredicate()
@@ -242,8 +246,15 @@ func TestACPRuntimePoolTaskWakePredicate(t *testing.T) {
 			p.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		}},
 		{name: "observed generation", want: true, mutate: func(p *corev1alpha1.RuntimePool) { p.Status.ObservedGeneration = 3 }},
-		{name: "active instance", want: true, mutate: func(p *corev1alpha1.RuntimePool) {
-			p.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{}
+		{name: "health probe refreshed the observation time", mutate: func(p *corev1alpha1.RuntimePool) {
+			later := metav1.NewTime(observed.Add(time.Minute))
+			p.Status.ActiveInstance.LastObservedTime = &later
+		}},
+		{name: "active instance rebooted", want: true, mutate: func(p *corev1alpha1.RuntimePool) {
+			p.Status.ActiveInstance.BootID = "boot-2"
+		}},
+		{name: "active instance retired", want: true, mutate: func(p *corev1alpha1.RuntimePool) {
+			p.Status.ActiveInstance = nil
 		}},
 		{name: "replaced", want: true, mutate: func(p *corev1alpha1.RuntimePool) { p.UID = "replacement" }},
 	} {

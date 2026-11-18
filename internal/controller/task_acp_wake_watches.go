@@ -239,8 +239,8 @@ func acpWorkspaceTaskGateChanged(oldWorkspace, newWorkspace *workspacev1alpha1.E
 
 // acpRuntimePoolTaskWakePredicate passes creates and deletes, and updates to
 // a pool's identity, lifecycle, admission, or active instance. Capacity
-// accounting churn (reservations, prompt counts) does not wake Tasks; the
-// dispatcher owns capacity admission.
+// accounting churn (reservations, prompt counts) and health-probe timestamp
+// refreshes do not wake Tasks; the dispatcher owns capacity admission.
 func acpRuntimePoolTaskWakePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -263,7 +263,18 @@ func acpRuntimePoolTaskGateChanged(oldPool, newPool *corev1alpha1.RuntimePool) b
 	return oldStatus.Lifecycle != newStatus.Lifecycle ||
 		oldStatus.AdmissionState != newStatus.AdmissionState ||
 		oldStatus.ObservedGeneration != newStatus.ObservedGeneration ||
-		!reflect.DeepEqual(oldStatus.ActiveInstance, newStatus.ActiveInstance)
+		!reflect.DeepEqual(activeInstanceIdentity(oldStatus.ActiveInstance), activeInstanceIdentity(newStatus.ActiveInstance))
+}
+
+// activeInstanceIdentity drops LastObservedTime, which every successful
+// health probe refreshes; the instance and fence fields remain compared.
+func activeInstanceIdentity(instance *corev1alpha1.RuntimePoolActiveInstanceStatus) *corev1alpha1.RuntimePoolActiveInstanceStatus {
+	if instance == nil {
+		return nil
+	}
+	identity := instance.DeepCopy()
+	identity.LastObservedTime = nil
+	return identity
 }
 
 func objectMetadataGateChanged(oldObject, newObject client.Object) bool {
