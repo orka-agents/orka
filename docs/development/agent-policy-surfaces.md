@@ -37,7 +37,7 @@ It describes current behavior. The contract for changing that behavior is
 | Agent runtime ceilings (`Agent.spec.runtime.ceiling`, ADR 0048) | Controller. For a built-in runtime, before it binds a Task and again until the Task starts; for a `runtimeRef` Agent, only at planning and binding, against the registered AgentRuntime policy | No | Nothing when the call is made: `delegate_task` creates the child Task, which then fails with a message such as "agent … ceiling forbids Bash, …" | Yes, from the target Agent's current ceiling and the child's resolved settings, and for a `runtimeRef` Agent its registered AgentRuntime policy |
 | Per-namespace active-Task cap (`--max-tasks-per-namespace`) | Controller | No | No refusal. A child Task over the cap doesn't start; it's requeued every 10 seconds, with a `NamespaceTaskLimitReached` event. | Yes, from the controller setting and the current count |
 | Delegation limits in the parent Agent's `spec.coordination`: `enabled`, `allowedAgents`, `maxDepth` and `maxConcurrentChildren` | `delegate_task` checks the allowed agents and the depth. On ACP it reads them from the parent Agent, and first refuses the call when the Agent has no `spec.coordination` or `enabled` is false. On native AI workers it reads them from the worker's environment, set when its Job was built. The controller checks them again, against the parent Agent's current spec, whenever the child Task reconciles. | No | From `delegate_task`, a raw error such as "parent agent does not have coordination enabled", "coordination depth exceeded: …" or "agent … is not in the allowed agents list"; an ACP agent sees `-32002`. From the controller, disabled coordination or a depth or allowed-agents failure fails the child Task. At `maxConcurrentChildren`, nothing is refused: the child Task is requeued every 10 seconds. | Yes, from the parent Agent's current spec and the current count of active children. A native AI worker's own `delegate_task` check uses the values captured when its Job was built, so a pre-check for it uses those. |
-| Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, a requester's account that is missing or can't be used is an `isError` result with `code: connection_required` and text saying how to fix it, on a read-only call without approval. A consequential or approval-required call whose Connection binding can't be named gets the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
+| Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, a requester's account that is missing or can't be used is an `isError` result with `code: connection_required` and text saying how to fix it. When the Task froze no Connection, only a read-only call without approval to a custom HTTP Tool gets that result. A consequential or approval-required call whose Connection binding can't be named gets the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
 | Child transaction-token scopes | Subset check and token exchange when a child Task is created | No | An unclassified tool error | Partly: the subset rule can be checked, but the exchange itself can still refuse |
 | Kubernetes RBAC for the identity Orka acts as | API server | No | Through the shared classifier: a tool result with `permission_denied` and "Check RBAC permissions". On some paths: the raw error, unclassified. | Yes: a SubjectAccessReview for that identity |
 | Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object, unless a matching webhook doesn't declare dry-run-safe side effects |
@@ -154,16 +154,18 @@ the JSON-RPC errors above is a tool execution error. Only the 200 `isError` resu
   - `approval_stale`;
   - `tool_outcome_unknown` ("The tool may have run. Do not repeat it automatically.");
   - `tool_failed_without_effect`.
-- The broker gives two refusals of its own a code as well, both as `isError` results:
+- The broker gives two refusals of its own a code as well, both as `isError` results.
+  `connection_required` has a limit, noted below.
   - `invalid_arguments`, when the tool registry rejects the arguments before the tool
     runs;
   - `connection_required`, when the requester's linked account is missing or can't be
     used. Its text names the provider and says what fixes it: linking, re-linking or
     removing extra links, then running the Task again. Approval settlement keeps this code
     for an approved call that fails the same way.
-  - Today a Task that froze no Connection gets `connection_required` only on read-only
-    calls without approval. A consequential or approval-required call gets the 502 behind
-    `-32002` instead.
+
+  A Task that froze no Connection gets `connection_required` only on a read-only call
+  without approval to a custom HTTP Tool. A linked built-in's call, and a consequential or
+  approval-required call, get a 502 behind `-32002` instead.
 - None of them carries a `retry` field.
 - A built-in tool's own `ChatToolResult` refusal also reaches the agent as an `isError`
   result, carrying its `errorType` and `suggestion`.
@@ -258,8 +260,9 @@ a consequential call whose Connection binding can't be named is refused with a 5
 anything is reserved, and the agent sees `-32002`. When the requester's own linked account
 is missing or can't be used, the broker returns an `isError` result with
 `code: connection_required` and text that names the provider and says what fixes it
-(`internal/controller/acp_mcp_broker.go`). For a Task that froze no Connection, only
-read-only calls without approval get that result; other calls get the 502.
+(`internal/controller/acp_mcp_broker.go`). For a Task that froze no Connection, only a
+read-only call without approval to a custom HTTP Tool gets that result; other calls get a
+502.
 
 ### Child transaction-token scopes
 
