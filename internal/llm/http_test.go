@@ -15,6 +15,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	"github.com/stretchr/testify/require"
 )
@@ -42,7 +43,7 @@ func TestFreshProvidersReuseConnectionsAndResolveCredentials(t *testing.T) {
 				if kind == "openai" {
 					_, _ = fmt.Fprint(w, `{"id":"resp_test","object":"response","model":"test-model","status":"completed","output":[{"id":"msg_test","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
 				} else {
-					_, _ = fmt.Fprint(w, `{"id":"msg_test","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+					_ = anthropictest.WriteMessage(w, `{"id":"msg_test","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 				}
 			}))
 			defer server.Close()

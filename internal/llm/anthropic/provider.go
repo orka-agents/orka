@@ -10,11 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/shared"
 
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -77,14 +79,57 @@ func (p *Provider) TelemetryProviderName() string {
 	return genai.ProviderAnthropic
 }
 
-// Complete sends a completion request
+// Complete sends a completion request and returns the whole response.
+//
+// It streams the request and assembles the message from the events. The SDK
+// refuses a non-streaming request whose max_tokens could take longer than its
+// ten-minute HTTP timeout (about 21,333 tokens), and proxies such as Vekil
+// give a non-streaming request far less time than a streaming one.
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildRequestParams(req)
 
-	// Make the request
-	message, err := p.client.Messages.New(ctx, params)
-	if err != nil {
+	stream := p.client.Messages.NewStreaming(ctx, params)
+	defer func() { _ = stream.Close() }()
+
+	var (
+		message                                  anthropic.Message
+		inputReported, outputReported, completed bool
+		cacheRead, cacheWrite                    *int64
+	)
+	for stream.Next() {
+		event := stream.Current()
+		if err := message.Accumulate(event); err != nil {
+			return nil, toProviderError(err)
+		}
+		switch e := event.AsAny().(type) {
+		case anthropic.MessageStartEvent:
+			u := e.Message.Usage
+			inputReported = u.JSON.InputTokens.Valid()
+			outputReported = u.JSON.OutputTokens.Valid()
+			cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, u.JSON.CacheReadInputTokens.Valid())
+			cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, u.JSON.CacheCreationInputTokens.Valid())
+		case anthropic.MessageDeltaEvent:
+			u := e.Usage
+			inputReported = inputReported || u.JSON.InputTokens.Valid()
+			outputReported = outputReported || u.JSON.OutputTokens.Valid()
+			if u.JSON.CacheReadInputTokens.Valid() {
+				cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, true)
+			}
+			if u.JSON.CacheCreationInputTokens.Valid() {
+				cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, true)
+			}
+			completed = completed || e.Delta.StopReason != ""
+		case anthropic.MessageStopEvent:
+			completed = true
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return nil, toProviderError(err)
+	}
+	if !completed {
+		// A dropped connection ends the stream without an error. Returning
+		// the partial message would pass truncated output off as complete.
+		return nil, &llm.ProviderError{Provider: "anthropic", Message: "anthropic stream ended before the message finished"}
 	}
 
 	// Convert response
@@ -96,9 +141,9 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		InputTokens:           int(message.Usage.InputTokens),
 		OutputTokens:          int(message.Usage.OutputTokens),
 		InputExcludesCache:    true,
-		UsageReported:         message.Usage.JSON.InputTokens.Valid() && message.Usage.JSON.OutputTokens.Valid(),
-		CachedInputTokens:     llm.ReportedTokenCount(message.Usage.CacheReadInputTokens, message.Usage.JSON.CacheReadInputTokens.Valid()),
-		CacheWriteInputTokens: llm.ReportedTokenCount(message.Usage.CacheCreationInputTokens, message.Usage.JSON.CacheCreationInputTokens.Valid()),
+		UsageReported:         inputReported && outputReported,
+		CachedInputTokens:     cacheRead,
+		CacheWriteInputTokens: cacheWrite,
 	}
 
 	// Extract content and tool calls
@@ -121,6 +166,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 // buildMessages converts llm messages to Anthropic format.
 func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 	messages := make([]anthropic.MessageParam, 0, len(msgs))
+	prevTool := false
 	for _, msg := range msgs {
 		switch msg.Role {
 		case "user":
@@ -141,12 +187,19 @@ func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
 			}
 		case "tool":
-			messages = append(messages, anthropic.NewUserMessage(
-				anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
-			))
+			// Return the results of parallel tool calls in one user message.
+			// Splitting them across messages teaches Claude to stop making
+			// parallel calls.
+			result := anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)
+			if n := len(messages); n > 0 && prevTool {
+				messages[n-1].Content = append(messages[n-1].Content, result)
+			} else {
+				messages = append(messages, anthropic.NewUserMessage(result))
+			}
 		case "system":
 			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
 		}
+		prevTool = msg.Role == "tool"
 	}
 	return messages
 }
@@ -217,7 +270,7 @@ func buildRequestParams(req *llm.CompletionRequest) anthropic.MessageNewParams {
 	}
 	params.Messages = buildMessages(messages)
 
-	if req.HasTemperature() {
+	if req.HasTemperature() && acceptsSamplingParams(req.Model) {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 
@@ -407,12 +460,31 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	return ch, nil
 }
 
+// streamErrorStatus maps the type of an error event that arrives inside a
+// stream to the HTTP status the API returns for the same error before a
+// stream starts, so retry and fallback treat both alike.
+var streamErrorStatus = map[shared.ErrorType]int{
+	shared.ErrorTypeInvalidRequestError: http.StatusBadRequest,
+	shared.ErrorTypeAuthenticationError: http.StatusUnauthorized,
+	shared.ErrorTypeBillingError:        http.StatusPaymentRequired,
+	shared.ErrorTypePermissionError:     http.StatusForbidden,
+	shared.ErrorTypeNotFoundError:       http.StatusNotFound,
+	shared.ErrorTypeRateLimitError:      http.StatusTooManyRequests,
+	shared.ErrorTypeAPIError:            http.StatusInternalServerError,
+	shared.ErrorTypeTimeoutError:        http.StatusGatewayTimeout,
+	shared.ErrorTypeOverloadedError:     529,
+}
+
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status
 // code from the Anthropic SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
 	pe := &llm.ProviderError{Provider: "anthropic", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
+		// An error event inside a stream carries the stream's 200 status.
+		if status, known := streamErrorStatus[apiErr.Type()]; known && apiErr.StatusCode < http.StatusBadRequest {
+			pe.StatusCode = status
+		}
 	}
 	return pe
 }

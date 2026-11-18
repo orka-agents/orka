@@ -16,6 +16,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -546,8 +547,7 @@ func TestUsagePersistenceFailureDoesNotRepeatProviderCall(t *testing.T) {
 							_, _ = fmt.Fprint(w, "event: message_delta\ndata: "+`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}`+"\n\n")
 							return
 						}
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = fmt.Fprint(w, `{"id":"message","type":"message","role":"assistant","model":"served-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}`)
+						_ = anthropictest.WriteMessage(w, `{"id":"message","type":"message","role":"assistant","model":"served-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}`)
 					}))
 					t.Cleanup(server.Close)
 					provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/primary/"})

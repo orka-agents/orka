@@ -234,7 +234,6 @@ spec:
     nodeSelector:
       sandbox-runtime: kata
   model:
-    temperature: 0.7
     maxTokens: 4096
   systemPrompt:
     inline: "You are a research specialist..."
@@ -258,7 +257,7 @@ spec:
 | Field | Description |
 | --- | --- |
 | `providerRef` | The [Provider](#provider) for a native Agent. Mutually exclusive with `runtime`. |
-| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2), `maxTokens`, `contextWindow`, and [`fallbacks`](#model-fallbacks). |
+| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2; an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it), `maxTokens`, `contextWindow`, and [`fallbacks`](#model-fallbacks). |
 | `systemPrompt` | `inline` text, or `configMapRef` to read it from a ConfigMap key. |
 | `tools` | Native Agents only. Tools the Agent may call: [built-in tools](built-in-tools.md) and custom [Tool](#tool) resources by name. An entry with `enabled: false` is skipped. Runtime Agents use `runtime.defaultAllowedTools` instead. |
 | `skills` | Native Agents only. [Skills](#skill) whose content is added to the system prompt. |

@@ -159,7 +159,7 @@ curl https://orka.example.com/anthropic/v1/models \
 | System messages (string format) | Yes, but Orka's own prompt is prepended in coordinator mode |
 | System messages (content block array format) | Same |
 | `max_tokens` | Yes |
-| `temperature` | Yes |
+| `temperature` | Yes, except that an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it |
 | `stop_sequences` | Yes |
 | Extended thinking (`thinking` with `budget_tokens`) | **No.** The field is accepted and ignored — see below |
 | Image inputs | Not yet |

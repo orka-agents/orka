@@ -32,7 +32,7 @@ export function AgentCreateForm() {
   const [provider, setProvider] = useState('')
   const [providerMissing, setProviderMissing] = useState(false)
   const [model, setModel] = useState('')
-  const [temperature, setTemperature] = useState('0.7')
+  const [temperature, setTemperature] = useState('')
   const [contextWindow, setContextWindow] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
   const [secretRef, setSecretRef] = useState('')
@@ -56,7 +56,7 @@ export function AgentCreateForm() {
     setProvider('')
     setProviderMissing(false)
     setModel('')
-    setTemperature('0.7')
+    setTemperature('')
     setContextWindow('')
     setMaxTokens('')
     setRuntimeSource('built-in')
@@ -271,6 +271,7 @@ export function AgentCreateForm() {
                   <div className="space-y-2">
                     <label htmlFor="agent-temperature" className="text-sm font-medium">Temperature</label>
                     <Input id="agent-temperature" type="number" step="any" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
+                    <p className="text-xs text-muted-foreground">Leave empty to use the model&apos;s default. Claude Opus 4.7 and later models don&apos;t accept a temperature, so Orka doesn&apos;t send one.</p>
                   </div>
                   <div className="space-y-2">
                     <label htmlFor="agent-max-tokens" className="text-sm font-medium">Max Tokens</label>
