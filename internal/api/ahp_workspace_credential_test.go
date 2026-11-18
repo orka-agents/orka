@@ -124,6 +124,13 @@ func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
 	require.Equal(t, int32(3), reads.Load(), "a new Pod's token is read back")
 	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
 	require.Equal(t, "the [REDACTED] here", string(ahpRedactWholeTokens([]byte("the earlier-token-0123456789 here"), w.tokensFor(principal.UserKey))))
+
+	// A server that provides no tokens still learns one an earlier run gave.
+	w.b = &ahpBackend{now: time.Now}
+	w.recovered = nil
+	w.tokens = nil
+	require.NoError(t, w.recoverToken(context.Background(), principal, pod))
+	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
 }
 
 // Output stays redacted for a replaced token for a day after it was last
