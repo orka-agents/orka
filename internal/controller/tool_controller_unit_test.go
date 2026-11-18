@@ -2615,11 +2615,18 @@ type recordingToolWorkspaceExecutor struct {
 	// describeDeleted lists Actor IDs Describe reports as already deleted.
 	describeDeleted []string
 	describePhase   workspace.Phase
+	// claimedTemplateUIDs is the template UID each Actor was claimed with,
+	// which Describe reports unless describeTemplates names another.
+	claimedTemplateUIDs map[string]string
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
 	e.claimName = req.ClaimName
 	e.claimTemplate = req.Template
+	if e.claimedTemplateUIDs == nil {
+		e.claimedTemplateUIDs = map[string]string{}
+	}
+	e.claimedTemplateUIDs[req.ClaimName] = req.Template.UID
 	created := e.claimCreated
 	if len(e.claimCreateds) > 0 {
 		created = e.claimCreateds[0]
@@ -2690,7 +2697,9 @@ func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req works
 	if slices.Contains(e.describeDeleted, req.Ref.ID) {
 		return &workspace.Description{Ref: req.Ref, Phase: workspace.PhaseDeleted}, nil
 	}
-	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase, Template: e.describeTemplates[req.Ref.ID]}, nil
+	template := e.describeTemplates[req.Ref.ID]
+	template.UID = cmp.Or(template.UID, e.claimedTemplateUIDs[req.Ref.ID])
+	return &workspace.Description{Ref: req.Ref, Phase: e.describePhase, Template: template}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {
