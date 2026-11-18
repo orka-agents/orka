@@ -109,9 +109,10 @@ jobs:
           # Vite alone: bun run build type-checks first, which fails on a new
           # route before the router plugin can regenerate the tree.
           bunx vite build
-          if ! git diff --quiet -- src/routeTree.gen.ts; then
+          # git status also reports the file when the PR deleted it and Vite recreated it.
+          if [[ -n "$(git status --porcelain --untracked-files=all -- src/routeTree.gen.ts)" ]]; then
             echo "ui/src/routeTree.gen.ts is stale. TanStack Router generates it from ui/src/routes/, so never edit it by hand." >&2
             echo "Fix: cd ui && bunx vite build, then commit ui/src/routeTree.gen.ts." >&2
-            git --no-pager diff --stat -- src/routeTree.gen.ts >&2
+            git status --short --untracked-files=all -- src/routeTree.gen.ts >&2
             exit 1
           fi
