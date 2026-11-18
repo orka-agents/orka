@@ -599,3 +599,30 @@ func TestExecutionEventStoreListSessionTypeFilterPreservesCursor(t *testing.T) {
 		t.Fatalf("latest=%d listed=%#v, want latest 2 and preserved session seq 2", latest, listed)
 	}
 }
+
+// A deduplicated append reads its key through the stream's deduplication
+// index rather than every event of the stream, so its write transaction
+// does not grow with the stream.
+func TestExecutionEventDedupeKeyLookupSearchesTheDedupeIndex(t *testing.T) {
+	s := setupTestStore(t)
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN `+executionEventByDedupeKeySQL, "tenant", "task", "task-a", "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan) != 1 || !strings.Contains(plan[0], "USING INDEX idx_execution_events_stream_dedupe_key") {
+		t.Fatalf("deduplication key lookup plan = %q, want a search of idx_execution_events_stream_dedupe_key", plan)
+	}
+}

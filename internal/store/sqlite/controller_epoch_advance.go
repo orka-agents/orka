@@ -35,7 +35,7 @@ func (s *Store) AdvanceControllerEpoch(
 	epoch.AcquiredAt = epoch.AcquiredAt.UTC()
 	epoch.UpdatedAt = epoch.UpdatedAt.UTC()
 	var state storagev1.ControllerEpochMirrorState
-	err = s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err = s.inWriteTransaction(ctx, "AdvanceControllerEpoch", func(ctx context.Context, tx *sql.Tx) error {
 		if err := requireDataset(tx, request.DatasetID); err != nil {
 			return err
 		}

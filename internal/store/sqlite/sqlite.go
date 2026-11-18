@@ -15,11 +15,20 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	_ "modernc.org/sqlite" // SQLite driver registration
 )
+
+// dbStatsName labels the connection pool statistics of the store
+// OpenLockedStore opens, exported as the go_sql_* series.
+const dbStatsName = "orka_store_sqlite"
+
+// writeTransactionBuckets span a free single connection through the 60s
+// budget of the controller's longest detached store write.
+var writeTransactionBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}
 
 var (
 	dbSizeBytes = prometheus.NewGauge(
@@ -28,10 +37,31 @@ var (
 			Help: "Size of the SQLite database file in bytes",
 		},
 	)
+	// writeWaitSeconds and writeHoldSeconds split a write operation's time:
+	// the wait for the store's single connection, and the time the operation
+	// then holds it until it commits or rolls back. A long wait
+	// with short holds is pool contention or a starved process; a long hold
+	// is slow SQL, or a holder the host descheduled.
+	writeWaitSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_store_sqlite_write_wait_seconds",
+			Help:    "Time a SQLite store write operation waited for the single connection before its transaction began",
+			Buckets: writeTransactionBuckets,
+		},
+		[]string{"method"},
+	)
+	writeHoldSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_store_sqlite_write_hold_seconds",
+			Help:    "Time a SQLite store write operation held the single connection, from the start of its transaction to its commit or rollback",
+			Buckets: writeTransactionBuckets,
+		},
+		[]string{"method"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(dbSizeBytes)
+	metrics.Registry.MustRegister(dbSizeBytes, writeWaitSeconds, writeHoldSeconds)
 }
 
 // NewDB opens a SQLite database with recommended pragmas for WAL mode,
@@ -1015,7 +1045,10 @@ type Store struct {
 	processLock   io.Closer
 	// ownsProcessLock is set for a store OpenLockedStore opened under the
 	// process lock, which an embedded dataset binding requires.
-	ownsProcessLock  bool
+	ownsProcessLock bool
+	// dbStats exports the connection pool statistics of a store
+	// OpenLockedStore opened; close unregisters it.
+	dbStats          prometheus.Collector
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
@@ -1083,7 +1116,19 @@ func OpenLockedStore(path string) (*Store, error) {
 	s := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true}
 	s.pendingWALTruncate.Store(true)
 	s.incarnation = uuid.NewString()
+	s.registerDBStats()
 	return s, nil
+}
+
+// registerDBStats exports the connection pool statistics of the store, so a
+// wait for its single connection is visible. The process lock admits one
+// such store per database, and the controller opens one; when another store
+// of this process already exports them, this one does not.
+func (s *Store) registerDBStats() {
+	collector := collectors.NewDBStatsCollector(s.db, dbStatsName)
+	if err := metrics.Registry.Register(collector); err == nil {
+		s.dbStats = collector
+	}
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,
@@ -1121,6 +1166,10 @@ func (s *Store) Start(ctx context.Context) error {
 func (s *Store) NeedLeaderElection() bool { return true }
 
 func (s *Store) close() error {
+	if s.dbStats != nil {
+		metrics.Registry.Unregister(s.dbStats)
+		s.dbStats = nil
+	}
 	dbErr := s.db.Close()
 	var lockErr error
 	if s.processLock != nil {

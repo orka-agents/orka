@@ -183,7 +183,7 @@ func writeOperationScoped[R any](
 		}
 	}
 	var result R
-	err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err := s.inWriteTransaction(ctx, method, func(ctx context.Context, tx *sql.Tx) error {
 		stored, replay, err := s.checkWrite(ctx, tx, method, envelope)
 		if err != nil {
 			return err
@@ -302,7 +302,9 @@ func requireEnvelopeFence(explicit, envelope storagev1.ControllerEpochFence) err
 // savepoint, or in a new transaction that it commits. A new transaction
 // reserves SQLite's writer before run reads anything, so an operation's
 // receipt check and its commit see the same state even across connections.
-func (s *Store) inWriteTransaction(ctx context.Context, run func(context.Context, *sql.Tx) error) error {
+// A new transaction records, under method, how long it waited for the
+// connection and how long it then held it.
+func (s *Store) inWriteTransaction(ctx context.Context, method string, run func(context.Context, *sql.Tx) error) error {
 	if tx := s.taskDataTx(ctx); tx != nil {
 		if _, err := tx.ExecContext(ctx, `SAVEPOINT orka_write_operation`); err != nil {
 			return err
@@ -315,11 +317,18 @@ func (s *Store) inWriteTransaction(ctx context.Context, run func(context.Context
 		_, err := tx.ExecContext(context.WithoutCancel(ctx), `RELEASE orka_write_operation`)
 		return err
 	}
+	started := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		writeWaitSeconds.WithLabelValues(method).Observe(time.Since(started).Seconds())
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	began := time.Now()
+	writeWaitSeconds.WithLabelValues(method).Observe(began.Sub(started).Seconds())
+	defer func() {
+		_ = tx.Rollback()
+		writeHoldSeconds.WithLabelValues(method).Observe(time.Since(began).Seconds())
+	}()
 	// BeginTx is deferred in SQLite. A write statement reserves the writer even
 	// when its predicate matches no rows.
 	if _, err := tx.ExecContext(ctx, `UPDATE operation_receipts SET method = method WHERE 0`); err != nil {
@@ -532,7 +541,7 @@ func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveO
 		return storagev1.OperationOutcome{}, err
 	}
 	var outcome storagev1.OperationOutcome
-	err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err := s.inWriteTransaction(ctx, "ResolveOperation", func(ctx context.Context, tx *sql.Tx) error {
 		if err := requireDataset(tx, request.DatasetID); err != nil {
 			return err
 		}
