@@ -772,3 +772,59 @@ func TestRepairValidationGateBoundsStalledAPICalls(t *testing.T) {
 		t.Fatal("the gate did not return after its wait deadline while the API server stalled")
 	}
 }
+
+func TestDeletedRepairValidationTaskRetiresItsPatchIdentity(t *testing.T) {
+	fixture := newRepairValidationFixture(t)
+	deleting := func(task *corev1alpha1.Task) *corev1alpha1.Task {
+		task = task.DeepCopy()
+		now := metav1.Now()
+		task.DeletionTimestamp = &now
+		task.Finalizers = []string{labels.TaskFinalizer}
+		return task
+	}
+	validationIdentity := artifactcap.Identity{Namespace: fixture.validation.Namespace, TaskID: string(fixture.validation.UID)}
+
+	t.Run("validation Task deleted before its repair settles", func(t *testing.T) {
+		task := deleting(fixture.validation)
+		r := newUnitReconciler(newTestScheme(), task)
+		retirer := &recordingIdentityRetirer{}
+		r.ACPArtifactRetirer = retirer
+		if _, err := r.handleDeletion(context.Background(), task); err != nil {
+			t.Fatalf("handleDeletion() error = %v", err)
+		}
+		if len(retirer.calls) != 1 || len(retirer.calls[0]) != 1 || retirer.calls[0][0] != validationIdentity {
+			t.Fatalf("retired identities = %#v, want only %#v", retirer.calls, validationIdentity)
+		}
+	})
+
+	t.Run("retirement failure keeps the finalizer", func(t *testing.T) {
+		task := deleting(fixture.validation)
+		r := newUnitReconciler(newTestScheme(), task)
+		retireErr := errors.New("artifact root unavailable")
+		r.ACPArtifactRetirer = &recordingIdentityRetirer{err: retireErr}
+		if _, err := r.handleDeletion(context.Background(), task); !errors.Is(err, retireErr) {
+			t.Fatalf("handleDeletion() error = %v, want %v", err, retireErr)
+		}
+		current := &corev1alpha1.Task{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatalf("get Task: %v", err)
+		}
+		if !controllerutil.ContainsFinalizer(current, labels.TaskFinalizer) {
+			t.Fatal("finalizer was removed although the patch identity was not retired")
+		}
+	})
+
+	t.Run("other Tasks retire nothing here", func(t *testing.T) {
+		other := deleting(fixture.validation)
+		delete(other.Annotations, labels.AnnotationRepositoryValidationKind)
+		r := newUnitReconciler(newTestScheme(), other)
+		retirer := &recordingIdentityRetirer{}
+		r.ACPArtifactRetirer = retirer
+		if _, err := r.handleDeletion(context.Background(), other); err != nil {
+			t.Fatalf("handleDeletion() error = %v", err)
+		}
+		if len(retirer.calls) != 0 {
+			t.Fatalf("retired identities = %#v, want none", retirer.calls)
+		}
+	})
+}

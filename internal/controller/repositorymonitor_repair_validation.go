@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -51,6 +52,22 @@ func isRepositoryMonitorRepairValidationTask(task *corev1alpha1.Task) bool {
 	return isRepositoryMonitorValidationTask(task) &&
 		task.Annotations[labels.AnnotationRepositoryValidationKind] == tools.RepositoryValidationKindRepair &&
 		strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationPatchDigest]) != ""
+}
+
+// retireRepositoryMonitorRepairValidationIdentity retires a deleted repair
+// validation Task's own patch-download identity. The repair's finalizer also
+// retires the identities of its live validation Tasks, but one deleted before
+// the repair settles is no longer listed there, and its download record would
+// otherwise keep the patch live indefinitely. Retirement only blocks that
+// Task's own capabilities and is idempotent, so retiring it twice is harmless.
+func (r *TaskReconciler) retireRepositoryMonitorRepairValidationIdentity(ctx context.Context, task *corev1alpha1.Task) error {
+	if r.ACPArtifactRetirer == nil || task == nil || task.UID == "" || !isRepositoryMonitorRepairValidationTask(task) {
+		return nil
+	}
+	if err := r.ACPArtifactRetirer.Retire(ctx, artifactcap.Identity{Namespace: task.Namespace, TaskID: string(task.UID)}); err != nil {
+		return fmt.Errorf("retire repair validation patch identity: %w", err)
+	}
+	return nil
 }
 
 // verifyRepositoryMonitorRepairValidationTask proves a repair validation Task
