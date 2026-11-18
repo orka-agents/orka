@@ -78,18 +78,26 @@ namespace, so asking needs permission to create Tasks there.`,
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			c := newClientFromCmd(cmd)
+			// --timeout bounds every request, from the Agent lookup to the
+			// answer read: the API client has no timeout of its own.
+			waitCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
 
-			if _, err := c.GetAgent(ctx, agent, client.GetOptions{Namespace: c.Namespace}); err != nil &&
-				strings.Contains(err.Error(), "HTTP 404") {
-				where := "the namespace the Orka server watches"
-				if c.Namespace != "" {
-					where = fmt.Sprintf("namespace %q", c.Namespace)
+			if _, err := c.GetAgent(waitCtx, agent, client.GetOptions{Namespace: c.Namespace}); err != nil {
+				if waitCtx.Err() != nil {
+					return fmt.Errorf("look up Agent %q: %w; no question was sent", agent, waitCtx.Err())
 				}
-				return fmt.Errorf("no Agent %q in %s: the Orka guide exists when the Helm chart sets guide.enabled=true. "+
-					"Pass -n with the installation's namespace, or --agent to ask another Agent", agent, where)
+				if strings.Contains(err.Error(), "HTTP 404") {
+					where := "the namespace the Orka server watches"
+					if c.Namespace != "" {
+						where = fmt.Sprintf("namespace %q", c.Namespace)
+					}
+					return fmt.Errorf("no Agent %q in %s: the Orka guide exists when the Helm chart sets guide.enabled=true. "+
+						"Pass -n with the installation's namespace, or --agent to ask another Agent", agent, where)
+				}
 			}
 
-			name, namespace, err := createAskTask(ctx, c, agent, question)
+			name, namespace, err := createAskTask(waitCtx, c, agent, question)
 			if err != nil {
 				return err
 			}
@@ -108,8 +116,6 @@ namespace, so asking needs permission to create Tasks there.`,
 			}
 
 			fmt.Fprintf(cmd.ErrOrStderr(), "Asking %s (task %s)...\n", agent, name) //nolint:errcheck
-			waitCtx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
 			detail, err := waitForAskTask(waitCtx, c, name)
 			if err != nil {
 				if waitCtx.Err() != nil {

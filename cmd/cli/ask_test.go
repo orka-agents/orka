@@ -35,6 +35,8 @@ type askServer struct {
 	stalledOnce  sync.Once
 	created      map[string]any
 	resultReads  int
+	stallLookup  bool     // Agent lookups hang until the client gives up
+	stallCreate  bool     // Task creates hang until the client gives up
 	namespace    string   // when set, the Task create response names this namespace
 	readSpaces   []string // the namespace query of each Task read
 }
@@ -45,7 +47,15 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		stall, stalled := s.stallResult, s.stalled
+		stallLookup, stallCreate := s.stallLookup, s.stallCreate
 		s.mu.Unlock()
+		if (stallLookup && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agents/")) ||
+			(stallCreate && r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks") {
+			// The server notices the client leaving only once the body is read.
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return
+		}
 		if stall != nil && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result") {
 			if stalled != nil {
 				s.stalledOnce.Do(func() { close(stalled) })
@@ -282,6 +292,27 @@ func TestAskOmitsAnUnknownNamespaceFromCommands(t *testing.T) {
 	_, _, err := runAskIn(context.Background(), t, srv, "", "q", "--timeout", "50ms")
 	if err == nil || strings.Contains(err.Error(), "-n") || !strings.Contains(err.Error(), "orka task result ask-") {
 		t.Fatalf("err = %v, want a recovery command without an empty -n", err)
+	}
+}
+
+func TestAskBoundsTheAgentLookupByTimeout(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	srv.stallLookup = true
+	_, _, err := runAsk(t, srv, "", "q", "--timeout", "50ms")
+	if err == nil || !strings.Contains(err.Error(), "no question was sent") {
+		t.Fatalf("err = %v, want the lookup to end at --timeout", err)
+	}
+	if srv.created != nil {
+		t.Fatalf("no Task may be created after the lookup timed out: %#v", srv.created)
+	}
+}
+
+func TestAskBoundsTheTaskCreateByTimeout(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	srv.stallCreate = true
+	_, _, err := runAsk(t, srv, "", "q", "--timeout", "50ms")
+	if err == nil || !strings.Contains(err.Error(), "create the question task ask-") {
+		t.Fatalf("err = %v, want the create to end at --timeout and name the Task", err)
 	}
 }
 
