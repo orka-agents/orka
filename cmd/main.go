@@ -353,6 +353,7 @@ func main() {
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
 	var taskWebhookDeliveryWorkers int
+	var taskMaxConcurrentReconciles int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -626,6 +627,10 @@ func main() {
 	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
 		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
 			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
+	flag.IntVar(&taskMaxConcurrentReconciles, "task-max-concurrent-reconciles", controller.DefaultTaskMaxConcurrentReconciles,
+		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
+			"concurrently with itself. Above 1, --max-tasks-per-namespace and coordination maxConcurrentChildren "+
+			"become best-effort under bursts of new Tasks.", controller.MaxTaskMaxConcurrentReconciles))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -983,6 +988,11 @@ func main() {
 	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
 		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
 			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
+		os.Exit(1)
+	}
+	if taskMaxConcurrentReconciles < 1 || taskMaxConcurrentReconciles > controller.MaxTaskMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --task-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			taskMaxConcurrentReconciles, controller.MaxTaskMaxConcurrentReconciles)
 		os.Exit(1)
 	}
 
@@ -1979,6 +1989,7 @@ func main() {
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
+		MaxConcurrentReconciles:      taskMaxConcurrentReconciles,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,

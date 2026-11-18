@@ -211,9 +211,14 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	defer removeWakeHandlers()
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
+	var lastPoolRetirement time.Time
 	for {
 		lastScan := time.Now()
-		if err := d.dispatchOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		retirePools := acpDispatchPoolRetirementDue(lastPoolRetirement, lastScan, d.Interval)
+		if retirePools {
+			lastPoolRetirement = lastScan
+		}
+		if err := d.dispatchScan(ctx, retirePools); err != nil && !errors.Is(err, context.Canceled) {
 			logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
 		}
 		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan) {
@@ -222,18 +227,41 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	}
 }
 
+// acpDispatchPoolRetirementDue reports whether a scan should also run idle
+// and stopped RuntimePool retirement. Wakeups can start a scan every
+// acpDispatchWakeMinInterval; retirement decisions wait minutes-long idle
+// TTLs and read each linked workspace uncached, so they run at most about
+// once per dispatch interval and never delay a wakeup's reservation. The
+// quarter-interval slack keeps the periodic tick retiring even when a wakeup
+// scan ran just before it.
+func acpDispatchPoolRetirementDue(last, now time.Time, interval time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= interval-interval/4
+}
+
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
+	return d.dispatchScan(ctx, true)
+}
+
+// dispatchScan admits queued Tasks and runs recovery and RuntimePool
+// accounting. retirePools additionally scales idle pools to zero and deletes
+// stopped ones; capacity accounting runs on every scan either way.
+func (d *ACPDispatcher) dispatchScan(ctx context.Context, retirePools bool) error {
+	timer := newACPDispatchScanTimer(time.Now, retirePools)
+	defer timer.log(ctx)
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	timer.mark("list")
 	if err := d.reconcileExpiredExternalEffects(ctx, tasks.Items); err != nil {
 		return err
 	}
+	timer.mark("externalEffects")
 	d.pruneFinalizedSessionTurns(tasks.Items)
 	if err := d.scheduleACPDeliveryRecoveries(ctx, tasks.Items); err != nil {
 		return err
 	}
+	timer.mark("deliveryRecoveries")
 	queued := make([]*corev1alpha1.Task, 0)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
@@ -247,8 +275,10 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 		queued = append(queued, task.DeepCopy())
 	}
 	sortACPTasksByQueuePriority(queued, time.Now().UTC())
+	timer.queued = len(queued)
 	admissible := queued[:0]
 	for _, queuedTask := range queued {
+		acpPreDispatch.mark(queuedTask, acpPreDispatchScanned)
 		keep, err := d.settleQueuedTaskBeforeAdmission(ctx, queuedTask)
 		if err != nil {
 			return fmt.Errorf("settle ACP task before admission %s/%s: %w", queuedTask.Namespace, queuedTask.Name, err)
@@ -258,6 +288,7 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 		}
 	}
 	queued = admissible
+	timer.mark("admissionSettle")
 	if err := d.AdmissionGate.Check(); err != nil {
 		return nil
 	}
@@ -278,6 +309,7 @@ dispatchLoop:
 				}
 				continue
 			}
+			timer.reserved++
 			go func(task *corev1alpha1.Task, target acpDispatchTarget) {
 				defer func() {
 					<-d.sem
@@ -291,7 +323,10 @@ dispatchLoop:
 			break dispatchLoop
 		}
 	}
-	return d.reapIdlePools(ctx, tasks.Items)
+	timer.mark("reservation")
+	err := d.reapIdlePoolsWithRetirement(ctx, tasks.Items, retirePools)
+	timer.mark("poolAccounting")
+	return err
 }
 
 //nolint:gocyclo // Terminal projection and cleanup recovery branches are audited together.
@@ -392,8 +427,17 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 	return nil
 }
 
-//nolint:gocyclo // Demand-state accounting and all fail-closed pool capacity gates are intentionally audited together.
 func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.Task) error {
+	return d.reapIdlePoolsWithRetirement(ctx, tasks, true)
+}
+
+// reapIdlePoolsWithRetirement refreshes every RuntimePool's coordinator
+// capacity and last-demand record. With retire, it also scales idle pools to
+// zero and deletes stopped ones; without it those decisions wait for a later
+// scan, which only keeps capacity longer.
+//
+//nolint:gocyclo // Demand-state accounting and all fail-closed pool capacity gates are intentionally audited together.
+func (d *ACPDispatcher) reapIdlePoolsWithRetirement(ctx context.Context, tasks []corev1alpha1.Task, retire bool) error {
 	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
 		return err
@@ -447,6 +491,9 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		}
 		pool = latest
 		if pool.Spec.DesiredReplicas == 0 {
+			if !retire {
+				continue
+			}
 			if err := d.reapStoppedSupersededPlainPool(ctx, pool, activeByPool[key], now); err != nil {
 				return err
 			}
@@ -466,6 +513,9 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 			if runtimePoolHasActiveDemand(pool, activeByPool[key]) {
 				continue
 			}
+		}
+		if !retire {
+			continue
 		}
 		lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
 		if err != nil {
@@ -997,6 +1047,7 @@ func validateFrozenACPDispatchPlan(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
+	acpPreDispatch.report(ctx, task)
 	var promptTrace *acpSpan
 	defer func() { promptTrace.End(retErr) }()
 
@@ -4197,6 +4248,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	acpPreDispatch.mark(task, acpPreDispatchReserved)
 	return task, target, nil
 }
 
