@@ -76,8 +76,10 @@ func Dial(t testing.TB, provider storagev1.StateProvider) *grpc.ClientConn {
 		t.Fatalf("create storage server: %v", err)
 	}
 	listener := bufconn.Listen(1 << 20)
+	// Stop waits for running handlers, so a provider method a cancelled call
+	// left running has returned before the test closes the provider.
 	grpcServer := grpc.NewServer(append(storageServer.ServerOptions(),
-		grpc.Creds(credentials.NewTLS(material.serverTLS())))...)
+		grpc.Creds(credentials.NewTLS(material.serverTLS())), grpc.WaitForHandlers(true))...)
 	storageServer.Register(grpcServer)
 	served := make(chan error, 1)
 	go func() { served <- grpcServer.Serve(listener) }()

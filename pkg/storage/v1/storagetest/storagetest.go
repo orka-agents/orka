@@ -111,26 +111,20 @@ func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
 	settings := collectOptions(options)
 	if !settings.providerAttachesEnvelopes {
-		t.Run("missing-envelopes", func(t *testing.T) {
+		settings.run(t, "missing-envelopes", func(t *testing.T) {
 			runMissingEnvelopes(t, newProvider, wrapState, stateWriteCases)
 		})
 	}
-	newProvider = stateFactory(newProvider, settings)
+	wrapped := stateFactory(newProvider, settings)
 	for _, family := range stateFamilies {
-		t.Run(family.name, func(t *testing.T) {
-			if settings.parallel {
-				t.Parallel()
-			}
-			family.run(t, newProvider)
+		settings.run(t, family.name, func(t *testing.T) {
+			family.run(t, wrapped)
 		})
 	}
-	t.Run("write-envelopes", func(t *testing.T) {
-		if settings.parallel {
-			t.Parallel()
-		}
-		runWriteCatalog(t, newProvider, stateWriteCases, settings)
+	settings.run(t, "write-envelopes", func(t *testing.T) {
+		runWriteCatalog(t, wrapped, stateWriteCases, settings)
 	})
-	runOptionalFamilies(t, newProvider, stateWriteCases, settings)
+	runOptionalFamilies(t, wrapped, stateWriteCases, settings)
 }
 
 // RunArtifacts runs every artifacts.v1 case against providers from
@@ -140,35 +134,32 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 	t.Helper()
 	settings := collectOptions(options)
 	if !settings.providerAttachesEnvelopes {
-		t.Run("missing-envelopes", func(t *testing.T) {
+		settings.run(t, "missing-envelopes", func(t *testing.T) {
 			runMissingEnvelopes(t, newProvider, wrapArtifacts, artifactWriteCases)
 		})
 	}
-	newProvider = artifactFactory(newProvider, settings)
-	t.Run("artifacts", func(t *testing.T) {
-		if settings.parallel {
-			t.Parallel()
-		}
-		runArtifacts(t, newProvider)
+	wrapped := artifactFactory(newProvider, settings)
+	settings.run(t, "artifacts", func(t *testing.T) {
+		runArtifacts(t, wrapped)
 	})
-	t.Run("artifact-write-order", func(t *testing.T) {
-		runArtifactWriteOrder(t, newProvider)
+	settings.run(t, "artifact-write-order", func(t *testing.T) {
+		runArtifactWriteOrder(t, wrapped)
 	})
-	t.Run("write-envelopes", func(t *testing.T) {
-		runWriteCatalog(t, newProvider, artifactWriteCases, settings)
+	settings.run(t, "write-envelopes", func(t *testing.T) {
+		runWriteCatalog(t, wrapped, artifactWriteCases, settings)
 	})
-	t.Run("dataset-binding", func(t *testing.T) {
-		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.ArtifactProvider) {
+	settings.run(t, "dataset-binding", func(t *testing.T) {
+		runDatasetBinding(t, wrapped, func(t *testing.T, provider storagev1.ArtifactProvider) {
 			saveArtifact(t, provider, artifactOwner("tenant-a", "task-1"), "report.txt", "text/plain", []byte("report"))
 		})
 	})
-	t.Run("write-watermark", func(t *testing.T) {
-		runWriteWatermark(t, newProvider)
+	settings.run(t, "write-watermark", func(t *testing.T) {
+		runWriteWatermark(t, wrapped)
 	})
-	t.Run("installations", func(t *testing.T) {
-		runInstallations(t, newProvider)
+	settings.run(t, "installations", func(t *testing.T) {
+		runInstallations(t, wrapped)
 	})
-	runOptionalFamilies(t, newProvider, artifactWriteCases, settings)
+	runOptionalFamilies(t, wrapped, artifactWriteCases, settings)
 }
 
 // runOptionalFamilies runs the cases the options enable over every write
@@ -176,15 +167,27 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], selected suiteOptions) {
 	t.Helper()
 	if selected.maintenance != nil {
-		t.Run("maintenance", func(t *testing.T) {
+		selected.run(t, "maintenance", func(t *testing.T) {
 			runMaintenance(t, newProvider, cases, *selected.maintenance)
 		})
 	}
 	if selected.durability != nil {
-		t.Run("durability", func(t *testing.T) {
+		selected.run(t, "durability", func(t *testing.T) {
 			runDurability(t, newProvider, cases, *selected.durability)
 		})
 	}
+}
+
+// run runs one family as a subtest, in parallel with the other families when
+// the Parallel option is set.
+func (o suiteOptions) run(t *testing.T, name string, family func(t *testing.T)) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		if o.parallel {
+			t.Parallel()
+		}
+		family(t)
+	})
 }
 
 // harnessProvider returns the provider a harness is given: the one the

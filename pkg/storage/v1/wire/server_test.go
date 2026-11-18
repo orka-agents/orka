@@ -462,10 +462,12 @@ func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 }
 
 // foreignResults answers plan calls for whatever datasets it is given, as a
-// server that does not check the request's dataset might.
+// server that does not check the request's dataset might, with err when it
+// is set.
 type foreignResults struct {
 	storagepb.UnimplementedResultsServer
 	served []string
+	err    error
 }
 
 func (r foreignResults) answer(ctx context.Context) error {
@@ -473,7 +475,10 @@ func (r foreignResults) answer(ctx context.Context) error {
 	for _, dataset := range r.served {
 		header.Append(wire.HeaderDataset, dataset)
 	}
-	return grpc.SetHeader(ctx, header)
+	if err := grpc.SetHeader(ctx, header); err != nil {
+		return err
+	}
+	return r.err
 }
 
 func (r foreignResults) GetPlan(ctx context.Context, _ *storagepb.GetPlanRequest) (*storagepb.GetPlanResponse, error) {
@@ -494,20 +499,75 @@ func TestClientRefusesAResponseFromAnotherDataset(t *testing.T) {
 		"more than one dataset": {testDataset, "dataset-other"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			grpcServer := grpc.NewServer()
-			storagepb.RegisterResultsServer(grpcServer, foreignResults{served: served})
-			go func() { _ = grpcServer.Serve(listener) }()
-			t.Cleanup(grpcServer.Stop)
-			client := wire.NewClient(dialInsecure(t, listener.Addr().String()), wire.ClientConfig{Dataset: testDataset})
+			client := serveForeign(t, foreignResults{served: served})
 
-			_, err = client.GetPlan(t.Context(), "n", "t")
+			_, err := client.GetPlan(t.Context(), "n", "t")
 			require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
 			err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+
+			// Another dataset's NOT_FOUND or refused write says nothing
+			// about the client's dataset.
+			client = serveForeign(t, foreignResults{served: served, err: storageStatus(codes.NotFound, wire.ReasonNotFound)})
+			_, err = client.GetPlan(t.Context(), "n", "t")
+			require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
+			require.NotErrorIs(t, err, storagev1.ErrNotFound)
+			client = serveForeign(t, foreignResults{served: served, err: storageStatus(codes.FailedPrecondition, wire.ReasonFenced)})
+			err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+			require.NotErrorIs(t, err, storagev1.ErrFenced)
 		})
 	}
+}
+
+// A refusal a server can send before its dataset check keeps its reason
+// whatever dataset the response names, and an error from the client's own
+// dataset keeps its reason too.
+func TestClientKeepsRefusalsSentBeforeTheDatasetCheck(t *testing.T) {
+	for reason, want := range map[string]error{
+		wire.ReasonUnauthenticated:  storagev1.ErrUnauthenticated,
+		wire.ReasonContractMismatch: storagev1.ErrIncompatible,
+		wire.ReasonUnsupportedField: storagev1.ErrIncompatible,
+		wire.ReasonDatasetMismatch:  storagev1.ErrDatasetMismatch,
+		wire.ReasonUnavailable:      storagev1.ErrUnavailable,
+		wire.ReasonIncompatible:     storagev1.ErrIncompatible,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			client := serveForeign(t, foreignResults{served: []string{"dataset-other"}, err: storageStatus(codes.FailedPrecondition, reason)})
+			_, err := client.GetPlan(t.Context(), "n", "t")
+			require.ErrorIs(t, err, want)
+			err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+			require.ErrorIs(t, err, want)
+			require.NotErrorIs(t, err, storagev1.ErrOutcomeUnknown, "a refusal before the dataset check committed nothing")
+		})
+	}
+
+	client := serveForeign(t, foreignResults{served: []string{testDataset}, err: storageStatus(codes.NotFound, wire.ReasonNotFound)})
+	_, err := client.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrNotFound)
+}
+
+// serveForeign serves results on a TCP loopback and returns a client bound to
+// testDataset.
+func serveForeign(t *testing.T, results foreignResults) *wire.Client {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	grpcServer := grpc.NewServer()
+	storagepb.RegisterResultsServer(grpcServer, results)
+	go func() { _ = grpcServer.Serve(listener) }()
+	t.Cleanup(grpcServer.Stop)
+	return wire.NewClient(dialInsecure(t, listener.Addr().String()), wire.ClientConfig{Dataset: testDataset})
+}
+
+// storageStatus is a status with a storage ErrorInfo, as the server library
+// sends.
+func storageStatus(code codes.Code, reason string) error {
+	st, err := status.New(code, reason).WithDetails(&errdetails.ErrorInfo{Domain: wire.ErrorDomain, Reason: reason})
+	if err != nil {
+		panic(err)
+	}
+	return st.Err()
 }
 
 // rejectAll fails every authentication.

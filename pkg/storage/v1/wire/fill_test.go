@@ -88,8 +88,19 @@ func (f *filler) time() time.Time {
 		f.next++
 		return time.Date(2026, 10, 21, 13, 14, 15, int(123456789+f.next), zone)
 	}
-	// Mostly in the Timestamp range, sometimes outside it.
-	seconds := f.random.Int64N(2*400000*365*24*3600) - 400000*365*24*3600
+	// Mostly in the Timestamp range, years 1 to 9999, so records with several
+	// times still round-trip; one time in eight is outside it, which the
+	// conversion refuses.
+	const first, last = -62135596800, 253402300799
+	seconds := first + f.random.Int64N(last-first+1)
+	if f.random.IntN(8) == 0 {
+		beyond := 1 + f.random.Int64N(1<<40)
+		if f.random.IntN(2) == 0 {
+			seconds = first - beyond
+		} else {
+			seconds = last + beyond
+		}
+	}
 	return time.Unix(seconds, f.random.Int64N(1e9)).In(zone)
 }
 

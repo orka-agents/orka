@@ -153,13 +153,19 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 	require.ErrorIs(t, precondition, storagev1.ErrConflict)
 
 	// The provider's wrapping text stays on the server: the client finds the
-	// typed message an in-process caller finds.
-	for _, typed := range []error{
-		storagev1.ValidationErrorf("x"), storagev1.FencedErrorf("x"), storagev1.PreconditionFailedErrorf("x"),
+	// typed message an in-process caller finds, whether the provider returned
+	// the typed error's value or a pointer to it.
+	for _, typed := range []struct{ err, sentinel error }{
+		{storagev1.ValidationErrorf("x"), storagev1.ErrValidation},
+		{&storagev1.ValidationError{Message: "x"}, storagev1.ErrValidation},
+		{storagev1.FencedErrorf("x"), storagev1.ErrFenced},
+		{&storagev1.FencedError{Message: "x"}, storagev1.ErrFenced},
+		{storagev1.PreconditionFailedErrorf("x"), storagev1.ErrPreconditionFailed},
+		{&storagev1.PreconditionFailedError{Message: "x"}, storagev1.ErrPreconditionFailed},
 	} {
-		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed))
-		require.Equal(t, "x", wrapped.Error())
-		require.ErrorIs(t, wrapped, typed)
+		wrapped := serverToClient(t, writeMethod, fmt.Errorf("save plan %q: %w", "secret-value", typed.err))
+		require.Equal(t, "x", wrapped.Error(), "%T", typed.err)
+		require.ErrorIs(t, wrapped, typed.sentinel)
 	}
 	bare := serverToClient(t, writeMethod, fmt.Errorf("plan: %w", storagev1.ErrValidation))
 	require.ErrorIs(t, bare, storagev1.ErrValidation)
@@ -178,10 +184,17 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 	require.ErrorAs(t, binding, &bindingErr)
 	require.Equal(t, bound, bindingErr, "the binding conflict keeps its stored binding")
 	require.ErrorIs(t, binding, storagev1.ErrConflict)
+	binding = serverToClient(t, writeMethod, fmt.Errorf("bind: %w", &bound))
+	bindingErr = storagev1.BindingConflictError{}
+	require.ErrorAs(t, binding, &bindingErr)
+	require.Equal(t, bound, bindingErr, "a pointer to a binding conflict keeps its stored binding")
 
 	tooLarge := serverToClient(t, writeMethod, storagev1.TooLargeError{What: "artifact \"a\"", Size: 11, Limit: 10})
 	require.ErrorIs(t, tooLarge, storagev1.ErrTooLarge)
 	require.Equal(t, storagev1.TooLargeError{What: "artifact \"a\"", Size: 11, Limit: 10}, tooLarge)
+	tooLarge = serverToClient(t, writeMethod, fmt.Errorf("save: %w", &storagev1.TooLargeError{What: "plan", Size: 20, Limit: 10}))
+	require.Equal(t, storagev1.TooLargeError{What: "plan", Size: 20, Limit: 10}, tooLarge,
+		"a pointer to a size refusal keeps its fields")
 
 	conflict := serverToClient(t, writeMethod, storagev1.ConflictErrorf("version %d changed", 3))
 	require.ErrorIs(t, conflict, storagev1.ErrConflict)
