@@ -33,12 +33,29 @@ type ahpChanges struct {
 
 // change makes a batch of changes, then deletes the stored contents the batch
 // left no file naming. The session's files share contents, so batches take
-// turns: one cannot delete a content another is about to name.
+// turns: one cannot delete a content another is about to name. Contents an
+// earlier change could not delete are tried again.
 func (c *ahpChanges) change(fn func()) {
 	unlock := c.b.lockChanges(c.principal.UserKey)
 	defer unlock()
+	c.b.mu.Lock()
+	pending := c.b.releasing[c.hash()]
+	delete(c.b.releasing, c.hash())
+	c.b.mu.Unlock()
+	for nonce := range pending {
+		c.release(nonce)
+	}
 	fn()
 	c.dropReleased()
+	if len(c.released) > 0 {
+		c.b.mu.Lock()
+		if c.b.releasing == nil {
+			c.b.releasing = map[string]map[string]bool{}
+		}
+		c.b.releasing[c.hash()] = c.released
+		c.b.mu.Unlock()
+		c.released = nil
+	}
 }
 
 // release notes contents a file may no longer name.
@@ -55,23 +72,27 @@ func (c *ahpChanges) release(nonces ...string) {
 }
 
 // dropReleased deletes the released contents no file of the session names.
-// When the files cannot be listed, it keeps them.
+// Contents it could not decide about or delete, when the files cannot be
+// listed or a delete fails, stay released for the next change to retry.
 func (c *ahpChanges) dropReleased() {
-	released := c.released
-	c.released = nil
-	if len(released) == 0 {
+	if len(c.released) == 0 {
 		return
 	}
 	files, err := c.listFiles()
 	if err != nil {
 		return
 	}
+	released := c.released
+	c.released = nil
 	for _, file := range files {
 		delete(released, file.Before)
 		delete(released, file.After)
 	}
 	for nonce := range released {
-		_ = c.b.store.DeleteAHPRecord(c.ctx, c.principal.UserKey, ahpRecordContent, c.hash()+"/"+nonce)
+		if err := c.b.store.DeleteAHPRecord(c.ctx, c.principal.UserKey, ahpRecordContent, c.hash()+"/"+nonce); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			c.release(nonce)
+		}
 	}
 }
 

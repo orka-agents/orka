@@ -1626,10 +1626,15 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	require.Equal(t, record.Branch+"-2", updated.Branch)
 	require.False(t, updated.Published)
 	require.Equal(t, record.WorkDir, updated.WorkDir, "without workspaces the session keeps the project directory")
-	snapshot, _, err := c.Subscribe(ctx, chat)
-	require.NoError(t, err)
-	raw, _ := json.Marshal(snapshot.Snapshot.State.Chat.ActiveTurn)
-	require.Contains(t, string(raw), "Switched to gpt-5.4-nano")
+	// The note reaches the turn after its Task is created.
+	require.Eventually(t, func() bool {
+		snapshot, _, err := c.Subscribe(ctx, chat)
+		if err != nil {
+			return false
+		}
+		raw, _ := json.Marshal(snapshot.Snapshot.State.Chat.ActiveTurn)
+		return strings.Contains(string(raw), "Switched to gpt-5.4-nano")
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 // A turn that published records so even when the store refuses the write that
@@ -2131,6 +2136,71 @@ func TestAHPChangesKeepOnlyTheContentsTheirFilesName(t *testing.T) {
 	require.Equal(t, []string{v0, v1, v2}, stored(), "versions no file names any more go")
 	changes.sync(map[string]ahpGitChange{dir + "/b.go": {After: &v3}})
 	require.Equal(t, []string{v3}, stored(), "the branch's files replace the reported ones")
+}
+
+// ahpFlakyChangeStore fails listing files and deleting contents while armed.
+type ahpFlakyChangeStore struct {
+	store.AHPStore
+	failList, failDelete atomic.Bool
+}
+
+func (s *ahpFlakyChangeStore) ListAHPRecords(ctx context.Context, userKey, kind string) ([]store.AHPRecord, error) {
+	if kind == ahpRecordFile && s.failList.Load() {
+		return nil, errors.New("list failed")
+	}
+	return s.AHPStore.ListAHPRecords(ctx, userKey, kind)
+}
+
+func (s *ahpFlakyChangeStore) DeleteAHPRecord(ctx context.Context, userKey, kind, key string) error {
+	if kind == ahpRecordContent && s.failDelete.Load() {
+		return errors.New("delete failed")
+	}
+	return s.AHPStore.DeleteAHPRecord(ctx, userKey, kind, key)
+}
+
+// Contents a change could not drop, as the store failed it, go with a later
+// change, even one made through another changeset of the session.
+func TestAHPChangesRetryContentsTheyCouldNotDrop(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	principal := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Namespace: ahpTestNamespace}
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, principal.UserKey, ahpRecordSession, ahpTestSession, &record))
+	flaky := &ahpFlakyChangeStore{AHPStore: env.backend.store}
+	env.backend.store = flaky
+	newChanges := func() *ahpChanges {
+		return &ahpChanges{b: env.backend, ctx: ctx, principal: principal, session: record, emit: env.backend.emitterFor(principal)}
+	}
+	dir := ahpTestDir[len("file://"):]
+	stored := func() []string {
+		records, err := flaky.AHPStore.ListAHPRecords(ctx, principal.UserKey, ahpRecordContent)
+		require.NoError(t, err)
+		contents := make([]string, 0, len(records))
+		for _, record := range records {
+			contents = append(contents, string(record.Value))
+		}
+		slices.Sort(contents)
+		return contents
+	}
+	v0, v1, v2, v3 := "v0\n", "v1\n", "v2\n", "v3\n"
+	newChanges().change(func() { newChanges().setFile(dir+"/a.go", &v0, &v1, false) })
+	require.Equal(t, []string{v0, v1}, stored())
+
+	flaky.failList.Store(true)
+	changes := newChanges()
+	changes.change(func() { changes.setFile(dir+"/a.go", &v1, &v2, false) })
+	require.Equal(t, []string{v0, v1, v2}, stored(), "nothing is dropped while the files cannot be listed")
+	flaky.failList.Store(false)
+	flaky.failDelete.Store(true)
+	changes = newChanges()
+	changes.change(func() { changes.setFile(dir+"/a.go", &v2, &v3, false) })
+	require.Equal(t, []string{v0, v1, v2, v3}, stored(), "nothing is dropped while deletes fail")
+	flaky.failDelete.Store(false)
+	changes = newChanges()
+	changes.change(func() {})
+	require.Equal(t, []string{v2, v3}, stored(), "the next change drops what earlier ones could not")
 }
 
 func TestAHPChangesFollowTheBranch(t *testing.T) {
