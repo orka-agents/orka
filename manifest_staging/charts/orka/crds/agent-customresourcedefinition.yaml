@@ -1391,7 +1391,7 @@ spec:
                   defaultReasoningEffort:
                     description: |-
                       DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
-                      Runtime adapters reject values they do not support (none is Codex-only; max is Claude-only).
+                      Only Codex accepts none. Codex and Claude accept max when the model and provider support it.
                     enum:
                     - none
                     - low
