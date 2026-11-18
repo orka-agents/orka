@@ -1092,6 +1092,48 @@ func TestOperatorQuiesceEndsAStreamBlockedOnItsCaller(t *testing.T) {
 	}
 }
 
+// A quiet command's final status fits the socket buffers, so its handler
+// reaches the WebSocket close handshake, which waits up to five seconds for a
+// caller that never acknowledges it. The abort must end the transport under
+// that handshake, so a barrier shorter than the handshake still succeeds.
+func TestOperatorQuiesceEndsAnUnacknowledgedCloseHandshake(t *testing.T) {
+	process := newFakeOperatorProcess()
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(operatorExecURL(server, sessionID), "http"), &websocket.DialOptions{
+		HTTPHeader:   signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}}),
+		Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caller never reads, so it never answers the close frame.
+	defer conn.CloseNow() //nolint:errcheck
+	state := supervisor.sessions[sessionID]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		bound := false
+		for _, registration := range state.operators {
+			bound = bound || registration.stream != nil
+		}
+		supervisor.mu.Unlock()
+		if bound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the exec stream was never bound")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	started := time.Now()
+	if err := supervisor.quiesceOperators(state, 2*time.Second); err != nil {
+		t.Fatalf("quiesce after %s: %v", time.Since(started), err)
+	}
+}
+
 // When the file helper fails before reading its stdin, the handler must not
 // return while the upload copy still reads r.Body (or uses the response through
 // MaxBytesReader) for a client that keeps the body open.

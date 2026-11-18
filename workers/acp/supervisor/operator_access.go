@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -113,6 +114,33 @@ func (a *operatorStreamAbort) disable() {
 	a.mu.Lock()
 	a.disabled = true
 	a.mu.Unlock()
+}
+
+// operatorHijackRecorder records the connection the WebSocket upgrade hijacks,
+// so revocation can end the transport under any WebSocket I/O, including a
+// close handshake.
+type operatorHijackRecorder struct {
+	http.ResponseWriter
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func (h *operatorHijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	if err == nil {
+		h.mu.Lock()
+		h.conn = conn
+		h.mu.Unlock()
+	}
+	return conn, rw, err
+}
+
+func (h *operatorHijackRecorder) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+func (h *operatorHijackRecorder) transport() net.Conn {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.conn
 }
 
 // bindOperatorStream records the abort for an operation's caller stream. An
@@ -587,7 +615,8 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Time{})
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	hijacked := &operatorHijackRecorder{ResponseWriter: w}
+	conn, err := websocket.Accept(hijacked, r, &websocket.AcceptOptions{
 		Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
 		// The caller is the authenticated controller-side API, never a
 		// browser; there is no ambient cookie authority to protect.
@@ -596,7 +625,15 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	stream := newOperatorStreamAbort(func() { _ = conn.CloseNow() })
+	// Close the transport itself: the WebSocket's own CloseNow waits for a
+	// close handshake already in progress, which a caller that stopped
+	// reading never acknowledges.
+	stream := newOperatorStreamAbort(func() {
+		if transport := hijacked.transport(); transport != nil {
+			_ = transport.Close()
+		}
+		_ = conn.CloseNow()
+	})
 	defer stream.disable()
 	s.bindOperatorStream(target, stream)
 	conn.SetReadLimit(operatoraccess.MaxFrameBytes + 1)
