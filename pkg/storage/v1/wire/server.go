@@ -262,15 +262,22 @@ func (s *Server) checkDigest(ctx context.Context, m *method, args ...any) error 
 	return nil
 }
 
-// servingDataset returns the dataset the provider last described: the
-// server describes the provider the first time a call names, or must name, a
-// dataset, and libraryDescribe updates it on every Describe. A Describe or
-// HealthCheck that names none needs no dataset.
+// servingDataset returns the dataset the server checks a call against. A
+// read or an administrative call that names a dataset describes the provider
+// again before it runs, so a provider whose dataset changed while it serves
+// never answers it for the dataset it served before. A write is checked
+// against the dataset the provider last described, as its envelope's dataset
+// is checked again by the provider itself, and a Describe or HealthCheck that
+// names none needs no dataset. libraryDescribe updates the dataset on every
+// Describe.
 func (s *Server) servingDataset(ctx context.Context, m *method, header metadata.MD) (string, error) {
-	if loaded := s.dataset.Load(); loaded != nil && *loaded != "" {
+	loaded := s.dataset.Load()
+	known := loaded != nil && *loaded != ""
+	omitted := m.mayOmitDataset() && len(header.Get(HeaderDataset)) == 0
+	if known && (omitted || m.kind == storagev1.MethodWrite) {
 		return *loaded, nil
 	}
-	if m.mayOmitDataset() && len(header.Get(HeaderDataset)) == 0 {
+	if omitted {
 		return "", nil
 	}
 	info, err := s.state.Describe(ctx)

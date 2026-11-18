@@ -462,6 +462,39 @@ func TestServerChecksTheRequestDataset(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
+// A read describes the provider again before it runs, so a provider whose
+// dataset changed while it serves never answers a client bound to the dataset
+// it served before, even when no Describe call came in between.
+func TestServerRechecksTheDatasetBeforeEachRead(t *testing.T) {
+	provider := newRecordingProvider()
+	conn := wiretest.Dial(t, provider)
+	client := wire.NewClient(conn, wire.ClientConfig{Dataset: testDataset})
+	_, err := client.GetPlan(t.Context(), "n", "t")
+	require.NoError(t, err)
+	require.Len(t, provider.callsTo("GetPlan"), 1)
+
+	provider.set("Describe", []any{storagev1.ProviderInfo{DatasetID: "dataset-switched"}}, nil)
+	_, err = client.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
+	_, err = client.ListUnreadMessages(t.Context(), "n", "t", "p", 0)
+	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
+	require.Len(t, provider.callsTo("GetPlan"), 1, "a read for the dataset served before never reaches the provider")
+	require.Empty(t, provider.callsTo("ListUnreadMessages"))
+
+	switched := wire.NewClient(conn, wire.ClientConfig{Dataset: "dataset-switched"})
+	var header metadata.MD
+	_, err = storagepb.NewResultsClient(conn).GetPlan(datasetContext(t.Context(), "dataset-switched"), &storagepb.GetPlanRequest{}, grpc.Header(&header))
+	require.NoError(t, err)
+	require.Equal(t, []string{"dataset-switched"}, header.Get(wire.HeaderDataset), "the response names the dataset the read was checked against")
+	_, err = switched.GetPlan(t.Context(), "n", "t")
+	require.NoError(t, err)
+
+	provider.set("Describe", nil, errors.New("the dataset is not open"))
+	_, err = switched.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrUnavailable, "a read the server cannot check against a fresh description is refused")
+	require.Len(t, provider.callsTo("GetPlan"), 3)
+}
+
 // A server whose provider cannot describe its dataset cannot check a call's
 // dataset, so it refuses the call as unavailable without running it.
 func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
