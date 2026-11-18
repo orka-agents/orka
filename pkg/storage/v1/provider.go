@@ -156,8 +156,13 @@ const (
 	// and the consolidation proposal types, whose application changes the
 	// memories they target only at the generations they name. Revision 11
 	// adds [MemoryConsolidationStore]. Revision 12 requires
-	// [WriteWatermarkStore] on both provider contracts.
-	ContractRevision = 12
+	// [WriteWatermarkStore] on both provider contracts. Revision 13 bounds
+	// inter-agent messages: [MessageStore.SendMessage] refuses content over
+	// [MaxMessageContentBytes], [MessageStore.ListUnreadMessages] and
+	// [MessageStore.ConsumeMessages] stop a batch before its content passes
+	// [MaxMessageBatchBytes], and the limit is reported in
+	// [ProviderLimits.MaxMessageContentBytes].
+	ContractRevision = 13
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.

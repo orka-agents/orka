@@ -224,7 +224,7 @@ func TestGetPlan(t *testing.T) {
 }
 
 func TestSendMessage(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers()
 	app.Post("/internal/v1/messages/:namespace", h.SendMessage)
 
 	t.Run("success", func(t *testing.T) {
@@ -256,6 +256,26 @@ func TestSendMessage(t *testing.T) {
 		resp, err := app.Test(req)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("content over the message limit", func(t *testing.T) {
+		body := map[string]string{
+			"fromTask":   "worker-a",
+			"toTask":     "worker-oversize",
+			"parentTask": "coordinator",
+			"content":    strings.Repeat("x", store.MaxMessageContentBytes+1),
+		}
+		bodyBytes, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/messages/default", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+		messages, err := ss.GetMessages(context.Background(), "default", "worker-oversize", "coordinator", false)
+		require.NoError(t, err)
+		require.Empty(t, messages, "nothing was stored")
 	})
 
 	t.Run("invalid body", func(t *testing.T) {

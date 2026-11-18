@@ -290,6 +290,8 @@ const (
 	MaxMessageBatch                   = storagev1.MaxMessageBatch
 	MaxMemoryRecallIDs                = storagev1.MaxMemoryRecallIDs
 	MaxResultBytes                    = storagev1.MaxResultBytes
+	MaxMessageContentBytes            = storagev1.MaxMessageContentBytes
+	MaxMessageBatchBytes              = storagev1.MaxMessageBatchBytes
 )
 
 var (
