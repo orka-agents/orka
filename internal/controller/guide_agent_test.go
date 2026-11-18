@@ -105,15 +105,6 @@ func TestGuideDesiredAgentIsReadOnly(t *testing.T) {
 	if spec.Runtime.DefaultAllowBash == nil || *spec.Runtime.DefaultAllowBash {
 		t.Fatal("defaultAllowBash must be explicitly false")
 	}
-	ceiling := spec.Runtime.Ceiling
-	if ceiling == nil || !slices.Equal(ceiling.AllowedTools, []string{"Glob", "Grep", "Read"}) ||
-		ceiling.AllowBash == nil || *ceiling.AllowBash ||
-		ceiling.MaxTurns == nil || *ceiling.MaxTurns != DefaultGuideMaxTurns {
-		t.Fatalf("ceiling = %#v, want Glob, Grep and Read, no Bash, and the default turn limit", ceiling)
-	}
-	if err := validateAgentRuntimeCeiling(nil, agent); err != nil {
-		t.Fatalf("guide defaults must fit the guide ceiling: %v", err)
-	}
 	if spec.Runtime.RuntimeRef != nil || spec.ProviderRef != nil || spec.SecretRef != nil ||
 		spec.Execution != nil || spec.Coordination != nil || len(spec.Tools) != 0 || len(spec.Skills) != 0 {
 		t.Fatalf("guide Agent must carry no external runtime, credentials, workspace, tools or skills: %#v", spec)
@@ -137,6 +128,20 @@ func TestGuideDesiredAgentIsReadOnly(t *testing.T) {
 	}
 	if agent.Name != GuideAgentName || agent.Namespace != guideTestNamespace || !isManagedGuideAgent(agent, "") {
 		t.Fatalf("metadata = %#v, want the managed guide Agent", agent.ObjectMeta)
+	}
+}
+
+// The ceiling holds a Task created directly to the guide's read-only defaults.
+func TestGuideDesiredAgentCapsTasksWithItsDefaults(t *testing.T) {
+	agent := guideTestConfig().DesiredAgent()
+	ceiling := agent.Spec.Runtime.Ceiling
+	if ceiling == nil || !slices.Equal(ceiling.AllowedTools, []string{"Glob", "Grep", "Read"}) ||
+		ceiling.AllowBash == nil || *ceiling.AllowBash ||
+		ceiling.MaxTurns == nil || *ceiling.MaxTurns != DefaultGuideMaxTurns {
+		t.Fatalf("ceiling = %#v, want Glob, Grep and Read, no Bash, and the default turn limit", ceiling)
+	}
+	if err := validateAgentRuntimeCeiling(nil, agent); err != nil {
+		t.Fatalf("guide defaults must fit the guide ceiling: %v", err)
 	}
 }
 
