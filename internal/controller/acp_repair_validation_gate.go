@@ -53,12 +53,16 @@ type repairValidationGateOutcome struct {
 // task's publication, or nil when task is not a repository monitor repair or
 // its monitor sets no repair command. A repair whose monitor cannot be read is
 // gated and fails closed.
+//
+// A repair is recognised only from facts its editors cannot change: the
+// immutable spec (an agent Task writing to an exact pull request head, which
+// only repairs set) and the RepositoryMonitor controller reference, which
+// admission holds. Labels and annotations are mutable metadata, so removing
+// them can never disable the gate.
 func (d *ACPDispatcher) repositoryMonitorRepairGateMonitor(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.RepositoryMonitor, bool, string) {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Spec.Workspace == nil ||
 		task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite ||
-		task.Labels[labels.LabelCreatedBy] != repositoryMonitorTaskCreatedBy ||
-		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationCommandID]) == "" ||
-		task.Annotations[labels.AnnotationMonitorItemKind] != repositoryMonitorPullRequestKind {
+		strings.TrimSpace(task.Spec.Workspace.ExpectedRemoteSHA) == "" {
 		return nil, false, ""
 	}
 	owner := metav1.GetControllerOf(task)
@@ -81,6 +85,27 @@ func (d *ACPDispatcher) repositoryMonitorRepairGateMonitor(ctx context.Context, 
 	return monitor, true, ""
 }
 
+// recheckRepairValidationConfiguration keeps a pass only while the live
+// RepositoryMonitor still requires the image and command it was validated
+// with. A pass under a check the operator has since replaced does not
+// satisfy the new one, so it fails closed.
+func (d *ACPDispatcher) recheckRepairValidationConfiguration(
+	ctx context.Context, task *corev1alpha1.Task, validated *corev1alpha1.RepositoryMonitor, outcome repairValidationGateOutcome,
+) repairValidationGateOutcome {
+	live, required, unavailable := d.repositoryMonitorRepairGateMonitor(ctx, task)
+	switch {
+	case unavailable != "":
+		return repairValidationUnavailable("%s", unavailable)
+	case !required || live == nil:
+		return repairValidationUnavailable("spec.validation.repairCommand was removed while the repair patch was being validated. Nothing was pushed.")
+	case live.UID != validated.UID ||
+		strings.TrimSpace(live.Spec.Validation.Image) != strings.TrimSpace(validated.Spec.Validation.Image) ||
+		tools.RepositoryValidationCommandDigest(live.Spec.Validation.RepairCommand) != tools.RepositoryValidationCommandDigest(validated.Spec.Validation.RepairCommand):
+		return repairValidationUnavailable("spec.validation changed while the repair patch was being validated. Nothing was pushed.")
+	}
+	return outcome
+}
+
 // gateRepositoryMonitorRepairPublication runs the operator's repair command
 // against the exact pull request head plus this patch before anything is
 // pushed (ADR 0038). It returns nil only when a passing result is durably
@@ -98,6 +123,9 @@ func (d *ACPDispatcher) gateRepositoryMonitorRepairPublication(
 	outcome := repairValidationGateOutcome{required: true, status: tools.RepositoryRepairValidationUnavailable, evidence: unavailable}
 	if unavailable == "" {
 		outcome = d.runRepositoryMonitorRepairValidation(ctx, task, monitor, delta)
+	}
+	if outcome.status == tools.RepositoryRepairValidationPassed {
+		outcome = d.recheckRepairValidationConfiguration(ctx, task, monitor, outcome)
 	}
 	logger := logf.FromContext(ctx)
 	switch outcome.status {

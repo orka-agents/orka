@@ -56,7 +56,8 @@ func isRepositoryMonitorRepairValidationTask(task *corev1alpha1.Task) bool {
 // verifyRepositoryMonitorRepairValidationTask proves a repair validation Task
 // still matches the binding persisted before the controller created it: the
 // exact repair Task incarnation, RepositoryMonitor, image, head, command, and
-// patch digest.
+// patch digest. The live monitor must still require the bound image and
+// command, so a changed check is never released under the old one.
 func (r *TaskReconciler) verifyRepositoryMonitorRepairValidationTask(ctx context.Context, task *corev1alpha1.Task, binding *tools.RepositoryValidationCommandBinding) error {
 	if binding == nil || binding.Kind != tools.RepositoryValidationKindRepair || !isRepositoryMonitorRepairValidationTask(task) {
 		return repositoryMonitorValidationConfinementErrorf("repair validation provenance kind does not match the Task")
@@ -82,6 +83,7 @@ func (r *TaskReconciler) verifyRepositoryMonitorRepairValidationTask(ctx context
 	if string(repair.UID) != binding.ReviewTaskUID || !metav1.IsControlledBy(repair, monitor) ||
 		!binding.MatchesRepair(repair, monitor, binding.Image) ||
 		strings.TrimSpace(monitor.Spec.Validation.Image) != binding.Image ||
+		!binding.MatchesCommand(monitor.Spec.Validation.RepairCommand) ||
 		task.Annotations[labels.AnnotationRepositoryValidationPatchDigest] != binding.PatchDigest {
 		return repositoryMonitorValidationConfinementErrorf("immutable repair validation provenance does not match its repair Task")
 	}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/workspacedelta"
@@ -48,7 +50,7 @@ func ApplyDeltaToDirectory(ctx context.Context, repositoryRoot string, artifact 
 		return fmt.Errorf("open repository root: %w", err)
 	}
 	defer root.Close() //nolint:errcheck
-	applier := directoryApplier{root: root, delta: delta}
+	applier := directoryApplier{root: root, delta: delta, relativeRoot: relativeRoot}
 	if err := applier.validate(ctx); err != nil {
 		return err
 	}
@@ -71,6 +73,8 @@ func rejectRepositoryControlPaths(delta parsedDelta) error {
 type directoryApplier struct {
 	root  *os.Root
 	delta parsedDelta
+	// relativeRoot is where the validation command runs; it is never pruned.
+	relativeRoot string
 
 	changes   map[string]workspacedelta.Change
 	deletions map[string]workspacedelta.Deletion
@@ -156,27 +160,31 @@ func (a *directoryApplier) validate(ctx context.Context) error {
 	return nil
 }
 
-// validateParents requires every proper parent of value to be a real
-// directory after the delta is applied: a parent the delta turns into a file
-// or symlink, or deletes without re-adding as a directory, is unsafe, and an
-// existing parent must be a real directory, never a symbolic link. It reports
-// fresh when a parent is missing from the checkout or created by this delta,
-// so value itself cannot exist on disk.
+// validateParents requires every existing proper parent of value to be a
+// real directory, never a symbolic link. For a change it also checks the
+// final tree: a parent the delta turns into a file or symlink, or deletes
+// without re-adding as a directory, is unsafe. A deletion is checked against
+// the existing checkout only, since its parent may itself be deleted and
+// replaced by a file or symlink. It reports fresh when a parent is missing
+// from the checkout or created by this delta, so value itself cannot exist
+// on disk.
 func (a *directoryApplier) validateParents(value string, forChange bool) (bool, error) {
 	components := strings.Split(value, "/")
 	for index := 1; index < len(components); index++ {
 		parent := strings.Join(components[:index], "/")
-		if change, ok := a.changes[parent]; ok {
-			if change.Kind != workspacedelta.EntryDirectory {
-				return false, operationError(ErrUnsafeDelta, "validate delta parent", fmt.Sprintf("parent %q of %q is not a directory", parent, value), nil)
+		if forChange {
+			if change, ok := a.changes[parent]; ok {
+				if change.Kind != workspacedelta.EntryDirectory {
+					return false, operationError(ErrUnsafeDelta, "validate delta parent", fmt.Sprintf("parent %q of %q is not a directory", parent, value), nil)
+				}
+				if change.Operation != workspacedelta.ChangeModified {
+					// An added or replacing directory is created by this delta.
+					return true, nil
+				}
 			}
-			if change.Operation != workspacedelta.ChangeModified {
-				// An added or replacing directory is created by this delta.
-				return true, nil
+			if _, deleted := a.deletions[parent]; deleted {
+				return false, operationError(ErrUnsafeDelta, "validate delta parent", fmt.Sprintf("parent %q of %q is deleted", parent, value), nil)
 			}
-		}
-		if _, deleted := a.deletions[parent]; deleted && forChange {
-			return false, operationError(ErrUnsafeDelta, "validate delta parent", fmt.Sprintf("parent %q of %q is deleted", parent, value), nil)
 		}
 		info, err := a.root.Lstat(parent)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -292,7 +300,89 @@ func (a *directoryApplier) apply(ctx context.Context) error {
 			}
 		}
 	}
+	return a.pruneEmptyDirectories(ctx)
+}
+
+// pruneEmptyDirectories removes every directory the delta left empty, so
+// the checkout matches the tree Git can publish. The publisher's index holds
+// no directory entries, and a fresh checkout of the published commit has no
+// empty directories: neither a directory the delta adds without files nor
+// one whose last file it deletes. The relative root and its ancestors stay,
+// since the validation command runs there.
+func (a *directoryApplier) pruneEmptyDirectories(ctx context.Context) error {
+	keep := map[string]struct{}{}
+	for current := a.relativeRoot; current != "" && current != "."; current = path.Dir(current) {
+		keep[current] = struct{}{}
+	}
+	candidates := map[string]struct{}{}
+	addAncestors := func(value string) {
+		for current := path.Dir(value); current != "." && current != "/"; current = path.Dir(current) {
+			candidates[current] = struct{}{}
+		}
+	}
+	for _, change := range a.delta.manifest.Entries {
+		if change.Kind == workspacedelta.EntryDirectory {
+			candidates[change.Path] = struct{}{}
+		}
+		addAncestors(change.Path)
+	}
+	for _, deletion := range a.delta.deletions {
+		addAncestors(deletion.Path)
+	}
+	directories := make([]string, 0, len(candidates))
+	for directory := range candidates {
+		if _, ok := keep[directory]; !ok {
+			directories = append(directories, directory)
+		}
+	}
+	// Deepest first, so a parent is checked after its emptied children go.
+	sort.Slice(directories, func(i, j int) bool {
+		left, right := strings.Count(directories[i], "/"), strings.Count(directories[j], "/")
+		if left != right {
+			return left > right
+		}
+		return directories[i] > directories[j]
+	})
+	for _, directory := range directories {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := a.root.Lstat(directory)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			// Removed, or beneath a directory the delta replaced.
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect directory %q: %w", directory, err)
+		}
+		if !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 {
+			continue
+		}
+		empty, err := a.directoryEmpty(directory)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			continue
+		}
+		if err := a.root.Remove(directory); err != nil {
+			return fmt.Errorf("remove empty directory %q: %w", directory, err)
+		}
+	}
 	return nil
+}
+
+func (a *directoryApplier) directoryEmpty(directory string) (bool, error) {
+	handle, err := a.root.Open(directory)
+	if err != nil {
+		return false, fmt.Errorf("open directory %q: %w", directory, err)
+	}
+	defer handle.Close() //nolint:errcheck
+	entries, err := handle.ReadDir(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read directory %q: %w", directory, err)
+	}
+	return len(entries) == 0, nil
 }
 
 // ensureParents re-checks at application time that no parent is a symbolic

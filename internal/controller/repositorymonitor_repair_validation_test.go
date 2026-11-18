@@ -314,6 +314,9 @@ func TestRepairValidationProvenanceFailsClosed(t *testing.T) {
 		"monitor image changed": func(f *repairValidationFixture) {
 			f.monitor.Spec.Validation.Image = "ghcr.io/example/other@sha256:" + strings.Repeat("f", 64)
 		},
+		"monitor command changed": func(f *repairValidationFixture) {
+			f.monitor.Spec.Validation.RepairCommand = "make test-all"
+		},
 		"command secret tampered": func(f *repairValidationFixture) {
 			f.command.Data[tools.RepositoryValidationCommandSecretKey] = []byte("true")
 		},
@@ -610,5 +613,95 @@ func TestRepairValidationDeliveryMessageFitsTheTaskStatusSchema(t *testing.T) {
 	}
 	if repairValidationDeliveryMessage("") == "" {
 		t.Fatal("empty evidence must still explain that nothing was pushed")
+	}
+}
+
+// A command that started and then ran past the validation timeout is recorded
+// as an executed failure, like review validation, so the repair agent gets
+// the feedback. A timeout before the command started could not validate.
+func TestClassifyRepairValidationTaskTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		executed bool
+		message  string
+		want     tools.RepositoryRepairValidationStatus
+	}{
+		{name: "command timed out", executed: true, message: "task timed out", want: tools.RepositoryRepairValidationFailed},
+		{name: "never started", message: "task timed out; " + podWaitingMessagePrefix + "ImagePullBackOff", want: tools.RepositoryRepairValidationUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "repair-validation"}}
+			task.Status.Phase = corev1alpha1.TaskPhaseFailed
+			task.Status.Message = tc.message
+			if tc.executed {
+				task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseFailed, Message: tc.message}
+			}
+			got := classifyRepairValidationTask(task, "make test")
+			if got.status != tc.want || !strings.Contains(got.evidence, tc.message) {
+				t.Fatalf("classifyRepairValidationTask() = %#v, want status %s with the controller message", got, tc.want)
+			}
+		})
+	}
+}
+
+// Labels and annotations are mutable by Task editors, so removing them must
+// not disable the gate; only the immutable spec and the admission-held
+// RepositoryMonitor controller reference identify a repair. A monitor-owned
+// write Task without an exact pull request head, such as an issue
+// implementation, is not a repair.
+func TestRepairValidationGateIgnoresMutableRepairMarkers(t *testing.T) {
+	h := newRepairValidationGateHarness(t, nil)
+	repair := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), client.ObjectKeyFromObject(h.f.repair), repair); err != nil {
+		t.Fatal(err)
+	}
+	stripped := repair.DeepCopy()
+	delete(stripped.Labels, labels.LabelCreatedBy)
+	delete(stripped.Annotations, repositoryMonitorIssueAnnotationCommandID)
+	delete(stripped.Annotations, labels.AnnotationMonitorItemKind)
+	if _, required, unavailable := h.dispatcher.repositoryMonitorRepairGateMonitor(context.Background(), stripped); !required || unavailable != "" {
+		t.Fatalf("gate required = %v (%q) after stripping metadata, want required", required, unavailable)
+	}
+	implementation := repair.DeepCopy()
+	implementation.Spec.Workspace.ExpectedRemoteSHA = ""
+	if _, required, _ := h.dispatcher.repositoryMonitorRepairGateMonitor(context.Background(), implementation); required {
+		t.Fatal("a monitor write Task without an exact pull request head must not be gated")
+	}
+}
+
+// A pass counts only while the live monitor still requires the check that
+// produced it; a changed or removed check fails closed.
+func TestRepairValidationPassIsRecheckedAgainstTheLiveMonitor(t *testing.T) {
+	passed := repairValidationGateOutcome{required: true, status: tools.RepositoryRepairValidationPassed}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1alpha1.RepositoryMonitor)
+		want   tools.RepositoryRepairValidationStatus
+	}{
+		"unchanged":       {mutate: func(*corev1alpha1.RepositoryMonitor) {}, want: tools.RepositoryRepairValidationPassed},
+		"command changed": {mutate: func(m *corev1alpha1.RepositoryMonitor) { m.Spec.Validation.RepairCommand = "make test-all" }, want: tools.RepositoryRepairValidationUnavailable},
+		"command removed": {mutate: func(m *corev1alpha1.RepositoryMonitor) { m.Spec.Validation.RepairCommand = "" }, want: tools.RepositoryRepairValidationUnavailable},
+		"image changed": {mutate: func(m *corev1alpha1.RepositoryMonitor) {
+			m.Spec.Validation.Image = "ghcr.io/example/other@sha256:" + strings.Repeat("f", 64)
+		}, want: tools.RepositoryRepairValidationUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newRepairValidationGateHarness(t, nil)
+			repair := &corev1alpha1.Task{}
+			if err := h.client.Get(context.Background(), client.ObjectKeyFromObject(h.f.repair), repair); err != nil {
+				t.Fatal(err)
+			}
+			validated, required, _ := h.dispatcher.repositoryMonitorRepairGateMonitor(context.Background(), repair)
+			if !required || validated == nil {
+				t.Fatal("fixture repair is not gated")
+			}
+			live := validated.DeepCopy()
+			tc.mutate(live)
+			if err := h.client.Update(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+			if got := h.dispatcher.recheckRepairValidationConfiguration(context.Background(), repair, validated, passed); got.status != tc.want {
+				t.Fatalf("recheck = %#v, want %s", got, tc.want)
+			}
+		})
 	}
 }

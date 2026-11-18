@@ -593,12 +593,10 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 	if validationTask {
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
-		if isRepositoryMonitorRepairValidationTask(task) {
-			// The repair patch lands on the exact checkout after the clone and
-			// before the network gate, so the command sees head plus patch.
-			if err := b.addRepositoryMonitorRepairValidationPatch(job, task); err != nil {
-				return nil, err
-			}
+		// A repair patch lands on the exact checkout after the clone and
+		// before the network gate, so the command sees head plus patch.
+		if err := b.addRepositoryMonitorRepairValidationPatch(job, task); err != nil {
+			return nil, err
 		}
 		if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
 			return nil, err
@@ -2390,7 +2388,12 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 	return nil
 }
 
+// addRepositoryMonitorRepairValidationPatch adds the repair patch init
+// container to a repair validation Job. Review validation Jobs are unchanged.
 func (b *JobBuilder) addRepositoryMonitorRepairValidationPatch(job *batchv1.Job, task *corev1alpha1.Task) error {
+	if !isRepositoryMonitorRepairValidationTask(task) {
+		return nil
+	}
 	patchDigest := strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationPatchDigest])
 	if patchDigest == "" {
 		return fmt.Errorf("repair validation patch digest is required")

@@ -373,3 +373,97 @@ func TestApplyDeltaToDirectoryControlPathsAllowedWithoutDeny(t *testing.T) {
 		t.Fatalf("control path content = %q", got)
 	}
 }
+
+// A directory the delta adds without files, or empties by deleting its last
+// file, is absent from the published commit, so the validation checkout must
+// not keep it either.
+func TestApplyDeltaToDirectoryPrunesDirectoriesGitCannotPublish(t *testing.T) {
+	baseline := map[string]testTreeEntry{
+		"keep.txt":            {content: "keep\n"},
+		"pkg/only.txt":        {content: "only\n"},
+		"deep/a/b/last.txt":   {content: "last\n"},
+		"deep/sibling.txt":    {content: "sibling\n"},
+		"services/app/go.mod": {content: "module app\n"},
+	}
+	delta, checkout := buildCapturedDelta(t, baseline, func(root string) {
+		mustWriteFile(t, filepath.Join(root, "keep.txt"), "keep // changed\n", 0o644)
+		for _, name := range []string{"pkg/only.txt", "deep/a/b/last.txt"} {
+			if err := os.Remove(filepath.Join(root, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"testdata", "nested/empty/deeper"} {
+			if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if err := ApplyDeltaToDirectory(context.Background(), checkout, delta.Artifact, delta.ArtifactDigest, ".", false); err != nil {
+		t.Fatalf("ApplyDeltaToDirectory: %v", err)
+	}
+	tree := readTree(t, checkout)
+	for _, gone := range []string{"pkg", "deep/a", "deep/a/b", "testdata", "nested", "nested/empty", "nested/empty/deeper"} {
+		if _, ok := tree[gone]; ok {
+			t.Fatalf("empty directory %q survived application: %#v", gone, tree)
+		}
+	}
+	if tree["keep.txt"].content != "keep // changed\n" || tree["deep/sibling.txt"].content != "sibling\n" ||
+		tree["services/app/go.mod"].content != "module app\n" {
+		t.Fatalf("applied tree = %#v", tree)
+	}
+}
+
+func TestApplyDeltaToDirectoryKeepsEmptiedRelativeRoot(t *testing.T) {
+	sub := map[string]testTreeEntry{"only.txt": {content: "only\n"}}
+	delta, _ := buildCapturedDelta(t, sub, func(root string) {
+		if err := os.Remove(filepath.Join(root, "only.txt")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkout := filepath.Join(t.TempDir(), "repo")
+	writeTestTree(t, checkout, map[string]testTreeEntry{"README.md": {content: "readme\n"}, "services/app/only.txt": {content: "only\n"}})
+	if err := ApplyDeltaToDirectory(context.Background(), checkout, delta.Artifact, delta.ArtifactDigest, "services/app", false); err != nil {
+		t.Fatalf("ApplyDeltaToDirectory: %v", err)
+	}
+	if tree := readTree(t, checkout); !tree["services/app"].dir || len(tree) != 3 {
+		t.Fatalf("relative root was not kept: %#v", tree)
+	}
+}
+
+// Replacing a non-empty directory with a file or symlink deletes its
+// descendants, whose parents are checked against the existing checkout.
+func TestApplyDeltaToDirectoryReplacesNonEmptyDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace func(t *testing.T, target string)
+		want    testTreeEntry
+	}{
+		{name: "file", replace: func(t *testing.T, target string) { mustWriteFile(t, target, "now a file\n", 0o644) }, want: testTreeEntry{content: "now a file\n", mode: 0o644}},
+		{name: "symlink", replace: func(t *testing.T, target string) {
+			if err := os.Symlink("README.md", target); err != nil {
+				t.Fatal(err)
+			}
+		}, want: testTreeEntry{link: "README.md"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseline := map[string]testTreeEntry{
+				"README.md":     {content: "readme\n"},
+				"dir/a.txt":     {content: "a\n"},
+				"dir/sub/b.txt": {content: "b\n"},
+			}
+			delta, checkout := buildCapturedDelta(t, baseline, func(root string) {
+				if err := os.RemoveAll(filepath.Join(root, "dir")); err != nil {
+					t.Fatal(err)
+				}
+				tc.replace(t, filepath.Join(root, "dir"))
+			})
+			if err := ApplyDeltaToDirectory(context.Background(), checkout, delta.Artifact, delta.ArtifactDigest, ".", false); err != nil {
+				t.Fatalf("ApplyDeltaToDirectory: %v", err)
+			}
+			tree := readTree(t, checkout)
+			if len(tree) != 2 || tree["dir"] != tc.want || tree["README.md"].content != "readme\n" {
+				t.Fatalf("applied tree = %#v, want dir = %#v", tree, tc.want)
+			}
+		})
+	}
+}

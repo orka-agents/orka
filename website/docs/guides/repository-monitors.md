@@ -405,11 +405,11 @@ spec:
 
 What happens next depends on the result, which Orka records against the exact patch digest:
 
-- **Passed:** Orka publishes exactly the patch that passed. A different patch is validated again.
-- **Failed:** nothing is pushed. Orka continues the repair in the same session with a new Task (named `<repair task>-rv<n>`) whose prompt says the previous attempt failed and repeats the command. Pre-push failures and review-validation failures after a push share one budget, `spec.repair.maxValidationRetries` (default `2`). When the retries run out, the repair fails with `repair_validation_failed`, nothing is pushed, and the readiness status says the repair did not pass `spec.validation.repairCommand`.
-- **Unavailable:** the check could not run, for example because the image could not be pulled. Orka fails closed: nothing is pushed, the repair fails with `repair_validation_unavailable`, and it is not retried.
+- **Passed:** Orka publishes exactly the patch that passed. A different patch is validated again. If `spec.validation.image` or `repairCommand` changes while a patch is being validated, the old result does not count: the repair fails closed as unavailable.
+- **Failed:** the command ran and exited non-zero, or started and ran past the validation timeout (a patch that makes the tests hang is something the next attempt can fix). Nothing is pushed. Orka continues the repair in the same session with a new Task (named `<repair task>-rv<n>`) whose prompt says the previous attempt failed and repeats the command. Pre-push failures and review-validation failures after a push share one budget, `spec.repair.maxValidationRetries` (default `2`). When the retries run out, the repair fails with `repair_validation_failed`, nothing is pushed, and the readiness status says the repair did not pass `spec.validation.repairCommand`.
+- **Unavailable:** the check could not run, for example because the image could not be pulled or the patch could not be applied. Orka fails closed: nothing is pushed, the repair fails with `repair_validation_unavailable`, and it is not retried.
 
-As with review validation, the command's output is hidden; Orka records only the exit status and bounded, redacted evidence. The command runs offline, so the image must already contain every tool and dependency it needs. The gate catches build and test failures, not wrong fixes that still pass; the next review handles those. Without `repairCommand`, repairs are pushed without this check, as before.
+As with review validation, the command's output is hidden; Orka records only the exit status and bounded, redacted evidence. The command runs offline, so the image must already contain every tool and dependency it needs. The gate catches build and test failures, not wrong fixes that still pass; the next review handles those. The checkout the command sees matches the tree Git can publish: directories the patch leaves empty are removed, since the pushed commit cannot contain them. Without `repairCommand`, repairs are pushed without this check, as before.
 
 ### CI evidence for repairs
 

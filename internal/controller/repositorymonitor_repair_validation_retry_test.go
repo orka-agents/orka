@@ -21,6 +21,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const repairValidationTestCommand = "make test"
@@ -65,8 +66,8 @@ func newRepairValidationRetryHarness(t *testing.T, name string, repairCommand st
 	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if created, err := reconciler.createRepositoryMonitorRepairTask(ctx, monitor, &store.MonitorRun{ID: "run-" + name}, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
-		t.Fatalf("createRepositoryMonitorRepairTask() = (%d, %v)", created, err)
+	if created, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, &store.MonitorRun{ID: "run-" + name}, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
+		t.Fatalf("createRepositoryMonitorRepairTaskWithEvidence() = (%d, %v)", created, err)
 	}
 	return &repairValidationRetryHarness{
 		t: t, ctx: ctx, store: monitorStore, client: cl, reconciler: reconciler, monitor: monitor, pr: pr,
@@ -297,5 +298,18 @@ func TestRepositoryMonitorRepairValidationRetryNames(t *testing.T) {
 	if strings.Contains(twice, "first") || strings.Count(twice, repositoryMonitorRepairValidationFeedbackStart) != 1 ||
 		!strings.HasSuffix(twice, repositoryMonitorRepairPromptInputMarker+`{"headSHA":"h"}`) {
 		t.Fatalf("feedback was not replaced: %q", twice)
+	}
+}
+
+// The command's output is hidden, so the retry prompt must carry the whole
+// accepted command, not a prefix.
+func TestRepositoryMonitorRepairValidationFeedbackKeepsTheFullCommand(t *testing.T) {
+	command := "make lint && " + strings.Repeat("go test ./pkg/x/... && ", 200) + "make e2e-last-check"
+	if !tools.ValidRepositoryRepairValidationCommand(command) {
+		t.Fatalf("test command of %d bytes is not an accepted repairCommand", len(command))
+	}
+	prompt := repositoryMonitorRepairPromptWithValidationFeedback("Fix the PR."+repositoryMonitorRepairPromptInputMarker+"{}", command, "exit 1", 1, 2)
+	if !strings.Contains(prompt, command) {
+		t.Fatalf("retry prompt does not contain the full %d-byte command", len(command))
 	}
 }

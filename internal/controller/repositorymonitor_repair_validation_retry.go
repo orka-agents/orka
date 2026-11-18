@@ -45,7 +45,6 @@ const (
 	repositoryMonitorRepairValidationRetryNameSuffix = "-rv"
 	repositoryMonitorRepairValidationFeedbackStart   = "\n\n[Orka pre-push validation feedback]\n"
 	repositoryMonitorRepairValidationFeedbackEnd     = "\n[end of Orka pre-push validation feedback]"
-	repositoryMonitorRepairValidationCommandLimit    = 1024
 )
 
 var repositoryMonitorRepairValidationRetryNamePattern = regexp.MustCompile(`-rv([1-9][0-9]*)$`)
@@ -126,7 +125,10 @@ func repositoryMonitorRepairPromptWithValidationFeedback(prompt, command, eviden
 	section.WriteString(repositoryMonitorRepairValidationFeedbackStart)
 	fmt.Fprintf(&section, "Your previous repair attempt did not pass Orka's pre-push validation (failed attempt %d; at most %d retries). Nothing was pushed to the pull request.\n", failures, maxRetries)
 	if command = strings.TrimSpace(command); command != "" {
-		fmt.Fprintf(&section, "Orka ran the operator's validation command offline against the pull request head with your patch applied:\n%s\n", boundedString(command, repositoryMonitorRepairValidationCommandLimit))
+		// The whole command is repeated: its output is hidden, so the command
+		// is all the repairer has to work out which check failed. Admission
+		// bounds it to 8192 bytes and rejects credential-like values.
+		fmt.Fprintf(&section, "Orka ran the operator's validation command offline against the pull request head with your patch applied:\n%s\n", command)
 	} else {
 		section.WriteString("Orka ran the operator's validation command offline against the pull request head with your patch applied.\n")
 	}
