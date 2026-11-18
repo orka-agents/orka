@@ -29,6 +29,8 @@ type ahpChanges struct {
 	emit      ahphost.Emitter
 	// released holds the contents files stopped naming during a change.
 	released map[string]bool
+	// unshown holds the files whose change could not be shown.
+	unshown map[string]bool
 }
 
 // change makes a batch of changes, then deletes the stored contents the batch
@@ -39,23 +41,60 @@ func (c *ahpChanges) change(fn func()) {
 	unlock := c.b.lockChanges(c.principal.UserKey)
 	defer unlock()
 	c.b.mu.Lock()
-	pending := c.b.releasing[c.hash()]
+	pending, unshown := c.b.releasing[c.hash()], c.b.unshown[c.hash()]
 	delete(c.b.releasing, c.hash())
+	delete(c.b.unshown, c.hash())
 	c.b.mu.Unlock()
 	for nonce := range pending {
 		c.release(nonce)
 	}
 	fn()
+	c.showAgain(unshown)
 	c.dropReleased()
+	c.b.mu.Lock()
+	defer c.b.mu.Unlock()
 	if len(c.released) > 0 {
-		c.b.mu.Lock()
 		if c.b.releasing == nil {
 			c.b.releasing = map[string]map[string]bool{}
 		}
 		c.b.releasing[c.hash()] = c.released
-		c.b.mu.Unlock()
 		c.released = nil
 	}
+	if len(c.unshown) > 0 {
+		if c.b.unshown == nil {
+			c.b.unshown = map[string]map[string]bool{}
+		}
+		c.b.unshown[c.hash()] = c.unshown
+		c.unshown = nil
+	}
+}
+
+// showAgain shows files an earlier change could not, as they are stored now:
+// clients read the changeset from what was shown, not from the records.
+func (c *ahpChanges) showAgain(paths map[string]bool) {
+	for full := range paths {
+		if c.unshown[full] {
+			// This change already tried, and failed, to show it.
+			continue
+		}
+		var file ahpFileContent
+		err := c.b.getRecord(c.ctx, c.principal.UserKey, ahpRecordFile, c.hash()+"/"+full, &file)
+		switch {
+		case err == nil:
+			c.emitFile(file)
+		case errors.Is(err, store.ErrNotFound):
+			c.emitRemoved(full)
+		default:
+			c.markUnshown(full)
+		}
+	}
+}
+
+func (c *ahpChanges) markUnshown(full string) {
+	if c.unshown == nil {
+		c.unshown = map[string]bool{}
+	}
+	c.unshown[full] = true
 }
 
 // release notes contents a file may no longer name.
@@ -171,9 +210,15 @@ func (c *ahpChanges) removeFile(full string) {
 	if c.b.store.DeleteAHPRecord(c.ctx, c.principal.UserKey, ahpRecordFile, c.hash()+"/"+full) != nil {
 		return
 	}
-	_ = c.emit.Emit(c.ctx, c.session.Changeset, ahptypes.StateAction{Value: &ahptypes.ChangesetFileRemovedAction{
+	c.emitRemoved(full)
+}
+
+func (c *ahpChanges) emitRemoved(full string) {
+	if c.emit.Emit(c.ctx, c.session.Changeset, ahptypes.StateAction{Value: &ahptypes.ChangesetFileRemovedAction{
 		Type: ahptypes.ActionTypeChangesetFileRemoved, FileId: ahpHash(full)[:16],
-	}})
+	}}) != nil {
+		c.markUnshown(full)
+	}
 }
 
 func (c *ahpChanges) emitFile(file ahpFileContent) {
@@ -189,9 +234,11 @@ func (c *ahpChanges) emitFile(file ahpFileContent) {
 	}
 	added, removed := ahpLineChanges(c.text(file.Before), c.text(file.After))
 	edit.Diff = &ahptypes.FileEditDiffStats{Added: &added, Removed: &removed}
-	_ = c.emit.Emit(c.ctx, c.session.Changeset, ahptypes.StateAction{Value: &ahptypes.ChangesetFileSetAction{
+	if c.emit.Emit(c.ctx, c.session.Changeset, ahptypes.StateAction{Value: &ahptypes.ChangesetFileSetAction{
 		Type: ahptypes.ActionTypeChangesetFileSet, File: ahptypes.ChangesetFile{Id: ahpHash(file.Path)[:16], Edit: edit},
-	}})
+	}}) != nil {
+		c.markUnshown(file.Path)
+	}
 }
 
 // files returns the session's changed files by path.
