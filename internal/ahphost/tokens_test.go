@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 func newTokenService(t *testing.T) *TokenService {
@@ -45,6 +46,43 @@ func TestMintStoresOnlyAHash(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, UserKey("https://issuer.example", "alice"), principal.UserKey)
 	require.Equal(t, "team", principal.Namespace)
+}
+
+// A person holds at most MaxActiveTokensPerUser live tokens; revoking or
+// outliving one makes room, and the ended ones kept stay bounded.
+func TestMintBoundsAPersonsTokens(t *testing.T) {
+	tokens := newTokenService(t)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tokens.Now = func() time.Time { return now }
+	ctx := context.Background()
+	alice := MintRequest{Issuer: "https://issuer.example", Subject: "alice", Namespace: "team", TTL: time.Hour}
+	var first MintedToken
+	for i := range MaxActiveTokensPerUser {
+		minted, err := tokens.Mint(ctx, alice)
+		require.NoError(t, err)
+		if i == 0 {
+			first = minted
+		}
+	}
+	_, err := tokens.Mint(ctx, alice)
+	require.ErrorIs(t, err, ErrTooManyTokens)
+	_, err = tokens.Mint(ctx, MintRequest{Issuer: "https://issuer.example", Subject: "bob", Namespace: "team", TTL: time.Hour})
+	require.NoError(t, err, "another person's tokens are their own")
+
+	require.NoError(t, tokens.Revoke(ctx, alice.Issuer, alice.Subject, first.ID))
+	_, err = tokens.Mint(ctx, alice)
+	require.NoError(t, err, "a revoked token makes room")
+
+	// Every token outlives itself; each mint after that keeps at most the
+	// newest ended ones.
+	now = now.Add(2 * time.Hour)
+	for range MaxActiveTokensPerUser {
+		_, err := tokens.Mint(ctx, alice)
+		require.NoError(t, err)
+	}
+	listed, err := tokens.Store.ListAHPTokens(ctx, UserKey(alice.Issuer, alice.Subject))
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(listed), MaxActiveTokensPerUser+storagev1.MaxAHPEndedTokensPerUser)
 }
 
 func TestMintRejectsBadRequests(t *testing.T) {

@@ -108,6 +108,13 @@ func (s *Store) createAHPToken(ctx context.Context, token store.AHPToken) error 
 	if err != nil {
 		return fmt.Errorf("create AHP token: %w", uniqueConflict(err))
 	}
+	// Only the newest of the user's ended tokens stay listed.
+	ended := `user_key = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)`
+	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_tokens WHERE `+ended+` AND id NOT IN (
+			SELECT id FROM ahp_tokens WHERE `+ended+` ORDER BY created_at DESC, id DESC LIMIT ?)`,
+		token.UserKey, token.CreatedAt.UTC(), token.UserKey, token.CreatedAt.UTC(), storagev1.MaxAHPEndedTokensPerUser); err != nil {
+		return fmt.Errorf("prune AHP tokens: %w", err)
+	}
 	return nil
 }
 

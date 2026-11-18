@@ -107,6 +107,9 @@ func (h *Handlers) CreateAHPToken(c fiber.Ctx) error {
 	if errors.Is(err, ahphost.ErrInvalidMintRequest) {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
+	if errors.Is(err, ahphost.ErrTooManyTokens) {
+		return fiber.NewError(fiber.StatusConflict, err.Error())
+	}
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to mint AHP token")
 	}

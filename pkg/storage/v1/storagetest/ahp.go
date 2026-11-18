@@ -58,6 +58,29 @@ func runAHP(t *testing.T, newProvider StateFactory) {
 		require.Empty(t, list)
 	})
 
+	t.Run("a user keeps only their newest ended tokens", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		for i := range storagev1.MaxAHPEndedTokensPerUser + 2 {
+			created := at.Add(time.Duration(i) * time.Minute)
+			require.NoError(t, p.CreateAHPToken(ctx, storagev1.AHPToken{ID: fmt.Sprintf("ended-%d", i), TokenHash: fmt.Sprintf("ended-hash-%d", i),
+				UserKey: "alice", CreatedAt: created, ExpiresAt: created.Add(time.Second)}))
+		}
+		require.NoError(t, p.CreateAHPToken(ctx, storagev1.AHPToken{ID: "live", TokenHash: "live-hash", UserKey: "alice",
+			CreatedAt: at.Add(24 * time.Hour), ExpiresAt: at.Add(48 * time.Hour)}))
+		require.NoError(t, p.CreateAHPToken(ctx, storagev1.AHPToken{ID: "bob-ended", TokenHash: "bob-hash", UserKey: "bob",
+			CreatedAt: at, ExpiresAt: at.Add(time.Second)}))
+		list, err := p.ListAHPTokens(ctx, "alice")
+		require.NoError(t, err)
+		require.Len(t, list, storagev1.MaxAHPEndedTokensPerUser+1)
+		require.Equal(t, "live", list[0].ID)
+		for _, gone := range []string{"ended-hash-0", "ended-hash-1"} {
+			_, err := p.GetAHPTokenByHash(ctx, gone)
+			require.ErrorIs(t, err, storagev1.ErrNotFound, "the oldest ended tokens go")
+		}
+		_, err = p.GetAHPTokenByHash(ctx, "bob-hash")
+		require.NoError(t, err, "another user's tokens stay")
+	})
+
 	t.Run("clients stay bound to their first user", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		_, err := p.GetAHPClient(ctx, "client-1")
