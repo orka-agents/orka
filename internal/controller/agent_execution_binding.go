@@ -861,7 +861,11 @@ func (e *errAgentExecutionBindingConflict) Error() string {
 }
 
 // persistAgentExecutionBinding implements the uncached compare-if-absent
-// write-once binding CAS. It never overwrites an existing binding.
+// write-once binding CAS. It never overwrites an existing binding. When it
+// returns the persisted binding it also refreshes task in place from the
+// uncached object that carries it, so the caller's later optimistic-lock
+// patches start from the resourceVersion the binding write produced instead
+// of the stale cached copy (which would always conflict once).
 func (r *TaskReconciler) persistAgentExecutionBinding(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -879,7 +883,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	// recovering an ambiguous status-patch response.
 	if existing := current.Status.AgentExecutionBinding; existing != nil {
 		if existing.BindingDigest == candidate.binding.BindingDigest {
-			return existing, nil
+			current.DeepCopyInto(task)
+			return task.Status.AgentExecutionBinding, nil
 		}
 		return nil, &errAgentExecutionBindingConflict{
 			existingDigest:  existing.BindingDigest,
@@ -907,7 +912,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 			latest.UID == task.UID {
 			if existing := latest.Status.AgentExecutionBinding; existing != nil {
 				if existing.BindingDigest == candidate.binding.BindingDigest {
-					return existing, nil
+					latest.DeepCopyInto(task)
+					return task.Status.AgentExecutionBinding, nil
 				}
 				return nil, &errAgentExecutionBindingConflict{
 					existingDigest:  existing.BindingDigest,
@@ -917,7 +923,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 		}
 		return nil, fmt.Errorf("write-once binding patch: %w", err)
 	}
-	return current.Status.AgentExecutionBinding, nil
+	current.DeepCopyInto(task)
+	return task.Status.AgentExecutionBinding, nil
 }
 
 func decodeAgentExecutionSnapshot(body []byte) (agentExecutionSnapshotBody, error) {
@@ -1532,7 +1539,10 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 		}
 		if current.Status.AgentExecutionBinding != nil {
-			task = current
+			// Adopt the uncached bound object in place: the caller queues
+			// this same Task next and must see the binding and the current
+			// resourceVersion, not the cache's pre-binding copy.
+			current.DeepCopyInto(task)
 		}
 	}
 	if existing := task.Status.AgentExecutionBinding; existing != nil {

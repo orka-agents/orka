@@ -25,6 +25,7 @@ import (
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -123,7 +124,14 @@ type ACPDispatcher struct {
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
 	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	// Informers, when set, wake the dispatcher as soon as a Task is queued
+	// or a RuntimePool starts admitting or frees capacity, instead of only
+	// on the next Interval tick.
+	Informers             cache.Informers
+	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+
+	wake     chan struct{}
+	wakeOnce sync.Once
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -199,16 +207,17 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		}
 		logf.FromContext(ctx).Error(err, "ACP Tasks remain blocked on recovery; independent work may proceed")
 	}
+	removeWakeHandlers := d.registerDispatchWakeHandlers(ctx)
+	defer removeWakeHandlers()
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
 	for {
+		lastScan := time.Now()
 		if err := d.dispatchOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
 		}
-		select {
-		case <-ctx.Done():
+		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan) {
 			return nil
-		case <-ticker.C:
 		}
 	}
 }
