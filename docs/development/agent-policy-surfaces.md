@@ -202,9 +202,11 @@ Publication is also refused once an operator has run `orka task exec` in the wor
 or copied a file into it with `orka task cp` (ADR 0044). Copying files out never taints.
 The taint is written before the command starts, so it applies even if the command changed
 nothing. If the Task then has changes to publish, it ends `Cancelled`, with delivery state
-`CancelledBeforePublish` and reason `OperatorTainted`. A Task whose workspace ends
-unchanged finishes as usual. The taint is a marker on the Task and workspace, not part of
-the Task spec.
+`CancelledBeforePublish` and reason `OperatorTainted`. A Task with nothing to publish isn't
+refused publication, but the taint still has effects. A Session turn that already depends on native
+continuity fails closed, and a tainted workspace is deleted rather than suspended, so the
+Session can't continue from it. The taint is a marker on the Task and workspace, not part
+of the Task spec.
 
 ### Orka API authorization in built-in tools
 
