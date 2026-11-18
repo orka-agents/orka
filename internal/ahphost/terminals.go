@@ -95,6 +95,12 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 	} else if !errors.Is(err, errUnknownChannel) {
 		return err
 	}
+	// Ended terminals nothing follows go, so a client that never disposes of
+	// them cannot grow what is stored; one that fails to go is tried again
+	// with the next terminal.
+	if err := c.host.dropOrphanedTerminals(ctx, c.principal); err != nil {
+		c.host.cfg.Logger.Error(err, "could not drop ended terminals", "user", c.principal.UserKey)
+	}
 	state, err := provider.CreateTerminal(ctx, c.principal, params, emitter{host: c.host, principal: c.principal})
 	if err != nil {
 		if rejection, ok := errors.AsType[*Rejection](err); ok {
