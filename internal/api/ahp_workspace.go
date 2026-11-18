@@ -101,7 +101,7 @@ type ahpWorkspaces struct {
 	refreshing map[string]bool
 	// tokens are the git tokens each user's workspace was given, which
 	// terminal output never carries.
-	tokens map[string][]string
+	tokens map[string][]ahpGivenToken
 	// providing are the users whose token is being installed; it closes when
 	// the installation ends.
 	providing map[string]chan struct{}

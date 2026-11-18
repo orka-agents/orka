@@ -197,6 +197,9 @@ type ahpBackend struct {
 	// releasing holds, per session changeset, contents released by a change
 	// that could not delete them, for the next change to retry.
 	releasing map[string]map[string]bool
+	// unshown holds, per session changeset, the files whose change could not
+	// be shown to clients, for the next change to show again.
+	unshown map[string]map[string]bool
 	// sessionRetry is the first wait before a session update the store
 	// refused is tried again; each next wait doubles, up to 32 times it.
 	// Zero is a second.
@@ -1064,6 +1067,7 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.releasing, hash)
+	delete(b.unshown, hash)
 	return b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordSession, session)
 }
 

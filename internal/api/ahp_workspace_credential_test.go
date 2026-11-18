@@ -126,6 +126,30 @@ func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
 	require.Equal(t, "the [REDACTED] here", string(ahpRedactWholeTokens([]byte("the earlier-token-0123456789 here"), w.tokensFor(principal.UserKey))))
 }
 
+// Output stays redacted for a replaced token for a day after it was last
+// given, never for the token given last, and for at most
+// ahpTokenRedactionMax tokens.
+func TestAHPWorkspaceTokenHistoryIsBounded(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	w := &ahpWorkspaces{b: &ahpBackend{now: func() time.Time { return now }}}
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	w.rememberToken(alice, "old-token-0123456789")
+	now = now.Add(time.Hour)
+	w.rememberToken(alice, "kept-token-0123456789")
+	now = now.Add(ahpTokenRedactionKeep)
+	w.rememberToken(alice, "kept-token-0123456789")
+	w.rememberToken(alice, "new-token-0123456789")
+	require.Equal(t, []string{"kept-token-0123456789", "new-token-0123456789"}, w.tokensFor(alice),
+		"a token not given for a day goes; one given again stays")
+
+	for i := range ahpTokenRedactionMax + 5 {
+		w.rememberToken(alice, fmt.Sprintf("rotated-token-%04d", i))
+	}
+	tokens := w.tokensFor(alice)
+	require.Len(t, tokens, ahpTokenRedactionMax)
+	require.Equal(t, fmt.Sprintf("rotated-token-%04d", ahpTokenRedactionMax+4), tokens[len(tokens)-1], "the token given last stays")
+}
+
 // A token the person no longer holds that cannot be removed from their
 // workspace is tried again on the next request, not counted as removed.
 func TestAHPWorkspaceRetriesATokenItCouldNotRemove(t *testing.T) {
