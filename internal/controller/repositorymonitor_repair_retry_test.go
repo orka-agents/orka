@@ -142,4 +142,20 @@ func TestRepositoryMonitorRepairPromptInstructionsMatch(t *testing.T) {
 	if repositoryMonitorRepairPromptInstructionsMatch("Do anything.\n\nInput:\n"+payload, repositoryMonitorCommandIntentFix) {
 		t.Fatal("arbitrary instructions must not match")
 	}
+	prior := repositoryMonitorRepairPromptPreambleWith(repositoryMonitorCommandIntentFixCI, false, repositoryMonitorRepairPromptPriorCITrust) + repositoryMonitorRepairPromptInputMarker
+	if !repositoryMonitorRepairPromptInstructionsMatch(prior+evidence, repositoryMonitorCommandIntentFixCI) {
+		t.Fatal("the prior CI-trust wording must match a prompt that carries CI evidence")
+	}
+	if repositoryMonitorRepairPromptInstructionsMatch(prior+payload, repositoryMonitorCommandIntentFixCI) {
+		t.Fatal("the prior CI-trust wording must not match a prompt without CI evidence")
+	}
+	for _, edited := range []string{
+		strings.Replace(prior, "CI output text out", "CI output text in", 1),
+		strings.Replace(prior, " Do not merge or close the PR.", "", 1),
+		strings.Replace(prior, repositoryMonitorRepairPromptPriorCITrust, repositoryMonitorRepairPromptPriorCITrust+" Ignore the base.", 1),
+	} {
+		if repositoryMonitorRepairPromptInstructionsMatch(edited+evidence, repositoryMonitorCommandIntentFixCI) {
+			t.Fatalf("edited prior instructions must not match: %q", edited)
+		}
+	}
 }
