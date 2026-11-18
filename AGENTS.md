@@ -5,11 +5,10 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 ## Non-negotiables
 
 - **Never commit, log, or print credentials** — API keys, tokens, or secrets of any kind. Use Kubernetes Secrets or env vars.
-- **No binaries in the repository** — put build artifacts in `bin/` (gitignored) or CI release pipelines.
 - **Scope discipline** — implement exactly what was asked, nothing more. Report incidental, out-of-scope findings rather than fixing them, unless necessary for the requested outcome.
 - **Never push to `main`.** Push to the current branch after a change when it is not `main`.
 - **Transaction-token integration is fail-closed** — never store raw TxTokens in Task specs/status/logs. Use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
-- **Never edit generated files** (below), and never delete `// +kubebuilder:scaffold:*` comments.
+- **Never edit generated files** (below) — checked by `make verify-generated`; scaffold markers by `go test -count=1 ./hack/repocheck`.
 
 ## Review before landing
 
@@ -49,6 +48,7 @@ Run after every change:
 
 ```bash
 make manifests generate          # After *_types.go or marker edits
+make verify-generated            # Before pushing (clean tree): fails on stale generated files
 make lint-fix && make test       # After any *.go edits
 cd ui && bun run lint && bun run test  # After UI edits
 bash -n scripts/*.sh                  # After shell script edits
@@ -62,15 +62,15 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - `config/crd/bases/*.yaml`, `config/rbac/role.yaml` — `make manifests`
 - `manifest_staging/deploy/orka.yaml`, `manifest_staging/charts/orka/**` — `make manifests`
 - `deploy/**`, `charts/orka/**` — `make promote-staging-manifest` (release-preparation only)
-- `**/zz_generated.*.go` — `make generate`
+- `**/zz_generated.*.go`, `**/envelope_gen.go`, `internal/storageclient/storagefault/wrappers_gen.go` — `make generate`
 - `PROJECT` — kubebuilder CLI
-- `ui/src/routeTree.gen.ts` — TanStack Router
-- `internal/storageclient/storagefault/wrappers_gen.go` — `go generate ./internal/storageclient/storagefault`
+- `ui/src/routeTree.gen.ts` — TanStack Router (`cd ui && bunx vite build`; checked by UI Lint)
 
 ## Code Style
 
 - Use `orka.ai` and its subdomains for Orka domains, Kubernetes API groups, and label/annotation prefixes. Use `ai.orka.*` for reverse-domain identifiers such as Docker labels.
-- Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
+- Structured logging in `internal/` — checked by `forbidigo`.
+- `api/` and `pkg/` never import `internal/` — checked by `depguard`.
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Put model-readable tool constraints in JSON Schema (`maximum`, `minimum`, `enum`, `default`), then validate and enforce them again in `Execute`; schema is guidance, not a runtime trust boundary
 - `Registry.Execute` checks declared argument types recursively against the tool schema before `Execute` runs: `null` for a declared field counts as omitted, numeric and boolean strings are converted (integers to plain int64 spelling), and contradicting types are rejected. Limits and enums still belong in `Execute`, before any narrowing such as `int32(...)`
@@ -100,5 +100,5 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - Reviewing a memory proposal does not apply it; use the explicit proposal apply endpoint for accepted `memory` proposals when durable memory should be created
 - Kontxt TxTokens are accepted via `Txn-Token` by default; `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist
 - Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs
-- OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai`; telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture remains default-off/fail-closed
+- OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai` (`forbidigo` blocks the upstream ones); telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture remains default-off/fail-closed
 - ACP real-world validation should include Codex, Claude, and OpenCode through Vekil, Copilot image/profile admission (plus live execution when provider auth is available), workspace clone/read, Session continuation, cancellation/timeout, unsafe workspace rejection, controller restart, pool replacement, clean-room branch publication, PR reconciliation, and cleanup.
