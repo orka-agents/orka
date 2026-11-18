@@ -490,17 +490,18 @@ var _ = Describe("Controller Feature Tests", func() {
 					},
 					"coordination": {
 						"enabled": true,
+						"allowedAgents": [{"name": "%s"}],
 						"maxConcurrentChildren": 1
 					}
 				}
-			}`, agentName, namespace, model)
+			}`, agentName, namespace, model, agentName)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(agentManifest)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("creating a parent task")
+			By("creating a parent task whose agent sets maxConcurrentChildren")
 			parentManifest := fmt.Sprintf(`{
 				"apiVersion": "core.orka.ai/v1alpha1",
 				"kind": "Task",
@@ -512,16 +513,17 @@ var _ = Describe("Controller Feature Tests", func() {
 					"type": "container",
 					"image": "busybox:latest",
 					"command": ["sleep"],
-					"args": ["120"]
+					"args": ["120"],
+					"agentRef": {"name": "%s"}
 				}
-			}`, parentTaskName, namespace)
+			}`, parentTaskName, namespace, agentName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(parentManifest)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("creating child tasks with parent label")
+			By("creating coordinated child tasks with parent label and depth annotation")
 			for _, childName := range []string{child1Name, child2Name, child3Name} {
 				childManifest := fmt.Sprintf(`{
 					"apiVersion": "core.orka.ai/v1alpha1",
@@ -531,6 +533,9 @@ var _ = Describe("Controller Feature Tests", func() {
 						"namespace": "%s",
 						"labels": {
 							"orka.ai/parent-task": "%s"
+						},
+						"annotations": {
+							"orka.ai/coordination-depth": "1"
 						}
 					},
 					"spec": {
@@ -563,6 +568,10 @@ var _ = Describe("Controller Feature Tests", func() {
 			_, _ = fmt.Fprintf(GinkgoWriter, "Child task phases: %s (running=%d)\n", output, runningCount)
 			Expect(runningCount).To(BeNumerically("<=", 1),
 				"At most 1 child should be Running with maxConcurrentChildren=1")
+			Expect(output).NotTo(ContainSubstring("=Failed"),
+				"coordinated children should wait for a slot, not fail admission")
+			Expect(runningCount+strings.Count(output, "=Succeeded")).To(BeNumerically(">=", 1),
+				"at least one child should have been admitted")
 		})
 	})
 
