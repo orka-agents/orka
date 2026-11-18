@@ -150,6 +150,9 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if image := spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.image must be digest-pinned with sha256")
 	}
+	if err := validateRepositoryMonitorRepairCommand(spec.Validation); err != nil {
+		return err
+	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
 	}
@@ -165,6 +168,19 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	// The CRD schema bounds the integer limits; this duration has no minimum.
 	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")
+	}
+	return nil
+}
+
+func validateRepositoryMonitorRepairCommand(validation corev1alpha1.RepositoryMonitorValidationSpec) error {
+	if validation.RepairCommand == "" {
+		return nil
+	}
+	if strings.TrimSpace(validation.Image) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.repairCommand requires spec.validation.image")
+	}
+	if !tools.ValidRepositoryRepairValidationCommand(validation.RepairCommand) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.validation.repairCommand must be trimmed valid UTF-8 without NUL bytes or credential-like values and no longer than %d bytes", workerenv.RepositoryValidationMaxCommandBytes))
 	}
 	return nil
 }

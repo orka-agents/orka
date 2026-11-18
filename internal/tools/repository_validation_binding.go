@@ -259,6 +259,11 @@ type repositoryValidationCommandBinding struct {
 	Image              string `json:"image"`
 	HeadSHA            string `json:"headSHA"`
 	CommandDigest      string `json:"commandDigest"`
+	// Kind is empty for review validation and RepositoryValidationKindRepair
+	// for a pre-publication repair gate. ReviewTaskName/UID then name the
+	// repair Task.
+	Kind        string `json:"kind,omitempty"`
+	PatchDigest string `json:"patchDigest,omitempty"`
 }
 
 // RepositoryValidationCommandBinding is the controller-owned execution
@@ -276,6 +281,9 @@ type RepositoryValidationCommandBinding struct {
 	Image              string
 	HeadSHA            string
 	CommandDigest      string
+	// Kind and PatchDigest identify a repair validation binding.
+	Kind        string
+	PatchDigest string
 }
 
 // FindRepositoryValidationCommandBinding finds the durable binding for one
@@ -324,6 +332,12 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 				Image:              binding.Image,
 				HeadSHA:            binding.HeadSHA,
 				CommandDigest:      binding.CommandDigest,
+				Kind:               binding.Kind,
+				PatchDigest:        binding.PatchDigest,
+			}
+			if (candidate.Kind != "" && candidate.Kind != RepositoryValidationKindRepair) ||
+				(candidate.Kind == RepositoryValidationKindRepair) != (candidate.PatchDigest != "") {
+				return nil, errRepositoryValidationBindingConflict
 			}
 			if event.Actor != repositoryValidationBindingActor || event.Summary != repositoryValidationBindingSummary ||
 				candidate.MonitorNamespace != namespace || candidate.MonitorName == "" || candidate.MonitorUID == "" ||
@@ -346,7 +360,7 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 // MatchesReview reports whether a durable binding belongs to the exact review
 // Task and RepositoryMonitor that requested it.
 func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, image, headSHA string) bool {
-	if b == nil || parent == nil || monitor == nil {
+	if b == nil || parent == nil || monitor == nil || b.Kind != "" || b.PatchDigest != "" {
 		return false
 	}
 	itemNumber, err := strconv.ParseInt(strings.TrimSpace(parent.Annotations[labels.AnnotationMonitorItemNumber]), 10, 64)
@@ -410,9 +424,16 @@ func ValidateRepositoryValidationOrphanCommandSecret(parent *corev1alpha1.Task, 
 }
 
 func repositoryValidationCommandBindingMatchesParent(parent *corev1alpha1.Task, binding *RepositoryValidationCommandBinding) bool {
-	return parent != nil && binding != nil && binding.MonitorNamespace == parent.Namespace &&
+	if parent == nil || binding == nil {
+		return false
+	}
+	expectedName := RepositoryValidationTaskName(parent)
+	if binding.Kind == RepositoryValidationKindRepair {
+		expectedName = RepositoryRepairValidationTaskName(parent, binding.PatchDigest)
+	}
+	return binding.MonitorNamespace == parent.Namespace &&
 		binding.ReviewTaskName == parent.Name && binding.ReviewTaskUID == string(parent.UID) &&
-		binding.ValidationTaskName == RepositoryValidationTaskName(parent)
+		binding.ValidationTaskName == expectedName
 }
 
 func repositoryValidationCommandSecretObjectMatches(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) bool {

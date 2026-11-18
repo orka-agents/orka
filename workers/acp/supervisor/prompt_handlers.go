@@ -1717,10 +1717,7 @@ func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, chan
 }
 
 func workspaceDeltaRepositoryControlPath(changedPath string) bool {
-	lower := strings.ToLower(strings.TrimPrefix(changedPath, "./"))
-	return strings.HasPrefix(lower, ".github/workflows/") ||
-		strings.HasPrefix(lower, "config/rbac/") ||
-		(strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret"))
+	return workspacedelta.RepositoryControlPath(changedPath)
 }
 
 func buildWorkspaceDeltaContext(

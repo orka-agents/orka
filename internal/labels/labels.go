@@ -135,6 +135,19 @@ const (
 
 const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
 
+// Repair validation (ADR 0038) annotations on a controller-created validation
+// Task that gates one repository monitor repair patch before publication.
+const (
+	// AnnotationRepositoryValidationKind is "repair" for a repair gate.
+	AnnotationRepositoryValidationKind = "orka.ai/repository-validation-kind"
+	// AnnotationRepositoryValidationPatchDigest is the exact repair delta
+	// artifact digest the validation Pod applies.
+	AnnotationRepositoryValidationPatchDigest = "orka.ai/repository-validation-patch-digest"
+	// AnnotationRepositoryValidationDenyControlPaths is "true" when the
+	// repair workspace denied repository control paths.
+	AnnotationRepositoryValidationDenyControlPaths = "orka.ai/repository-validation-deny-control-paths"
+)
+
 // Parked-turn continuation metadata. The parked Task's status.wait is the
 // authority for a continuation; these are informational and for selection.
 const (

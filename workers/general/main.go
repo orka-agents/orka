@@ -62,6 +62,9 @@ func run() (err error) {
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--apply-repository-repair-patch" {
+		return applyRepositoryRepairPatch(ctx, os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--materialize-validation-command" {
 		return materializeValidationCommand(os.Args[2:])
 	}

@@ -94,10 +94,7 @@ func (r *RepositoryMonitorReconciler) syncRepositoryMonitorRepairValidationAttem
 	if err != nil {
 		return repositoryMonitorRepairValidationRetryState{}, err
 	}
-	maxValidationRetries := 2
-	if monitor.Spec.Repair.MaxValidationRetries != nil {
-		maxValidationRetries = int(*monitor.Spec.Repair.MaxValidationRetries)
-	}
+	maxValidationRetries := repositoryMonitorMaxValidationRetries(monitor)
 	exhausted := repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) && attempts > maxValidationRetries
 	desiredError := ""
 	if exhausted {
@@ -162,7 +159,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairValidationAttemptCo
 			attempts++
 		}
 		if next == "" {
-			return attempts, nil
+			// Pre-push validation failures share the same budget.
+			prePush, err := r.repositoryMonitorRepairJobPrePushValidationFailures(ctx, monitor, job)
+			if err != nil {
+				return 0, err
+			}
+			return attempts + prePush, nil
 		}
 		cursor = next
 	}
@@ -176,10 +178,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairValidationRetryStat
 	if err != nil || job == nil {
 		return repositoryMonitorRepairValidationRetryState{}, err
 	}
-	maxValidationRetries := 2
-	if monitor.Spec.Repair.MaxValidationRetries != nil {
-		maxValidationRetries = int(*monitor.Spec.Repair.MaxValidationRetries)
-	}
+	maxValidationRetries := repositoryMonitorMaxValidationRetries(monitor)
 	exhausted := job.LastError == repositoryMonitorValidationRetryExhaustedReason && job.ValidationAttempts > maxValidationRetries
 	return repositoryMonitorRepairValidationRetryState{associated: true, exhausted: exhausted}, nil
 }
@@ -1679,6 +1678,24 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		} else {
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = fmt.Sprintf("task ended in phase %s", task.Status.Phase)
+			switch repositoryMonitorRepairValidationDeliveryReason(&task) {
+			case repositoryMonitorRepairValidationFailedDeliveryReason:
+				// The patch failed the operator's repairCommand and was not
+				// pushed. Continue the repair session within the budget.
+				retried, retryErr := r.retryRepositoryMonitorRepairAfterValidation(ctx, monitor, &job, &task)
+				if retryErr != nil {
+					return ingested, retryErr
+				}
+				if retried {
+					ingested = true
+					continue
+				}
+				job.LastError = repositoryMonitorRepairValidationFailedError
+			case repositoryMonitorRepairValidationUnavailableDeliveryReason:
+				// The gate could not run; fail closed without retrying.
+				job.ValidationAttempts = repositoryMonitorRepairTaskPriorValidationFailures(&task)
+				job.LastError = repositoryMonitorRepairValidationUnavailableError
+			}
 		}
 		if reason := repositoryMonitorWorkspacePathRejectionReason(&task); reason != "" {
 			// The runtime rejected the repair's paths before publishing it.

@@ -146,6 +146,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		}
 	}
 	if item.RepairState == repositoryMonitorRepairPhaseFailed {
+		description, err := r.repositoryMonitorRepairValidationReadinessDescription(ctx, monitor, pr.Number, pr.HeadSHA)
+		if err != nil {
+			return "", "", err
+		}
+		if description != "" {
+			return repositoryMonitorStatusFailure, description, nil
+		}
 		return repositoryMonitorStatusFailure, "Repair did not complete successfully.", nil
 	}
 	if repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {

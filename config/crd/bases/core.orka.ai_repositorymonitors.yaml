@@ -745,7 +745,21 @@ spec:
                     - changed
                     - full
                     type: string
+                  repairCommand:
+                    description: |-
+                      RepairCommand is the operator-selected offline shell command that gates
+                      every repair before Orka pushes it, for example "make test". Orka runs it
+                      in Image against the exact pull request head the repair started from with
+                      the repair's patch applied, without network access. A repair whose patch
+                      does not pass is not pushed. The repairer never chooses this command.
+                      Requires Image. When empty, repairs are not gated.
+                    maxLength: 8192
+                    type: string
                 type: object
+                x-kubernetes-validations:
+                - message: repairCommand requires image
+                  rule: '!has(self.repairCommand) || size(self.repairCommand) == 0
+                    || (has(self.image) && size(self.image) > 0)'
             required:
             - repoURL
             type: object

@@ -593,6 +593,13 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 	if validationTask {
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
+		if isRepositoryMonitorRepairValidationTask(task) {
+			// The repair patch lands on the exact checkout after the clone and
+			// before the network gate, so the command sees head plus patch.
+			if err := b.addRepositoryMonitorRepairValidationPatch(job, task); err != nil {
+				return nil, err
+			}
+		}
 		if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
 			return nil, err
 		}
@@ -2379,6 +2386,63 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		Name:      repositoryMonitorValidationNetworkSandboxVolume,
 		MountPath: repositoryMonitorValidationNetworkSandboxMount,
 		ReadOnly:  true,
+	})
+	return nil
+}
+
+func (b *JobBuilder) addRepositoryMonitorRepairValidationPatch(job *batchv1.Job, task *corev1alpha1.Task) error {
+	patchDigest := strings.TrimSpace(task.Annotations[labels.AnnotationRepositoryValidationPatchDigest])
+	if patchDigest == "" {
+		return fmt.Errorf("repair validation patch digest is required")
+	}
+	controllerURL := strings.TrimSpace(b.ControllerURL)
+	if controllerURL == "" {
+		return fmt.Errorf("repair validation requires the controller artifact endpoint")
+	}
+	workspace := effectiveWorkspace(task)
+	if workspace == nil {
+		return fmt.Errorf("repair validation requires a workspace")
+	}
+	relativeRoot := strings.TrimSpace(workspace.SubPath)
+	if relativeRoot == "" {
+		relativeRoot = "."
+	}
+	deny := "false"
+	if task.Annotations[labels.AnnotationRepositoryValidationDenyControlPaths] == booleanTrueValue {
+		deny = booleanTrueValue
+	}
+	mode := int32(0o400)
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: repositoryMonitorRepairValidationPatchVolume,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  tools.RepositoryRepairValidationCapabilitySecretName(task.Name),
+			DefaultMode: &mode,
+			Items: []corev1.KeyToPath{{
+				Key:  tools.RepositoryRepairValidationCapabilitySecretKey,
+				Path: tools.RepositoryRepairValidationCapabilitySecretKey,
+			}},
+		}},
+	})
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:            repositoryMonitorRepairValidationPatchContainer,
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: platformImagePullPolicy(b.GeneralWorkerImage),
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{workerBinaryPath},
+		Args: []string{
+			repositoryMonitorRepairValidationPatchWorkerMode,
+			controllerURL,
+			path.Join(repositoryMonitorRepairValidationPatchMount, tools.RepositoryRepairValidationCapabilitySecretKey),
+			workspaceRootPath,
+			patchDigest,
+			relativeRoot,
+			deny,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: repositoryMonitorRepairValidationPatchVolume, MountPath: repositoryMonitorRepairValidationPatchMount, ReadOnly: true},
+			{Name: taskWorkspaceVolume, MountPath: workspaceRootPath},
+			{Name: runtimePoolTempVolume, MountPath: workerTempPath},
+		},
 	})
 	return nil
 }
