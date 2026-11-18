@@ -91,8 +91,15 @@ func ValidateEvent(event *EventEnvelope) error {
 	if event.ProtocolVersion != Version {
 		return fmt.Errorf("unsupported protocolVersion %q", event.ProtocolVersion)
 	}
-	if event.EventType != EventTypeText {
+	if event.EventType != EventTypeText && event.EventType != EventTypeDelegatedText {
 		return fmt.Errorf("unsupported eventType %q", event.EventType)
+	}
+	ref, present := event.Metadata[GatewayGrantRefKey]
+	if (event.EventType == EventTypeDelegatedText && strings.TrimSpace(ref) == "") || (event.EventType != EventTypeDelegatedText && present) {
+		return errors.New("gatewayGrantRef is required only for delegatedText")
+	}
+	if event.EventType == EventTypeDelegatedText && SanitizeMessage(ref, MaxMetadataValueBytes) != ref {
+		return errors.New("gatewayGrantRef must survive sanitization unchanged")
 	}
 	for name, value := range map[string]string{
 		"externalEventId": event.ExternalEventID,
@@ -236,10 +243,15 @@ func ValidateDeliveryRequest(request *DeliveryRequest) error {
 			return err
 		}
 	}
-	if request.Kind != DeliveryKindFinal && request.Kind != DeliveryKindError {
+	textLimit := MaxTextBytes
+	switch request.Kind {
+	case DeliveryKindMessage:
+		textLimit = MaxInterimTextBytes
+	case DeliveryKindFinal, DeliveryKindError:
+	default:
 		return fmt.Errorf("unsupported delivery kind %q", request.Kind)
 	}
-	if request.Text == "" || len(request.Text) > MaxTextBytes || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
+	if request.Text == "" || len(request.Text) > textLimit || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
 		return errors.New("delivery text is invalid")
 	}
 	return nil

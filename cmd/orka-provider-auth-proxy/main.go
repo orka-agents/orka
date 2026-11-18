@@ -14,24 +14,25 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/orka-agents/orka/internal/envutil"
 )
 
 func main() {
-	listenAddress := flag.String("listen-address", envDefault("ORKA_PROVIDER_AUTH_PROXY_LISTEN_ADDRESS", ":8080"), "HTTP listen address")
-	upstreamBaseURL := flag.String("upstream-base-url", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL"), "Unauthenticated Vekil upstream base URL")
-	tokenFile := flag.String("token-file", envDefault("ORKA_PROVIDER_AUTH_PROXY_TOKEN_FILE", "/var/run/secrets/orka/provider-auth/token"), "Mounted current bearer token file")
+	listenAddress := flag.String("listen-address", envutil.String("ORKA_PROVIDER_AUTH_PROXY_LISTEN_ADDRESS", ":8080"), "HTTP listen address")
+	upstreamBaseURL := flag.String("upstream-base-url", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL"), "Credential-injecting model gateway base URL")
+	tokenFile := flag.String("token-file", envutil.String("ORKA_PROVIDER_AUTH_PROXY_TOKEN_FILE", "/var/run/secrets/orka/provider-auth/token"), "Mounted current bearer token file")
 	previousTokenFile := flag.String("previous-token-file", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_FILE"), "Optional mounted previous/overlap bearer token file")
 	previousTokenValidUntilFile := flag.String("previous-token-valid-until-file", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_VALID_UNTIL_FILE"), "Optional mounted RFC3339 expiry file for the previous/overlap token")
-	tokenReloadInterval := flag.Duration("token-reload-interval", envDurationDefault("ORKA_PROVIDER_AUTH_PROXY_TOKEN_RELOAD_INTERVAL", defaultTokenReloadInterval), "Bearer token file reload interval")
-	previousTokenOverlap := flag.Duration("previous-token-overlap", envDurationDefault("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_OVERLAP", defaultPreviousTokenOverlap), "Maximum previous/overlap token acceptance window")
-	maxRequestBytes := flag.Int64("max-request-bytes", envInt64Default("ORKA_PROVIDER_AUTH_PROXY_MAX_REQUEST_BYTES", defaultMaxRequestBytes), "Maximum streamed request body size")
-	maxResponseBytes := flag.Int64("max-response-bytes", envInt64Default("ORKA_PROVIDER_AUTH_PROXY_MAX_RESPONSE_BYTES", defaultMaxResponseBytes), "Maximum streamed response body size")
-	responseHeaderTimeout := flag.Duration("response-header-timeout", envDurationDefault("ORKA_PROVIDER_AUTH_PROXY_RESPONSE_HEADER_TIMEOUT", defaultResponseHeaderTimeout), "Upstream response header timeout")
-	maxConcurrentRequests := flag.Int("max-concurrent-requests", envIntDefault("ORKA_PROVIDER_AUTH_PROXY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrentRequests), "Maximum concurrent upstream requests")
+	tokenReloadInterval := flag.Duration("token-reload-interval", envutil.MustDuration("ORKA_PROVIDER_AUTH_PROXY_TOKEN_RELOAD_INTERVAL", defaultTokenReloadInterval), "Bearer token file reload interval")
+	previousTokenOverlap := flag.Duration("previous-token-overlap", envutil.MustDuration("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_OVERLAP", defaultPreviousTokenOverlap), "Maximum previous/overlap token acceptance window")
+	maxRequestBytes := flag.Int64("max-request-bytes", envutil.MustInt64("ORKA_PROVIDER_AUTH_PROXY_MAX_REQUEST_BYTES", defaultMaxRequestBytes), "Maximum streamed request body size")
+	maxResponseBytes := flag.Int64("max-response-bytes", envutil.MustInt64("ORKA_PROVIDER_AUTH_PROXY_MAX_RESPONSE_BYTES", defaultMaxResponseBytes), "Maximum streamed response body size")
+	responseHeaderTimeout := flag.Duration("response-header-timeout", envutil.MustDuration("ORKA_PROVIDER_AUTH_PROXY_RESPONSE_HEADER_TIMEOUT", defaultResponseHeaderTimeout), "Upstream response header timeout")
+	maxConcurrentRequests := flag.Int("max-concurrent-requests", envutil.MustInt("ORKA_PROVIDER_AUTH_PROXY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrentRequests), "Maximum concurrent upstream requests")
 	flag.Parse()
 
 	tokens := newBearerTokenStore(time.Now)
@@ -90,47 +91,4 @@ func main() {
 
 func errorsIsServerClosed(err error) bool {
 	return err == http.ErrServerClosed
-}
-
-func envDefault(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envInt64Default(name string, fallback int64) int64 {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		log.Fatalf("invalid %s", name)
-	}
-	return parsed
-}
-
-func envIntDefault(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		log.Fatalf("invalid %s", name)
-	}
-	return parsed
-}
-
-func envDurationDefault(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		log.Fatalf("invalid %s", name)
-	}
-	return parsed
 }

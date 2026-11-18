@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - router.yaml
+images:
+  - name: controller
+    newName: ghcr.io/orka-agents/orka
+    newTag: latest

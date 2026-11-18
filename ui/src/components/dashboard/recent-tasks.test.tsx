@@ -35,6 +35,14 @@ describe('RecentTasks', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
+  it('flags a recent task that is waiting for approval', () => {
+    const waiting = makeTask('gated', 'agent', 'Running', new Date().toISOString())
+    waiting.status = { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }
+    render(<RecentTasks tasks={[waiting]} />)
+    expect(screen.getByText('gated')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
   it('empty state shows "No tasks yet"', () => {
     render(<RecentTasks tasks={[]} />)
     expect(screen.getByText('No tasks yet')).toBeInTheDocument()
@@ -88,5 +96,26 @@ describe('RecentTasks', () => {
     // Only 10 task links should be rendered
     const links = screen.getAllByRole('link')
     expect(links.length).toBe(10)
+  })
+
+  it('sorts a complete list by creation time before choosing recent tasks', () => {
+    const tasks = [
+      makeTask('older', 'container', 'Succeeded', '2026-01-01T00:00:00Z'),
+      makeTask('newer', 'container', 'Succeeded', '2026-01-03T00:00:00Z'),
+      makeTask('middle', 'container', 'Succeeded', '2026-01-02T00:00:00Z'),
+    ]
+    render(<RecentTasks tasks={tasks} />)
+    expect(screen.getAllByRole('link').map((link) => link.textContent)).toEqual([
+      expect.stringContaining('newer'),
+      expect.stringContaining('middle'),
+      expect.stringContaining('older'),
+    ])
+  })
+
+  it('describes a truncated list as a sample rather than recent tasks', () => {
+    render(<RecentTasks tasks={[makeTask('loaded', 'container', 'Running')]} isTruncated />)
+    expect(screen.getByText('Task sample')).toBeInTheDocument()
+    expect(screen.queryByText('Recent Tasks')).not.toBeInTheDocument()
+    expect(screen.getByText(/Newer tasks may exist outside it/)).toBeInTheDocument()
   })
 })

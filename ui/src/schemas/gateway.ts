@@ -13,6 +13,7 @@ interface GatewayCapabilities {
   senderIdentity?: boolean
   explicitSessions?: boolean
   idempotentDelivery?: boolean
+  interimDelivery?: boolean
 }
 
 export interface Gateway {
@@ -122,7 +123,7 @@ export interface GatewayDelivery {
   eventId: string
   taskName?: string
   sessionName?: string
-  kind: 'final' | 'error'
+  kind: 'final' | 'error' | 'message'
   state: GatewayDeliveryState
   replyTarget: string
   text: string

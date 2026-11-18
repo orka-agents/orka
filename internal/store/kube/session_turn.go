@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/types"
-
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -19,7 +17,7 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured
 	}
-	normalized, fence, err := normalizeSessionTurnForCreateKube(request.Turn, request.Fence)
+	normalized, fence, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -32,10 +30,10 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	}
 	defer s.releaseControllerEpochMutation(snapshot)
 	if existing, getErr := s.sessionTurns.GetSessionTurn(ctx, normalized.ID); getErr == nil {
-		if sameSessionTurnCreationKube(*existing, normalized) {
+		if store.SameSessionTurnCreation(*existing, normalized) {
 			return existing, nil
 		}
-		return nil, controlConflict("session turn %q was reused with different prompt input or request digest", normalized.ID)
+		return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
 	} else if !errors.Is(getErr, store.ErrNotFound) {
 		return nil, getErr
 	}
@@ -46,20 +44,13 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	}
 	control := sessionControlFromObject(sessionObject)
 	if control.Version != request.ExpectedSessionVersion || !sessionLeaseMatchesKey(control.Lease, normalized.Key) {
-		return nil, controlConflict("session turn %q does not match the active Kubernetes Session lease/version", normalized.ID)
+		return nil, store.ConflictErrorf("session turn %q does not match the active Kubernetes Session lease/version", normalized.ID)
 	}
 	if err := s.verifyMirroredSessionLease(ctx, sessionObject, *control.Lease); err != nil {
 		return nil, err
 	}
-	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, normalized)
-	if err != nil {
+	if _, err := s.loadSessionTurnPromptAttempt(ctx, normalized); err != nil {
 		return nil, err
-	}
-	if evidence.harnessV1 != nil && evidence.harnessV1.State != store.HarnessV1AttemptPrepared {
-		return nil, controlConflict(
-			"new harness v1 SessionTurn must be opened while attempt %q is Prepared, got %s",
-			normalized.PromptAttemptID, evidence.harnessV1.State,
-		)
 	}
 	return s.sessionTurns.CreateSessionTurnRecord(ctx, store.CreateSessionTurnRecordRequest{
 		Turn:        normalized,
@@ -102,12 +93,12 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	}
 	if turn.State == store.SessionTurnFinalized {
 		if !sessionTurnRequestMatchesFinalized(*turn, normalized) {
-			return nil, controlConflict("session turn %q was finalized with different terminal data or digest", turn.ID)
+			return nil, store.ConflictErrorf("session turn %q was finalized with different terminal data or digest", turn.ID)
 		}
 		return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil)
 	}
 	if turn.Version != normalized.ExpectedTurnVersion {
-		return nil, controlConflict("session turn %q is version %d, expected %d", turn.ID, turn.Version, normalized.ExpectedTurnVersion)
+		return nil, store.ConflictErrorf("session turn %q is version %d, expected %d", turn.ID, turn.Version, normalized.ExpectedTurnVersion)
 	}
 
 	sessionObject, err := s.findSessionControlByUID(ctx, normalized.Key.SessionUID)
@@ -116,19 +107,19 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	}
 	control := sessionControlFromObject(sessionObject)
 	if control.Version != normalized.ExpectedSessionVersion || !sessionLeaseMatchesKey(control.Lease, normalized.Key) {
-		return nil, controlConflict("session turn %q finalization is fenced by a different Kubernetes Session version or lease", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q finalization is fenced by a different Kubernetes Session version or lease", turn.ID)
 	}
 	if err := s.verifyMirroredSessionLease(ctx, sessionObject, *control.Lease); err != nil {
 		return nil, err
 	}
-	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, *turn)
+	attempt, err := s.loadSessionTurnPromptAttempt(ctx, *turn)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSessionTurnExecutionForFinalization(evidence, normalized); err != nil {
+	if err := validatePromptAttemptForCrossStoreFinalization(*attempt, normalized); err != nil {
 		return nil, err
 	}
-	plan, err := s.buildCrossStoreFinalizationPlan(ctx, control, *turn, evidence, normalized)
+	plan, err := s.buildCrossStoreFinalizationPlan(ctx, control, *attempt, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +139,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		PublicationReceipt:   plan.receipt,
 		Projection:           normalized.Projection,
 		FinalizedAt:          normalized.FinalizedAt,
+		NativeSession:        normalized.NativeSession,
+		NativeSessionCarried: normalized.NativeSessionCarried,
 	})
 	if err != nil {
 		return nil, err
@@ -191,7 +184,7 @@ func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store
 		return nil, err
 	}
 	if turn.State != store.SessionTurnFinalized || turn.Key != request.Key || turn.PromptAttemptID != request.PromptAttemptID || turn.FinalizationDigest != request.FinalizationDigest {
-		return nil, controlConflict("session turn %q does not match the persisted finalization recovery identity", turnID)
+		return nil, store.ConflictErrorf("session turn %q does not match the persisted finalization recovery identity", turnID)
 	}
 	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil)
 }
@@ -204,7 +197,7 @@ func (s *Store) completePersistedSessionTurnFinalization(
 	precomputedPlan *crossStoreFinalizationPlan,
 ) (*store.SessionTurn, error) {
 	if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil {
-		return nil, controlConflict("session turn %q has no durable finalized receipt to resume", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q has no durable finalized receipt to resume", turn.ID)
 	}
 	projection, err := s.outbox.GetOutboxProjection(ctx, turn.ProjectionID)
 	if err != nil {
@@ -213,19 +206,19 @@ func (s *Store) completePersistedSessionTurnFinalization(
 	if projection.AggregateKind != sessionTurnAggregateKind || projection.AggregateID != turn.ID ||
 		projection.ProjectionKind != turn.ProjectionKind || projection.PayloadDigest != turn.ProjectionDigest ||
 		!projection.InitialAvailableAt.Equal(turn.ProjectionAvailableAt) {
-		return nil, controlConflict("outbox projection %q does not match persisted session turn %q", projection.ID, turn.ID)
+		return nil, store.ConflictErrorf("outbox projection %q does not match persisted session turn %q", projection.ID, turn.ID)
 	}
 	sessionObject, err := s.findSessionControlByUID(ctx, turn.Key.SessionUID)
 	if err != nil {
 		return nil, err
 	}
 	control := sessionControlFromObject(sessionObject)
-	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, turn)
+	attempt, err := s.loadSessionTurnPromptAttempt(ctx, turn)
 	if err != nil {
 		return nil, err
 	}
 	expectedLeaseRequestDigest, err := store.SessionMutationLeaseRequestDigest(
-		turn.Key.SessionUID, turn.Key.LeaseGeneration, turn.Key.TaskUID, turn.Key.Attempt, turn.Key.PromptID, evidence.requestDigest,
+		turn.Key.SessionUID, turn.Key.LeaseGeneration, turn.Key.TaskUID, turn.Key.Attempt, turn.Key.PromptID, attempt.RequestDigest,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("derive finalized Session Lease request digest: %w", err)
@@ -238,7 +231,7 @@ func (s *Store) completePersistedSessionTurnFinalization(
 	}
 	if !sessionControlAlreadyFinalized(control, turn.ID, turn.FinalizationDigest) {
 		if !sessionLeaseMatchesKey(control.Lease, turn.Key) {
-			return nil, controlConflict("session turn %q recovery is fenced by a different Kubernetes Session lease", turn.ID)
+			return nil, store.ConflictErrorf("session turn %q recovery is fenced by a different Kubernetes Session lease", turn.ID)
 		}
 		if err := s.verifyMirroredSessionLease(ctx, sessionObject, *control.Lease); err != nil {
 			return nil, err
@@ -258,12 +251,12 @@ func (s *Store) completePersistedSessionTurnFinalization(
 		Projection:             *projection,
 		FinalizedAt:            turn.FinalizedAt.UTC(),
 	}
-	if err := validateSessionTurnExecutionForFinalization(evidence, request); err != nil {
+	if err := validatePromptAttemptForCrossStoreFinalization(*attempt, request); err != nil {
 		return nil, err
 	}
 	plan := crossStoreFinalizationPlan{}
 	if precomputedPlan == nil {
-		plan, err = s.buildCrossStoreFinalizationPlan(ctx, control, turn, evidence, request)
+		plan, err = s.buildCrossStoreFinalizationPlan(ctx, control, *attempt, request)
 		if err != nil {
 			return nil, err
 		}
@@ -271,7 +264,7 @@ func (s *Store) completePersistedSessionTurnFinalization(
 		plan = *precomputedPlan
 	}
 	if !reflect.DeepEqual(turn.PublicationReceipt, plan.receipt) {
-		return nil, controlConflict("session turn %q has a different publication receipt snapshot", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q has a different publication receipt snapshot", turn.ID)
 	}
 
 	if plan.publication != nil {
@@ -299,7 +292,7 @@ func (s *Store) activatePersistedSessionTurnProjection(
 	fence store.ControllerEpochFence,
 ) error {
 	if projection == nil || turn.FinalizedAt == nil {
-		return controlConflict("session turn %q lacks its persisted projection activation identity", turn.ID)
+		return store.ConflictErrorf("session turn %q lacks its persisted projection activation identity", turn.ID)
 	}
 	projection.AvailableAt = turn.ProjectionAvailableAt
 	_, err := s.sessionTurns.ActivateSessionTurnProjection(ctx, store.ActivateSessionTurnProjectionRequest{
@@ -318,88 +311,15 @@ func (s *Store) activatePersistedSessionTurnProjection(
 
 const sessionTurnAggregateKind = "SessionTurn"
 
-type sessionTurnExecutionEvidence struct {
-	prompt        *store.PromptAttempt
-	harnessV1     *store.HarnessV1Attempt
-	requestDigest string
-}
-
-func (s *Store) loadSessionTurnExecutionEvidence(
-	ctx context.Context,
-	control store.SessionControl,
-	turn store.SessionTurn,
-) (sessionTurnExecutionEvidence, error) {
-	prompt, promptErr := s.GetPromptAttempt(ctx, turn.PromptAttemptID)
-	if promptErr == nil {
-		if err := validateSessionTurnPromptBinding(*prompt, turn.Key); err != nil {
-			return sessionTurnExecutionEvidence{}, err
-		}
-		return sessionTurnExecutionEvidence{prompt: prompt, requestDigest: prompt.RequestDigest}, nil
-	}
-	if !errors.Is(promptErr, store.ErrNotFound) {
-		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn prompt attempt: %w", promptErr)
-	}
-	if s.harnessV1Attempts == nil || turn.Key.Attempt > int64(^uint32(0)>>1) {
-		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn execution attempt: %w", promptErr)
-	}
-	key := store.HarnessV1AttemptKey{
-		Namespace: control.Namespace,
-		TaskUID:   turn.Key.TaskUID,
-		Attempt:   int32(turn.Key.Attempt),
-	}
-	attempt, err := s.harnessV1Attempts.GetHarnessV1Attempt(ctx, key)
+func (s *Store) loadSessionTurnPromptAttempt(ctx context.Context, turn store.SessionTurn) (*store.PromptAttempt, error) {
+	attempt, err := s.GetPromptAttempt(ctx, turn.PromptAttemptID)
 	if err != nil {
-		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn harness v1 attempt: %w", err)
+		return nil, fmt.Errorf("session turn prompt attempt: %w", err)
 	}
-	if turn.PromptAttemptID != key.SessionReferenceID() || attempt.TurnID != turn.Key.PromptID ||
-		attempt.TaskUID != turn.Key.TaskUID || int64(attempt.Attempt) != turn.Key.Attempt {
-		return sessionTurnExecutionEvidence{}, controlConflict(
-			"session turn harness v1 attempt does not match the fenced SessionTurn identity",
-		)
+	if err := validateSessionTurnPromptBinding(*attempt, turn.Key); err != nil {
+		return nil, err
 	}
-	task := &corev1alpha1.Task{}
-	if err := s.readClient().Get(ctx, types.NamespacedName{Namespace: control.Namespace, Name: attempt.TaskName}, task); err != nil {
-		return sessionTurnExecutionEvidence{}, mapKubernetesError("read harness v1 SessionTurn Task", err)
-	}
-	binding := task.Status.AgentExecutionBinding
-	if string(task.UID) != attempt.TaskUID || task.Spec.Type != corev1alpha1.TaskTypeAgent || binding == nil ||
-		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
-		binding.BindingDigest != attempt.BindingDigest || binding.Snapshot.Digest != attempt.SnapshotDigest {
-		return sessionTurnExecutionEvidence{}, controlConflict(
-			"session turn harness v1 attempt does not match the immutable Kubernetes Task binding",
-		)
-	}
-	if err := store.ValidateCanonicalDigest("harness v1 SessionTurn request digest", attempt.RequestDigest); err != nil {
-		return sessionTurnExecutionEvidence{}, err
-	}
-	return sessionTurnExecutionEvidence{harnessV1: attempt, requestDigest: attempt.RequestDigest}, nil
-}
-
-func validateSessionTurnExecutionForFinalization(
-	evidence sessionTurnExecutionEvidence,
-	request store.FinalizeSessionTurnRequest,
-) error {
-	if evidence.prompt != nil {
-		return validatePromptAttemptForCrossStoreFinalization(*evidence.prompt, request)
-	}
-	if evidence.harnessV1 == nil {
-		return controlConflict("session turn has no route-specific execution receipt")
-	}
-	attempt := evidence.harnessV1
-	if !store.IsTerminalHarnessV1AttemptState(attempt.State) {
-		key := store.HarnessV1AttemptKey{Namespace: attempt.Namespace, TaskUID: attempt.TaskUID, Attempt: attempt.Attempt}
-		return controlConflict("harness v1 attempt %q is not terminal: %s", key.CanonicalID(), attempt.State)
-	}
-	if request.PublicationID != "" || request.VerifiedBaseline != nil {
-		return store.ValidationErrorf("harness v1 SessionTurn cannot carry v2 publication state")
-	}
-	if request.TerminalKind == store.SessionTurnAssistantResult && attempt.State != store.HarnessV1AttemptSucceeded {
-		return store.ValidationErrorf("assistant-result finalization requires succeeded harness v1 execution, got %s", attempt.State)
-	}
-	if attempt.State == store.HarnessV1AttemptSucceeded && attempt.TerminalReceiptDigest == "" {
-		return controlConflict("succeeded harness v1 attempt has no authoritative terminal receipt")
-	}
-	return nil
+	return attempt, nil
 }
 
 type crossStoreFinalizationPlan struct {
@@ -410,12 +330,11 @@ type crossStoreFinalizationPlan struct {
 	blockReason      string
 }
 
-//nolint:gocyclo // Finalization keeps v1/v2 evidence and publication blocking decisions in one atomic plan.
+//nolint:gocyclo // Finalization keeps publication receipt and blocking decisions in one atomic plan.
 func (s *Store) buildCrossStoreFinalizationPlan(
 	ctx context.Context,
 	control store.SessionControl,
-	turn store.SessionTurn,
-	evidence sessionTurnExecutionEvidence,
+	attempt store.PromptAttempt,
 	request store.FinalizeSessionTurnRequest,
 ) (crossStoreFinalizationPlan, error) {
 	plan := crossStoreFinalizationPlan{availability: store.SessionAvailable, blockReason: request.BlockReason}
@@ -423,30 +342,6 @@ func (s *Store) buildCrossStoreFinalizationPlan(
 		copyValue := *control.VerifiedBaseline
 		plan.verifiedBaseline = &copyValue
 	}
-	if evidence.harnessV1 != nil {
-		if request.PublicationID != "" || request.VerifiedBaseline != nil {
-			return crossStoreFinalizationPlan{}, store.ValidationErrorf("harness v1 SessionTurn cannot finalize publication state")
-		}
-		if evidence.harnessV1.State == store.HarnessV1AttemptOutcomeUnknown {
-			expected := strings.TrimSpace(evidence.harnessV1.TerminalReason)
-			if expected == "" {
-				expected = "harness v1 outcome cannot be proven"
-			}
-			if plan.blockReason == "" {
-				plan.blockReason = expected
-			} else if plan.blockReason != expected {
-				return crossStoreFinalizationPlan{}, controlConflict("session block reason does not match the harness v1 terminal receipt")
-			}
-			plan.availability = store.SessionReconciliationBlocked
-		} else if plan.blockReason != "" {
-			return crossStoreFinalizationPlan{}, store.ValidationErrorf("only OutcomeUnknown harness v1 execution may block a Session")
-		}
-		return plan, nil
-	}
-	if evidence.prompt == nil {
-		return crossStoreFinalizationPlan{}, controlConflict("session turn has no route-specific execution evidence")
-	}
-	attempt := *evidence.prompt
 	if request.PublicationID == "" {
 		if request.VerifiedBaseline != nil {
 			return crossStoreFinalizationPlan{}, store.ValidationErrorf("verified baseline advancement requires a publication receipt")
@@ -463,14 +358,14 @@ func (s *Store) buildCrossStoreFinalizationPlan(
 	}
 	if publication.TaskUID != request.Key.TaskUID || publication.Attempt != request.Key.Attempt || publication.PromptID != request.Key.PromptID ||
 		(publication.SessionUID != "" && publication.SessionUID != request.Key.SessionUID) || !store.IsTerminalPublicationState(publication.State) {
-		return crossStoreFinalizationPlan{}, controlConflict("publication %q does not match the terminal session turn identity/state", publication.ID)
+		return crossStoreFinalizationPlan{}, store.ConflictErrorf("publication %q does not match the terminal session turn identity/state", publication.ID)
 	}
 	expectedDelivery, err := promptDeliveryStateForPublicationKube(publication.State)
 	if err != nil {
 		return crossStoreFinalizationPlan{}, err
 	}
 	if attempt.DeliveryState != expectedDelivery {
-		return crossStoreFinalizationPlan{}, controlConflict("prompt attempt delivery state %s does not match publication state %s", attempt.DeliveryState, publication.State)
+		return crossStoreFinalizationPlan{}, store.ConflictErrorf("prompt attempt delivery state %s does not match publication state %s", attempt.DeliveryState, publication.State)
 	}
 	receipt := publicationReceiptKube(*publication)
 	plan.publication = publication
@@ -481,7 +376,7 @@ func (s *Store) buildCrossStoreFinalizationPlan(
 	}
 	if derivedBaseline != nil {
 		if request.VerifiedBaseline != nil && !reflect.DeepEqual(*request.VerifiedBaseline, *derivedBaseline) {
-			return crossStoreFinalizationPlan{}, controlConflict("requested verified baseline does not match independent publication receipt")
+			return crossStoreFinalizationPlan{}, store.ConflictErrorf("requested verified baseline does not match independent publication receipt")
 		}
 		plan.verifiedBaseline = derivedBaseline
 	}
@@ -490,13 +385,12 @@ func (s *Store) buildCrossStoreFinalizationPlan(
 		if plan.blockReason == "" {
 			plan.blockReason = expectedBlockReason
 		} else if plan.blockReason != expectedBlockReason {
-			return crossStoreFinalizationPlan{}, controlConflict("session block reason does not match the durable publication outcome")
+			return crossStoreFinalizationPlan{}, store.ConflictErrorf("session block reason does not match the durable publication outcome")
 		}
 	}
 	if plan.blockReason != "" {
 		plan.availability = store.SessionReconciliationBlocked
 	}
-	_ = turn
 	return plan, nil
 }
 
@@ -529,10 +423,10 @@ func (s *Store) finalizeBranchClaimForSessionTurn(ctx context.Context, publicati
 		if claim.LastOperationDigest == request.FinalizationDigest && claim.Generation == publication.BranchClaimGeneration && claim.LastVerified.Equal(newRemote) && claim.Availability == claimAvailability && claim.BlockedReason == blockReason && claim.RelatedPublicationID == relatedPublicationID {
 			return nil
 		}
-		return controlConflict("branch finalization operation %q was already applied with different target values", operationID)
+		return store.ConflictErrorf("branch finalization operation %q was already applied with different target values", operationID)
 	}
 	if claim.Generation != publication.BranchClaimGeneration || claim.RepositoryID != publication.TargetRepositoryID || claim.Ref != publication.TargetRef || !claim.LastVerified.Equal(publication.Baseline) || claim.Availability != store.BranchClaimAvailable {
-		return controlConflict("branch claim %q no longer matches publication finalization baseline/generation", claim.ID)
+		return store.ConflictErrorf("branch claim %q no longer matches publication finalization baseline/generation", claim.ID)
 	}
 	updated := object.DeepCopy()
 	remote := remoteRefToAPI(newRemote)
@@ -553,10 +447,10 @@ func (s *Store) finalizeSessionControlForTurn(ctx context.Context, original *cor
 		if sessionFinalizationTargetMatches(control, plan, request.FinalizationDigest, turn.PromptAttemptID, request.PublicationID) {
 			return original, nil
 		}
-		return nil, controlConflict("session finalization operation %q was already applied with different target values", operationID)
+		return nil, store.ConflictErrorf("session finalization operation %q was already applied with different target values", operationID)
 	}
 	if control.Version != request.ExpectedSessionVersion || !sessionLeaseMatchesKey(control.Lease, request.Key) {
-		return nil, controlConflict("session turn %q finalization is fenced by a different Kubernetes Session version or lease", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q finalization is fenced by a different Kubernetes Session version or lease", turn.ID)
 	}
 	updated := original.DeepCopy()
 	updated.Status.Availability = corev1alpha1.RuntimeSessionControlAvailability(plan.availability)
@@ -598,10 +492,10 @@ func (s *Store) releaseFinalizedSessionLease(ctx context.Context, object *corev1
 		if state.Mode == leaseModeEmpty && state.Generation == key.LeaseGeneration {
 			return nil
 		}
-		return controlConflict("finalized Session Lease has unexpected empty-state generation")
+		return store.ConflictErrorf("finalized Session Lease has unexpected empty-state generation")
 	}
 	if state.Mode != leaseModeMutation || state.Generation != key.LeaseGeneration || state.TaskUID != key.TaskUID || state.Attempt != key.Attempt || state.PromptID != key.PromptID || state.RequestDigest != requestDigest {
-		return controlConflict("session mutation Lease no longer matches finalized turn")
+		return store.ConflictErrorf("session mutation Lease no longer matches finalized turn")
 	}
 	updated := lease.DeepCopy()
 	clearSessionLease(updated, state.Generation)
@@ -622,7 +516,7 @@ func (s *Store) findSessionControlByUID(ctx context.Context, sessionUID string) 
 			continue
 		}
 		if match != nil {
-			return nil, controlConflict("multiple RuntimeSessionControls exist for Session UID %q", sessionUID)
+			return nil, store.ConflictErrorf("multiple RuntimeSessionControls exist for Session UID %q", sessionUID)
 		}
 		match = list.Items[i].DeepCopy()
 	}
@@ -630,63 +524,6 @@ func (s *Store) findSessionControlByUID(ctx context.Context, sessionUID string) 
 		return nil, store.ErrNotFound
 	}
 	return match, nil
-}
-
-func normalizeSessionTurnForCreateKube(turn store.SessionTurn, fence store.ControllerEpochFence) (store.SessionTurn, store.ControllerEpochFence, error) {
-	turn.Key.SessionUID = strings.TrimSpace(turn.Key.SessionUID)
-	turn.Key.TaskUID = strings.TrimSpace(turn.Key.TaskUID)
-	turn.Key.PromptID = strings.TrimSpace(turn.Key.PromptID)
-	if err := turn.Key.Validate(); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	canonicalID, err := turn.Key.CanonicalID()
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	turn.ID = strings.TrimSpace(turn.ID)
-	if turn.ID == "" {
-		turn.ID = canonicalID
-	}
-	if turn.ID != canonicalID {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn ID must equal canonical ID %q", canonicalID)
-	}
-	turn.PromptAttemptID = strings.TrimSpace(turn.PromptAttemptID)
-	if err := store.ValidateControlIdentifier("prompt attempt ID", turn.PromptAttemptID); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if err := store.ValidateCanonicalDigest("session turn request digest", turn.RequestDigest); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if strings.TrimSpace(turn.UserPrompt) == "" {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn user prompt is required")
-	}
-	if err := store.ValidateControlText("session turn user prompt", turn.UserPrompt); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.State == "" {
-		turn.State = store.SessionTurnOpen
-	}
-	if turn.State != store.SessionTurnOpen || turn.TerminalKind != "" || turn.TerminalContent != "" || turn.FinalizationDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn must be open and must not contain finalization data")
-	}
-	normalizedFence, err := normalizeEpochFence(fence)
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.Version != 0 && turn.Version != 1 {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn version must be zero or one")
-	}
-	now := normalizeControlTime(turn.CreatedAt)
-	turn.CreatedAt = now
-	if turn.UpdatedAt.IsZero() {
-		turn.UpdatedAt = now
-	} else {
-		turn.UpdatedAt = turn.UpdatedAt.UTC()
-	}
-	turn.ControllerEpochName = normalizedFence.Name
-	turn.ControllerEpoch = normalizedFence.Epoch
-	turn.Version = 1
-	return turn, normalizedFence, nil
 }
 
 func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnRequest) (store.FinalizeSessionTurnRequest, string, error) {
@@ -697,7 +534,7 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 	if err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
 	}
@@ -716,6 +553,12 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 	}
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
+	}
+	if request.NativeSessionCarried && (request.NativeSession == nil || request.TerminalKind != store.SessionTurnOutcomeMarker) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("carried native checkpoint requires the existing record and an outcome-marker finalization")
+	}
+	if request.NativeSession != nil && (request.SkipTranscriptAppend || !request.NativeSessionCarried && request.TerminalKind != store.SessionTurnAssistantResult) {
+		return store.FinalizeSessionTurnRequest{}, "", store.ValidationErrorf("native capture requires canonical assistant-result finalization; native state cannot skip transcript append")
 	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.FinalizeSessionTurnRequest{}, "", err
@@ -737,13 +580,13 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 			return store.FinalizeSessionTurnRequest{}, "", err
 		}
 	}
-	request.FinalizedAt = normalizeControlTime(request.FinalizedAt)
+	request.FinalizedAt = store.NormalizeControlTime(request.FinalizedAt)
 	return request, turnID, nil
 }
 
 func validateSessionTurnPromptBinding(attempt store.PromptAttempt, key store.SessionTurnKey) error {
 	if attempt.Key.TaskUID != key.TaskUID || attempt.Key.Attempt != key.Attempt || attempt.Key.PromptID != key.PromptID || attempt.SessionUID != key.SessionUID || attempt.SessionLeaseGeneration != key.LeaseGeneration {
-		return controlConflict("session turn prompt attempt does not match the fenced SessionTurn identity")
+		return store.ConflictErrorf("session turn prompt attempt does not match the fenced SessionTurn identity")
 	}
 	return nil
 }
@@ -753,10 +596,10 @@ func validatePromptAttemptForCrossStoreFinalization(attempt store.PromptAttempt,
 		return err
 	}
 	if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) {
-		return controlConflict("prompt attempt %q execution is not terminal: %s", attempt.ID, attempt.ExecutionState)
+		return store.ConflictErrorf("prompt attempt %q execution is not terminal: %s", attempt.ID, attempt.ExecutionState)
 	}
 	if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-		return controlConflict("prompt attempt %q delivery is not terminal: %s", attempt.ID, attempt.DeliveryState)
+		return store.ConflictErrorf("prompt attempt %q delivery is not terminal: %s", attempt.ID, attempt.DeliveryState)
 	}
 	if request.TerminalKind == store.SessionTurnAssistantResult && attempt.ExecutionState != store.PromptExecutionSucceeded {
 		return store.ValidationErrorf("assistant-result finalization requires succeeded prompt execution, got %s", attempt.ExecutionState)
@@ -767,7 +610,7 @@ func validatePromptAttemptForCrossStoreFinalization(attempt store.PromptAttempt,
 			store.PromptDeliveryReadOnlyWorkspaceModified, store.PromptDeliveryCredentialBlocked, store.PromptDeliveryConflict:
 			return nil
 		default:
-			return controlConflict("prompt attempt delivery state %s requires a matching publication receipt", attempt.DeliveryState)
+			return store.ConflictErrorf("prompt attempt delivery state %s requires a matching publication receipt", attempt.DeliveryState)
 		}
 	}
 	return nil
@@ -829,6 +672,7 @@ func sessionTurnRequestMatchesFinalized(turn store.SessionTurn, request store.Fi
 		availableAt = request.FinalizedAt
 	}
 	return turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind && turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
+		turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) &&
 		turn.ProjectionID == request.Projection.ID && turn.ProjectionKind == request.Projection.ProjectionKind && turn.ProjectionDigest == request.Projection.PayloadDigest && turn.ProjectionAvailableAt.Equal(availableAt)
 }
 
@@ -838,8 +682,4 @@ func sessionControlAlreadyFinalized(control store.SessionControl, turnID, digest
 
 func sessionLeaseMatchesKey(lease *store.SessionMutationLease, key store.SessionTurnKey) bool {
 	return lease != nil && lease.Generation == key.LeaseGeneration && lease.TaskUID == key.TaskUID && lease.Attempt == key.Attempt && lease.PromptID == key.PromptID
-}
-
-func sameSessionTurnCreationKube(a, b store.SessionTurn) bool {
-	return a.ID == b.ID && a.Key == b.Key && a.PromptAttemptID == b.PromptAttemptID && a.RequestDigest == b.RequestDigest && a.UserPrompt == b.UserPrompt
 }

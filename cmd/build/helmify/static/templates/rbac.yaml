@@ -1,5 +1,5 @@
+{{- $aiWorkerRBACProfile := include "orka.aiWorkerRBACProfile" . -}}
 {{- if .Values.rbac.create -}}
-{{- $harnessV2 := eq .Values.controller.mode "harness-v2" -}}
 # Controller tenant Role. The release namespace is also the immutable watch namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -10,15 +10,49 @@ metadata:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies"]
+    resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connections"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Orka creates Tasks and Agents for callers it has already authorized, so it
+  # may use every Agent and Provider; see --agent-use-authorization-enabled and
+  # --provider-use-authorization-enabled.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents", "providers"]
+    verbs: ["use"]
+  # The API binds Agent identities only for callers it has checked for bind.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agentidentities/entra"]
+    verbs: ["bind"]
+  # Providers are operator-authored: the controller reads them and manages
+  # their finalizer, never creates or deletes one.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["connectorproviders"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Users create AgentHosts and operators author AgentHostTemplates; the
+  # controller reads templates, manages hosts' finalizers and status, and
+  # creates, wakes and deletes the hosts of people who link an agent-host
+  # ConnectorProvider.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status"]
+    resources: ["agenthosttemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["sessions"]
+    verbs: ["get", "list", "delete"]
+  # Scheduled memory consolidation runs: see memory-consolidation-policy.yaml.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memories"]
+    verbs: ["list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memoryproposals"]
+    verbs: ["list", "create"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers", "agenthosts/finalizers"]
     verbs: ["update"]
-  {{- if $harnessV2 }}
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -31,40 +65,27 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces", "executionworkspaceclasses", "executionworkspacepools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # The workspace admission policies gate spec.coreAdmission writes on the
-  # "admit" verb and class-backed Task/Tool creation on the "use" verb, so the
-  # controller needs both or fail-closed admission rejects its own writes.
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces"]
+    resources: ["executionworkspacecheckpoints"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # The workspace admission policies gate spec.coreAdmission writes on the
+  # "admit" verb and class/checkpoint selection on the "use" verb. The
+  # controller needs both or admission rejects its own Task updates.
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders", "executionworkspaceclasses", "executionworkspacepools", "executionworkspaces", "executionworkspacecheckpoints"]
     verbs: ["admit"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaceclasses"]
+    resources: ["executionworkspaceclasses", "executionworkspacecheckpoints"]
     verbs: ["use"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces/status", "executionworkspaceclasses/status", "executionworkspacepools/status"]
+    resources: ["executionworkspaces/status", "executionworkspaceclasses/status", "executionworkspacepools/status", "executionworkspacecheckpoints/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
-    resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers"]
+    resources: ["executionworkspaces/finalizers", "executionworkspaceclasses/finalizers", "executionworkspacecheckpoints/finalizers"]
     verbs: ["update"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["ate.dev"]
-    resources: ["actortemplates"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  {{- end }}
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["batch"]
-    resources: ["cronjobs"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -72,13 +93,13 @@ rules:
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: [""]
-    resources: ["pods/status", "endpoints", "persistentvolumeclaims", "replicationcontrollers"]
+    resources: ["pods/status", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update"]
   - apiGroups: [""]
-    resources: ["serviceaccounts/token", "pods/portforward"]
+    resources: ["serviceaccounts/token"]
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["events"]
@@ -89,27 +110,17 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["get", "list"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+    # The Events-v1 retention recorder writes Events; create and patch are
+    # required or every Retention Event is rejected by the API server.
+    verbs: ["get", "list", "create", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
@@ -132,7 +143,65 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- if $harnessV2 }}
+{{- if .Values.controller.executionWorkspace.dispatchEnabled }}
+---
+# Providers opt namespaced profile reads into this release's watch namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-parameter-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Separate opt-in for cluster-scoped provider configs, never namespaced profiles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-provider-config-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-provider-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
 # Runtime child resources are confined to the v2 installation's runtime namespace.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -149,15 +218,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -177,7 +243,83 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if include "orka.agentHostsEnabled" . }}
+---
+# Agent-host Pods, volumes, NetworkPolicies and Secrets are confined to the host namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orka.controllerName" . }}-agent-host
+  namespace: {{ include "orka.agentHostNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    # Kept with the namespace: after controller.agentHosts.namespace changes,
+    # the controller still needs it to stop and delete the hosts left there.
+    helm.sh/resource-policy: keep
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerName" . }}-agent-host
+  namespace: {{ include "orka.agentHostNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orka.controllerName" . }}-agent-host
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}
+---
+# The Task webhook signing Secret lives alone in its own namespace; only the
+# controller can read or change it. create cannot be name-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+  namespace: {{ include "orka.taskWebhookSigningNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "orka.taskWebhookSigningSecretName" . | quote }}]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+  namespace: {{ include "orka.taskWebhookSigningNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orka.controllerName" . }}-task-webhook-signing
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 ---
 # Minimal cluster-scoped controller authority. Namespaced workload access is never bound here.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -187,14 +329,34 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
+  # The controller reads its own namespace's execution-mode claim and writes
+  # it on first start; the namespace-mode admission policy keeps it immutable.
   - apiGroups: [""]
     resources: ["namespaces"]
-    resourceNames:
-      - {{ .Release.Namespace }}
-      {{- if $harnessV2 }}
-      - {{ .Values.controller.acpRuntime.namespace }}
-      {{- end }}
+    resourceNames: [{{ .Release.Namespace | quote }}]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Values.controller.acpRuntime.namespace | quote }}]
     verbs: ["get"]
+  {{- if include "orka.webhookTLSGenerated" . }}
+  # The certificate rotator watches webhook configurations cluster-wide and
+  # rewrites only this release's caBundle. list/watch cannot be name-scoped.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: [{{ include "orka.controllerWebhookName" . | quote }}]
+    verbs: ["update", "patch"]
+  {{- end }}
+  # Startup preflight checks retained allocations even when dispatch is disabled.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["runtimepools"]
+    verbs: ["list"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaces"]
+    verbs: ["list"]
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
@@ -208,7 +370,6 @@ rules:
       - {{ include "orka.vendorWorkerClusterRoleName" . }}
       - {{ include "orka.containerWorkerClusterRoleName" . }}
     verbs: ["bind"]
-  {{- if $harnessV2 }}
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     resourceNames: ["tasks.core.orka.ai", "gatewayclasses.gateway.orka.ai", "gateways.gateway.orka.ai", "gatewaybindings.gateway.orka.ai"]
@@ -235,12 +396,25 @@ rules:
     resources: ["executionworkspaceproviders"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders"]
+    verbs: ["admit"]
+  - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaceproviders/finalizers"]
     verbs: ["update"]
-  {{- end }}
+  # Provider deletion protection scans namespaced references across all
+  # namespaces. The namespaced manager RoleBinding cannot authorize those lists.
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceclasses", "executionworkspacepools", "executionworkspaces", "executionworkspacecheckpoints"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -270,10 +444,13 @@ rules:
   # Task permissions
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status"]
     verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks/approvals", "tasks/cancel"]
+    verbs: ["update"]
 
   # RepositoryMonitor permissions
   - apiGroups: ["core.orka.ai"]
@@ -298,12 +475,63 @@ rules:
     resources: ["skills"]
     verbs: ["get", "list", "watch"]
 
-  {{- if $harnessV2 }}
-  # Generic gateway resource permissions (read-only; durable ledgers use the Orka REST API).
+  # Provider permissions (read-only). The dashboard Chat provider picker calls
+  # GET /providers, which passes a SubjectAccessReview for this resource, and
+  # native chat exists in every controller mode.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["providers"]
+    verbs: ["get", "list", "watch"]
+
+  # Virtual Session API permissions
+  - apiGroups: ["core.orka.ai"]
+    resources: ["sessions"]
+    verbs: ["get", "list", "create", "update", "delete"]
+
+  # Chat admission does not authorize nested tool resource operations.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["chats"]
+    verbs: ["create"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["chats/config"]
+    verbs: ["get"]
+
+  # Read memory and security resources. Review/apply and security
+  # mutations require an explicit operator grant.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memories", "memoryproposals", "repositoryscans", "repositoryscans/slices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositoryscans/threatmodel", "securityfindings", "securityfindings/pullrequest"]
+    verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositoryscans/scans", "repositoryscans/droppedfindings", "repositoryscans/findings", "securityfindings/patches"]
+    verbs: ["list"]
+
+  # Virtual monitor records and actions, alongside RepositoryMonitor edit access.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositorymonitors/runs", "repositorymonitors/commands"]
+    verbs: ["create"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositorymonitors/runs", "repositorymonitors/items", "monitorevents"]
+    verbs: ["list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["monitorcommands", "monitoractions", "monitorworkactions", "monitorimplementationjobs", "monitormutations"]
+    verbs: ["get", "list"]
+
+  # Generic gateway resources and virtual durable ledgers remain read-only.
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]
     verbs: ["get", "list", "watch"]
-  {{- end }}
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gatewayevents", "gatewaydeliveries"]
+    verbs: ["get", "list"]
+
+  # ACP runtime resource permissions (read-only; the dashboard Runtimes page
+  # and `orka runtime-pool` / `orka agent-runtime` reads pass a
+  # SubjectAccessReview for these resources).
+  - apiGroups: ["core.orka.ai"]
+    resources: ["runtimepools", "agentruntimes"]
+    verbs: ["get", "list", "watch"]
 
   # ConfigMap permissions (for results and sessions)
   - apiGroups: [""]
@@ -325,7 +553,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}
     namespace: {{ include "orka.clientNamespace" . }}
-{{- if $harnessV2 }}
 ---
 # GatewayClass is cluster-scoped, so isolated clients need a separate ClusterRoleBinding for read access.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -354,9 +581,8 @@ subjects:
     name: {{ .Values.client.name }}
     namespace: {{ include "orka.clientNamespace" . }}
 {{- end }}
-{{- end }}
 ---
-# AI Worker Role (trusted worker with Kubernetes tool and code_exec permissions)
+# AI Worker Role (default grants or an opt-in read-only profile)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -364,6 +590,20 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
+  {{- if eq $aiWorkerRBACProfile "restricted" }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tools", "outboundaccesspolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents", "agentruntimes"]
+    verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks"]
+    verbs: ["get", "list", "watch"]
+  {{- else }}
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "delete"]
@@ -371,11 +611,17 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["providers"]
+    verbs: ["use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agentruntimes"]
+    verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -406,16 +652,6 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  # Agent sandbox workspace backend: create/reattach/delete claims and connect to sandbox pods
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
     verbs: ["create"]
@@ -437,6 +673,7 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -466,11 +703,17 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["providers"]
+    verbs: ["use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agentruntimes"]
+    verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -491,16 +734,6 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
-  # Agent sandbox workspace backend for agent task workers: create/reattach/delete claims and connect to sandbox pods
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]

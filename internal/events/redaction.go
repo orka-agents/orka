@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/redact"
@@ -30,24 +31,6 @@ var (
 	executionEventSingleRelativeURLRe   = regexp.MustCompile("(?i)\\b[^/[:space:]<>\\\"'`?#]+(?:\\?[^[:space:]<>\\\"'`=]*=[^[:space:]<>\\\"'`]+|#[^[:space:]<>\\\"'`]+)")
 	executionEventRelativeURLRe         = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])(?:/[^/[:space:]<>\"'`][^[:space:]<>\"'`]*|\\?[^[:space:]<>\"'`]+)")
 )
-
-// ExecutionEventTruncation records whether public event payload fields were truncated.
-// Lengths are measured after redaction so metadata cannot expose raw secret sizes.
-type ExecutionEventTruncation struct {
-	SummaryTruncated         bool `json:"summaryTruncated,omitempty"`
-	SummaryOriginalChars     int  `json:"summaryOriginalChars,omitempty"`
-	ContentTextTruncated     bool `json:"contentTextTruncated,omitempty"`
-	ContentTextOriginalChars int  `json:"contentTextOriginalChars,omitempty"`
-	ContentJSONTruncated     bool `json:"contentJsonTruncated,omitempty"`
-	ContentJSONOriginalBytes int  `json:"contentJsonOriginalBytes,omitempty"`
-}
-
-// Empty reports whether no truncation metadata was set.
-func (m ExecutionEventTruncation) Empty() bool {
-	return !m.SummaryTruncated && m.SummaryOriginalChars == 0 &&
-		!m.ContentTextTruncated && m.ContentTextOriginalChars == 0 &&
-		!m.ContentJSONTruncated && m.ContentJSONOriginalBytes == 0
-}
 
 // SanitizedExecutionEventPayload contains redacted and size-bounded public payload fields.
 type SanitizedExecutionEventPayload struct {
@@ -84,6 +67,12 @@ func stripPrefixedExecutionEventURLQuery(candidate string) string {
 
 func stripExecutionEventURLQuery(candidate string) string {
 	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+	// A redaction placeholder ends with ']': when the candidate already
+	// carries one (redact.SensitiveText runs first), its closing bracket is
+	// part of the placeholder, not trailing punctuation.
+	if idx := strings.LastIndex(candidate, ExecutionEventRedactedValue); idx >= 0 && len(trimmed) < idx+len(ExecutionEventRedactedValue) {
+		trimmed = candidate[:idx+len(ExecutionEventRedactedValue)]
+	}
 	suffix := candidate[len(trimmed):]
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
@@ -239,6 +228,7 @@ func isExecutionEventTokenUsageKey(normalized string) bool {
 		"inputtokens",
 		"outputtokens",
 		"cachedinputtokens",
+		"cachewriteinputtokens",
 		"totaltokens",
 		"totaltokencount",
 		"tokencount",
@@ -254,16 +244,25 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
-		for key, child := range typed {
-			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && !isExecutionEventNumericValue(child) {
-				out[key] = ExecutionEventRedactedValue
+		// Keys are sorted so that redacted keys, which may collide, are
+		// told apart the same way every time.
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
+			outKey := sanitizeExecutionEventJSONKey(key, out)
+			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && child != nil && !isExecutionEventNumericValue(child) {
+				out[outKey] = ExecutionEventRedactedValue
 				continue
 			}
 			if IsSensitiveExecutionEventKey(key) {
-				out[key] = ExecutionEventRedactedValue
+				out[outKey] = ExecutionEventRedactedValue
 				continue
 			}
-			out[key] = sanitizeExecutionEventJSONValue(child)
+			out[outKey] = sanitizeExecutionEventJSONValue(child)
 		}
 		return out
 	case []any:
@@ -276,6 +275,22 @@ func sanitizeExecutionEventJSONValue(value any) any {
 		return RedactExecutionEventText(typed)
 	default:
 		return typed
+	}
+}
+
+// sanitizeExecutionEventJSONKey redacts a key the way string values are
+// redacted: keys are as caller-controlled as values, so a credential sent as
+// a key must not survive in the event either. A key that collides with one
+// already kept, as a literal key can with an earlier key's redacted form, is
+// numbered, so no field is dropped.
+func sanitizeExecutionEventJSONKey(key string, kept map[string]any) string {
+	redacted := RedactExecutionEventText(key)
+	candidate := redacted
+	for n := 2; ; n++ {
+		if _, taken := kept[candidate]; !taken {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s (%d)", redacted, n)
 	}
 }
 

@@ -14,13 +14,38 @@ func TestRepositoryMonitorWorkActionIDIsDeterministicAndUnambiguous(t *testing.T
 
 func TestRepositoryMonitorDesiredActionForIntentNormalizesBeforeMapping(t *testing.T) {
 	tests := map[string]string{
-		" fix ":          repositoryMonitorDesiredActionRepair,
-		" approve_plan ": "approve",
-		" review ":       "review",
+		" fix ": repositoryMonitorDesiredActionRepair,
+
+		" review ": "review",
 	}
 	for input, want := range tests {
 		if got := RepositoryMonitorDesiredActionForIntent(input); got != want {
 			t.Errorf("RepositoryMonitorDesiredActionForIntent(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRepositoryMonitorWorkActionStatusClassification(t *testing.T) {
+	for status, want := range map[string]bool{
+		RepositoryMonitorWorkActionStatusQueued:       true,
+		RepositoryMonitorWorkActionStatusLeased:       true,
+		RepositoryMonitorWorkActionStatusRunning:      true,
+		RepositoryMonitorWorkActionStatusRetryPending: true,
+		RepositoryMonitorWorkActionStatusSucceeded:    false,
+		RepositoryMonitorWorkActionStatusFailed:       false,
+		RepositoryMonitorWorkActionStatusBlocked:      false,
+		RepositoryMonitorWorkActionStatusCancelled:    false,
+		RepositoryMonitorWorkActionStatusCompleted:    false,
+		"":          false,
+		"processed": false,
+	} {
+		if got := IsRepositoryMonitorWorkActionActive(status); got != want {
+			t.Errorf("IsRepositoryMonitorWorkActionActive(%q) = %v, want %v", status, got, want)
+		}
+	}
+	for _, status := range RepositoryMonitorWorkActionActiveStatuses() {
+		if !IsRepositoryMonitorWorkActionActive(status) {
+			t.Errorf("active status list contains inactive %q", status)
 		}
 	}
 }

@@ -28,6 +28,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -307,6 +308,7 @@ var _ = Describe("Task Controller", func() {
 			// Verify Job exists
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			Expect(task.Status.JobUID).To(Equal(string(job.UID)))
 		})
 
 		It("should fail when agent ref does not exist", func() {
@@ -343,6 +345,48 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("failed to get agent"))
+		})
+
+		It("should fail a container task whose env reads a Secret without the direct mount opt-in", func() {
+			ctx := context.Background()
+			// The job builder reads the opt-in from the process environment.
+			GinkgoT().Setenv(directSecretMountsEnvVar, "false")
+			r := newReconciler()
+			taskName := "test-pending-env-secret-ref"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ns},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "busybox:latest",
+					Command: []string{"env"},
+					Env: []corev1.EnvVar{{
+						Name: "API_TOKEN",
+						ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "other-team-secret"},
+							Key:                  "token",
+						}},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.JobName).To(BeEmpty())
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Message).To(ContainSubstring("spec.env[0] (API_TOKEN) uses valueFrom.secretKeyRef"))
+			Expect(cond.Message).To(ContainSubstring(directSecretMountsEnvVar + "=true"))
 		})
 	})
 
@@ -733,6 +777,57 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(Equal("task timed out"))
+		})
+
+		It("should complete a parent's cancel request through the terminal path", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ss, ok := r.ResultStore.(*sqlite.Store)
+			Expect(ok).To(BeTrue())
+			taskName := "test-running-cancel-requested"
+			sessionName := taskName + "-session"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        taskName,
+					Namespace:   ns,
+					Finalizers:  []string{labels.TaskFinalizer},
+					Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by parent task: wrong approach"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:       corev1alpha1.TaskTypeContainer,
+					Image:      "alpine:latest",
+					Command:    []string{"sleep", "100"},
+					SessionRef: &corev1alpha1.SessionReference{Name: sessionName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			Expect(ss.CreateSession(ctx, &store.SessionRecord{Namespace: ns, Name: sessionName, SessionType: "task"})).To(Succeed())
+			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID), time.Now().UTC())).To(Succeed())
+
+			started := metav1.Now()
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = taskName + "-job"
+			task.Status.JobUID = taskName + "-job-uid"
+			task.Status.StartTime = &started
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseCancelled))
+			Expect(task.Status.Message).To(Equal("cancelled by parent task: wrong approach"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+			session, err := ss.GetSession(ctx, ns, sessionName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(session.ActiveTask).To(BeEmpty())
+			Expect(ss.CheckTaskJobAuthority(ctx, store.TaskJobIdentity{
+				Namespace: ns, TaskUID: string(task.UID), JobUID: taskName + "-job-uid",
+			})).To(MatchError(store.ErrTaskJobRevoked))
 		})
 
 		It("should report task timeout when the Job active deadline fails first", func() {
@@ -1653,6 +1748,54 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("invalid cron expression"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+		})
+
+		It("should fail with completion time when an existing schedule is edited to an invalid cron expression", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-edited-invalid-cron"
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: defaultNS,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Schedule: "*/5 * * * *",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through: finalizer → Pending → Scheduled
+			for range 3 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
+			Expect(task.Status.CompletionTime).To(BeNil())
+
+			// Edit the live schedule to an invalid expression.
+			task.Spec.Schedule = "not-a-cron"
+			Expect(k8sClient.Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("invalid cron expression"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+			complete := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(complete).NotTo(BeNil())
+			Expect(complete.Status).To(Equal(metav1.ConditionFalse))
+			Expect(complete.Reason).To(Equal(eventReasonTaskFailed))
 		})
 
 		It("should create child task when schedule time is reached", func() {
@@ -1721,6 +1864,51 @@ var _ = Describe("Task Controller", func() {
 			for i := range childList.Items {
 				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: defaultNS})
 			}
+		})
+
+		It("re-anchors a schedule that was suspended past its starting deadline", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-reanchor"
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
+			defer cleanupTask(ctx, nn)
+
+			deadline := int64(100)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Image:                   "alpine:latest",
+					Command:                 []string{"echo", "hi"},
+					Schedule:                "*/2 * * * *",
+					StartingDeadlineSeconds: &deadline,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			for range 3 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate a long suspend: the last run is far enough in the past
+			// that the next slot is already beyond the starting deadline.
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			stale := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+			task.Status.LastScheduleTime = &stale
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// The reconcile should skip the long-missed slot AND re-anchor the
+			// LastScheduleTime to ~now, instead of leaving it frozen 30m ago.
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.LastScheduleTime).NotTo(BeNil())
+			Expect(task.Status.LastScheduleTime.Time).To(BeTemporally(">", stale.Add(20*time.Minute)),
+				"LastScheduleTime must advance to ~now so the schedule is not permanently frozen")
+			Expect(task.Status.NextScheduleTime).NotTo(BeNil())
+			Expect(task.Status.NextScheduleTime.Time).To(BeTemporally(">", time.Now().Add(-time.Second)),
+				"NextScheduleTime must point at a future slot")
 		})
 
 		It("should skip run when Forbid policy and active child exists", func() {

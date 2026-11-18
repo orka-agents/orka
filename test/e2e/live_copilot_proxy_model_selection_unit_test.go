@@ -25,14 +25,16 @@ func TestLiveCopilotProxyClaudeModelPreferences(t *testing.T) {
 		"claude-sonnet-4.5",
 		"claude-sonnet-4.6",
 		"claude-sonnet-5",
+		"claude-opus-4.8",
+		"claude-haiku-4.5",
 	}}
 	actual := firstPreferredProxyModel(
 		catalog,
 		liveCopilotProxyClaudeModelPreferences,
 		liveCopilotProxyClaudeModelPrefixes...,
 	)
-	if actual != "claude-sonnet-5" {
-		t.Fatalf("selected Claude model %q, want %q", actual, "claude-sonnet-5")
+	if actual != "claude-haiku-4.5" {
+		t.Fatalf("selected Claude model %q, want %q", actual, "claude-haiku-4.5")
 	}
 }
 

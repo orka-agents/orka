@@ -1,13 +1,11 @@
 # Demo Magic Scenarios
 
-This directory contains a small `demo-magic` kit for showing Orka in six ways:
+This directory contains a small `demo-magic` kit for showing Orka in five ways:
 
 - `10-chat-pr.sh`: Claude Code -> Orka's Anthropic-compatible API -> prepared coordinator -> coder/reviewer/CI loops -> PR
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
-- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current ACP v2 path
 - `70-agent-substrate.sh`: archived Substrate prototype; requires an Actor-backed v2 supervisor before it is supported again
 
 There is also:
@@ -20,9 +18,9 @@ There is also:
 - A running Orka controller reachable at `ORKA_API_BASE`
 - `kubectl`, `curl`, `jq`, and `claude` (Claude Code) on your local PATH
 - Optional: an upstream `demo-magic.sh` if you want to override the vendored fallback
-- A demo namespace that is not the controller namespace
-- A Provider CRD and runtime credential Secret in that demo namespace
-- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 60/70 scripts still assume one broad Git Secret and must be migrated before use.
+- Demo resources live in the controller's watched namespace (`orka-system` for `make deploy` and the Helm chart): the static harness-v2 controller reconciles exactly one namespace, so `DEMO_NAMESPACE` must equal `--watch-namespace`
+- A Provider CRD and runtime credential Secret in that namespace
+- Separate read/clone and publication/forge credential Secrets for any ACP workspace demo. The archived 70 script still assumes one broad Git Secret and must be migrated before use.
 
 The demo scripts include a lightweight `demo-magic.sh` fallback at `hack/demos/lib/demo-magic.sh`, so no separate checkout is required. If you prefer the upstream `demo-magic` behavior, set `DEMO_MAGIC_PATH` to your local checkout. If `DEMO_MAGIC_PATH` points at a missing file, the scripts ignore it and use the vendored fallback.
 
@@ -34,7 +32,7 @@ Set these before running the scenarios:
 # Optional override for upstream demo-magic. Usually unnecessary because a fallback is vendored.
 # export DEMO_MAGIC_PATH="$HOME/src/demo-magic/demo-magic.sh"
 export ORKA_API_BASE="http://127.0.0.1:8080"
-export DEMO_NAMESPACE="demo-magic"
+export DEMO_NAMESPACE="orka-system"   # must be the controller's --watch-namespace
 
 # Must match metadata.name from: kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="<existing-provider-name>"
@@ -54,13 +52,13 @@ export DEMO_GIT_SECRET_REF="<git-secret-name>"
 For the current shared demo cluster, the immediate fix is usually:
 
 ```bash
-kubectl get provider -n demo-magic
+kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="copilot"
 export DEMO_RUNTIME_SECRET_REF="codex-runtime-copilot"
 export DEMO_GIT_SECRET_REF="github-credentials"
 ```
 
-If you want to keep `DEMO_PROVIDER_REF="copilot-proxy-openai"`, create an alias Provider in `demo-magic` instead:
+If you want to keep `DEMO_PROVIDER_REF="copilot-proxy-openai"`, create an alias Provider in `$DEMO_NAMESPACE` instead:
 
 ```bash
 cat <<'YAML' | kubectl apply -f -
@@ -68,7 +66,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: copilot-proxy-openai
-  namespace: demo-magic
+  namespace: orka-system   # $DEMO_NAMESPACE
 spec:
   type: openai
   secretRef:
@@ -83,10 +81,10 @@ YAML
 
 These commands show resource shape only. Replace placeholder values locally and do not commit, echo, or paste real tokens into logs.
 
-Create the demo namespace:
+Confirm the namespace exists and carries the controller's static-mode label (`make deploy` creates it; creating a different, unlabeled namespace here would leave every demo Task unreconciled):
 
 ```bash
-kubectl create namespace "$DEMO_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl get namespace "$DEMO_NAMESPACE" -o jsonpath='{.metadata.labels.orka\.ai/controller-mode}'; echo
 ```
 
 Create the Provider's API-key Secret and Provider CR. `spec.secretRef.name` and `spec.secretRef.key` must point at the Secret/key you create here. `baseURL` is optional for the built-in provider types, but useful for OpenAI-compatible proxies.
@@ -231,52 +229,35 @@ hack/demos/10-chat-pr.sh
 hack/demos/20-manual-workflow.sh
 hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
-hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
 ```
 
-Demo 70 (Agent Substrate) runs on its **own** kind cluster, not the shared
-demo-magic cluster (Substrate needs a custom registry + gVisor node config):
+### Backend setup
+
+The Substrate target installs the native backend and runs pooled MCP Tools
+conformance in a dedicated kind cluster. It does not install an external ACP
+provider or the `substrate-coding` class used by archived Demo 70:
 
 ```bash
-make demo-substrate-up                                # stand up the dedicated cluster
-kubectl config use-context kind-orka-agent-substrate-e2e
-DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh
-make demo-substrate-down                              # tear it down
+make demo-substrate-up
+# Use the scoped kubeconfig printed by the installer; for the default run:
+export KUBECONFIG="$PWD/bin/substrate-e2e-orka-agent-substrate-e2e/kubeconfig"
+make demo-substrate-down
 ```
 
-### One cluster for everything (`demo-cluster-up-all`)
-
-Because the Substrate cluster is the superset (custom registry + gVisor nodes),
-a single bootstrap can host the current demos (00–40 and 60–70) on it:
+`demo-cluster-up-all` adds the model configuration and archived agent-sandbox
+assets to that MCP conformance cluster. `demo-cluster-up` installs Orka and those
+add-ons on `orka-demo`. Neither target installs an external ACP provider or class:
 
 ```bash
-make demo-cluster-up-all        # substrate cluster + Orka + agent-sandbox + vekil + Provider/secrets
-                                # (one-time GitHub device-code login for vekil — follow the log prompt)
+make demo-cluster-up-all        # MCP conformance + Orka demo add-ons
+# Model setup may require a one-time GitHub device-code login; follow the log prompt.
 ```
 
-> **Re-running is guarded.** If a kind cluster named `orka-agent-substrate-e2e`
-> already exists, the bootstrap prompts **reuse / recreate / cancel** instead of
-> silently destroying it (the Substrate standup does `kind delete` + rebuild,
-> which would wipe a completed vekil login). Choose **reuse** to keep the cluster
-> and just reconcile the add-ons. For non-interactive runs, set
-> `DEMO_CLUSTER_REUSE=reuse|recreate|cancel` to skip the prompt; with no TTY and
-> no override it defaults to `recreate` (the historical behavior).
+Reusing an existing Substrate cluster requires `DEMO_CLUSTER_REUSE=reuse`.
+Remove completed conformance resources before rerunning, or choose a new
+`KIND_CLUSTER`; the installer does not automatically recreate existing clusters.
 
 ```bash
-# Workspace demos bring their own namespace/env:
-kubectl config use-context kind-orka-agent-substrate-e2e
-
-# Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
-# (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
-# the demo MUST run there — DEMO_NAMESPACE=default fails with
-# "template orka-live-template not found in namespace default".
-DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
-  DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
-  DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
-
-# Demo 70 (substrate): sets provider: substrate explicitly; runs in `default`.
-./hack/demos/70-agent-substrate.sh
-
 # Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):
 source hack/demos/cluster/demo-env.sh
 ./hack/demos/20-manual-workflow.sh
@@ -287,17 +268,16 @@ source hack/demos/cluster/demo-env.sh
 make demo-cluster-up-all-down     # tear it all down
 ```
 
-Notes: the agent-sandbox/Substrate bootstrap and demos are retained only for
-prototype archaeology. Current ACP v2 validation must not set a default execution
-workspace provider or rely on a per-Task worker path. kontxt's `enforce` mode only
-gates requests carrying a `Txn-Token`, so the other demos remain independent.
-
-Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
-release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error
-*after* the agent's work and PR have already landed. This is Substrate runtime
-nondeterminism on `runsc`, not an Orka bug — the demo's story (cold run opens a
-real PR, warm run reattaches with `reused=true`) still completes. Re-run if the
-final card matters for a recording.
+Demo 70 and the agent-sandbox runtime assets are retained for prototype archaeology.
+Reviving them requires the external provider installation and class/profile setup
+described in the [workspace provider guide](../../docs/development/workspace-provider-authoring.md),
+the generic `--enable-workspace-provider-api` and
+`--acp-workspace-dispatch-enabled` flags, and migration to the harness v2 runtime
+and Workspace/Publisher credential contract. The classes default to
+`sandbox-coding` and `substrate-coding`; the bootstrap targets create neither.
+Current validation must not set a default workspace provider or use a per-Task
+worker path. kontxt's `enforce` mode only gates requests carrying a `Txn-Token`,
+so the other demos remain independent.
 
 ## Recording
 
@@ -336,8 +316,8 @@ An explicit `DEMO_CHAT_REQUEST` / `DEMO_MANUAL_REQUEST` env var or
 
 ### Bootstrapping a demo cluster
 
-For Demo 60 (and a clean rerun of 10–40) you can spin up a dedicated kind
-cluster and load the sandbox runtime image:
+For a clean rerun of 10–40 you can spin up a dedicated kind cluster and load
+the sandbox runtime image:
 
 ```bash
 make demo-cluster-up

@@ -16,7 +16,7 @@ var _ store.SessionCleanupPersistenceStore = (*Store)(nil)
 // GetSessionCleanupIntent returns the durable cross-store cleanup plan.
 func (s *Store) GetSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupIntent, error) {
 	var encoded []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT plan FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
 		namespace, sessionName,
 	).Scan(&encoded)
@@ -65,7 +65,7 @@ func (s *Store) ListSessionCleanupIntents(ctx context.Context) ([]store.SessionC
 // after the Session row and intent have been atomically removed.
 func (s *Store) GetSessionCleanupCompletion(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupCompletion, error) {
 	completion := &store.SessionCleanupCompletion{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, session_name, session_uid, operation_id, operation_digest, completed_at
 		 FROM session_cleanup_completions WHERE namespace = ? AND session_name = ?`,
 		namespace, sessionName,
@@ -87,41 +87,50 @@ func (s *Store) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID str
 	if sessionUID == "" {
 		return false, nil
 	}
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM session_cleanup_completions WHERE session_uid = ?`, sessionUID,
-	).Scan(&count); err != nil {
-		return false, err
-	}
-	if count > 0 {
-		return true, nil
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT plan FROM session_cleanup_intents`)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
-			return false, err
+	// Completion replaces the intent in one commit, so both are read from one
+	// snapshot; otherwise a cleanup finishing between the two reads would leave
+	// the UID looking unfenced.
+	var fenced bool
+	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var count int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM session_cleanup_completions WHERE session_uid = ?`, sessionUID,
+		).Scan(&count); err != nil {
+			return err
 		}
-		var intent store.SessionCleanupIntent
-		if err := json.Unmarshal(encoded, &intent); err != nil {
-			return false, err
+		if count > 0 {
+			fenced = true
+			return nil
 		}
-		if intent.SessionUID == sessionUID {
-			return true, nil
+		rows, err := q.QueryContext(ctx, `SELECT plan FROM session_cleanup_intents`)
+		if err != nil {
+			return err
 		}
-	}
-	return false, rows.Err()
+		defer rows.Close() //nolint:errcheck
+		for rows.Next() {
+			var encoded []byte
+			if err := rows.Scan(&encoded); err != nil {
+				return err
+			}
+			var intent store.SessionCleanupIntent
+			if err := json.Unmarshal(encoded, &intent); err != nil {
+				return err
+			}
+			if intent.SessionUID == sessionUID {
+				fenced = true
+				return nil
+			}
+		}
+		return rows.Err()
+	})
+	return fenced, err
 }
 
 // GetSessionCleanupIdentity returns the Kubernetes Session UID already bound
 // to a transcript row, including a bind-before-control crash residue.
 func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessionName string) (string, error) {
 	var sessionUID string
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT control_session_uid FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
 	).Scan(&sessionUID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -134,6 +143,12 @@ func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessio
 // transcript row so deletion cannot confuse a pre-cutover replacement with the
 // control record left by an older Session incarnation.
 func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessionName, sessionUID string) error {
+	return writeOperationErr(ctx, s, "BindSessionCleanupIdentity", func(ctx context.Context) error {
+		return s.bindSessionCleanupIdentityWrite(ctx, namespace, sessionName, sessionUID)
+	})
+}
+
+func (s *Store) bindSessionCleanupIdentityWrite(ctx context.Context, namespace, sessionName, sessionUID string) error {
 	trimmedNamespace := strings.TrimSpace(namespace)
 	if namespace != trimmedNamespace {
 		return store.ValidationErrorf("session namespace must not contain surrounding whitespace")
@@ -154,50 +169,59 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 	if err := store.ValidateControlIdentifier("session UID", sessionUID); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET control_session_uid = ?
-		 WHERE namespace = ? AND name = ?
-		   AND (control_session_uid = '' OR control_session_uid = ?)
-		   AND NOT EXISTS (
-		     SELECT 1 FROM session_cleanup_intents
-		     WHERE namespace = ? AND session_name = ?
-		   )
-		   AND NOT EXISTS (
-		     SELECT 1 FROM session_cleanup_completions
-		     WHERE namespace = ? AND session_name = ?
-		   )`,
-		sessionUID, namespace, sessionName, sessionUID,
-		namespace, sessionName, namespace, sessionName,
-	)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 1 {
-		return nil
-	}
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
-	).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		return store.ErrNotFound
-	}
-	return controlConflict("session %s/%s has a different cleanup identity or deletion fence", namespace, sessionName)
+	// The update and the check that tells a missing Session from a conflict
+	// share one transaction, so a Session created after the update is not
+	// reported as a conflict.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx,
+			`UPDATE sessions SET control_session_uid = ?
+			 WHERE namespace = ? AND name = ?
+			   AND (control_session_uid = '' OR control_session_uid = ?)
+			   AND NOT EXISTS (
+			     SELECT 1 FROM session_cleanup_intents
+			     WHERE namespace = ? AND session_name = ?
+			   )
+			   AND NOT EXISTS (
+			     SELECT 1 FROM session_cleanup_completions
+			     WHERE namespace = ? AND session_name = ?
+			   )`,
+			sessionUID, namespace, sessionName, sessionUID,
+			namespace, sessionName, namespace, sessionName,
+		)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 1 {
+			return nil
+		}
+		var count int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
+		).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return store.ErrNotFound
+		}
+		return store.ConflictErrorf("session %s/%s has a different cleanup identity or deletion fence", namespace, sessionName)
+	})
 }
 
 // HasSessionCleanupIntent reports whether new work must be refused for a
 // Session whose deletion has crossed the durable intent boundary.
 func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error) {
+	return sessionCleanupIntentExists(ctx, s.taskDataExecutor(ctx), strings.TrimSpace(namespace), strings.TrimSpace(sessionName))
+}
+
+func sessionCleanupIntentExists(ctx context.Context, q controlQueryRower, namespace, sessionName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
-		strings.TrimSpace(namespace), strings.TrimSpace(sessionName),
+		namespace, sessionName,
 	).Scan(&count); err != nil {
 		return false, err
 	}
@@ -207,24 +231,33 @@ func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionN
 // PrepareSessionCleanup atomically re-proves SQLite quiescence and records the
 // exact Kubernetes cleanup plan before any authoritative object is deleted.
 func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionCleanupIntent) (*store.SessionCleanupIntent, error) {
+	return writeOperation(ctx, s, "PrepareSessionCleanup", nil, func(ctx context.Context) (*store.SessionCleanupIntent, error) {
+		return s.prepareSessionCleanupWrite(ctx, intent)
+	})
+}
+
+func (s *Store) prepareSessionCleanupWrite(ctx context.Context, intent store.SessionCleanupIntent) (*store.SessionCleanupIntent, error) {
 	if err := normalizeSessionCleanupIntent(&intent); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if existing, getErr := getSessionCleanupIntentTx(ctx, tx, intent.Namespace, intent.SessionName); getErr == nil {
+	if existing, getErr := getSessionCleanupIntentTx(ctx, tx.Tx, intent.Namespace, intent.SessionName); getErr == nil {
+		if existing.Gateway != nil && intent.Gateway == nil {
+			return nil, store.ErrGatewayOwnedSession
+		}
 		if existing.OperationID != intent.OperationID || existing.OperationDigest != intent.OperationDigest {
-			return nil, controlConflict("session cleanup intent for %s/%s belongs to a different operation", intent.Namespace, intent.SessionName)
+			return nil, store.ConflictErrorf("session cleanup intent for %s/%s belongs to a different operation", intent.Namespace, intent.SessionName)
 		}
 		return existing, nil
 	} else if !errors.Is(getErr, store.ErrNotFound) {
 		return nil, getErr
 	}
-	if err := validateSessionCleanupEligibilityTx(ctx, tx, intent); err != nil {
+	if err := validateSessionCleanupEligibilityTx(ctx, tx.Tx, intent); err != nil {
 		return nil, err
 	}
 	encoded, err := json.Marshal(intent)
@@ -246,9 +279,13 @@ func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionC
 
 // CompleteSessionCleanup removes SQLite-owned turn/outbox/transcript state only
 // after the caller has reclaimed the exact Kubernetes plan in the intent.
-//
-//nolint:gocyclo // Receipt, transcript, projection, cursor, and intent deletion must remain one auditable transaction.
 func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
+	return writeOperationErr(ctx, s, "CompleteSessionCleanup", func(ctx context.Context) error {
+		return s.completeSessionCleanupWrite(ctx, request)
+	})
+}
+
+func (s *Store) completeSessionCleanupWrite(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
 	namespace := strings.TrimSpace(request.Namespace)
 	if request.Namespace != namespace {
 		return store.ValidationErrorf("session namespace must not contain surrounding whitespace")
@@ -273,11 +310,19 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := completeSessionCleanupTx(ctx, tx.Tx, request); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+//nolint:gocyclo // Receipt, transcript, projection, cursor, and intent deletion must remain one auditable transaction.
+func completeSessionCleanupTx(ctx context.Context, tx *sql.Tx, request store.CompleteSessionCleanupRequest) error {
 	intent, err := getSessionCleanupIntentTx(ctx, tx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		completion, completionErr := getSessionCleanupCompletionTx(ctx, tx, request.Namespace, request.SessionName)
@@ -285,18 +330,18 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 			return nil
 		}
 		if completionErr == nil {
-			return controlConflict("session cleanup completion belongs to a different operation")
+			return store.ConflictErrorf("session cleanup completion belongs to a different operation")
 		}
 		if !errors.Is(completionErr, store.ErrNotFound) {
 			return completionErr
 		}
-		return controlConflict("session %s/%s has no durable cleanup intent or completion receipt", request.Namespace, request.SessionName)
+		return store.ConflictErrorf("session %s/%s has no durable cleanup intent or completion receipt", request.Namespace, request.SessionName)
 	}
 	if err != nil {
 		return err
 	}
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
-		return controlConflict("session cleanup completion does not match the durable intent")
+		return store.ConflictErrorf("session cleanup completion does not match the durable intent")
 	}
 	var sessionCount int64
 	if err := tx.QueryRowContext(ctx,
@@ -308,6 +353,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return store.ErrNotFound
 	}
 	if err := validateSessionCleanupEligibilityTx(ctx, tx, *intent); err != nil {
+		return err
+	}
+	if err := archiveSessionTurnCleanupReceipts(ctx, tx, *intent); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -329,6 +377,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 	completedAt := time.Now().UTC()
+	if err := deleteNativeSessionTx(ctx, tx, request.Namespace, request.SessionName); err != nil {
+		return err
+	}
 	receiptResult, err := tx.ExecContext(ctx,
 		`INSERT INTO session_cleanup_completions(namespace, session_name, session_uid, operation_id, operation_digest, completed_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
@@ -348,11 +399,14 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	if rows, rowsErr := receiptResult.RowsAffected(); rowsErr != nil {
 		return rowsErr
 	} else if rows != 1 {
-		return controlConflict("session cleanup completion belongs to a different operation")
+		return store.ConflictErrorf("session cleanup completion belongs to a different operation")
+	}
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, request.Namespace); err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx,
-		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
-		request.Namespace, request.SessionName, store.SessionTypeGateway,
+		`DELETE FROM sessions WHERE namespace = ? AND name = ?`,
+		request.Namespace, request.SessionName,
 	)
 	if err != nil {
 		return err
@@ -362,7 +416,7 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 	if deleted != sessionCount {
-		return controlConflict("session %s/%s changed before transcript cleanup", request.Namespace, request.SessionName)
+		return store.ConflictErrorf("session %s/%s changed before transcript cleanup", request.Namespace, request.SessionName)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE execution_events SET session_name = '', session_seq = 0 WHERE namespace = ? AND session_name = ?`,
@@ -387,9 +441,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	if rows, rowsErr := intentResult.RowsAffected(); rowsErr != nil {
 		return rowsErr
 	} else if rows != 1 {
-		return controlConflict("session cleanup intent changed before completion")
+		return store.ConflictErrorf("session cleanup intent changed before completion")
 	}
-	return tx.Commit()
+	return nil
 }
 
 //nolint:gocyclo // The durable cross-store plan validates each independent exact fence in one place.
@@ -426,6 +480,9 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 		return store.ValidationErrorf("session cleanup preparation time is required")
 	}
 	intent.PreparedAt = intent.PreparedAt.UTC()
+	if err := validateGatewayCleanupProof(*intent); err != nil {
+		return err
+	}
 	if intent.SessionUID == "" {
 		if intent.ControlObjectUID != "" || intent.ControlRequestDigest != "" || intent.ExpectedControlVersion != 0 ||
 			intent.ExpectedLeaseGeneration != 0 || intent.LeaseName != "" || intent.LeaseObjectUID != "" ||
@@ -456,8 +513,11 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 			return store.ValidationErrorf("session cleanup Lease fence is incomplete")
 		}
 	} else {
-		if intent.ExpectedLeaseGeneration < 1 {
-			return store.ValidationErrorf("session cleanup Lease generation must be at least one")
+		// A Session cancelled before its first runtime admission still owns
+		// an empty generation-zero Lease. Reclamation checks its exact UID,
+		// generation, and unheld state before deleting it.
+		if intent.ExpectedLeaseGeneration < 0 {
+			return store.ValidationErrorf("session cleanup Lease generation must not be negative")
 		}
 		if err := store.ValidateControlIdentifier("session Lease name", intent.LeaseName); err != nil {
 			return err
@@ -513,7 +573,7 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		intent.Namespace, intent.SessionName,
 	).Scan(&sessionType, &activeTask, &activeTaskUID, &activeTaskExpiresAt, &controlSessionUID); errors.Is(err, sql.ErrNoRows) {
-		if intent.SessionUID != "" {
+		if intent.SessionUID != "" && intent.Gateway == nil {
 			return nil
 		}
 		return store.ErrNotFound
@@ -525,16 +585,22 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		if controlSessionUID == "" {
 			needsTurnIdentityProof = true
 		} else if controlSessionUID != intent.SessionUID {
-			return controlConflict("session %s/%s transcript is not bound to Kubernetes Session UID %q", intent.Namespace, intent.SessionName, intent.SessionUID)
+			return store.ConflictErrorf("session %s/%s transcript is not bound to Kubernetes Session UID %q", intent.Namespace, intent.SessionName, intent.SessionUID)
 		}
 	} else if controlSessionUID != "" {
-		return controlConflict("session %s/%s has Kubernetes cleanup identity %q but no control plan", intent.Namespace, intent.SessionName, controlSessionUID)
+		return store.ConflictErrorf("session %s/%s has Kubernetes cleanup identity %q but no control plan", intent.Namespace, intent.SessionName, controlSessionUID)
 	}
 	if sessionType == store.SessionTypeGateway {
-		return store.ErrGatewayOwnedSession
+		if err := validateGatewayCleanupEligibilityTx(ctx, tx, intent); err != nil {
+			return err
+		}
+	} else if intent.Gateway != nil {
+		return store.ConflictErrorf("Gateway cleanup cannot reclaim a different Session type")
 	}
+	// The plan's preparation time is the time of the request; a provider never
+	// judges a lease on its own clock.
 	if err := ensureSessionLockQuiescentTx(
-		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt,
+		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt, intent.PreparedAt,
 	); err != nil {
 		return err
 	}
@@ -575,7 +641,10 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 			var marker struct {
 				Kind string `json:"kind"`
 			}
-			if err := json.Unmarshal([]byte(terminalContent), &marker); err != nil || marker.Kind == "OutcomeUnknown" {
+			// OutcomeUnknown is a finalized v2 turn. The coordinated cleanup
+			// still requires quiescent controls and exact runtime retirement;
+			// completion archives the unchanged terminal projection.
+			if err := json.Unmarshal([]byte(terminalContent), &marker); err != nil {
 				return store.ErrConflict
 			}
 		}
@@ -587,7 +656,7 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		return store.ErrConflict
 	}
 	if needsTurnIdentityProof && turnCount == 0 {
-		return controlConflict("legacy session %s/%s has no SessionTurn proof for Kubernetes Session UID %q", intent.Namespace, intent.SessionName, intent.SessionUID)
+		return store.ConflictErrorf("legacy session %s/%s has no SessionTurn proof for Kubernetes Session UID %q", intent.Namespace, intent.SessionName, intent.SessionUID)
 	}
 	var unsettledProjections int
 	if err := tx.QueryRowContext(ctx,

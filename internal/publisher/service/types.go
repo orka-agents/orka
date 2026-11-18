@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,6 +14,10 @@ import (
 
 const (
 	ProtocolVersion = "orka.workspace-publisher.v1"
+
+	// PullRequestPresentationFeature is opt-in so legacy strict v1 clients do
+	// not receive an unknown field in their capabilities response.
+	PullRequestPresentationFeature = "pull-request-presentation.v1"
 
 	HealthPath                   = "/v1/health"
 	CapabilitiesPath             = "/v1/capabilities"
@@ -279,6 +284,7 @@ type CapabilitiesResponse struct {
 	RedirectsAllowed          bool             `json:"redirectsAllowed"`
 	ProviderOrMCPAccess       bool             `json:"providerOrMcpAccess"`
 	PullRequestReconciliation bool             `json:"pullRequestReconciliation"`
+	PullRequestPresentation   bool             `json:"pullRequestPresentation,omitempty"`
 	Limits                    CapabilityLimits `json:"limits"`
 }
 
@@ -287,12 +293,6 @@ type CapabilitiesResponse struct {
 // credentials. The file is deleted immediately after reconciliation.
 type PRReconcilerFactory interface {
 	New(ctx context.Context, credentialPath string) (publisher.PullRequestReconciler, error)
-}
-
-type PRReconcilerFactoryFunc func(context.Context, string) (publisher.PullRequestReconciler, error)
-
-func (f PRReconcilerFactoryFunc) New(ctx context.Context, credentialPath string) (publisher.PullRequestReconciler, error) {
-	return f(ctx, credentialPath)
 }
 
 // Config contains only already-resolved secrets. The command package loads
@@ -334,6 +334,9 @@ type Config struct {
 	PRFactory                      PRReconcilerFactory
 	HTTPClient                     *http.Client
 	Now                            func() time.Time
+	// Logger records each failed operation with only the public error fields
+	// returned to the controller. Nil discards.
+	Logger *slog.Logger
 }
 
 func defaultWorkspaceLimits() WorkspaceLimits {

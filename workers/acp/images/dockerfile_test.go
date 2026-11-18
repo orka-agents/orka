@@ -165,6 +165,147 @@ func TestRuntimeDockerfilesArePinnedAndHardened(t *testing.T) {
 	}
 }
 
+func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("agentkit", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.ReadFile(filepath.Join("agentkit", "prepare-overlay.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG AGENTKIT_RUNTIME_IMAGE",
+		"ARG AGENTKIT_ADAPTER_DIGEST",
+		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE} AS runtime-source",
+		"FROM supervisor-builder AS runtime-preparer",
+		"RUN --mount=from=runtime-source,target=/runtime,ro",
+		"sh workers/acp/images/agentkit/prepare-overlay.sh /runtime /out/prepared",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("AgentKit Dockerfile is missing %q", required)
+		}
+	}
+	preparation := contents + "\n" + string(helper)
+	for _, required := range []string{
+		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
+		"test \"${#digest}\" -eq 64",
+		"case \"$digest\" in *[!0-9a-f]*)",
+		"case \"$AGENTKIT_ADAPTER_DIGEST\" in sha256:*",
+		"test \"${#adapter_digest}\" -eq 64",
+		"case \"$adapter_digest\" in *[!0-9a-f]*)",
+		"test \"$AGENTKIT_ADAPTER_DIGEST\" = \"sha256:$digest\"",
+		"serve=$(resolve_source /opt/agentkit/bin/agentkit-serve)",
+		"test -x \"$serve\"",
+		"config=$(resolve_source /agent/agent.yaml)",
+		"test -s \"$config\"",
+		"chown -R 0:0 \"$overlay/opt/agentkit\"",
+		"chmod -R a+rX,go-w \"$overlay/opt/agentkit\"",
+		"chown 0:0 \"$overlay/agent\" \"$overlay${config#\"$source\"}\"",
+		"chmod 0555 \"$overlay/agent\"",
+		"chmod 0711 \"$overlay/sessions\"",
+		"chmod 0444 \"$overlay${config#\"$source\"}\"",
+	} {
+		if !strings.Contains(preparation, required) {
+			t.Errorf("AgentKit build-stage preparation is missing %q", required)
+		}
+	}
+	for _, forbidden := range universalForbiddenSubstrings {
+		if strings.Contains(preparation, forbidden) {
+			t.Errorf("AgentKit composition contains forbidden mutable or secret-bearing surface %q", forbidden)
+		}
+	}
+
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("AgentKit runtime image is not the final base stage")
+	}
+	finalStage := contents[lastFrom:]
+	for line := range strings.SplitSeq(finalStage, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "RUN") {
+			t.Errorf("AgentKit final stage must not execute RUN instructions: %s", line)
+		}
+	}
+	for _, required := range []string{
+		"COPY --from=runtime-preparer /out/prepared/ /",
+		"ORKA_ACP_PROVIDER=agentkit",
+		"ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}",
+		"ai.orka.acp.adapter.name=\"agentkit-serve-acp\"",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(finalStage, required) {
+			t.Errorf("AgentKit final stage is missing %q", required)
+		}
+	}
+}
+
+func TestFoundryDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("foundry", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG FOUNDRY_RUNTIME_IMAGE\n",
+		"ARG FOUNDRY_ADAPTER_DIGEST\n",
+		"FROM --platform=$TARGETPLATFORM ${FOUNDRY_RUNTIME_IMAGE} AS foundry",
+		"case \"$FOUNDRY_RUNTIME_IMAGE\" in *@sha256:*",
+		"test \"${#digest}\" -eq 64",
+		"case \"$digest\" in *[!0-9a-f]*)",
+		"test \"$FOUNDRY_ADAPTER_DIGEST\" = \"sha256:$digest\"",
+		"COPY --from=foundry /agent-runtime-foundry /out/agent-runtime-foundry",
+		"COPY --from=foundry /agent/foundry.json /out/agent/foundry.json",
+		"test -x /out/agent-runtime-foundry",
+		"test -s /out/agent/foundry.json",
+		"test \"$TARGETOS\" = linux",
+		"case \"$TARGETARCH\" in amd64|arm64)",
+		"chmod 0711 /out/sessions",
+		"chmod 0555 /out/agent /out/agent-runtime-foundry",
+		"chmod 0444 /out/agent/foundry.json",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("Foundry Dockerfile is missing %q", required)
+		}
+	}
+	forbidden := append([]string{
+		"AZURE_CLIENT_" + "SECRET=", "AZURE_FEDERATED_" + "TOKEN_FILE=",
+		"FOUNDRY_RUNTIME_IMAGE=", "FOUNDRY_ADAPTER_DIGEST=sha256:",
+	}, universalForbiddenSubstrings...)
+	for _, value := range forbidden {
+		if strings.Contains(contents, value) {
+			t.Errorf("Foundry Dockerfile contains forbidden mutable or credential default %q", value)
+		}
+	}
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${FOUNDRY_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("Foundry runtime image is not the final base stage")
+	}
+	for _, required := range []string{
+		"ORKA_ACP_PROVIDER=foundry",
+		"ORKA_ACP_FOUNDRY_ADAPTER_DIGEST=${FOUNDRY_ADAPTER_DIGEST}",
+		"ai.orka.acp.adapter.name=\"foundry-serve-acp\"",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper",
+		"COPY --from=supervisor-builder --chown=0:0 /out/agent-runtime-foundry /agent-runtime-foundry",
+		"COPY --from=supervisor-builder --chown=0:0 /out/agent /agent",
+		"COPY --from=supervisor-builder --chown=0:0 /out/sessions /sessions",
+		"USER 0:0\n",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(contents[lastFrom:], required) {
+			t.Errorf("Foundry final stage is missing %q", required)
+		}
+	}
+}
+
 func TestCopilotPinIsNewerThanCredentiallessBYOKACPFixBoundary(t *testing.T) {
 	t.Parallel()
 	got := parseVersionCore(t, acp.CopilotCLIVersion)
@@ -197,6 +338,48 @@ func compareVersionCore(left, right [3]int) int {
 		}
 	}
 	return 0
+}
+
+// Repository-controlled agent configuration must not run commands outside the
+// Orka tool policy: Codex must not trust the cloned session root, and Copilot
+// must only load hooks from a root-owned managed policy.
+func TestRuntimeImagesBlockRepositoryAgentConfiguration(t *testing.T) {
+	t.Parallel()
+	patch, err := os.ReadFile(filepath.Join("codex", "patch-agent-mode.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(patch)
+	if got := hex.EncodeToString(sum[:]); got != acp.CodexACPOrkaPatchSHA256 {
+		t.Fatalf("patch-agent-mode.mjs SHA-256 = %s, want %s", got, acp.CodexACPOrkaPatchSHA256)
+	}
+	for _, required := range []string{`trust_level: "trusted",`, "            projects: {},", "exactly once"} {
+		if !strings.Contains(string(patch), required) {
+			t.Errorf("Codex adapter patch is missing %q", required)
+		}
+	}
+	codex, err := os.ReadFile(filepath.Join("codex", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const patchStep = "node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts /src/src/CodexAcpClient.ts;"
+	if !strings.Contains(string(codex), patchStep) {
+		t.Error("Codex Dockerfile does not patch the adapter's session root trust")
+	}
+	copilot, err := os.ReadFile(filepath.Join("copilot", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"install -d -o 0 -g 0 -m 0755 /etc/github-copilot;",
+		`printf '%s\n' '{"allowManagedHooksOnly":true}' > /etc/github-copilot/managed-settings.json;`,
+		"chown 0:0 /etc/github-copilot/managed-settings.json;",
+		"chmod 0644 /etc/github-copilot/managed-settings.json",
+	} {
+		if !strings.Contains(string(copilot), required) {
+			t.Errorf("Copilot Dockerfile is missing managed hook policy step %q", required)
+		}
+	}
 }
 
 func TestDockerContextIncludesCopilotLicenseInputs(t *testing.T) {

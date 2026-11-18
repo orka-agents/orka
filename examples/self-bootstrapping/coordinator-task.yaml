@@ -1,16 +1,19 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
-  name: build-rest-api
+  generateName: bootstrap-plan-
 spec:
   type: ai
   agentRef:
     name: coordinator
   prompt: |
-    Build a simple TODO REST API in Go with the following requirements:
+    Produce a reviewed implementation plan for a TODO REST API in Go:
     - CRUD endpoints (GET, POST, PUT, DELETE) for /api/todos
     - In-memory storage
     - Unit tests for all handlers
     - Clean code with proper error handling
 
-    Create specialist agents for coding and reviewing, then coordinate the work.
+    Create specialist agents for API design and test planning, then review and
+    combine their results into a plan under 800 words. Use the supplied context;
+    no repository access, code execution, or publication is needed.
+  timeout: 10m

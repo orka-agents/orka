@@ -25,9 +25,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/agentcontext"
+
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,10 +42,16 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	orkalabels "github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
+)
+
+const (
+	externalEventConflictMessage = "externalEventId already identifies a different gateway event"
+	eventIDField                 = "eventId"
 )
 
 const (
@@ -86,6 +95,7 @@ type Config struct {
 	TerminalRetention            time.Duration
 	DeliveryTimeout              time.Duration
 	DeliveryMaxAttempts          int
+	InterimMessagesPerTask       int
 	ClaimLease                   time.Duration
 	PollInterval                 time.Duration
 	BatchSize                    int
@@ -98,7 +108,7 @@ func DefaultConfig() Config {
 		Enabled: true, PendingPerSession: 100, MaxRecordsPerGateway: 1_000, MaxRejectedRecordsPerGateway: 250, EventExpiry: 24 * time.Hour,
 		TerminalRetention: 30 * 24 * time.Hour, DeliveryTimeout: 15 * time.Second,
 		DeliveryMaxAttempts: 10, ClaimLease: time.Minute, PollInterval: 500 * time.Millisecond,
-		BatchSize: 25,
+		BatchSize: 25, InterimMessagesPerTask: 10,
 	}
 }
 
@@ -112,14 +122,26 @@ func (e *HTTPError) Error() string { return e.Message }
 
 // Service owns durable admission, dispatch, terminal projection, and delivery.
 type Service struct {
-	Client        client.Client
-	APIReader     client.Reader
-	EventStore    store.GatewayEventStore
-	DeliveryStore store.GatewayDeliveryStore
-	ResultStore   store.ResultStore
-	HTTPClient    *http.Client
-	Config        Config
-	Owner         string
+	// TaskPassCredentials are controller-mounted, per-Gateway UID credentials,
+	// never delivery bearers or Task/Tool namespace Secrets.
+	TaskPassCredentials      map[string]TaskPassCredential
+	Client                   client.Client
+	APIReader                client.Reader
+	EventStore               store.GatewayEventStore
+	DeliveryStore            store.GatewayDeliveryStore
+	ResultStore              store.ResultStore
+	HTTPClient               *http.Client
+	Config                   Config
+	Owner                    string
+	SessionCleanup           store.GatewaySessionCleanupStore
+	SessionCleanupCandidates store.GatewaySessionCleanupCandidateStore
+	SessionCleanupEpochs     interface {
+		CurrentFence(context.Context) (store.ControllerEpochFence, error)
+	}
+	taskCleanupAfterNamespace    string
+	taskCleanupAfterUID          string
+	sessionCleanupAfterNamespace string
+	sessionCleanupAfterName      string
 }
 
 func (s *Service) freshReader() client.Reader {
@@ -161,31 +183,142 @@ func (s *Service) Start(ctx context.Context) error {
 		defer close(deliveryDone)
 		s.runDeliveryLoop(ctx, logger)
 	}()
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		s.runMaintenanceLoop(ctx, logger)
+	}()
 
 	ticker := time.NewTicker(s.Config.PollInterval)
 	defer ticker.Stop()
-	maintenanceTicker := time.NewTicker(time.Minute)
-	defer maintenanceTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			<-deliveryDone
+			<-maintenanceDone
 			return nil
 		case <-ticker.C:
 			if err := s.processCoreOnce(ctx); err != nil {
 				logger.Error(err, "gateway processing iteration failed")
 			}
-		case now := <-maintenanceTicker.C:
+		}
+	}
+}
+
+func (s *Service) runMaintenanceLoop(ctx context.Context, logger logr.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
 			terminalCutoff := now.Add(-s.Config.TerminalRetention)
 			if _, err := s.DeliveryStore.MaintainGatewayRecords(ctx, s.Config.Namespace, now, terminalCutoff); err != nil {
 				logger.Error(err, "gateway maintenance failed")
-			} else if err := s.cleanupRetainedGatewayTasks(ctx, terminalCutoff); err != nil {
+				continue
+			}
+			if err := s.cleanupRetainedGatewaySessions(ctx, now, terminalCutoff); err != nil {
+				logger.Error(err, "gateway Session retention cleanup remains pending")
+			}
+			if err := s.cleanupRetainedGatewayTasks(ctx, terminalCutoff); err != nil {
 				logger.Error(err, "gateway Task retention cleanup failed")
+			}
+			if err := s.pruneGatewayTaskCleanupReceipts(ctx); err != nil {
+				logger.Error(err, "gateway Task cleanup receipt pruning remains pending")
 			}
 		}
 	}
 }
 
+// Receipt authority is needed until the exact Task disappears, even when it
+// has been deleting for longer than retention. Never infer absence from the
+// cache: a lagging informer must not strand a Task by losing its receipt.
+func (s *Service) pruneGatewayTaskCleanupReceipts(ctx context.Context) error {
+	if s == nil || s.APIReader == nil {
+		return nil
+	}
+	receipts, ok := s.EventStore.(store.GatewayTaskCleanupReceiptMaintenanceStore)
+	if !ok {
+		return nil
+	}
+	limit := min(max(s.Config.BatchSize, 1), 100)
+	page, err := receipts.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{
+		Namespace: s.Config.Namespace, AfterNamespace: s.taskCleanupAfterNamespace,
+		AfterTaskUID: s.taskCleanupAfterUID, Limit: limit,
+	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, receipt := range page {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		// Advance even on a retained receipt or failed read/delete. Retry those
+		// entries after the scan wraps without starving independent receipts.
+		s.taskCleanupAfterNamespace, s.taskCleanupAfterUID = receipt.Namespace, receipt.TaskUID
+		var task corev1alpha1.Task
+		err := s.APIReader.Get(ctx, client.ObjectKey{Namespace: receipt.Namespace, Name: receipt.TaskName}, &task)
+		if err == nil && (task.UID == "" || string(task.UID) == receipt.TaskUID) {
+			continue
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("check Gateway Task cleanup receipt %s/%s: %w", receipt.Namespace, receipt.TaskName, err))
+			continue
+		}
+		if err := receipts.DeleteGatewayTaskCleanupReceipt(ctx, receipt.Namespace, receipt.TaskName, receipt.TaskUID); err != nil {
+			errs = append(errs, fmt.Errorf("prune Gateway Task cleanup receipt %s/%s: %w", receipt.Namespace, receipt.TaskName, err))
+		}
+	}
+	if len(page) < limit {
+		s.taskCleanupAfterNamespace, s.taskCleanupAfterUID = "", ""
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Service) cleanupRetainedGatewaySessions(ctx context.Context, now, terminalCutoff time.Time) error {
+	if s.SessionCleanup == nil || s.SessionCleanupCandidates == nil || s.SessionCleanupEpochs == nil {
+		return nil
+	}
+	page, err := s.SessionCleanupCandidates.ListGatewaySessionCleanupCandidates(ctx, store.GatewaySessionCleanupFilter{
+		Namespace: s.Config.Namespace, TerminalCutoff: terminalCutoff,
+		AfterNamespace: s.sessionCleanupAfterNamespace, AfterSessionName: s.sessionCleanupAfterName,
+		Limit: min(max(s.Config.BatchSize, 1), 100),
+	})
+	if err != nil {
+		return err
+	}
+	var fence store.ControllerEpochFence
+	if len(page.Candidates) > 0 {
+		fence, err = s.SessionCleanupEpochs.CurrentFence(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	var errs []error
+	for _, candidate := range page.Candidates {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = candidate.Namespace, candidate.SessionName
+		if err := s.SessionCleanup.ReclaimGatewaySession(ctx, store.ReclaimGatewaySessionRequest{
+			Session: candidate, Fence: fence, RequestedAt: now,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("reclaim Gateway Session %s/%s: %w", candidate.Namespace, candidate.SessionName, err))
+		}
+	}
+	// Use raw query progress, including rows excluded for invalid ownership.
+	// Blocked candidates are retried when the scan wraps, without preventing
+	// later Sessions or Task receipt maintenance from making progress.
+	s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = page.NextNamespace, page.NextSessionName
+	if page.Complete {
+		s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = "", ""
+	}
+	return errors.Join(errs...)
+}
+
+//nolint:gocyclo // Reclamation verifies event, Task, and Session ownership before each destructive step.
 func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutoff time.Time) error {
 	if s == nil || s.Client == nil || s.EventStore == nil {
 		return nil
@@ -205,11 +338,12 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	var errs []error
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) {
+		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) ||
+			!task.Status.Phase.IsTerminal() {
 			continue
 		}
 		owner, gatewayOwned := TaskOwner(task)
-		if !gatewayOwned || owner.GatewayNamespace == "" || owner.NamespaceUID == "" ||
+		if !gatewayOwned || owner.GatewayNamespace != task.Namespace || owner.NamespaceUID == "" ||
 			owner.GatewayName == "" || owner.GatewayUID == "" || task.UID == "" {
 			continue
 		}
@@ -229,7 +363,17 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 				continue
 			}
 			if !tombstoned {
-				continue
+				archived, err := s.gatewayTaskCompactionArchived(ctx, task)
+				if err == nil && !archived {
+					archived, err = s.gatewayTaskCleanupArchived(ctx, task)
+				}
+				if err != nil {
+					errs = append(errs, fmt.Errorf("check retained gateway Task archive %s/%s: %w", task.Namespace, task.Name, err))
+					continue
+				}
+				if !archived {
+					continue
+				}
 			}
 		}
 		if eventFound {
@@ -249,6 +393,67 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	return errors.Join(errs...)
 }
 
+// Compaction receipts preserve the exact Task deletion authority after event
+// deduplication expires, including Tasks that never acquired a SessionTurn.
+// Requesting ordinary deletion still leaves runtime and archive finalizers in
+// charge of deciding when the Task itself can be removed.
+func (s *Service) gatewayTaskCompactionArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	reader, ok := s.EventStore.(store.GatewayTaskCleanupReceiptStore)
+	if !ok {
+		return false, nil
+	}
+	receipt, err := reader.GetGatewayTaskCleanupReceipt(ctx, task.Namespace, task.Name, string(task.UID))
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	owner, owned := TaskOwner(task)
+	if receipt == nil || !owned || receipt.Namespace != task.Namespace || receipt.TaskName != task.Name || receipt.TaskUID != string(task.UID) ||
+		receipt.NamespaceUID != owner.NamespaceUID || receipt.GatewayName != owner.GatewayName || receipt.GatewayUID != owner.GatewayUID ||
+		receipt.BindingUID == "" || receipt.BindingName != task.Annotations[TaskGatewayBindingAnnotation] ||
+		receipt.EventID == "" || receipt.EventID != task.Annotations[TaskGatewayEventAnnotation] ||
+		task.Spec.SessionRef == nil || receipt.SessionName != task.Spec.SessionRef.Name ||
+		task.Spec.SessionRef.ThroughMessageID != store.GatewayUserMessageID(receipt.EventID) ||
+		receipt.CompactedAt.IsZero() || receipt.CompactedAt.Before(task.CreationTimestamp.Time) {
+		return false, store.ConflictErrorf("Gateway Task compaction receipt does not match its exact ownership")
+	}
+	return true, nil
+}
+
+// Archive evidence outlives the bounded event tombstones. A controller that was
+// offline for that whole window must still be able to request Task deletion.
+func (s *Service) gatewayTaskCleanupArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	reader, ok := s.ResultStore.(store.SessionTurnCleanupReceiptStore)
+	if !ok || task.Spec.SessionRef == nil || task.Status.Execution == nil {
+		return false, nil
+	}
+	execution := task.Status.Execution
+	attemptID, err := (store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: int64(execution.Attempt), PromptID: execution.PromptID,
+	}).CanonicalID()
+	if err != nil {
+		return false, nil // No admitted prompt can have a matching archive.
+	}
+	receipt, err := reader.GetSessionTurnCleanupReceipt(ctx, task.Namespace, task.Spec.SessionRef.Name, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if receipt == nil || receipt.PromptAttemptID != attemptID || receipt.Key.TaskUID != string(task.UID) ||
+		receipt.Key.SessionUID != execution.RuntimeSessionUID || receipt.Key.Attempt != int64(execution.Attempt) ||
+		receipt.Key.PromptID != execution.PromptID || !strings.HasPrefix(receipt.OperationID, store.GatewaySessionCleanupOperationPrefix) {
+		return false, store.ConflictErrorf("Gateway Task archive does not match its exact execution identity")
+	}
+	if err := receipt.Validate(task.Namespace, task.Spec.SessionRef.Name, receipt.TurnID); err != nil {
+		return false, err
+	}
+	return receipt.ProjectionState == store.OutboxProjectionDelivered, nil
+}
+
 func (s *Service) runDeliveryLoop(ctx context.Context, logger logr.Logger) {
 	ticker := time.NewTicker(s.Config.PollInterval)
 	defer ticker.Stop()
@@ -262,21 +467,6 @@ func (s *Service) runDeliveryLoop(ctx context.Context, logger logr.Logger) {
 			}
 		}
 	}
-}
-
-// ProcessOnce performs one bounded core iteration and one delivery attempt for tests.
-func (s *Service) ProcessOnce(ctx context.Context) error {
-	if s == nil || !s.Config.Enabled || s.Client == nil || s.EventStore == nil || s.DeliveryStore == nil {
-		return nil
-	}
-	var errs []error
-	if err := s.processCoreOnce(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	if err := s.processDeliveryBatch(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
 }
 
 func (s *Service) processDeliveryBatch(ctx context.Context) error {
@@ -460,7 +650,7 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 	if existing, err := s.EventStore.GetGatewayEventDuplicate(ctx, &baseEvent, now); err == nil {
 		return s.acknowledgeDuplicateEvent(ctx, existing, &baseEvent)
 	} else if errors.Is(err, store.ErrDuplicateMismatch) {
-		return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+		return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("look up gateway event duplicate: %w", err)
 	}
@@ -504,6 +694,9 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		return nil, fmt.Errorf("resolve bound Agent: %w", err)
 	}
 	baseEvent.AgentUID = string(agent.UID)
+	if eventEnvelope.EventType == protocol.EventTypeDelegatedText && agent.Spec.Runtime == nil {
+		return s.admitRejectedEvent(ctx, baseEvent, "delegatedText requires controller-brokered agent execution")
+	}
 
 	sessionName, err := deriveSessionName(object, binding, eventEnvelope)
 	if err != nil {
@@ -517,8 +710,16 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		RejectedRecordLimit: s.Config.MaxRejectedRecordsPerGateway,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrGatewaySessionCleanupPending) {
+			return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "the previous Gateway Session is being reclaimed; retry this event"}
+		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
-			return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
+		}
+		// A replaced controller's write is fenced, which also matches
+		// ErrConflict; it says nothing about Session ownership.
+		if errors.Is(err, store.ErrFenced) {
+			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
@@ -556,7 +757,7 @@ func (s *Service) admitRejectedEvent(
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDuplicateMismatch) {
-			return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
+			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 		}
 		if errors.Is(err, store.ErrCapacity) {
 			gatewayIngressTotal.WithLabelValues("capacity").Inc()
@@ -584,7 +785,7 @@ func (s *Service) acknowledgeDuplicateEvent(
 ) (*protocol.IngressResponse, error) {
 	if !matchingGatewayEventEnvelope(existing, candidate) {
 		return nil, &HTTPError{
-			Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event",
+			Code: http.StatusConflict, Message: externalEventConflictMessage,
 		}
 	}
 	if existing.State == store.GatewayEventRejected || existing.State == store.GatewayEventDeadLettered {
@@ -644,12 +845,12 @@ func (s *Service) DispatchOnce(ctx context.Context) error {
 	if handled, recoveryErr := s.reconcileExistingDispatchTask(ctx, event, recoveryNow); handled || recoveryErr != nil {
 		return recoveryErr
 	}
-	binding, ready, err := s.resolveDispatchBinding(ctx, event)
+	binding, agent, ready, err := s.resolveDispatchBinding(ctx, event)
 	if err != nil || !ready {
 		return err
 	}
 	freshNow := time.Now().UTC()
-	if handled, err := s.handleExpiredDispatchClaim(ctx, event, binding, freshNow); handled || err != nil {
+	if handled, err := s.handleExpiredDispatchClaim(ctx, event, binding, agent, freshNow); handled || err != nil {
 		return err
 	}
 	if event.ExpiresAt.Sub(freshNow) < minimumGatewayExecutionWindow {
@@ -683,7 +884,7 @@ func (s *Service) DispatchOnce(ctx context.Context) error {
 		gatewayDispatchTotal.WithLabelValues("namespace_limit").Inc()
 		return nil
 	}
-	linkedTask, _, ready, err := s.createOrFindGatewayTask(ctx, renewed, binding, freshNow)
+	linkedTask, ready, err := s.createOrFindGatewayTask(ctx, renewed, binding, agent, freshNow)
 	if err != nil || !ready {
 		return err
 	}
@@ -764,7 +965,11 @@ func (s *Service) reconcileExistingDispatchTask(
 		return true, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
 	}
 
-	expected := taskForGatewayEvent(event, binding, now)
+	// Task kind is immutable. Agent edits after creation must not reroute recovery.
+	expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, existing.Spec.Type, now)
+	if err != nil {
+		return true, err
+	}
 	if gatewayTaskMatchesExpected(existing, expected, event, binding) {
 		return true, s.EventStore.MarkGatewayEventTaskCreated(
 			ctx, event.Namespace, event.ID, event.TaskName, string(existing.UID), s.Owner, now,
@@ -777,7 +982,11 @@ func (s *Service) reconcileExistingDispatchTask(
 }
 
 func (s *Service) handleExpiredDispatchClaim(
-	ctx context.Context, event *store.GatewayEvent, binding *gatewayv1alpha1.GatewayBinding, now time.Time,
+	ctx context.Context,
+	event *store.GatewayEvent,
+	binding *gatewayv1alpha1.GatewayBinding,
+	agent *corev1alpha1.Agent,
+	now time.Time,
 ) (bool, error) {
 	if event.ExpiresAt.Sub(now) >= minimumGatewayExecutionWindow {
 		return false, nil
@@ -795,7 +1004,10 @@ func (s *Service) handleExpiredDispatchClaim(
 		return true, err
 	}
 	if binding != nil {
-		expected := taskForGatewayEvent(event, binding, now)
+		expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, existing.Spec.Type, now)
+		if err != nil {
+			return true, err
+		}
 		if gatewayTaskMatchesExpected(existing, expected, event, binding) {
 			return true, s.EventStore.MarkGatewayEventTaskCreated(
 				ctx, event.Namespace, event.ID, event.TaskName, string(existing.UID), s.Owner, now,
@@ -811,63 +1023,63 @@ func (s *Service) handleExpiredDispatchClaim(
 
 func (s *Service) resolveDispatchBinding(
 	ctx context.Context, event *store.GatewayEvent,
-) (*gatewayv1alpha1.GatewayBinding, bool, error) {
+) (*gatewayv1alpha1.GatewayBinding, *corev1alpha1.Agent, bool, error) {
 	gatewayObject := &gatewayv1alpha1.Gateway{}
 	err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.GatewayName}, gatewayObject)
 	if apierrors.IsNotFound(err) {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway no longer exists.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway no longer exists.")
 	}
 	if err != nil {
 		s.retryEvent(ctx, event, "admitted Gateway is not ready", eventBackoff(event.AttemptCount))
 		gatewayDispatchTotal.WithLabelValues("gateway_not_ready").Inc()
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if string(gatewayObject.UID) != event.GatewayUID {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway identity changed.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway identity changed.")
 	}
 	if gatewayObject.Generation != event.GatewayGeneration {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway generation changed.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway generation changed.")
 	}
 	if !gatewayObject.Status.Ready || gatewayObject.Status.ObservedGeneration != gatewayObject.Generation {
 		s.retryEvent(ctx, event, "admitted Gateway is not ready", eventBackoff(event.AttemptCount))
 		gatewayDispatchTotal.WithLabelValues("gateway_not_ready").Inc()
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	binding := &gatewayv1alpha1.GatewayBinding{}
 	err = s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.BindingName}, binding)
 	if apierrors.IsNotFound(err) {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding no longer exists.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding no longer exists.")
 	}
 	if err != nil {
 		s.retryEvent(ctx, event, "binding changed or is not ready", eventBackoff(event.AttemptCount))
 		gatewayDispatchTotal.WithLabelValues("binding_not_ready").Inc()
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if string(binding.UID) != event.BindingUID || binding.Generation != event.BindingGeneration {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding identity changed.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding identity changed.")
 	}
 	if !binding.Status.Ready || binding.Status.ObservedGeneration != binding.Generation {
 		s.retryEvent(ctx, event, "binding changed or is not ready", eventBackoff(event.AttemptCount))
 		gatewayDispatchTotal.WithLabelValues("binding_not_ready").Inc()
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if !bindingMatchesAdmittedEvent(binding, event) {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding routing changed.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding routing changed.")
 	}
 	agent := &corev1alpha1.Agent{}
 	err = s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.AgentName}, agent)
 	if apierrors.IsNotFound(err) {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Agent no longer exists.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted Agent no longer exists.")
 	}
 	if err != nil {
 		s.retryEvent(ctx, event, "admitted agent is not available", eventBackoff(event.AttemptCount))
 		gatewayDispatchTotal.WithLabelValues("agent_not_ready").Inc()
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if event.AgentUID != "" && string(agent.UID) != event.AgentUID {
-		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
+		return nil, nil, false, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
 	}
-	return binding, true, nil
+	return binding, agent, true, nil
 }
 
 func (s *Service) expireDispatchEvent(ctx context.Context, event *store.GatewayEvent, reason string) error {
@@ -905,7 +1117,7 @@ func (s *Service) expireGatewayEvent(
 		createdAt = event.CompletedAt.Add(time.Duration(event.TranscriptOrder) * time.Nanosecond)
 	}
 	taskName := ""
-	metadata := map[string]string{"eventId": event.ID}
+	metadata := map[string]string{eventIDField: event.ID}
 	if taskIdentityVerified && event.TaskUID != "" {
 		taskName = event.TaskName
 		metadata["taskName"] = event.TaskName
@@ -967,13 +1179,30 @@ func (s *Service) createOrFindGatewayTask(
 	ctx context.Context,
 	event *store.GatewayEvent,
 	binding *gatewayv1alpha1.GatewayBinding,
+	agent *corev1alpha1.Agent,
 	now time.Time,
-) (*corev1alpha1.Task, bool, bool, error) {
-	task := taskForGatewayEvent(event, binding, now)
+) (*corev1alpha1.Task, bool, error) {
+	taskType := corev1alpha1.TaskTypeAgent
+	if agent.Spec.Runtime == nil {
+		taskType = corev1alpha1.TaskTypeAI
+	}
+	task, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, taskType, now)
+	if err != nil {
+		return nil, false, err
+	}
+	if !event.TaskPolicyFrozen && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
+		frozen, freezeErr := s.EventStore.FreezeGatewayEventTaskRuntimeAllowedTools(
+			ctx, event.Namespace, event.ID, s.Owner, task.Spec.AgentRuntime.AllowedTools, now,
+		)
+		if freezeErr != nil {
+			return nil, false, fmt.Errorf("freeze Gateway Task runtime policy: %w", freezeErr)
+		}
+		*event = *frozen
+	}
 	orkatracing.StampTaskTraceContext(ctx, task)
 	createErr := s.Client.Create(ctx, task)
 	if createErr == nil {
-		return s.refreshGatewayTaskUID(ctx, event, task, true)
+		return s.refreshGatewayTaskUID(ctx, event, task)
 	}
 	existing := &corev1alpha1.Task{}
 	lookupErr := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, existing)
@@ -981,14 +1210,14 @@ func (s *Service) createOrFindGatewayTask(
 		if !gatewayTaskMatchesExpected(existing, task, event, binding) {
 			s.retryEvent(ctx, event, "deterministic task name collision", eventBackoff(event.AttemptCount))
 			gatewayDispatchTotal.WithLabelValues("name_collision").Inc()
-			return nil, false, false, nil
+			return nil, false, nil
 		}
 		// The Create response may be ambiguous even though the API server committed
 		// the deterministic Task. Treat the fresh read as authoritative and link it.
-		return s.refreshGatewayTaskUID(ctx, event, existing, false)
+		return s.refreshGatewayTaskUID(ctx, event, existing)
 	}
 	if !apierrors.IsNotFound(lookupErr) {
-		return nil, false, false, errors.Join(createErr, fmt.Errorf("read deterministic gateway Task after create: %w", lookupErr))
+		return nil, false, errors.Join(createErr, fmt.Errorf("read deterministic gateway Task after create: %w", lookupErr))
 	}
 	if definitiveGatewayTaskCreateFailure(createErr) {
 		reason := "The message could not start because the configured task is invalid."
@@ -998,12 +1227,12 @@ func (s *Service) createOrFindGatewayTask(
 			event.StateMessage = reason
 		}
 		gatewayDispatchTotal.WithLabelValues("create_rejected").Inc()
-		return nil, false, false, expireErr
+		return nil, false, expireErr
 	}
 	// Unknown transport/server errors may be returned after the API server commits.
 	// Keep the Dispatching claim intact so lease recovery reconciles before requeue.
 	gatewayDispatchTotal.WithLabelValues("create_ambiguous").Inc()
-	return nil, false, false, fmt.Errorf("gateway Task create outcome is ambiguous: %w", createErr)
+	return nil, false, fmt.Errorf("gateway Task create outcome is ambiguous: %w", createErr)
 }
 
 func definitiveGatewayTaskCreateFailure(err error) bool {
@@ -1012,19 +1241,19 @@ func definitiveGatewayTaskCreateFailure(err error) bool {
 }
 
 func (s *Service) refreshGatewayTaskUID(
-	ctx context.Context, event *store.GatewayEvent, task *corev1alpha1.Task, created bool,
-) (*corev1alpha1.Task, bool, bool, error) {
+	ctx context.Context, event *store.GatewayEvent, task *corev1alpha1.Task,
+) (*corev1alpha1.Task, bool, error) {
 	if task.UID == "" {
 		refreshed := &corev1alpha1.Task{}
 		if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, refreshed); err != nil {
-			return nil, created, false, err
+			return nil, false, err
 		}
 		task = refreshed
 	}
 	if task.UID == "" {
-		return nil, created, false, fmt.Errorf("linked gateway Task UID is unavailable")
+		return nil, false, fmt.Errorf("linked gateway Task UID is unavailable")
 	}
-	return task, created, true, nil
+	return task, true, nil
 }
 
 func deleteGatewayTaskWithUID(ctx context.Context, kubeClient client.Client, task *corev1alpha1.Task) error {
@@ -1105,7 +1334,7 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 			}
 			continue
 		}
-		if isTerminalTaskPhase(task.Status.Phase) {
+		if task.Status.Phase.IsTerminal() {
 			projected, err := s.projectTerminal(ctx, event, task)
 			if errors.Is(err, errGatewayResultNotReady) {
 				s.deferProjection(ctx, event, now)
@@ -1148,6 +1377,7 @@ func (s *Service) deferProjection(ctx context.Context, event *store.GatewayEvent
 	)
 }
 
+//nolint:gocyclo // Terminal projection handles each delivery outcome explicitly.
 func (s *Service) projectTerminal(
 	ctx context.Context,
 	event *store.GatewayEvent,
@@ -1192,7 +1422,33 @@ func (s *Service) projectTerminal(
 	}
 	messageMetadata := map[string]string{
 		"gateway": event.GatewayName, "binding": event.BindingName,
-		"eventId": event.ID, "taskName": task.Name, "deliveryId": deliveryID,
+		eventIDField: event.ID, "taskName": task.Name, "deliveryId": deliveryID,
+	}
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		messageMetadata[store.SessionSoulDigestMetadata] = digest
+	} else if task.Spec.Type == corev1alpha1.TaskTypeAI && task.Status.Phase == corev1alpha1.TaskPhaseFailed &&
+		task.UID != "" && task.Status.SoulBinding == nil && task.Status.Attempts == 0 && task.Status.StartTime == nil &&
+		task.Status.JobName == "" && task.Status.JobUID == "" && task.Status.Iteration == 0 &&
+		task.Status.Execution == nil && task.Status.ExecutionOutcome == nil && task.Status.ResultRef == nil {
+		// Any failure before binding and execution, including soul, Provider and
+		// compatibility errors, ran no model turn, so it must not pin absence.
+		// The status alone cannot rule out an earlier no-soul Job whose
+		// start-status write was lost, so an owned Job also counts as execution.
+		// Read failures retry projection rather than pin the wrong identity.
+		var jobs batchv1.JobList
+		if err := s.freshReader().List(ctx, &jobs, client.InNamespace(task.Namespace)); err != nil {
+			return false, err
+		}
+		unbound := true
+		for i := range jobs.Items {
+			if metav1.IsControlledBy(&jobs.Items[i], task) {
+				unbound = false
+				break
+			}
+		}
+		if unbound {
+			messageMetadata[store.SessionSoulUnboundMetadata] = "true"
+		}
 	}
 	deliveryTrace := orkatracing.InjectContext(ctx)
 	deliveryExpiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)
@@ -1202,7 +1458,7 @@ func (s *Service) projectTerminal(
 		GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID, TaskName: task.Name,
 		SessionName: event.SessionName, Kind: kind, AccountID: event.AccountID, ContextID: event.ContextID,
 		ThreadID: event.ThreadID, ReplyTarget: replyTarget, Text: text,
-		Metadata:    map[string]string{"eventId": event.ID, "taskName": task.Name},
+		Metadata:    map[string]string{eventIDField: event.ID, "taskName": task.Name},
 		TraceParent: boundedTraceValue(deliveryTrace.Get("traceparent"), 256),
 		TraceState:  boundedTraceValue(deliveryTrace.Get("tracestate"), 1024),
 		State:       store.GatewayDeliveryPending, MaxAttempts: s.Config.DeliveryMaxAttempts,
@@ -1229,6 +1485,8 @@ func (s *Service) projectTerminal(
 }
 
 // DeliverOnce claims one due delivery and records the synchronous terminal adapter result.
+//
+//nolint:gocyclo // Delivery keeps claim, send, and settlement branches together under one lease.
 func (s *Service) DeliverOnce(ctx context.Context) error {
 	claimAt := time.Now().UTC()
 	delivery, err := s.DeliveryStore.ClaimNextGatewayDelivery(ctx, s.Config.Namespace, s.Owner, claimAt, s.Config.ClaimLease)
@@ -1307,6 +1565,19 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Eligibility reads must finish before starting the adapter request timeout.
+	if delivery.Kind == protocol.DeliveryKindMessage {
+		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
+				gatewayDeliveryTotal.WithLabelValues("non_retryable_error").Inc()
+				gatewayDeadLettersTotal.WithLabelValues("delivery").Inc()
+				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
+					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
+			}
+			return s.retryOrDeadLetterDelivery(ctx, delivery, "gateway message eligibility is unavailable", time.Now().UTC())
+		}
+	}
 	deliveryWindow := delivery.ExpiresAt.Sub(time.Now().UTC())
 	if deliveryWindow <= 0 {
 		return s.DeliveryStore.MarkGatewayDeliveryTerminal(
@@ -1379,8 +1650,10 @@ func (s *Service) completeGatewayDelivery(
 	// Correlate the Task before committing the delivery as terminal. If the patch fails,
 	// the Sending lease expires and the same idempotent delivery is replayed, allowing
 	// correlation to converge without creating a second provider-side send.
-	if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
-		return err
+	if delivery.Kind != protocol.DeliveryKindMessage {
+		if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
+			return err
+		}
 	}
 	if err := s.DeliveryStore.MarkGatewayDeliveryDelivered(
 		ctx, delivery.Namespace, delivery.ID, s.Owner, providerMessageID, outcomeAt,
@@ -1524,7 +1797,8 @@ func deriveSessionName(object *gatewayv1alpha1.Gateway, binding *gatewayv1alpha1
 
 func gatewayTaskCorrelatesWithEvent(task *corev1alpha1.Task, event *store.GatewayEvent) bool {
 	if task == nil || event == nil || task.Name != event.TaskName || task.Namespace != event.Namespace ||
-		task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != event.AgentName ||
+		(task.Spec.Type != corev1alpha1.TaskTypeAgent && task.Spec.Type != corev1alpha1.TaskTypeAI) ||
+		task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != event.AgentName ||
 		task.Spec.Prompt != "" || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != event.SessionName ||
 		task.Spec.SessionRef.ThroughMessageID != store.GatewayUserMessageID(event.ID) || !task.Spec.SessionRef.PromptIncluded ||
 		task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != event.SenderID ||
@@ -1590,7 +1864,8 @@ func gatewayTaskMatchesExpected(
 	existingSpec := existing.Spec.DeepCopy()
 	expectedSpec := expected.Spec.DeepCopy()
 	existingSpec.Timeout = expectedSpec.Timeout
-	if !apiequality.Semantic.DeepEqual(*existingSpec, *expectedSpec) {
+	// Control fields such as suspend can change after creation.
+	if !apiequality.Semantic.DeepEqual(existingSpec.ExecutionInputs(), expectedSpec.ExecutionInputs()) {
 		return false
 	}
 	for key, value := range expected.Labels {
@@ -1607,6 +1882,41 @@ func gatewayTaskMatchesExpected(
 		}
 	}
 	return true
+}
+
+func (s *Service) materializedTaskForGatewayEvent(
+	ctx context.Context,
+	event *store.GatewayEvent,
+	binding *gatewayv1alpha1.GatewayBinding,
+	agent *corev1alpha1.Agent,
+	taskType corev1alpha1.TaskType,
+	now time.Time,
+) (*corev1alpha1.Task, error) {
+	task := taskForGatewayEvent(event, binding, now)
+	if taskType == corev1alpha1.TaskTypeAI {
+		if event.EventType == protocol.EventTypeDelegatedText {
+			return nil, fmt.Errorf("delegatedText requires controller-brokered agent execution")
+		}
+		if event.TaskPolicyFrozen {
+			return nil, fmt.Errorf("native AI Tasks cannot discard a frozen runtime policy")
+		}
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return nil, fmt.Errorf("taskDefaults.agentRuntimeMaxTurns is not supported by native AI Tasks")
+		}
+		task.Spec.Type = corev1alpha1.TaskTypeAI
+		return task, nil
+	}
+	if event.TaskPolicyFrozen {
+		if task.Spec.AgentRuntime == nil {
+			task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+		}
+		task.Spec.AgentRuntime.AllowedTools = append([]string{}, event.TaskAllowedTools...)
+		return task, nil
+	}
+	if err := agentruntimepolicy.ResolveAndMaterializeRuntimeRefAllowedTools(ctx, s.freshReader(), task, agent); err != nil {
+		return nil, fmt.Errorf("resolve generated Gateway Task AgentRuntime policy: %w", err)
+	}
+	return task, nil
 }
 
 func taskForGatewayEvent(event *store.GatewayEvent, binding *gatewayv1alpha1.GatewayBinding, now time.Time) *corev1alpha1.Task {
@@ -1694,7 +2004,7 @@ func (s *Service) ensureDenialDelivery(ctx context.Context, event *store.Gateway
 		GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
 		Kind: protocol.DeliveryKindError, State: store.GatewayDeliveryPending,
 		AccountID: event.AccountID, ContextID: event.ContextID, ThreadID: event.ThreadID,
-		ReplyTarget: replyTarget, Text: text, Metadata: map[string]string{"eventId": event.ID},
+		ReplyTarget: replyTarget, Text: text, Metadata: map[string]string{eventIDField: event.ID},
 		TraceParent: event.TraceParent, TraceState: event.TraceState,
 		MaxAttempts: s.Config.DeliveryMaxAttempts, NextAttemptAt: now, ExpiresAt: event.ExpiresAt,
 		CreatedAt: now, UpdatedAt: now,
@@ -1876,6 +2186,9 @@ func normalizeConfig(config Config) Config {
 	if config.DeliveryMaxAttempts <= 0 {
 		config.DeliveryMaxAttempts = defaults.DeliveryMaxAttempts
 	}
+	if config.InterimMessagesPerTask <= 0 {
+		config.InterimMessagesPerTask = defaults.InterimMessagesPerTask
+	}
 	if config.ClaimLease <= 0 {
 		config.ClaimLease = defaults.ClaimLease
 	}
@@ -2051,10 +2364,6 @@ func terminalErrorText(phase corev1alpha1.TaskPhase, statusMessage string) strin
 		return "The conversation is too long for the configured model. Please shorten the request and try again."
 	}
 	return "The task could not be completed."
-}
-
-func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	return phase == corev1alpha1.TaskPhaseSucceeded || phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func eventBackoff(attempt int) time.Duration {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -19,19 +20,35 @@ const (
 	AgentResultKindThreatModel = "orka.security.threat-model.v1"
 	AgentResultKindFindings    = "orka.security.findings.v1"
 	AgentResultKindValidation  = "orka.security.validation.v1"
+	AgentResultKindPatch       = "orka.security.patch.v1"
 
 	maxThreatModelResultBytes = 1 << 20
 	maxFindingsResultBytes    = 512 << 10
 	maxValidationResultBytes  = 256 << 10
-	maxReviewContextBytes     = 256 << 10
-	maxThreatModelBytes       = 768 << 10
-	maxFindingTextBytes       = 64 << 10
-	maxFindingSummaryBytes    = 16 << 10
-	maxFindingEvidenceRefs    = 32
-	maxFindingsPerSlice       = 3
-	maxValidationListItems    = 64
-	maxValidationItemBytes    = 8 << 10
-	maxValidationEvidenceRefs = 32
+	maxPatchResultBytes       = 64 << 10
+	// MaxPatchSummaryArtifactBytes bounds a pre-existing patch summary
+	// artifact before it is decoded; it matches the terminal-result cap.
+	MaxPatchSummaryArtifactBytes = maxPatchResultBytes
+	maxPatchSummaryBytes         = 16 << 10
+	maxPatchChangedFiles         = 64
+	maxPatchTestsRun             = 64
+	maxReviewContextBytes        = 1 << 20
+	maxThreatModelBytes          = 768 << 10
+	maxFindingTextBytes          = 64 << 10
+	maxFindingSummaryBytes       = 16 << 10
+	maxFindingEvidenceRefs       = 32
+	maxFindingsPerSlice          = 3
+	maxValidationListItems       = 64
+	maxValidationItemBytes       = 8 << 10
+	maxValidationEvidenceRefs    = 32
+	maxReviewedFiles             = 256
+	maxResolvedQuestions         = 32
+	maxResolvedQuestionBytes     = 4 << 10
+
+	// MaxReviewContextReferenceFiles bounds the files a review may cite
+	// beyond its excerpts; it keeps a whole-repository index within the
+	// review context byte limit.
+	MaxReviewContextReferenceFiles = 4000
 )
 
 // AgentResultBinding is controller-owned identity that every SecurityScan
@@ -42,6 +59,113 @@ type AgentResultBinding struct {
 	ScanID         string
 	PolicyDigest   string
 	ContextDigest  string
+}
+
+// MarshalReviewContext encodes a review context within the size a scan
+// accepts. When the reference listing would not fit, trailing references are
+// dropped; the mapper lists the most relevant ones first.
+func MarshalReviewContext(manifest ReviewContextManifest) ([]byte, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil || len(data) <= maxReviewContextBytes {
+		return data, err
+	}
+	excess := len(data) - maxReviewContextBytes
+	references := manifest.ReferenceFiles
+	for excess > 0 && len(references) > 0 {
+		last, err := json.Marshal(references[len(references)-1])
+		if err != nil {
+			return nil, err
+		}
+		excess -= len(last) + 1
+		references = references[:len(references)-1]
+	}
+	manifest.ReferenceFiles = references
+	return json.Marshal(manifest)
+}
+
+// MaxReviewContextsBytes bounds the review contexts one mapper run
+// publishes together, below the worker's 50 MiB artifact upload limit.
+const MaxReviewContextsBytes = 40 << 20
+
+// MarshalReviewContexts encodes a mapper run's review contexts within budget
+// bytes in total. While they do not fit, the longest reference listing is
+// halved, keeping its most relevant entries.
+func MarshalReviewContexts(manifests []ReviewContextManifest, budget int) ([][]byte, error) {
+	encoded := make([][]byte, len(manifests))
+	total := 0
+	for i := range manifests {
+		data, err := MarshalReviewContext(manifests[i])
+		if err != nil {
+			return nil, err
+		}
+		encoded[i] = data
+		total += len(data)
+	}
+	for total > budget {
+		longest := -1
+		for i := range manifests {
+			if len(manifests[i].ReferenceFiles) > 0 && (longest < 0 || len(manifests[i].ReferenceFiles) > len(manifests[longest].ReferenceFiles)) {
+				longest = i
+			}
+		}
+		if longest < 0 {
+			return nil, fmt.Errorf("review contexts total %d bytes even without reference files, above the %d byte limit", total, budget)
+		}
+		references := manifests[longest].ReferenceFiles
+		manifests[longest].ReferenceFiles = references[:len(references)/2]
+		data, err := MarshalReviewContext(manifests[longest])
+		if err != nil {
+			return nil, err
+		}
+		total += len(data) - len(encoded[longest])
+		encoded[longest] = data
+	}
+	return encoded, nil
+}
+
+// minScaledReviewContextBytes is the smallest per-slice excerpt budget
+// BuildReviewContexts scales down to before it gives up.
+const minScaledReviewContextBytes = 2 << 10
+
+// BuildReviewContexts builds and encodes the review contexts of one mapper
+// run within budget bytes in total. When the default-sized contexts exceed
+// the budget even without reference files, as in a repository with thousands
+// of slices, the per-slice excerpt budget is scaled down until they fit in half
+// of it, leaving the rest for reference listings; reviewers read the rest of
+// each file from their workspace. Otherwise contexts keep the default size.
+func BuildReviewContexts(
+	root string,
+	slices []store.ReviewSlice,
+	references map[string][]ReviewContextReferenceFile,
+	budget int,
+) ([][]byte, error) {
+	maxBytes := defaultMaxReviewContextBytes
+	for {
+		manifests := make([]ReviewContextManifest, 0, len(slices))
+		bare := 0
+		for i := range slices {
+			_, manifest, err := BuildReviewContext(root, slices[i], ReviewContextOptions{MaxBytes: maxBytes})
+			if err != nil {
+				return nil, fmt.Errorf("build security review context for %s: %w", slices[i].ID, err)
+			}
+			data, err := MarshalReviewContext(manifest)
+			if err != nil {
+				return nil, err
+			}
+			bare += len(data)
+			manifest.ReferenceFiles = references[slices[i].ID]
+			manifests = append(manifests, manifest)
+		}
+		scaled := maxBytes < defaultMaxReviewContextBytes
+		if !scaled && bare <= budget || scaled && bare <= budget/2 || maxBytes == minScaledReviewContextBytes {
+			// At the floor, MarshalReviewContexts still fails closed when
+			// the contexts do not fit.
+			return MarshalReviewContexts(manifests, budget)
+		}
+		// bare > budget > 0 here: any total within budget returned above.
+		next := int(int64(maxBytes) * int64(budget/2) / int64(bare))
+		maxBytes = max(minScaledReviewContextBytes, min(next, maxBytes*3/4))
+	}
 }
 
 // ParseTrustedReviewContextManifest validates the mapper-owned context used as
@@ -89,12 +213,13 @@ func ParseTrustedReviewContextManifest(data []byte) (*ReviewContextManifest, str
 // ThreatModelResultEnvelope is the only accepted terminal result for the
 // threat-model agent stage.
 type ThreatModelResultEnvelope struct {
-	SchemaVersion  int    `json:"schemaVersion"`
-	Kind           string `json:"kind"`
-	RepositoryScan string `json:"repositoryScan"`
-	ScanID         string `json:"scanId"`
-	PolicyDigest   string `json:"policyDigest"`
-	ThreatModel    string `json:"threatModel"`
+	SchemaVersion  int                     `json:"schemaVersion"`
+	Kind           string                  `json:"kind"`
+	RepositoryScan string                  `json:"repositoryScan"`
+	ScanID         string                  `json:"scanId"`
+	PolicyDigest   string                  `json:"policyDigest"`
+	ThreatModel    string                  `json:"threatModel"`
+	Investigations []SecurityInvestigation `json:"investigations,omitempty"`
 }
 
 // FindingsResultEnvelope is the only accepted terminal result for one review
@@ -152,11 +277,13 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 		return "", err
 	}
 	content := strings.TrimSpace(result.ThreatModel)
-	if content == "" {
-		return "", fmt.Errorf("threatModel is required")
-	}
 	if len(content) > maxThreatModelBytes {
 		return "", fmt.Errorf("threatModel exceeds %d bytes", maxThreatModelBytes)
+	}
+	// Validate visible markdown before redaction can hide transcript markers.
+	content = strings.TrimSpace(stripUnsafeTextRunes(content))
+	if content == "" {
+		return "", fmt.Errorf("threatModel is required")
 	}
 	if !strings.HasPrefix(content, "#") {
 		return "", fmt.Errorf("threatModel must be markdown beginning with a heading")
@@ -164,7 +291,23 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	if securityResultLooksLikeToolTranscript(content) {
 		return "", fmt.Errorf("threatModel looks like a tool transcript")
 	}
+	// Incremental scans do not request investigations; keep the saved
+	// section unless the result supplies a replacement.
+	if result.Investigations != nil {
+		content = RenderThreatModelInvestigations(content, result.Investigations)
+	}
+	content = SanitizeThreatModel(content)
+	if len(content) > maxThreatModelBytes {
+		return "", fmt.Errorf("threatModel exceeds %d bytes", maxThreatModelBytes)
+	}
 	return content, nil
+}
+
+// SanitizeThreatModel redacts common credential shapes in generated and edited
+// threat models. Strip invisible runes first so they cannot split a credential
+// past the redactor; preserve newlines and tabs for markdown structure.
+func SanitizeThreatModel(content string) string {
+	return redact.SensitiveText(stripUnsafeTextRunes(content))
 }
 
 func securityResultLooksLikeToolTranscript(content string) bool {
@@ -204,6 +347,7 @@ func ParseFindingsResult(data []byte, expected FindingsResultExpectation) (*Find
 	if strings.TrimSpace(result.SliceID) != strings.TrimSpace(expected.SliceID) {
 		return nil, fmt.Errorf("security result sliceId does not match task slice")
 	}
+	normalizeFindingsCoverage(&result.Findings.Scan)
 	if err := validateFindingsResultArtifact(result.Findings, expected); err != nil {
 		return nil, err
 	}
@@ -233,6 +377,7 @@ func ParseValidationResult(data []byte, expected ValidationResultExpectation) (*
 	if strings.TrimSpace(result.FindingID) != findingID || strings.TrimSpace(result.Validation.FindingID) != findingID {
 		return nil, fmt.Errorf("security validation result findingId does not match task finding")
 	}
+	result.Validation.Evidence = usableValidationEvidence(result.Validation.Evidence, expected.Finding.Evidence)
 	if err := validateValidationArtifact(result.Validation, expected.Finding); err != nil {
 		return nil, err
 	}
@@ -284,6 +429,60 @@ func validateAgentResultBinding(repositoryScan, scanID, policyDigest, contextDig
 	return nil
 }
 
+// normalizeFindingsCoverage bounds the reviewer's coverage notes. They only
+// describe the review, so excess or unsafe entries are dropped instead of
+// rejecting the findings they accompany.
+func normalizeFindingsCoverage(scan *FindingsV2Scan) {
+	files := make([]string, 0, min(len(scan.ReviewedFiles), maxReviewedFiles))
+	seen := map[string]struct{}{}
+	for _, file := range scan.ReviewedFiles {
+		file = strings.TrimSpace(file)
+		if _, ok := seen[file]; ok || !SafeRepoPath(file) {
+			continue
+		}
+		seen[file] = struct{}{}
+		files = append(files, file)
+		if len(files) == maxReviewedFiles {
+			break
+		}
+	}
+	scan.ReviewedFiles = files
+	questions := make([]FindingsV2ResolvedQuestion, 0, min(len(scan.ResolvedQuestions), maxResolvedQuestions))
+	for _, question := range scan.ResolvedQuestions {
+		question.Question = truncateUTF8(strings.TrimSpace(question.Question), maxResolvedQuestionBytes)
+		question.Resolution = truncateUTF8(strings.TrimSpace(question.Resolution), maxResolvedQuestionBytes)
+		if question.Question == "" {
+			continue
+		}
+		questions = append(questions, question)
+		if len(questions) == maxResolvedQuestions {
+			break
+		}
+	}
+	scan.ResolvedQuestions = questions
+	limitations := make([]string, 0, min(len(scan.Limitations), maxResolvedQuestions))
+	for _, limitation := range scan.Limitations {
+		if limitation = truncateUTF8(strings.TrimSpace(limitation), maxResolvedQuestionBytes); limitation != "" {
+			limitations = append(limitations, limitation)
+		}
+		if len(limitations) == maxResolvedQuestions {
+			break
+		}
+	}
+	scan.Limitations = limitations
+}
+
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 func validateFindingsResultArtifact(artifact FindingsV2Artifact, expected FindingsResultExpectation) error {
 	if artifact.SchemaVersion != SchemaVersionFindingsV2 {
 		return fmt.Errorf("unsupported findings schemaVersion %d", artifact.SchemaVersion)
@@ -325,7 +524,7 @@ func validateBoundedFinding(index int, finding FindingsV2Finding) error {
 		{"severity", finding.Severity, 32},
 		{"confidence", finding.Confidence, 32},
 		{"triage", finding.Triage, maxFindingSummaryBytes},
-		{"summary", finding.Summary, maxFindingTextBytes},
+		{summaryField, finding.Summary, maxFindingTextBytes},
 		{"rootCause", finding.RootCause, maxFindingTextBytes},
 		{"reproduction", finding.Reproduction, maxFindingTextBytes},
 		{"remediation", finding.Remediation, maxFindingTextBytes},
@@ -376,9 +575,9 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 		name  string
 		value string
 	}{
-		{"summary", artifact.Summary},
-		{"reproduction", artifact.Reproduction},
-		{"attack_path_analysis", artifact.AttackPathAnalysis},
+		{summaryField, artifact.Summary},
+		{"reproduction", string(artifact.Reproduction)},
+		{"attack_path_analysis", string(artifact.AttackPathAnalysis)},
 		{"likelihood", artifact.Likelihood},
 		{"impact", artifact.Impact},
 	} {
@@ -412,12 +611,29 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 	return nil
 }
 
+// usableValidationEvidence keeps the validator's evidence that may be merged
+// into the finding. Validators trace beyond the finding's own locations, so
+// refs outside that boundary are dropped instead of discarding the verdict.
+func usableValidationEvidence(refs ValidationArtifactEvidenceRefs, accepted []store.FindingEvidenceRef) ValidationArtifactEvidenceRefs {
+	out := make(ValidationArtifactEvidenceRefs, 0, min(len(refs), maxValidationEvidenceRefs))
+	for _, ref := range refs {
+		if validateValidationEvidenceRef(len(out), ref, accepted) != nil {
+			continue
+		}
+		out = append(out, ref)
+		if len(out) == maxValidationEvidenceRefs {
+			break
+		}
+	}
+	return out
+}
+
 func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, accepted []store.FindingEvidenceRef) error {
 	if strings.TrimSpace(ref.TaskName) != "" || strings.TrimSpace(ref.Name) != "" {
 		return fmt.Errorf("validation.evidence[%d] may not reference task artifacts", index)
 	}
 	switch strings.TrimSpace(ref.Kind) {
-	case "file":
+	case fileLocationKind:
 		if !SafeRepoPath(ref.Path) || ref.StartLine <= 0 || ref.EndLine < ref.StartLine {
 			return fmt.Errorf("validation.evidence[%d] has invalid file range", index)
 		}
@@ -446,7 +662,7 @@ func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, acce
 
 func validationEvidenceWithinAcceptedFinding(ref store.FindingEvidenceRef, accepted []store.FindingEvidenceRef) bool {
 	for _, candidate := range accepted {
-		if candidate.Kind != "file" || candidate.Path != ref.Path {
+		if candidate.Kind != fileLocationKind || candidate.Path != ref.Path {
 			continue
 		}
 		if ref.StartLine >= candidate.StartLine && ref.EndLine <= candidate.EndLine {
@@ -475,4 +691,148 @@ func ReviewContextDigest(manifest ReviewContextManifest) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// PatchResultEnvelope is the harness-v2 terminal result of a security patch
+// task. The agent applies the fix to the workspace and returns this envelope
+// as its only output; it never writes artifact files. The authoritative diff
+// is derived by the controller from the governed publication, so the envelope
+// carries only the agent's account of what it changed.
+type PatchResultEnvelope struct {
+	SchemaVersion  int            `json:"schemaVersion"`
+	Kind           string         `json:"kind"`
+	RepositoryScan string         `json:"repositoryScan"`
+	FindingID      string         `json:"findingId"`
+	Summary        string         `json:"summary"`
+	ChangedFiles   []string       `json:"changedFiles"`
+	TestsRun       []PatchTestRun `json:"testsRun,omitempty"`
+	Risk           string         `json:"risk"`
+}
+
+// PatchResultExpectation is the controller-owned identity a patch result must
+// match exactly.
+type PatchResultExpectation struct {
+	RepositoryScan string
+	FindingID      string
+}
+
+// ParsePatchResult strictly decodes a terminal patch result and requires the
+// exact repository scan and finding identity. It returns the bounded patch
+// summary the controller persists alongside the publication-derived diff.
+func ParsePatchResult(data []byte, expected PatchResultExpectation) (*PatchSummaryArtifact, error) {
+	var result PatchResultEnvelope
+	if err := decodeStrictResult(data, maxPatchResultBytes, &result); err != nil {
+		return nil, err
+	}
+	if result.SchemaVersion != AgentResultSchemaVersion {
+		return nil, fmt.Errorf("unsupported security result schemaVersion %d", result.SchemaVersion)
+	}
+	if result.Kind != AgentResultKindPatch {
+		return nil, fmt.Errorf("security result kind %q is not a patch", result.Kind)
+	}
+	if strings.TrimSpace(expected.RepositoryScan) == "" || result.RepositoryScan != expected.RepositoryScan {
+		return nil, fmt.Errorf("patch result repositoryScan does not match the expected scan")
+	}
+	if strings.TrimSpace(expected.FindingID) == "" || result.FindingID != expected.FindingID {
+		return nil, fmt.Errorf("patch result findingId does not match the expected finding")
+	}
+	return NormalizePatchSummaryArtifact(PatchSummaryArtifact{
+		SchemaVersion: SchemaVersionPatchSummary,
+		FindingID:     result.FindingID,
+		Summary:       result.Summary,
+		ChangedFiles:  result.ChangedFiles,
+		TestsRun:      result.TestsRun,
+		Risk:          result.Risk,
+	})
+}
+
+// NormalizePatchSummaryArtifact applies the bounded, credential-rejecting
+// validation every durable patch summary must pass, whether it arrived as a
+// harness-v2 terminal result or as a pre-existing artifact written through the
+// upload API. Summary text, changed-file paths, and test commands are
+// agent-controlled and persist in artifacts, status, and PR bodies, so a
+// credential-shaped value in any of them fails closed; the value itself is
+// deliberately kept out of the error.
+func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummaryArtifact, error) {
+	if artifact.SchemaVersion != SchemaVersionPatchSummary {
+		return nil, fmt.Errorf("unsupported patch summary schemaVersion %d", artifact.SchemaVersion)
+	}
+	if strings.TrimSpace(artifact.FindingID) == "" {
+		return nil, fmt.Errorf("patch summary findingId is required")
+	}
+	summary := strings.TrimSpace(stripUnsafeTextRunes(artifact.Summary))
+	if summary == "" {
+		return nil, fmt.Errorf("patch summary is required")
+	}
+	if len(summary) > maxPatchSummaryBytes {
+		return nil, fmt.Errorf("patch summary exceeds %d bytes", maxPatchSummaryBytes)
+	}
+	if securityResultLooksLikeToolTranscript(summary) {
+		return nil, fmt.Errorf("patch summary looks like a tool transcript")
+	}
+	// Summary and test commands are agent-controlled and become a durable
+	// artifact; a credential echoed there (for example while describing the
+	// secret a remediation removed) must never persist. The value itself is
+	// deliberately kept out of the error.
+	if LooksLikeSecret(summary) {
+		return nil, fmt.Errorf("patch summary contains a credential-shaped value")
+	}
+	if len(artifact.ChangedFiles) == 0 {
+		return nil, fmt.Errorf("patch changedFiles is required")
+	}
+	if len(artifact.ChangedFiles) > maxPatchChangedFiles {
+		return nil, fmt.Errorf("patch changedFiles exceeds %d entries", maxPatchChangedFiles)
+	}
+	changed := make([]string, 0, len(artifact.ChangedFiles))
+	seen := make(map[string]struct{}, len(artifact.ChangedFiles))
+	for _, file := range artifact.ChangedFiles {
+		file = strings.TrimSpace(strings.ReplaceAll(stripUnsafeTextRunes(file), "\\", "/"))
+		for strings.HasPrefix(file, "./") {
+			file = strings.TrimPrefix(file, "./")
+		}
+		if file == "" || !SafeRepoPath(file) {
+			return nil, fmt.Errorf("patch changedFiles contains an unsafe path")
+		}
+		// Paths are agent-controlled and persist in artifacts, status, and
+		// PR bodies; a credential smuggled as a path segment must not.
+		if LooksLikeSecret(file) {
+			return nil, fmt.Errorf("patch changedFiles contains a credential-shaped path")
+		}
+		if _, duplicate := seen[file]; duplicate {
+			continue
+		}
+		seen[file] = struct{}{}
+		changed = append(changed, file)
+	}
+	if len(artifact.TestsRun) > maxPatchTestsRun {
+		return nil, fmt.Errorf("patch testsRun exceeds %d entries", maxPatchTestsRun)
+	}
+	var testsRun []PatchTestRun
+	if len(artifact.TestsRun) > 0 {
+		testsRun = make([]PatchTestRun, len(artifact.TestsRun))
+	}
+	for i, run := range artifact.TestsRun {
+		command := strings.TrimSpace(stripUnsafeTextRunes(run.Command))
+		if command == "" || len(command) > maxValidationItemBytes {
+			return nil, fmt.Errorf("patch testsRun contains an invalid command")
+		}
+		if LooksLikeSecret(command) {
+			return nil, fmt.Errorf("patch testsRun contains a credential-shaped command")
+		}
+		testsRun[i] = PatchTestRun{Command: command, ExitCode: run.ExitCode}
+	}
+	risk := strings.ToLower(strings.TrimSpace(artifact.Risk))
+	switch risk {
+	case "low", "medium", "high":
+	default:
+		return nil, fmt.Errorf("patch risk must be low, medium, or high")
+	}
+	return &PatchSummaryArtifact{
+		SchemaVersion: SchemaVersionPatchSummary,
+		FindingID:     artifact.FindingID,
+		Summary:       summary,
+		ChangedFiles:  changed,
+		TestsRun:      testsRun,
+		Risk:          risk,
+	}, nil
 }

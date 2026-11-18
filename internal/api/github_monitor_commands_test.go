@@ -11,7 +11,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -45,12 +47,12 @@ func TestGitHubWebhook_CommandLabelIsConsumedAfterDurableQueue(t *testing.T) {
 		State:  "open",
 		Title:  "Plan after queue",
 		Body:   "Please plan only after durable intake.",
-		Labels: []string{"orka:plan"},
+		Labels: []string{"orka:implement"},
 	}
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	command := &store.CommandEvent{ID: repositoryMonitorCommandID(dedupe)}
 	runID := repositoryMonitorCommandRunID(command)
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, githubActionImplement)
 
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -75,9 +77,9 @@ func TestGitHubWebhook_CommandLabelIsConsumedAfterDurableQueue(t *testing.T) {
 	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":41,"state":"open","title":"Plan after queue","body":"Please plan only after durable intake.","html_url":"https://github.com/sozercan/vekil/issues/41","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":41,"state":"open","title":"Plan after queue","body":"Please plan only after durable intake.","html_url":"https://github.com/sozercan/vekil/issues/41","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 
@@ -105,8 +107,8 @@ func TestGitHubWebhook_DuplicateCommandQueuesBeforeLabelCleanup(t *testing.T) {
 	monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels = true
 
 	delivery := "delivery-duplicate-queue-before-consume"
-	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 45, State: "open", Title: "Repair handoff", Body: "Queue before cleanup.", Labels: []string{"orka:plan"}}
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 45, State: "open", Title: "Repair handoff", Body: "Queue before cleanup.", Labels: []string{"orka:implement"}}
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	processedAt := time.Now()
 	command := &store.CommandEvent{
 		ID:                  repositoryMonitorCommandID(dedupe),
@@ -117,10 +119,10 @@ func TestGitHubWebhook_DuplicateCommandQueuesBeforeLabelCleanup(t *testing.T) {
 		Number:              int64(target.Number),
 		Source:              githubCommandEventSourceLabel,
 		DeliveryID:          delivery,
-		Label:               "orka:plan",
+		Label:               "orka:implement",
 		DedupeKey:           dedupe,
 		IdempotencyKey:      dedupe,
-		Intent:              commandIntentPlan,
+		Intent:              githubActionImplement,
 		IssueSnapshotDigest: githubIssueSnapshotDigest(monitor, target),
 		Status:              githubCommandStatusAccepted,
 		CreatedAt:           processedAt,
@@ -130,7 +132,7 @@ func TestGitHubWebhook_DuplicateCommandQueuesBeforeLabelCleanup(t *testing.T) {
 		t.Fatalf("CreateCommandEvent() error = %v", err)
 	}
 	runID := repositoryMonitorCommandRunID(command)
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, githubActionImplement)
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || !strings.Contains(r.URL.Path, "/issues/45/labels/") {
 			http.Error(w, "unexpected GitHub API request", http.StatusNotFound)
@@ -150,9 +152,9 @@ func TestGitHubWebhook_DuplicateCommandQueuesBeforeLabelCleanup(t *testing.T) {
 	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":45,"state":"open","title":"Repair handoff","body":"Queue before cleanup.","html_url":"https://github.com/sozercan/vekil/issues/45","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":45,"state":"open","title":"Repair handoff","body":"Queue before cleanup.","html_url":"https://github.com/sozercan/vekil/issues/45","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
@@ -173,8 +175,8 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
 
 	delivery := "delivery-processed-cleanup"
-	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 46, State: "open", Title: "Processed", Body: "Retry cleanup.", Labels: []string{"orka:plan"}}
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 46, State: "open", Title: "Processed", Body: "Retry cleanup.", Labels: []string{"orka:implement"}}
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	processedAt := time.Now()
 	const terminalReason = "workflow failed after retries"
 	command := &store.CommandEvent{
@@ -186,10 +188,10 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 		Number:              int64(target.Number),
 		Source:              githubCommandEventSourceLabel,
 		DeliveryID:          delivery,
-		Label:               "orka:plan",
+		Label:               "orka:implement",
 		DedupeKey:           dedupe,
 		IdempotencyKey:      dedupe,
-		Intent:              commandIntentPlan,
+		Intent:              githubActionImplement,
 		IssueSnapshotDigest: githubIssueSnapshotDigest(monitor, target),
 		Status:              githubCommandStatusProcessed,
 		Error:               terminalReason,
@@ -199,7 +201,7 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 	if err := monitorStore.CreateCommandEvent(t.Context(), command); err != nil {
 		t.Fatalf("CreateCommandEvent() error = %v", err)
 	}
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, githubActionImplement)
 	if err := monitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
 		ID:                   actionID,
 		MonitorNamespace:     monitor.Namespace,
@@ -208,8 +210,8 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 		TargetKind:           target.Kind,
 		TargetNumber:         int64(target.Number),
 		TargetSnapshotDigest: command.IssueSnapshotDigest,
-		DesiredAction:        commandIntentPlan,
-		DedupeKey:            store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, target.Kind, int64(target.Number), "", command.IssueSnapshotDigest, commandIntentPlan),
+		DesiredAction:        githubActionImplement,
+		DedupeKey:            store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, target.Kind, int64(target.Number), "", command.IssueSnapshotDigest, githubActionImplement),
 		Status:               repositoryMonitorRunPhaseFailed,
 		Phase:                repositoryMonitorRunPhaseFailed,
 		Error:                terminalReason,
@@ -248,9 +250,9 @@ func TestGitHubWebhook_ProcessedDuplicateRetriesLabelCleanupWithoutErasingReason
 	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":46,"state":"open","title":"Processed","body":"Retry cleanup.","html_url":"https://github.com/sozercan/vekil/issues/46","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":46,"state":"open","title":"Processed","body":"Retry cleanup.","html_url":"https://github.com/sozercan/vekil/issues/46","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
@@ -285,8 +287,8 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
 
 	delivery := "delivery-consume-completed"
-	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 44, State: "open", Title: "Completed", Body: "Recover cleanup.", Labels: []string{"orka:plan"}}
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 44, State: "open", Title: "Completed", Body: "Recover cleanup.", Labels: []string{"orka:implement"}}
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	processedAt := time.Now()
 	command := &store.CommandEvent{
 		ID:                  repositoryMonitorCommandID(dedupe),
@@ -297,10 +299,10 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 		Number:              int64(target.Number),
 		Source:              githubCommandEventSourceLabel,
 		DeliveryID:          delivery,
-		Label:               "orka:plan",
+		Label:               "orka:implement",
 		DedupeKey:           dedupe,
 		IdempotencyKey:      dedupe,
-		Intent:              commandIntentPlan,
+		Intent:              githubActionImplement,
 		IssueSnapshotDigest: githubIssueSnapshotDigest(monitor, target),
 		Status:              githubCommandStatusCompleted,
 		CreatedAt:           processedAt,
@@ -309,7 +311,7 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 	if err := monitorStore.CreateCommandEvent(t.Context(), command); err != nil {
 		t.Fatalf("CreateCommandEvent() error = %v", err)
 	}
-	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, githubActionImplement)
 	if err := monitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
 		ID:                   actionID,
 		MonitorNamespace:     monitor.Namespace,
@@ -318,9 +320,9 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 		TargetKind:           target.Kind,
 		TargetNumber:         int64(target.Number),
 		TargetSnapshotDigest: command.IssueSnapshotDigest,
-		DesiredAction:        commandIntentPlan,
+		DesiredAction:        githubActionImplement,
 		DependsOnActionID:    "wa-active",
-		DedupeKey:            store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, target.Kind, int64(target.Number), "", command.IssueSnapshotDigest, commandIntentPlan),
+		DedupeKey:            store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, target.Kind, int64(target.Number), "", command.IssueSnapshotDigest, githubActionImplement),
 		Status:               githubCommandStatusCompleted,
 		Phase:                "coalesced",
 		CreatedAt:            processedAt,
@@ -341,9 +343,9 @@ func TestGitHubWebhook_CompletedDuplicateStillConsumesCommandLabel(t *testing.T)
 	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":44,"state":"open","title":"Completed","body":"Recover cleanup.","html_url":"https://github.com/sozercan/vekil/issues/44","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":44,"state":"open","title":"Completed","body":"Recover cleanup.","html_url":"https://github.com/sozercan/vekil/issues/44","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
@@ -385,21 +387,21 @@ func TestGitHubWebhook_RunCreateFailureLeavesRecoverableWorkAction(t *testing.T)
 	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":42,"state":"open","title":"Retry durable intake","body":"Do not coalesce against phantom work.","html_url":"https://github.com/sozercan/vekil/issues/42","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":42,"state":"open","title":"Retry durable intake","body":"Do not coalesce against phantom work.","html_url":"https://github.com/sozercan/vekil/issues/42","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
-	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 42, State: "open", Title: "Retry durable intake", Body: "Do not coalesce against phantom work.", Labels: []string{"orka:plan"}}
+	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 42, State: "open", Title: "Retry durable intake", Body: "Do not coalesce against phantom work.", Labels: []string{"orka:implement"}}
 
 	firstDelivery := "delivery-run-create-fails"
 	firstResp := performSignedGitHubWebhook(t, server, githubEventIssues, firstDelivery, secret, body)
 	if firstResp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("first status = %d, want internal server error; body: %s", firstResp.StatusCode, readRespBody(t, firstResp))
 	}
-	firstDedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", firstDelivery)
+	firstDedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", firstDelivery)
 	firstCommandID := repositoryMonitorCommandID(firstDedupe)
-	firstAction, err := baseStore.GetWorkAction(t.Context(), monitor.Namespace, store.RepositoryMonitorWorkActionID(firstCommandID, commandIntentPlan))
+	firstAction, err := baseStore.GetWorkAction(t.Context(), monitor.Namespace, store.RepositoryMonitorWorkActionID(firstCommandID, githubActionImplement))
 	if err != nil {
 		t.Fatalf("GetWorkAction(first) error = %v", err)
 	}
@@ -412,13 +414,13 @@ func TestGitHubWebhook_RunCreateFailureLeavesRecoverableWorkAction(t *testing.T)
 	if secondResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("second status = %d, want accepted coalesced retry; body: %s", secondResp.StatusCode, readRespBody(t, secondResp))
 	}
-	secondDedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", secondDelivery)
+	secondDedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", secondDelivery)
 	secondCommand := &store.CommandEvent{ID: repositoryMonitorCommandID(secondDedupe)}
 	secondRunID := repositoryMonitorCommandRunID(secondCommand)
 	if _, err := baseStore.GetMonitorRun(t.Context(), monitor.Namespace, secondRunID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetMonitorRun(second) error = %v, want no duplicate run", err)
 	}
-	secondAction, err := baseStore.GetWorkAction(t.Context(), monitor.Namespace, store.RepositoryMonitorWorkActionID(secondCommand.ID, commandIntentPlan))
+	secondAction, err := baseStore.GetWorkAction(t.Context(), monitor.Namespace, store.RepositoryMonitorWorkActionID(secondCommand.ID, githubActionImplement))
 	if err != nil {
 		t.Fatalf("GetWorkAction(second) error = %v", err)
 	}
@@ -472,5 +474,91 @@ func TestCreateRepositoryMonitorCommandEventRunCreateFailureMarksWorkActionRetry
 	}
 	if action.Status != store.RepositoryMonitorWorkActionStatusRetryPending || action.BlockedReason != store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed || action.CompletedAt != nil {
 		t.Fatalf("action = %#v, want nonterminal retryable run creation failure", action)
+	}
+}
+
+func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsFinishedAction(t *testing.T) {
+	_, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo"}}
+	command := &store.CommandEvent{ID: "cmd-finished", Intent: commandIntentPlan}
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	if err := handlers.repositoryMonitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID: actionID, MonitorNamespace: "demo", MonitorName: "repo-monitor", CommandEventID: command.ID,
+		TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 43, Intent: commandIntentPlan, DesiredAction: commandIntentPlan,
+		Status: store.RepositoryMonitorWorkActionStatusSucceeded, Phase: "plan_succeeded", CreatedAt: completedAt, CompletedAt: &completedAt,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+
+	if err := handlers.markRepositoryMonitorCommandWorkActionRetryPending(t.Context(), monitor, command, "run-late", errors.New("signal failed")); err != nil {
+		t.Fatalf("markRepositoryMonitorCommandWorkActionRetryPending() error = %v", err)
+	}
+
+	action, err := handlers.repositoryMonitorStore.GetWorkAction(t.Context(), "demo", actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusSucceeded || action.CompletedAt == nil || action.BlockedReason != "" || action.RunID != "" {
+		t.Fatalf("action = %#v, want the finished action left unchanged", action)
+	}
+}
+
+// completingWriteStore completes the action just before a caller's write of
+// it reaches the store, as the controller can between that caller's read and
+// its write.
+type completingWriteStore struct {
+	store.RepositoryMonitorStore
+}
+
+func (s completingWriteStore) complete(ctx context.Context, namespace, id string) error {
+	action, err := s.GetWorkAction(ctx, namespace, id)
+	if err != nil {
+		return err
+	}
+	completedAt := time.Now().UTC()
+	action.Status, action.CompletedAt = store.RepositoryMonitorWorkActionStatusSucceeded, &completedAt
+	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func (s completingWriteStore) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	if err := s.complete(ctx, action.MonitorNamespace, action.ID); err != nil {
+		return err
+	}
+	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func (s completingWriteStore) MarkWorkActionRetryPending(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
+	if err := s.complete(ctx, request.Namespace, request.ID); err != nil {
+		return false, err
+	}
+	return s.RepositoryMonitorStore.MarkWorkActionRetryPending(ctx, request)
+}
+
+func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsConcurrentCompletion(t *testing.T) {
+	_, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo"}}
+	command := &store.CommandEvent{ID: "cmd-racing", Intent: commandIntentPlan}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	if err := handlers.repositoryMonitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID: actionID, MonitorNamespace: "demo", MonitorName: "repo-monitor", CommandEventID: command.ID,
+		TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 44, Intent: commandIntentPlan, DesiredAction: commandIntentPlan,
+		Status: store.RepositoryMonitorWorkActionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	inner := handlers.repositoryMonitorStore
+	handlers.repositoryMonitorStore = completingWriteStore{inner}
+
+	if err := handlers.markRepositoryMonitorCommandWorkActionRetryPending(t.Context(), monitor, command, "run-late", errors.New("signal failed")); err != nil {
+		t.Fatalf("markRepositoryMonitorCommandWorkActionRetryPending() error = %v", err)
+	}
+
+	action, err := inner.GetWorkAction(t.Context(), "demo", actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusSucceeded || action.CompletedAt == nil || action.RunID != "" {
+		t.Fatalf("action = %#v, want the completion that landed before the write kept", action)
 	}
 }

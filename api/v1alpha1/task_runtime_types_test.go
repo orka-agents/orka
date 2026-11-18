@@ -37,6 +37,8 @@ func TestTaskWorkspaceSchemaFields(t *testing.T) {
 		ForgeCredentialRef: &WorkspaceCredentialReference{Name: "forge-token"},
 		SubPath:            "src/app",
 		PRBaseBranch:       "main",
+		PRTitle:            "fix: handle empty filters",
+		PRBody:             "Reject empty filters before querying.",
 		PushBranch:         "orka/task-full-uid",
 		CreatePR:           true,
 	}
@@ -65,6 +67,8 @@ func TestTaskWorkspaceSchemaFields(t *testing.T) {
 		"publicationCredentialRef",
 		"forgeCredentialRef",
 		"createPR",
+		"prTitle",
+		"prBody",
 	} {
 		if _, ok := workspaceJSON[field]; !ok {
 			t.Errorf("workspace JSON missing %q: %s", field, encoded)

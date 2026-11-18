@@ -29,15 +29,6 @@ func newProviderScheme() *runtime.Scheme {
 	return s
 }
 
-// ---------- ValidationError.Error ----------
-
-func TestValidationError_Error(t *testing.T) {
-	e := &ValidationError{Message: "something broke"}
-	if got := e.Error(); got != "something broke" {
-		t.Errorf("Error() = %q, want %q", got, "something broke")
-	}
-}
-
 // ---------- validateProvider ----------
 
 func TestValidateProvider(t *testing.T) {

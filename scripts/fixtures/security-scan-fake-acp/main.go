@@ -24,6 +24,7 @@ const (
 	fieldJSONRPC    = "jsonrpc"
 	fieldResult     = "result"
 	fieldType       = "type"
+	fieldName       = "name"
 	contentTypeText = "text"
 
 	methodInitialize    = "initialize"
@@ -125,12 +126,12 @@ func serve(input io.Reader, output io.Writer) error {
 				"id":         decodeID(message.ID),
 				fieldResult: map[string]any{
 					"protocolVersion": protocolVersion,
-					"agentInfo":       map[string]any{"name": "orka-security-scan-fixture", "version": "1"},
+					"agentInfo":       map[string]any{fieldName: "orka-security-scan-fixture", "version": "1"},
 					"agentCapabilities": map[string]any{
 						"mcpCapabilities": map[string]any{"http": true},
 					},
 					"authMethods": []any{map[string]any{
-						"id": apiKeyAuthMethod, "name": "API key",
+						"id": apiKeyAuthMethod, fieldName: "API key",
 					}},
 				},
 			}); err != nil {
@@ -244,7 +245,7 @@ func callAuthorityProbe(server mcpServer) error {
 	if _, err := callMCP(server, "authority-init", "initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "orka-security-scan-fixture", "version": "1"},
+		"clientInfo":      map[string]any{fieldName: "orka-security-scan-fixture", "version": "1"},
 	}); err != nil {
 		return err
 	}
@@ -271,7 +272,7 @@ func callAuthorityProbe(server mcpServer) error {
 		return errors.New("authority probe MCP tool was unavailable")
 	}
 	called, err := callMCP(server, "authority-call", "tools/call", map[string]any{
-		"name":      authorityProbeTool,
+		fieldName:   authorityProbeTool,
 		"arguments": map[string]any{"probe": "authority"},
 	})
 	if err != nil {

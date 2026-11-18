@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -87,8 +88,8 @@ func TestControllerMCPBrokerClientContextCancellationStopsTransport(t *testing.T
 	cancel()
 	select {
 	case err := <-result:
-		if err == nil {
-			t.Fatal("Call() succeeded after context cancellation")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("Call() lost local cancellation provenance")
 		}
 		if observed := <-cancellation; observed != context.Canceled {
 			t.Fatalf("broker transport context error = %v, want context.Canceled", observed)
@@ -100,6 +101,50 @@ func TestControllerMCPBrokerClientContextCancellationStopsTransport(t *testing.T
 		t.Fatal("Call() did not terminate promptly after context cancellation")
 	}
 }
+
+func TestControllerMCPBrokerClientCancellationPreservesIndependentResponses(t *testing.T) {
+	for _, outcome := range []string{"cancelled body", "transport error", "HTTP rejection", "completed"} {
+		t.Run(outcome, func(t *testing.T) {
+			client := newTestControllerMCPBrokerClient(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			client.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				cancel()
+				if outcome == "transport error" {
+					return nil, errors.New("independent transport failure with private detail")
+				}
+				response := testMCPBrokerHTTPResponse(t, request, "call-1")
+				if outcome != "completed" {
+					response.Body = cancelledMCPResponseBody{}
+				}
+				if outcome == "HTTP rejection" {
+					response.StatusCode = http.StatusForbidden
+				}
+				return response, nil
+			})
+			response, err := client.Call(ctx, testControllerMCPBrokerCallRequest(t, "call-1"))
+			switch outcome {
+			case "cancelled body":
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled body lost its cause: %v", err)
+				}
+			case "completed":
+				if err != nil || response.CallID != "call-1" {
+					t.Fatalf("complete response changed after cancellation: %v", err)
+				}
+			default:
+				if err == nil || errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "private") {
+					t.Fatalf("independent error changed or leaked detail: %v", err)
+				}
+			}
+		})
+	}
+}
+
+type cancelledMCPResponseBody struct{}
+
+func (cancelledMCPResponseBody) Read([]byte) (int, error) { return 0, context.Canceled }
+func (cancelledMCPResponseBody) Close() error             { return nil }
 
 func newTestControllerMCPBrokerClient(t *testing.T) *controllerMCPBrokerClient {
 	t.Helper()

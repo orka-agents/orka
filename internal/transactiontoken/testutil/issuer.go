@@ -27,6 +27,10 @@ import (
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
 
+const (
+	rsaSHA256Algorithm = "RS256"
+)
+
 type testingT interface {
 	Helper()
 	Fatalf(string, ...any)
@@ -63,7 +67,7 @@ func (i *Issuer) JWKSHandler() http.Handler {
 				"kty": "RSA",
 				"kid": i.kid,
 				"use": "sig",
-				"alg": "RS256",
+				"alg": rsaSHA256Algorithm,
 				"n":   base64.RawURLEncoding.EncodeToString(i.key.N.Bytes()),
 				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(i.key.PublicKey.E)).Bytes()),
 			}},
@@ -104,7 +108,7 @@ func (i *Issuer) SignClaims(claims transactiontoken.Claims, ttl time.Duration) (
 		}
 		claims.TransactionID = base64.RawURLEncoding.EncodeToString(random)
 	}
-	header := map[string]any{"alg": "RS256", "typ": transactiontoken.JWTType, "kid": i.kid}
+	header := map[string]any{"alg": rsaSHA256Algorithm, "typ": transactiontoken.JWTType, "kid": i.kid}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", err
@@ -137,7 +141,7 @@ func Verify(ctx context.Context, jwksURL, audience, token string) (*transactiont
 	if err := decodePart(parts[0], &header); err != nil {
 		return nil, err
 	}
-	if header.Algorithm != "RS256" || header.Type != transactiontoken.JWTType || header.KeyID == "" {
+	if header.Algorithm != rsaSHA256Algorithm || header.Type != transactiontoken.JWTType || header.KeyID == "" {
 		return nil, errors.New("invalid transaction-token JWT header")
 	}
 	publicKey, err := fetchRSAKey(ctx, jwksURL, header.KeyID)

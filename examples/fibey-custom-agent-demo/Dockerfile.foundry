@@ -1,0 +1,9 @@
+# syntax=docker/dockerfile:1
+# Build with the AgentKit repository as the context, using the same immutable
+# Fibey image as the direct ACP composition. Foundry provides Entra ingress auth.
+ARG AGENTKIT_IMAGE
+FROM ${AGENTKIT_IMAGE}
+COPY --chown=0:0 --chmod=0555 test/foundry-hosted-agent/foundry_live.py /opt/agentkit/foundry_live.py
+ENV PORT=8088
+EXPOSE 8088
+ENTRYPOINT ["/opt/agentkit/bin/python", "/opt/agentkit/foundry_live.py"]

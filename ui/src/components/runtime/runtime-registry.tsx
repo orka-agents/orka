@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError } from '@/lib/api-client'
 import { useAgentRuntimes, useRuntimePools } from '@/hooks/use-runtimes'
 import type { AgentRuntime, RuntimePool } from '@/schemas/runtime'
 
@@ -46,16 +46,11 @@ function CapacityMeter({ label, current = 0, maximum = 0 }: { label: string; cur
         <span className="text-muted-foreground">{label}</span>
         <span className="font-mono">{capacityText(current, maximum)}</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-label={`${label} capacity`}>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="img" aria-label={`${label} capacity: ${capacityText(current, maximum)}`}>
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
       </div>
     </div>
   )
-}
-
-function capabilityText(value?: boolean) {
-  if (value === undefined) return 'Unknown'
-  return value ? 'Yes' : 'No'
 }
 
 function RuntimePoolCard({ pool }: { pool: RuntimePool }) {
@@ -115,103 +110,6 @@ function RuntimePoolCard({ pool }: { pool: RuntimePool }) {
 
 function AgentRuntimeCard({ runtime }: { runtime: AgentRuntime }) {
   const observed = runtime.status?.observedCapabilities
-
-  if (runtime.spec.contractVersion === undefined) {
-    return (
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <ExternalLink className="h-4 w-4 text-primary" />
-                {runtime.metadata.name}
-              </CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">{runtime.spec.deployment.endpoint}</p>
-            </div>
-            <Badge variant="secondary" className={stateClass('Degraded')}>Not ready</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="text-sm"><span className="text-muted-foreground">Contract</span><div className="font-mono">Unclassified</div></div>
-          {runtime.status?.message && <p className="text-sm text-muted-foreground">{runtime.status.message}</p>}
-        </CardContent>
-      </Card>
-    )
-  }
-
-  if (runtime.spec.contractVersion === 'orka.harness.v1') {
-    const configured = runtime.spec.capabilities
-    const hasObservedCapabilities = observed !== undefined
-    const toolModes = hasObservedCapabilities
-      ? observed.toolExecutionModes ?? []
-      : configured?.toolExecutionModes ?? []
-    const brokeredToolClasses = hasObservedCapabilities
-      ? observed.brokeredToolClasses ?? []
-      : configured?.brokeredToolClasses ?? []
-    const supportsCancel = hasObservedCapabilities
-      ? observed.supportsCancel ?? false
-      : configured?.supportsCancel
-    const supportsRuntimeSessions = hasObservedCapabilities
-      ? observed.supportsRuntimeSessions ?? false
-      : configured?.supportsRuntimeSessions
-    const supportsContinuation = hasObservedCapabilities
-      ? observed.supportsContinuation ?? false
-      : configured?.supportsContinuation
-    const supportsArtifacts = hasObservedCapabilities
-      ? observed.supportsArtifacts ?? false
-      : configured?.supportsArtifacts
-
-    return (
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <ExternalLink className="h-4 w-4 text-primary" />
-                {runtime.metadata.name}
-              </CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">{runtime.spec.deployment.endpoint}</p>
-            </div>
-            <Badge
-              variant="secondary"
-              className={runtime.status?.ready ? stateClass('Ready') : stateClass('Degraded')}
-            >
-              {runtime.status?.ready ? 'Ready' : 'Not ready'}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-            <div><span className="text-muted-foreground">Contract</span><div className="font-mono">{runtime.spec.contractVersion}</div></div>
-            <div><span className="text-muted-foreground">Runtime name</span><div>{observed?.runtimeName ?? '—'}</div></div>
-            <div><span className="text-muted-foreground">Runtime version</span><div>{observed?.runtimeVersion ?? '—'}</div></div>
-            <div><span className="text-muted-foreground">Transport</span><div>{observed?.transport ?? '—'}</div></div>
-          </div>
-          <div className="grid gap-3 rounded-md border bg-muted/25 p-3 text-xs md:grid-cols-2 lg:grid-cols-3">
-            <div><span className="text-muted-foreground">Tool modes</span><div className="mt-0.5">{toolModes.length > 0 ? toolModes.join(', ') : '—'}</div></div>
-            <div><span className="text-muted-foreground">Brokered tool classes</span><div className="mt-0.5">{brokeredToolClasses.length > 0 ? brokeredToolClasses.join(', ') : '—'}</div></div>
-            <div><span className="text-muted-foreground">Concurrent turns</span><div className="mt-0.5 font-mono">{observed?.maxConcurrentTurns ?? '—'}</div></div>
-            <div><span className="text-muted-foreground">Maximum turn</span><div className="mt-0.5 font-mono">{observed?.maxTurnSeconds === undefined ? '—' : `${observed.maxTurnSeconds}s`}</div></div>
-            <div><span className="text-muted-foreground">Maximum output</span><div className="mt-0.5 font-mono">{observed?.maxOutputBytes === undefined ? '—' : `${observed.maxOutputBytes} bytes`}</div></div>
-            <div><span className="text-muted-foreground">Provider</span><div className="mt-0.5">{observed?.providerKind ?? '—'}</div></div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <Activity className="h-4 w-4 text-primary" />
-            <Badge variant="outline">Cancel: {capabilityText(supportsCancel)}</Badge>
-            <Badge variant="outline">Runtime sessions: {capabilityText(supportsRuntimeSessions)}</Badge>
-            <Badge variant="outline">Continuation: {capabilityText(supportsContinuation)}</Badge>
-            <Badge variant="outline">Artifacts: {capabilityText(supportsArtifacts)}</Badge>
-            {hasObservedCapabilities && <Badge variant="outline">Suspend: {capabilityText(observed.supportsSuspend ?? false)}</Badge>}
-            {hasObservedCapabilities && <Badge variant="outline">Workspace snapshot: {capabilityText(observed.supportsWorkspaceSnapshot ?? false)}</Badge>}
-          </div>
-          {runtime.status?.lastValidated && (
-            <p className="text-xs text-muted-foreground">Validated {new Date(runtime.status.lastValidated).toLocaleString()}</p>
-          )}
-          {runtime.status?.message && <p className="text-sm text-muted-foreground">{runtime.status.message}</p>}
-        </CardContent>
-      </Card>
-    )
-  }
 
   const configured = runtime.spec.capabilities
   const profile = observed?.runtimeProfileDigest ? {
@@ -278,15 +176,20 @@ function AgentRuntimeCard({ runtime }: { runtime: AgentRuntime }) {
 
 function RuntimeAPIError({ error, resource }: { error: unknown; resource: string }) {
   const unavailable = error instanceof ApiError && (error.status === 404 || error.status === 501)
+  const forbidden = isForbiddenError(error)
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <EmptyState
-          icon={Activity}
-          headline={unavailable ? `${resource} API unavailable` : `Could not load ${resource.toLowerCase()}`}
-          hint={unavailable
-            ? 'This controller build does not expose the ACP runtime registry REST endpoints yet.'
-            : error instanceof Error ? error.message : 'The runtime registry request failed.'}
+          icon={forbidden ? ShieldCheck : Activity}
+          headline={forbidden
+            ? `Not authorized to view ${resource} resources`
+            : unavailable ? `${resource} API unavailable` : `Could not load ${resource.toLowerCase()}`}
+          hint={forbidden
+            ? `Your token lacks read permission for ${resource} resources (${error.message}).`
+            : unavailable
+              ? 'This controller build does not expose the ACP runtime registry REST endpoints yet.'
+              : error instanceof Error ? error.message : 'The runtime registry request failed.'}
         />
       </CardContent>
     </Card>

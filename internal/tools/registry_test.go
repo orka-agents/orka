@@ -123,50 +123,6 @@ func TestRegistry_Get(t *testing.T) {
 	}
 }
 
-func TestRegistry_List(t *testing.T) {
-	tests := []struct {
-		name    string
-		tools   []Tool
-		wantLen int
-	}{
-		{
-			name:    "empty registry",
-			tools:   nil,
-			wantLen: 0,
-		},
-		{
-			name: "one tool",
-			tools: []Tool{
-				&mockTool{name: testTool1Name},
-			},
-			wantLen: 1,
-		},
-		{
-			name: "multiple tools",
-			tools: []Tool{
-				&mockTool{name: testTool1Name},
-				&mockTool{name: testTool2Name},
-				&mockTool{name: "tool3"},
-			},
-			wantLen: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := NewRegistry()
-			for _, tool := range tt.tools {
-				r.Register(tool)
-			}
-
-			list := r.List()
-			if len(list) != tt.wantLen {
-				t.Errorf("List() len = %d, want %d", len(list), tt.wantLen)
-			}
-		})
-	}
-}
-
 func TestRegistry_Execute(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -369,5 +325,39 @@ func TestRegisterBuiltinTools(t *testing.T) {
 		if _, ok := DefaultRegistry.Get(name); !ok {
 			t.Errorf("expected built-in tool %q to be registered", name)
 		}
+	}
+}
+
+func TestRegistryExecuteDecodesStringifiedObjectArgs(t *testing.T) {
+	var received string
+	r := NewRegistry()
+	r.Register(&mockTool{
+		name:       "configure",
+		parameters: json.RawMessage(`{"type":"object","properties":{"workspace":{"type":"object"},"label":{"type":"string"}}}`),
+		executeFunc: func(_ context.Context, args json.RawMessage) (string, error) {
+			received = string(args)
+			return "ok", nil
+		},
+	})
+
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{name: "object sent as a string", args: `{"workspace":"{\"gitRepo\":\"https://github.com/acme/api\",\"depth\":9007199254740993}"}`, want: `{"workspace":{"gitRepo":"https://github.com/acme/api","depth":9007199254740993}}`},
+		{name: "string property left alone", args: `{"label":"{\"k\":\"v\"}"}`, want: `{"label":"{\"k\":\"v\"}"}`},
+		{name: "string that is not an object", args: `{"workspace":"main"}`, want: `{"workspace":"main"}`},
+		{name: "object passed through", args: `{"workspace":{"gitRepo":"x"}}`, want: `{"workspace":{"gitRepo":"x"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := r.Execute(context.Background(), "configure", json.RawMessage(tt.args)); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if received != tt.want {
+				t.Errorf("tool received %s, want %s", received, tt.want)
+			}
+		})
 	}
 }

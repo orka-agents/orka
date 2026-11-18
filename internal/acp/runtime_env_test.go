@@ -56,11 +56,20 @@ func TestPrepareSessionPathsRejectsUnsafeInputs(t *testing.T) {
 		}
 	}
 	symlink := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(t.TempDir(), symlink); err != nil {
+	target := t.TempDir()
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, symlink); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PrepareSessionPaths(symlink, "session"); err == nil {
 		t.Fatal("symlink base unexpectedly accepted")
+	}
+	after, err := os.Stat(target)
+	if err != nil || after.Mode() != before.Mode() {
+		t.Fatalf("rejected symlink changed target permissions: %v", err)
 	}
 }
 
@@ -74,7 +83,7 @@ func TestBuildChildEnvironmentStartsFromEmptyAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := EnvironmentMap(env)
+	values := environmentMap(env)
 	if _, ok := values["SUPERVISOR_SECRET"]; ok {
 		t.Fatal("ambient supervisor environment leaked")
 	}
@@ -214,12 +223,6 @@ func TestUIDAllocatorPersistsHighWaterBeforeReturningIdentity(t *testing.T) {
 	}
 }
 
-func TestSessionIdentityLabel(t *testing.T) {
-	if got := SessionIdentityLabel(42, 7); got != "uid-42-g7" {
-		t.Fatalf("label = %q", got)
-	}
-}
-
 func TestFinalizeSessionOwnershipNonRootOwnIdentity(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o600); err != nil {
@@ -341,5 +344,198 @@ func TestSessionOwnershipReclaimOrdersParentsAndChownBeforeChmod(t *testing.T) {
 		if eventIndex["chown:"+path] >= eventIndex["chmod:"+path] {
 			t.Fatalf("reclaim order chmods %s before chown: %v", path, events)
 		}
+	}
+}
+
+// GitHub repository identities are case-insensitive: a continuation that
+// changes only capitalization must be judged the same repository so the
+// preserved durable tree resumes instead of being wiped.
+func TestSameDurableWorkspaceIdentity(t *testing.T) {
+	const canonicalRepo = "github.com/orka-agents/orka"
+	cases := []struct {
+		first, second string
+		want          bool
+	}{
+		{"github.com/Orka-Agents/Orka", canonicalRepo, true},
+		{canonicalRepo, canonicalRepo, true},
+		{canonicalRepo, "github.com/orka-agents/other", false},
+		{"gitlab.com/Orka/Repo", "gitlab.com/orka/repo", false},
+		{"__no_workspace__", "__no_workspace__", true},
+		{"", "", true},
+	}
+	for _, tc := range cases {
+		if got := SameDurableWorkspaceIdentity(tc.first, tc.second); got != tc.want {
+			t.Fatalf("SameDurableWorkspaceIdentity(%q, %q) = %v, want %v", tc.first, tc.second, got, tc.want)
+		}
+	}
+}
+
+func environmentMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func TestReadOnlyWorkspaceProtectionModes(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		durable      bool
+		protectsRoot bool
+	}{
+		{name: "workspace inside session root", protectsRoot: true},
+		{name: "durable workspace outside session root", durable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "session")
+			workspace := filepath.Join(root, "workspace")
+			if tc.durable {
+				workspace = filepath.Join(t.TempDir(), "ws-session")
+			}
+			nested := filepath.Join(workspace, "dir")
+			if err := os.MkdirAll(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			files := map[string]os.FileMode{
+				filepath.Join(workspace, "readme"):          0o644,
+				filepath.Join(workspace, "tool"):            0o755,
+				filepath.Join(nested, "group-writable"):     0o664,
+				filepath.Join(nested, "private"):            0o600,
+				filepath.Join(nested, "private-executable"): 0o700,
+			}
+			for path, mode := range files {
+				if err := os.WriteFile(path, []byte("x"), mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := filepath.Join(workspace, "link")
+			if err := os.Symlink("readme", link); err != nil {
+				t.Fatal(err)
+			}
+
+			var events []string
+			chowned := map[string]bool{}
+			chmods := map[string]os.FileMode{}
+			err := protectReadOnlySessionWorkspace(root, workspace, 0, 20000,
+				func(path string, uid, gid int) error {
+					if uid != 0 || gid != 20000 {
+						t.Fatalf("ownership for %s = %d:%d, want 0:20000", path, uid, gid)
+					}
+					chowned[path] = true
+					events = append(events, "chown:"+path)
+					return nil
+				},
+				func(path string, mode os.FileMode) error {
+					if !chowned[path] {
+						t.Fatalf("chmod %s before taking ownership", path)
+					}
+					chmods[path] = mode
+					events = append(events, "chmod:"+path)
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if chowned[root] != tc.protectsRoot {
+				t.Fatalf("session root protected = %v, want %v", chowned[root], tc.protectsRoot)
+			}
+			if tc.protectsRoot {
+				if chmods[root] != 0o710 || events[0] != "chown:"+root {
+					t.Fatalf("session root must be protected first with mode 710: %v", events)
+				}
+			}
+			want := map[string]os.FileMode{
+				workspace: 0o750, nested: 0o750,
+				filepath.Join(nested, "group-writable"):     0o644,
+				filepath.Join(nested, "private"):            0o640,
+				filepath.Join(nested, "private-executable"): 0o750,
+			}
+			for path := range files {
+				if _, ok := want[path]; !ok {
+					want[path] = 0 // already read-only for the group: no chmod
+				}
+			}
+			for path, mode := range want {
+				if !chowned[path] {
+					t.Fatalf("%s was not protected", path)
+				}
+				if chmods[path] != mode {
+					t.Fatalf("chmod for %s = %o, want %o", path, chmods[path], mode)
+				}
+			}
+			if !chowned[link] || chmods[link] != 0 {
+				t.Fatalf("symlink must be re-owned without chmod: chowned=%v mode=%o", chowned[link], chmods[link])
+			}
+		})
+	}
+}
+
+func TestProtectReadOnlySessionWorkspaceNonRootOwnIdentity(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid == 0 {
+		t.Skip("non-root behavior")
+	}
+	root := t.TempDir()
+	paths := SessionPaths{Root: root, Workspace: filepath.Join(root, "workspace")}
+	if err := ProtectReadOnlySessionWorkspace(paths, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProtectReadOnlySessionWorkspace(paths, uid+1, gid+1); err == nil {
+		t.Fatal("non-root supervisor protected a workspace for another identity")
+	}
+}
+
+func TestPrepareReadOnlyWorkspaceModes(t *testing.T) {
+	workspace := t.TempDir()
+	nested := filepath.Join(workspace, ".claude")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]os.FileMode{
+		filepath.Join(workspace, "private"):           {0o600, 0o640},
+		filepath.Join(workspace, "private-tool"):      {0o700, 0o750},
+		filepath.Join(nested, "settings.json"):        {0o600, 0o640},
+		filepath.Join(workspace, "world-writable"):    {0o666, 0o644},
+		filepath.Join(workspace, "already-read-only"): {0o644, 0o644},
+	}
+	for path, modes := range want {
+		if err := os.WriteFile(path, []byte("x"), modes[0]); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, modes[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("private", filepath.Join(workspace, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareReadOnlyWorkspaceModes(workspace); err != nil {
+		t.Fatal(err)
+	}
+	for path, modes := range want {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != modes[1] {
+			t.Fatalf("mode for %s = %o, want %o", path, info.Mode().Perm(), modes[1])
+		}
+	}
+	if info, err := os.Lstat(nested); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("directory mode changed: %v, %v", info, err)
+	}
+	if err := PrepareReadOnlyWorkspaceModes("relative"); err == nil {
+		t.Fatal("relative workspace accepted")
 	}
 }

@@ -26,10 +26,10 @@ const (
 	ToolTypeFunction     = "function"
 	ToolTypeExtension    = "extension"
 	ToolTypeDatastore    = "datastore"
-	ContentCaptureNone   = "none"
-	ContentCaptureSpan   = "span"
-	ContentCaptureEvent  = "event"
-	ContentCaptureAll    = "span_and_event"
+
+	// ErrorTypeOther is the semantic-convention fallback error.type value
+	// when no more specific low-cardinality class is known.
+	ErrorTypeOther = "_OTHER"
 )
 
 const (

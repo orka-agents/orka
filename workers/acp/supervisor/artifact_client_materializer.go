@@ -17,29 +17,39 @@ import (
 	"github.com/orka-agents/orka/internal/safesymlink"
 )
 
-type WorkspaceMaterializerLimits struct {
+// Fixed bounds for materializing a baseline workspace archive into a session.
+const (
+	workspaceMaterializerMaxEntries       = 100_000
+	workspaceMaterializerMaxExpandedBytes = 1 << 30
+	workspaceMaterializerMaxPathBytes     = 4096
+)
+
+type workspaceMaterializerLimits struct {
 	MaxEntries       int
 	MaxExpandedBytes int64
 	MaxPathBytes     int
 }
 
-type remoteWorkspaceMaterializer struct {
-	client *ArtifactClient
-	limits WorkspaceMaterializerLimits
+var defaultWorkspaceMaterializerLimits = workspaceMaterializerLimits{
+	MaxEntries:       workspaceMaterializerMaxEntries,
+	MaxExpandedBytes: workspaceMaterializerMaxExpandedBytes,
+	MaxPathBytes:     workspaceMaterializerMaxPathBytes,
 }
 
-func NewRemoteWorkspaceMaterializer(client *ArtifactClient, limits WorkspaceMaterializerLimits) (WorkspaceMaterializer, error) {
+type remoteWorkspaceMaterializer struct {
+	client *ArtifactClient
+	limits workspaceMaterializerLimits
+}
+
+func NewRemoteWorkspaceMaterializer(client *ArtifactClient) (WorkspaceMaterializer, error) {
+	return newRemoteWorkspaceMaterializerWithLimits(client, defaultWorkspaceMaterializerLimits)
+}
+
+// newRemoteWorkspaceMaterializerWithLimits exists so tests can exercise the
+// bounds with small archives; production always uses the package constants.
+func newRemoteWorkspaceMaterializerWithLimits(client *ArtifactClient, limits workspaceMaterializerLimits) (WorkspaceMaterializer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("artifact client is required")
-	}
-	if limits.MaxEntries == 0 {
-		limits.MaxEntries = 100_000
-	}
-	if limits.MaxExpandedBytes == 0 {
-		limits.MaxExpandedBytes = 1 << 30
-	}
-	if limits.MaxPathBytes == 0 {
-		limits.MaxPathBytes = 4096
 	}
 	if limits.MaxEntries < 1 || limits.MaxExpandedBytes < 1 || limits.MaxPathBytes < 1 {
 		return nil, fmt.Errorf("workspace materializer limits must be positive")
@@ -121,6 +131,9 @@ func (m *remoteWorkspaceMaterializer) Materialize(ctx context.Context, request h
 		if err := validateMaterializedWorkspaceBoundary(installRoot, m.limits); err != nil {
 			return err
 		}
+	}
+	if err := syncMaterializedTree(installRoot); err != nil {
+		return fmt.Errorf("sync materialized workspace: %w", err)
 	}
 	if err := os.Remove(destination); err != nil {
 		return fmt.Errorf("replace empty workspace destination: %w", err)
@@ -211,7 +224,7 @@ func (m *remoteWorkspaceMaterializer) extract(reader io.Reader, root string) err
 	return writeMaterializedSymlinks(root, links)
 }
 
-func validateMaterializedWorkspaceBoundary(root string, limits WorkspaceMaterializerLimits) error {
+func validateMaterializedWorkspaceBoundary(root string, limits workspaceMaterializerLimits) error {
 	paths := make(map[string]struct{})
 	links := make(map[string]string)
 	err := filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
@@ -339,12 +352,10 @@ func writeMaterializedFile(root, target string, size int64, executable bool, rea
 	if err != nil {
 		return fmt.Errorf("create materialized workspace file: %w", err)
 	}
+	// Durability comes from one syncMaterializedTree before installation.
 	written, copyErr := io.CopyN(file, reader, size)
 	if copyErr == nil && written != size {
 		copyErr = io.ErrUnexpectedEOF
-	}
-	if copyErr == nil {
-		copyErr = file.Sync()
 	}
 	closeErr := file.Close()
 	if copyErr == nil {

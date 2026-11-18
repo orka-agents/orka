@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded for built-in agent Tasks by ACP v2 execution and delivery status.
+Superseded for built-in agent Tasks by Orka harness v2 execution and delivery status.
 
 The earlier prototype reported worker-owned upstream workspace lifecycle. Current ACP agent Tasks expose provider-neutral control state through:
 

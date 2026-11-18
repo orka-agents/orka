@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 # Build the UI
-FROM --platform=$BUILDPLATFORM docker.io/oven/bun:1@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS ui-builder
+FROM --platform=$BUILDPLATFORM docker.io/oven/bun:1@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS ui-builder
 WORKDIR /app
 COPY ui/package.json ui/bun.lock ./
 RUN bun install --frozen-lockfile
@@ -9,7 +9,7 @@ COPY ui/ .
 RUN bun run build
 
 # Build the manager binary
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0@sha256:65b6f280bf050ec5af12716857e8ea8439d694dbba8f31ceeb7630670071f2bb AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -17,9 +17,9 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN go mod download
+# Download modules into BuildKit's module cache, which the Go builds of the
+# other images share; the build step mounts it and the Go build cache too.
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
@@ -32,19 +32,24 @@ COPY --from=ui-builder /app/dist/ internal/uiembed/dist/
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager ./cmd \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o orka-admission ./cmd/orka-admission \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o scm-egress-proxy ./cmd/orka-scm-egress-proxy
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o manager ./cmd \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-admission ./cmd/orka-admission \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o scm-egress-proxy ./cmd/orka-scm-egress-proxy \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o compat-router ./cmd/orka-compat-router \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-host-agent ./cmd/orka-host-agent
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
+FROM gcr.io/distroless/static:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/orka-admission .
 COPY --from=builder /workspace/provider-auth-proxy .
 COPY --from=builder /workspace/scm-egress-proxy .
+COPY --from=builder /workspace/compat-router .
+COPY --from=builder /workspace/orka-host-agent .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

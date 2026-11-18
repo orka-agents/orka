@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"unicode/utf8"
@@ -75,12 +76,8 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 		return nil, nil
 	}
-	// Only serialize a workspace when the user actually configured a workspace
-	// field: a bare {intent: "read"} — whether defaulted or passed explicitly —
-	// would make an otherwise valid prompt-only agent Task fail preflight in
-	// harness-v1 mode, which requires gitRepo on any non-nil workspace. An
-	// explicit write intent is a real configuration and proceeds so its
-	// missing-gitRepo validation error surfaces instead of being dropped.
+	// Omit the implicit read workspace when no workspace fields were configured.
+	// Preserve explicit write intent so its required repository is validated.
 	if !otherWorkspaceFlagsUsed && (!intentFlagUsed || intent != string(corev1alpha1.WorkspaceIntentWrite)) {
 		return nil, nil
 	}
@@ -371,7 +368,7 @@ func addRepositoryIdentity(target map[string]any, key, provider, id string) {
 	provider = strings.TrimSpace(provider)
 	id = strings.TrimSpace(id)
 	if provider != "" && id != "" {
-		target[key] = map[string]any{"provider": provider, "id": id}
+		target[key] = map[string]any{cliProviderKey: provider, "id": id}
 	}
 }
 
@@ -380,18 +377,25 @@ func addCredentialRef(target map[string]any, field, name, secretKey string) {
 	if name == "" {
 		return
 	}
-	ref := map[string]any{"name": name}
+	ref := map[string]any{cliNameKey: name}
 	if secretKey = strings.TrimSpace(secretKey); secretKey != "" {
 		ref["key"] = secretKey
 	}
 	target[field] = ref
 }
 
+const executionOutcomeUnknown = "OutcomeUnknown"
+
 func newTaskRuntimeStatusCmd() *cobra.Command {
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "status <name>",
-		Short: "Show durable execution, delivery, and runtime-pool status",
-		Args:  cobra.ExactArgs(1),
+		Short: "Show whether a task finished and where its change went",
+		Long: `Show a task's phase and, for write-intent workspaces, its delivery state and
+publication branch. A failed task shows its reason. --verbose adds the
+execution and runtime-pool details (attempt, RuntimePool, runtime instance,
+session generation, verified remote commit) for tracing a problem.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
 			detail, err := c.GetTask(cmd.Context(), args[0], client.GetOptions{Namespace: c.Namespace})
@@ -406,20 +410,109 @@ func newTaskRuntimeStatusCmd() *cobra.Command {
 			if format != outputTable {
 				return printStructured(cmd, status)
 			}
-			return printTaskRuntimeStatusTable(cmd, status)
+			if verbose {
+				return printTaskRuntimeStatusTable(cmd, status)
+			}
+			writeIntent := strings.EqualFold(nestedString(*detail, "spec", "workspace", "intent"), string(corev1alpha1.WorkspaceIntentWrite))
+			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), taskWaitingOn(*detail), writeIntent)
 		},
 	}
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show execution and runtime-pool details as well")
 	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
+// printTaskRuntimeStatusSummary prints the rows a person needs after
+// creating a Task: whether it finished, and where the change went. Delivery
+// rows appear only for write-intent workspaces (or once delivery status
+// exists), and a failed or unknown outcome shows its reason.
+func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason, waitingOn string, writeIntent bool) error {
+	execution := nestedMap(status, "execution")
+	delivery := nestedMap(status, "delivery")
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
+	rows := [][2]string{
+		{labelTask, anyString(status[cliTaskCommand])},
+		{labelPhase, anyString(status["phase"])},
+	}
+	if waitingOn != "" {
+		rows = append(rows, [2]string{labelWaitingOn, waitingOn})
+	}
+	if writeIntent || len(delivery) > 0 {
+		rows = append(rows,
+			[2]string{labelDelivery, anyString(delivery["state"])},
+			[2]string{labelPublicationBranch, anyString(delivery["branch"])},
+		)
+		if pr := nestedString(delivery, "prReceipt", "url"); pr != "" {
+			rows = append(rows, [2]string{labelPullRequest, pr})
+		}
+	}
+	if reason != "" {
+		rows = append(rows, [2]string{labelReason, reason})
+	}
+	for _, row := range rows {
+		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
+	}
+	if execution["state"] == executionOutcomeUnknown || execution["outcome"] == executionOutcomeUnknown {
+		fmt.Fprintln(w, "Replay policy\tTerminal; create a new Task explicitly. No automatic replay.") //nolint:errcheck
+	}
+	return w.Flush()
+}
+
+// taskFailureReason returns a one-line reason for a Task that failed, was
+// cancelled, or ended with an unknown outcome, and nothing otherwise. The
+// safe status projection carries the ACP execution and delivery details;
+// container and native AI Tasks record their failure in the Task's
+// top-level status message or workload execution outcome, which are read
+// from the full Task so the short view shows the controller's error.
+func taskFailureReason(status map[string]any, task map[string]any) string {
+	execution := nestedMap(status, "execution")
+	delivery := nestedMap(status, "delivery")
+	taskStatus := nestedMap(task, "status")
+	workload := nestedMap(taskStatus, "executionOutcome")
+	phase := anyString(status["phase"])
+	failed := phase == string(corev1alpha1.TaskPhaseFailed) || phase == string(corev1alpha1.TaskPhaseCancelled) ||
+		execution["outcome"] == executionOutcomeUnknown || execution["state"] == executionOutcomeUnknown ||
+		strings.EqualFold(anyString(execution["outcome"]), "Failed") ||
+		strings.EqualFold(anyString(delivery["outcome"]), "Failed")
+	if !failed {
+		return ""
+	}
+	reason := anyString(execution["reason"])
+	if reason == "" {
+		reason = anyString(workload["reason"])
+	}
+	message := anyString(execution["message"])
+	if message == "" {
+		message = anyString(delivery["message"])
+	}
+	if message == "" {
+		message = anyString(workload["message"])
+	}
+	if message == "" {
+		message = anyString(taskStatus["message"])
+	}
+	if reason == "" && message == "" {
+		if outcome := anyString(execution["outcome"]); outcome != "" {
+			return outcome
+		}
+		return phase
+	}
+	return oneLine(joinNonEmpty(reason, message, ": "))
+}
+
 func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
 	out := map[string]any{
-		"task":      client.StringField(task, "metadata", "name"),
-		"namespace": client.StringField(task, "metadata", "namespace"),
+		cliTaskCommand:    client.StringField(task, "metadata", cliNameKey),
+		cliNamespaceQuery: client.StringField(task, "metadata", cliNamespaceQuery),
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
+	// A Task awaiting approval stays Running, so the action it waits on is
+	// reported in every output, not only the default summary.
+	if waitingOn := taskWaitingOn(task); waitingOn != "" {
+		out["waitingOn"] = waitingOn
+	}
 	if execution := nestedMap(status, "execution"); len(execution) > 0 {
 		out["execution"] = copyKeys(execution,
 			"state", "outcome", "reason", "attempt", "promptID", "runtimePoolName", "runtimePoolUID",
@@ -441,25 +534,29 @@ func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) erro
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
 	rows := [][2]string{
-		{"Task", anyString(status["task"])},
-		{"Namespace", anyString(status["namespace"])},
-		{"Phase", anyString(status["phase"])},
-		{"Execution", anyString(execution["state"])},
+		{labelTask, anyString(status[cliTaskCommand])},
+		{labelNamespace, anyString(status[cliNamespaceQuery])},
+		{labelPhase, anyString(status["phase"])},
+		{labelExecution, anyString(execution["state"])},
 		{"Execution outcome", anyString(execution["outcome"])},
 		{"Execution reason", anyString(execution["reason"])},
 		{"Attempt", anyString(execution["attempt"])},
 		{"RuntimePool", anyString(execution["runtimePoolName"])},
 		{"Runtime instance", compactCLIValue(anyString(execution["runtimeInstanceID"]))},
 		{"Runtime session generation", anyString(execution["runtimeSessionGeneration"])},
-		{"Delivery", anyString(delivery["state"])},
+		{labelDelivery, anyString(delivery["state"])},
 		{"Delivery outcome", anyString(delivery["outcome"])},
-		{"Publication branch", anyString(delivery["branch"])},
+		{"Delivery message", anyString(delivery["message"])},
+		{labelPublicationBranch, anyString(delivery["branch"])},
 		{"Verified remote", compactCLIValue(anyString(delivery["verifiedRemoteSHA"]))},
+	}
+	if waitingOn := anyString(status["waitingOn"]); waitingOn != "" {
+		rows = slices.Insert(rows, 3, [2]string{labelWaitingOn, waitingOn})
 	}
 	for _, row := range rows {
 		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
 	}
-	if execution["state"] == "OutcomeUnknown" || execution["outcome"] == "OutcomeUnknown" {
+	if execution["state"] == executionOutcomeUnknown || execution["outcome"] == executionOutcomeUnknown {
 		fmt.Fprintln(w, "Replay policy\tTerminal; create a new Task explicitly. No automatic replay.") //nolint:errcheck
 	}
 	return w.Flush()

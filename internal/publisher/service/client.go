@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +45,26 @@ func (e *ClientError) Error() string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("workspace publisher request failed with status %d and code %q", e.StatusCode, e.Response.Code)
+}
+
+// transportError is a request that got no response. It does not unwrap, so
+// errors.Is and errors.As see one opaque failure; TransportCause exposes the
+// underlying error to callers that classify connection failures.
+type transportError struct {
+	cause error
+}
+
+func (e *transportError) Error() string {
+	return "workspace publisher transport failed"
+}
+
+// TransportCause returns the error behind a Workspace/Publisher request that
+// got no response, or nil when err is not such a failure.
+func TransportCause(err error) error {
+	if transport, ok := errors.AsType[*transportError](err); ok {
+		return transport.cause
+	}
+	return nil
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -103,7 +124,7 @@ func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 
 func (c *Client) Capabilities(ctx context.Context) (CapabilitiesResponse, error) {
 	var response CapabilitiesResponse
-	err := c.get(ctx, CapabilitiesPath, &response)
+	err := c.get(ctx, CapabilitiesPath+"?features="+PullRequestPresentationFeature, &response)
 	return response, err
 }
 
@@ -150,9 +171,35 @@ func (c *Client) ReclaimPublication(ctx context.Context, request PublicationRecl
 }
 
 func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestReconcileRequest) (PullRequestReconcileResponse, error) {
-	var response PullRequestReconcileResponse
-	err := c.post(ctx, OperationPullRequestReconcile, request.Metadata, request, &response)
-	return response, err
+	ctx, cancel := requestContext(ctx)
+	defer cancel()
+	// Discovery and the mutation can land on different pods during a rollout.
+	// A strict legacy JSON rejection happens before any SCM effect or journal
+	// reservation. Retry only that rejection with the same immutable request.
+	retryDeadline := time.NewTimer(2 * time.Minute)
+	defer retryDeadline.Stop()
+	hasPresentation := request.Intent.Title != "" || request.Intent.Body != "" || request.Intent.TaskName != "" || request.Intent.TaskNamespace != ""
+	for {
+		var response PullRequestReconcileResponse
+		err := c.post(ctx, OperationPullRequestReconcile, request.Metadata, request, &response)
+		failure, rejected := errors.AsType[*ClientError](err)
+		if !hasPresentation || !rejected || failure.StatusCode != http.StatusBadRequest ||
+			failure.Response.Code != "invalid_request" || failure.Response.Message != "pull request reconcile JSON is invalid" {
+			return response, err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return response, ctx.Err()
+		case <-retryDeadline.C:
+			timer.Stop()
+			return response, err
+		case <-timer.C:
+			// Drop idle connections pinned to a legacy Service backend before retrying.
+			c.httpClient.CloseIdleConnections()
+		}
+	}
 }
 
 // defaultRequestTimeout bounds publisher requests whose caller context carries
@@ -171,7 +218,7 @@ func (c *Client) get(ctx context.Context, path string, target any) error {
 	ctx, cancel := requestContext(ctx)
 	defer cancel()
 	endpoint := *c.baseURL
-	endpoint.Path = path
+	endpoint.Path, endpoint.RawQuery, _ = strings.Cut(path, "?")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return fmt.Errorf("create workspace publisher request")
@@ -218,7 +265,7 @@ func (c *Client) post(ctx context.Context, operation Operation, metadata Operati
 func (c *Client) do(request *http.Request, target any) error {
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("workspace publisher transport failed")
+		return &transportError{cause: err}
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if response.StatusCode >= 300 && response.StatusCode < 400 && strings.TrimSpace(response.Header.Get("Location")) != "" {

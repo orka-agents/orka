@@ -38,10 +38,10 @@ func repositoryScanConfiguredCredentialRefs(scan *corev1alpha1.RepositoryScan) [
 	}
 	return []repositoryScanCredentialRef{
 		{field: "spec.gitSecretRef", ref: scan.Spec.GitSecretRef},
-		{field: "spec.readCredentialRef", ref: scan.Spec.ReadCredentialRef},
-		{field: "spec.publicationReadCredentialRef", ref: scan.Spec.PublicationReadCredentialRef},
-		{field: "spec.publicationCredentialRef", ref: scan.Spec.PublicationCredentialRef},
-		{field: "spec.forgeCredentialRef", ref: scan.Spec.ForgeCredentialRef},
+		{field: readCredentialRefPath, ref: scan.Spec.ReadCredentialRef},
+		{field: publicationReadCredentialRefPath, ref: scan.Spec.PublicationReadCredentialRef},
+		{field: publicationCredentialRefPath, ref: scan.Spec.PublicationCredentialRef},
+		{field: forgeCredentialRefPath, ref: scan.Spec.ForgeCredentialRef},
 	}
 }
 
@@ -50,10 +50,10 @@ func repositoryScanPatchCredentialRefs(scan *corev1alpha1.RepositoryScan) ([]rep
 		return nil, fmt.Errorf("repository scan is required")
 	}
 	refs := []repositoryScanCredentialRef{
-		{field: "spec.readCredentialRef", ref: scan.Spec.ReadCredentialRef},
-		{field: "spec.publicationReadCredentialRef", ref: scan.Spec.PublicationReadCredentialRef},
-		{field: "spec.publicationCredentialRef", ref: scan.Spec.PublicationCredentialRef},
-		{field: "spec.forgeCredentialRef", ref: scan.Spec.ForgeCredentialRef},
+		{field: readCredentialRefPath, ref: scan.Spec.ReadCredentialRef},
+		{field: publicationReadCredentialRefPath, ref: scan.Spec.PublicationReadCredentialRef},
+		{field: publicationCredentialRefPath, ref: scan.Spec.PublicationCredentialRef},
+		{field: forgeCredentialRefPath, ref: scan.Spec.ForgeCredentialRef},
 	}
 	seen := make(map[string]string, len(refs))
 	for _, credential := range refs {
@@ -109,6 +109,12 @@ func repositoryScanPatchTaskWorkspace(scan *corev1alpha1.RepositoryScan, branch 
 	workspace := repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentWrite)
 	if workspace != nil {
 		workspace.PushBranch = strings.TrimSpace(branch)
+		// The supervisor's delta check inspects the changed files' new
+		// content, so a remediation that removes a hardcoded credential
+		// still publishes (the secret is gone from the new content) while a
+		// delta that introduces one fails closed — same policy the monitor
+		// implementation tasks use.
+		workspace.RejectSecretLikeContent = true
 	}
 	return workspace
 }

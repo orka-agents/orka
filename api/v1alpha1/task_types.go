@@ -40,6 +40,19 @@ const (
 	TaskPhaseCancelled  TaskPhase = "Cancelled"
 )
 
+// IsTerminal reports whether the phase is final: Succeeded, Failed, or
+// Cancelled. Scheduled is not terminal; a recurring parent stays Scheduled.
+// Empty and unknown phases are not terminal, so callers that gate cleanup or
+// accounting on this fail safe by treating the Task as still live.
+func (p TaskPhase) IsTerminal() bool {
+	switch p {
+	case TaskPhaseSucceeded, TaskPhaseFailed, TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // ConcurrencyPolicy describes how the controller will handle concurrent scheduled runs.
 // +kubebuilder:validation:Enum=Allow;Forbid
 type ConcurrencyPolicy string
@@ -125,6 +138,19 @@ type TaskTransaction struct {
 	Context map[string]string `json:"context,omitempty"`
 }
 
+// TaskWebhookEvent is an opt-in, non-terminal webhook event (ADR 0053).
+// +kubebuilder:validation:Enum=task.approval_requested;task.approval_resolved
+type TaskWebhookEvent string
+
+const (
+	// TaskWebhookEventApprovalRequested notifies when a human approval for the
+	// Task is requested.
+	TaskWebhookEventApprovalRequested TaskWebhookEvent = "task.approval_requested"
+	// TaskWebhookEventApprovalResolved notifies when a requested approval is
+	// approved, declined, expired, or cancelled.
+	TaskWebhookEventApprovalResolved TaskWebhookEvent = "task.approval_resolved"
+)
+
 // TaskSpec defines the desired state of Task
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
@@ -133,7 +159,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt) && (!has(self.prompt) || self.prompt == oldSelf.prompt))",message="agent prompt is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef) && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))",message="agentRef is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime) && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))",message="agentRuntime is immutable for agent Tasks"
-// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))",message="sessionRef is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace))",message="workspace is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout))",message="timeout is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
@@ -141,6 +167,10 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="!has(self.webhookEvents) || size(self.webhookEvents) == 0 || (has(self.webhookURL) && size(self.webhookURL) > 0)",message="webhookEvents requires webhookURL"
+// +kubebuilder:validation:XValidation:rule="!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type == 'ai' && !has(self.sessionRef))",message="ai.memoryConsolidation requires an ai Task without sessionRef"
+// +kubebuilder:validation:XValidation:rule="(has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai) && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation) || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)",message="ai.memoryConsolidation is immutable"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -181,11 +211,22 @@ type TaskSpec struct {
 	// +optional
 	WebhookURL string `json:"webhookURL,omitempty"`
 
+	// WebhookEvents opts spec.webhookURL into non-terminal notices (ADR 0053).
+	// Terminal notices (task.succeeded, task.failed, task.cancelled) are always
+	// sent and cannot be listed here; empty or absent keeps terminal notices
+	// only. Selecting any approval event also enables the task.approval_overflow
+	// notice. Requires webhookURL.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=2
+	WebhookEvents []TaskWebhookEvent `json:"webhookEvents,omitempty"`
+
 	// SecretRef references a Kubernetes Secret containing credentials
 	// +optional
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 
-	// SessionRef references a session for conversation continuity
+	// SessionRef references a session for conversation continuity.
+	// It is immutable after Task creation because it bounds transcript access.
 	// +optional
 	SessionRef *SessionReference `json:"sessionRef,omitempty"`
 
@@ -411,6 +452,74 @@ type AISpec struct {
 	// Tools lists the tools available for this task
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// MemoryConsolidation makes this Task a memory consolidation run: it reads
+	// the namespace's current memories and recently changed Sessions and
+	// reports, or proposes, merges, supersessions and retirements for review
+	// (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+	// Prompt, when set, steers what it focuses on. Creating such a Task, or
+	// changing its spec, requires list and get on sessions and list on
+	// memories in the namespace, and in Propose mode create on
+	// memoryproposals.
+	// +optional
+	MemoryConsolidation *MemoryConsolidationSpec `json:"memoryConsolidation,omitempty"`
+}
+
+// MemoryConsolidationMode selects what a memory consolidation run does with
+// the operations it finds.
+// +kubebuilder:validation:Enum=DryRun;Propose
+type MemoryConsolidationMode string
+
+const (
+	// MemoryConsolidationDryRun reports the operations without creating
+	// proposals.
+	MemoryConsolidationDryRun MemoryConsolidationMode = "DryRun"
+	// MemoryConsolidationPropose also creates a memory proposal for each
+	// accepted operation.
+	MemoryConsolidationPropose MemoryConsolidationMode = "Propose"
+)
+
+// MemoryConsolidationSpec configures a memory consolidation run.
+type MemoryConsolidationSpec struct {
+	// Mode is DryRun, the default, or Propose.
+	// +kubebuilder:default=DryRun
+	// +optional
+	Mode MemoryConsolidationMode `json:"mode,omitempty"`
+
+	// MinNewSessions is the fewest Sessions that must have changed since the
+	// last completed run for this run to call the model. Fewer skips the run.
+	// Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MinNewSessions *int32 `json:"minNewSessions,omitempty"`
+
+	// MaxOperations is the most operations one run reports or proposes.
+	// Defaults to 10.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxOperations *int32 `json:"maxOperations,omitempty"`
+
+	// Lookback is how far back the first run of its mode in a namespace
+	// reads. Later runs start where the latest completed run ended. Defaults
+	// to 168h; at most 720h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h') && duration(self) <= duration('720h')",message="lookback must be between 1h and 720h"
+	// +optional
+	Lookback *metav1.Duration `json:"lookback,omitempty"`
+}
+
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AISpec) MarshalJSON() ([]byte, error) {
+	type aiSpecJSON AISpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(aiSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		aiSpecJSON
+		Tools []string `json:"tools"`
+	}{aiSpecJSON: aiSpecJSON(in), Tools: in.Tools})
 }
 
 // SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
@@ -427,8 +536,9 @@ type SkillReference struct {
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v1' || ((!has(self.execution) || (has(oldSelf.execution) && self.execution == oldSelf.execution)) && (!has(self.delivery) || (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))",message="a v1-bound Task cannot acquire new v2 execution or delivery state"
-// +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v2' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime) && self.harnessRuntime == oldSelf.harnessRuntime)",message="a v2-bound Task cannot acquire new v1 harness state"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding == oldSelf.soulBinding)",message="soulBinding is write-once and immutable"
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type TaskStatus struct {
 	// Phase is the current phase of the task
 	// +optional
@@ -455,6 +565,11 @@ type TaskStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// JobUID is the immutable identity returned when the controller creates the
+	// current Job. A Job with the same name and a different UID has no worker authority.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+
 	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
@@ -468,17 +583,23 @@ type TaskStatus struct {
 	// +optional
 	Delivery *TaskDeliveryStatus `json:"delivery,omitempty"`
 
-	// HarnessRuntime records the controller-resolved harness v1 runtime target
-	// for an in-flight agent turn. It intentionally stores only non-secret
-	// routing metadata and Secret references, never bearer values. Compatibility
-	// surface for harness v1 bindings.
-	// +optional
-	HarnessRuntime *HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
-
 	// AgentExecutionBinding is the authoritative, write-once, immutable
 	// execution route for this agent Task.
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
+
+	// SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+	// digests only, never prompt text. Retries reject configuration drift.
+	// +optional
+	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
+
+	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
+	// the requester's Connection behind each connection-mode
+	// OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+	// the worker are honored only while the live Connection still matches.
+	// No token material is ever recorded.
+	// +optional
+	ConnectionBindings []ConnectionBinding `json:"connectionBindings,omitempty"`
 
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
@@ -495,6 +616,21 @@ type TaskStatus struct {
 	// +optional
 	WebhookDelivered bool `json:"webhookDelivered,omitempty"`
 
+	// WebhookDelivery records the durable state of the signed terminal webhook
+	// notice for spec.webhookURL. Only one notice is pending per Task; a newer
+	// terminal state supersedes it before delivery. No URL, token, or signature
+	// material is recorded.
+	// +optional
+	WebhookDelivery *TaskWebhookDelivery `json:"webhookDelivery,omitempty"`
+
+	// ApprovalWebhooks records the opt-in approval notices selected by
+	// spec.webhookEvents (ADR 0053): a bounded queue projected from the Task's
+	// durable approval events, and the projection cursor that keeps a
+	// transition from ever being notified twice. It is independent of the
+	// terminal notice in webhookDelivery.
+	// +optional
+	ApprovalWebhooks *TaskApprovalWebhooks `json:"approvalWebhooks,omitempty"`
+
 	// Message provides additional status information
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -503,19 +639,245 @@ type TaskStatus struct {
 	// +optional
 	ChildTasks []ChildTaskStatus `json:"childTasks,omitempty"`
 
+	// Wait records a data-only park requested by this Task's agent turn: the
+	// awaited event, its deadline, and the continuation Task that resumes the
+	// Session once the event arrives. Process memory is never preserved.
+	// +optional
+	Wait *TaskWaitStatus `json:"wait,omitempty"`
+
 	// Conditions represent the current state of the Task
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// LastScheduleTime is the last time a child task was created for a scheduled run.
+	// LastScheduleTime is the schedule's progress cursor: the last time a
+	// child task was created, or — when a run was missed past
+	// startingDeadlineSeconds (for example while suspended) — the time the
+	// skipped window was re-anchored so the schedule resumes from the
+	// present instead of replaying missed runs.
 	// +optional
 	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 
 	// NextScheduleTime is the next time a child task will be created.
 	// +optional
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
+}
+
+// TaskSoulBinding is the non-secret, write-once identity of AI prompt configuration.
+type TaskSoulBinding struct {
+	// TaskGeneration is the Task spec generation whose prompt was resolved.
+	// +kubebuilder:validation:Minimum=1
+	TaskGeneration int64 `json:"taskGeneration"`
+	// AgentUID and AgentGeneration identify the exact Agent revision.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentUID string `json:"agentUID"`
+	// +kubebuilder:validation:Minimum=1
+	AgentGeneration int64 `json:"agentGeneration"`
+	// SoulDigest identifies the exact persona source bytes.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	SoulDigest string `json:"soulDigest"`
+	// PromptDigest identifies the composed role and persona prompt.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	PromptDigest string `json:"promptDigest"`
+	// InputsDigest identifies the Task execution inputs, the spec without its
+	// control fields, that the binding froze. After the first binding it,
+	// rather than TaskGeneration, proves the inputs are unchanged, so a
+	// control-field edit such as spec.suspend keeps the binding valid.
+	// Bindings recorded before this field existed keep the generation check.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	InputsDigest string `json:"inputsDigest,omitempty"`
+}
+
+// TaskWebhookDeliveryState is the lifecycle state of a Task webhook notice.
+// +kubebuilder:validation:Enum=Pending;Delivered;Failed
+type TaskWebhookDeliveryState string
+
+const (
+	// TaskWebhookDeliveryPending means the notice still has attempts left.
+	TaskWebhookDeliveryPending TaskWebhookDeliveryState = "Pending"
+	// TaskWebhookDeliveryDelivered means the receiver acknowledged the notice
+	// with a 2xx response.
+	TaskWebhookDeliveryDelivered TaskWebhookDeliveryState = "Delivered"
+	// TaskWebhookDeliveryFailed means the notice was rejected by policy,
+	// exhausted its bounded attempts, belonged to a parked turn whose
+	// continuation now reports instead, or was an approval notice retired
+	// unsent. It is never retried.
+	TaskWebhookDeliveryFailed TaskWebhookDeliveryState = "Failed"
+)
+
+// TaskWebhookDelivery is the durable, provider-neutral record of one signed
+// webhook notice. The record doubles as the delivery lease: an attempt is
+// claimed by persisting it with optimistic concurrency before any request is
+// sent, so a restarted or replacement controller never sends concurrently and
+// never exceeds the attempt bound.
+type TaskWebhookDelivery struct {
+	// DeliveryID is the stable idempotency key sent with every attempt of this
+	// notice. Receivers should deduplicate on it.
+	// +kubebuilder:validation:MaxLength=64
+	DeliveryID string `json:"deliveryID"`
+
+	// EventType is the notice event, such as task.succeeded.
+	// +kubebuilder:validation:MaxLength=64
+	EventType string `json:"eventType"`
+
+	// OccurredAt is the notice creation time carried in the payload.
+	OccurredAt metav1.Time `json:"occurredAt"`
+
+	// PayloadSHA256 is the lowercase hex SHA-256 digest of the exact request
+	// body. A different digest for the same Task means newer state superseded
+	// the pending notice.
+	// +kubebuilder:validation:MaxLength=64
+	PayloadSHA256 string `json:"payloadSHA256"`
+
+	// State is the notice lifecycle state.
+	State TaskWebhookDeliveryState `json:"state"`
+
+	// Attempts counts claimed delivery attempts, including any attempt
+	// interrupted by a controller restart.
+	// +kubebuilder:validation:Minimum=0
+	Attempts int32 `json:"attempts"`
+
+	// Superseded counts earlier pending notices for this Task that newer state
+	// replaced before they were delivered.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Superseded int32 `json:"superseded,omitempty"`
+
+	// LastAttemptTime is when the latest attempt was claimed.
+	// +optional
+	LastAttemptTime *metav1.Time `json:"lastAttemptTime,omitempty"`
+
+	// NextAttemptTime is the earliest time another attempt may be claimed.
+	// While an attempt is in flight it is the lease expiry.
+	// +optional
+	NextAttemptTime *metav1.Time `json:"nextAttemptTime,omitempty"`
+
+	// LastStatusCode is the HTTP status of the latest completed attempt.
+	// +optional
+	LastStatusCode int32 `json:"lastStatusCode,omitempty"`
+
+	// LastError is a bounded, credential-free description of the latest failure.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	LastError string `json:"lastError,omitempty"`
+}
+
+// TaskApprovalWebhookTransition is the approval change an approval notice
+// reports.
+// +kubebuilder:validation:Enum=Requested;Resolved;Overflow
+type TaskApprovalWebhookTransition string
+
+const (
+	// TaskApprovalWebhookRequested reports a new approval request.
+	TaskApprovalWebhookRequested TaskApprovalWebhookTransition = "Requested"
+	// TaskApprovalWebhookResolved reports an approval's single resolution.
+	TaskApprovalWebhookResolved TaskApprovalWebhookTransition = "Resolved"
+	// TaskApprovalWebhookOverflow reports that later transitions were not
+	// recorded because the notice queue was full.
+	TaskApprovalWebhookOverflow TaskApprovalWebhookTransition = "Overflow"
+)
+
+// MaxTaskApprovalWebhookNotices bounds status.approvalWebhooks.notices. One
+// slot is reserved for the overflow notice.
+const MaxTaskApprovalWebhookNotices = 16
+
+// TaskApprovalWebhooks is the durable projection of a Task's approval events
+// into signed webhook notices.
+type TaskApprovalWebhooks struct {
+	// ProjectedSeq is the projection cursor: the highest approval event stream
+	// sequence already projected. A transition at or below it is never
+	// projected again, so a delivered or pruned notice is never regenerated.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ProjectedSeq int64 `json:"projectedSeq,omitempty"`
+
+	// Tracking records that projectedSeq has followed the approval events
+	// since the Task selected an approval event. The controller sets it when
+	// it initializes the status of a Task that selects one. Otherwise, the
+	// first projection raises projectedSeq to the stream's high-water mark
+	// before setting it, so history from before the selection, or from while
+	// the Task selected no approval event, is never notified. It is cleared
+	// when the Task selects no approval event.
+	// +optional
+	Tracking bool `json:"tracking,omitempty"`
+
+	// Notices are the retained notices in stream order. Pending notices are
+	// never removed; settled ones are pruned, oldest first, to make room.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Notices []TaskApprovalWebhookNotice `json:"notices,omitempty"`
+
+	// Pruned counts settled notices removed to make room.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Pruned int32 `json:"pruned,omitempty"`
+
+	// Overflowed is set once the queue was full of pending notices. A single
+	// overflow notice is then recorded and no later transition is notified.
+	// +optional
+	Overflowed bool `json:"overflowed,omitempty"`
+
+	// Omitted counts approval transitions not notified because of overflow.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Omitted int32 `json:"omitted,omitempty"`
+}
+
+// TaskApprovalWebhookNotice is one approval notice and its delivery record.
+// It holds only the safe identifiers the payload carries; the payload is
+// rendered from this record alone, so every attempt sends identical bytes.
+type TaskApprovalWebhookNotice struct {
+	TaskWebhookDelivery `json:",inline"`
+
+	// Transition is the approval change this notice reports.
+	Transition TaskApprovalWebhookTransition `json:"transition"`
+
+	// StreamSeq is the approval event stream sequence of the transition. For
+	// the overflow notice it is the first transition that was not notified.
+	// +kubebuilder:validation:Minimum=0
+	StreamSeq int64 `json:"streamSeq"`
+
+	// ApprovalID identifies the approval. Empty for the overflow notice.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ApprovalID string `json:"approvalID,omitempty"`
+
+	// Resolution is how a resolved approval ended.
+	// +optional
+	// +kubebuilder:validation:Enum=approved;declined;expired;cancelled
+	Resolution string `json:"resolution,omitempty"`
+
+	// TargetTool is the tool name the approval gates, when it has one.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	TargetTool string `json:"targetTool,omitempty"`
+
+	// Severity is the approval's severity label.
+	// +optional
+	// +kubebuilder:validation:MaxLength=16
+	Severity string `json:"severity,omitempty"`
+
+	// ExpiresAt is the enforced approval deadline, when the approval has one.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
+	// SigningDeadline is the latest time the notice may wait for webhook signing
+	// keys. It is set when the notice is queued. While the keys are
+	// unavailable at or after it, the notice is retired unsent so later
+	// notices can proceed. It is not part of the payload.
+	// +optional
+	SigningDeadline *metav1.Time `json:"signingDeadline,omitempty"`
+
+	// Parked reports a parked-turn sign-off approval (ADR 0041).
+	// +optional
+	Parked bool `json:"parked,omitempty"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
@@ -686,6 +1048,31 @@ type ChildTaskStatus struct {
 	Result string `json:"result,omitempty"`
 }
 
+// ConnectionBinding is one frozen person-to-provider link for a policy.
+type ConnectionBinding struct {
+	// PolicyName is the connection-mode OutboundAccessPolicy.
+	PolicyName string `json:"policyName"`
+	// Provider is the ConnectorProvider the policy selects.
+	Provider string `json:"provider"`
+	// ConnectionName is the requester's Connection for that provider.
+	ConnectionName string `json:"connectionName"`
+	// UID and Generation pin the Connection as it was when frozen.
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
+	// Mode is the Connection mode at freeze time.
+	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:metadata:annotations=gateway.orka.ai/session-cutoff-schema=v1
 // +kubebuilder:subresource:status
@@ -693,7 +1080,11 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
+// +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
+// The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
+// soul-only binding it compares every field except TaskControlFields; a test
+// regenerates that field list from TaskSpec.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.webhookEvents) == has(oldSelf.spec.webhookEvents) && (!has(self.spec.webhookEvents) || self.spec.webhookEvents == oldSelf.spec.webhookEvents) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {
@@ -730,15 +1121,9 @@ const (
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
 // Runtime type and credentials come from the referenced Agent CRD.
-// +kubebuilder:validation:XValidation:rule="!has(self.workspace) || (oldSelf.hasValue() && has(oldSelf.value().workspace) && self.workspace == oldSelf.value().workspace)",optionalOldSelf=true,message="legacy agentRuntime.workspace is a preserved harness v1 compatibility surface; new Tasks must use spec.workspace"
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type AgentRuntimeSpec struct {
-	// Workspace is the legacy harness v1 agent workspace configuration at its
-	// historical JSON path. It is a preserved compatibility read surface for
-	// stored v1 Tasks only: it can never be introduced or changed, and it is
-	// not an authority surface for new work.
-	// +optional
-	Workspace *LegacyAgentWorkspaceConfig `json:"workspace,omitempty"`
-
 	// MaxTurns limits the number of agent loop iterations
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
@@ -762,11 +1147,10 @@ type AgentRuntimeSpec struct {
 // and an explicitly empty deny-all override.
 func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 	type agentRuntimeSpecJSON struct {
-		Workspace       *LegacyAgentWorkspaceConfig `json:"workspace,omitempty"`
-		MaxTurns        *int32                      `json:"maxTurns,omitempty"`
-		AllowedTools    *[]string                   `json:"allowedTools,omitempty"`
-		DisallowedTools []string                    `json:"disallowedTools,omitempty"`
-		AllowBash       *bool                       `json:"allowBash,omitempty"`
+		MaxTurns        *int32    `json:"maxTurns,omitempty"`
+		AllowedTools    *[]string `json:"allowedTools,omitempty"`
+		DisallowedTools []string  `json:"disallowedTools,omitempty"`
+		AllowBash       *bool     `json:"allowBash,omitempty"`
 	}
 	var allowedTools *[]string
 	if in.AllowedTools != nil {
@@ -774,161 +1158,11 @@ func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 		allowedTools = &tools
 	}
 	return json.Marshal(agentRuntimeSpecJSON{
-		Workspace:       in.Workspace,
 		MaxTurns:        in.MaxTurns,
 		AllowedTools:    allowedTools,
 		DisallowedTools: in.DisallowedTools,
 		AllowBash:       in.AllowBash,
 	})
-}
-
-// LegacyAgentWorkspaceConfig is the harness v1 agent workspace shape preserved
-// at the historical spec.agentRuntime.workspace JSON path. Historically valid
-// stored values round-trip unchanged and are intentionally not subject to the
-// v2 WorkspaceConfig URL and credential CEL policy; the shared schema keeps
-// only protocol-neutral validation, and protocol-specific rules are enforced
-// at binding resolution. These fields never enter new bindings: new v1
-// workspaces are credential-free and public-read-only by policy.
-type LegacyAgentWorkspaceConfig struct {
-	// GitRepo is the repository URL to clone.
-	// +optional
-	GitRepo string `json:"gitRepo,omitempty"`
-
-	// Branch is the git branch to checkout.
-	// +optional
-	Branch string `json:"branch,omitempty"`
-
-	// Ref is a specific git ref (commit SHA, tag) to checkout.
-	// +optional
-	Ref string `json:"ref,omitempty"`
-
-	// GitSecretRef references a Secret containing git credentials. Adopted
-	// legacy bindings freeze the exact Secret identity; new bindings reject it.
-	// +optional
-	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
-
-	// SubPath is a subdirectory within the repo to use as workspace root.
-	// +optional
-	SubPath string `json:"subPath,omitempty"`
-
-	// ForkRepo is the writable fork repository URL for pushing changes.
-	// +optional
-	ForkRepo string `json:"forkRepo,omitempty"`
-
-	// PRBaseBranch is the upstream branch to target for pull requests.
-	// +optional
-	PRBaseBranch string `json:"prBaseBranch,omitempty"`
-
-	// PushBranch is the remote branch name to push changes to after the agent
-	// completes.
-	// +optional
-	PushBranch string `json:"pushBranch,omitempty"`
-}
-
-// HarnessRuntimeStatus records the resolved harness v1 runtime and its durable
-// attempt projection. Harness v1 cannot write the v2-only execution/delivery
-// surfaces, so terminal ambiguity is represented here without weakening route
-// exclusivity.
-// +kubebuilder:validation:XValidation:rule="!has(self.state) || !(self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']) || has(self.outcome)",message="terminal harness state requires an outcome"
-// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || (has(self.state) && self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])",message="harness outcome requires a terminal state"
-// +kubebuilder:validation:XValidation:rule="!has(self.state) || self.state != 'OutcomeUnknown' || (has(self.outcome) && self.outcome == 'OutcomeUnknown')",message="OutcomeUnknown harness state requires OutcomeUnknown outcome"
-type HarnessRuntimeStatus struct {
-	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
-	// Empty means built-in CLI wrapper.
-	// +optional
-	RuntimeRefName string `json:"runtimeRefName,omitempty"`
-
-	// RuntimeName is the runtime name advertised by the harness capabilities
-	// and sent in turn metadata.
-	// +optional
-	RuntimeName string `json:"runtimeName,omitempty"`
-
-	// ContractVersion is the Orka harness contract version used for the turn.
-	// +optional
-	ContractVersion string `json:"contractVersion,omitempty"`
-
-	// Endpoint is the non-secret harness base URL selected when the turn started.
-	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
-
-	// RuntimeGeneration is the AgentRuntime generation selected when the turn started.
-	// +optional
-	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`
-
-	// AuthRefName is the Secret name selected when the turn started.
-	// +optional
-	AuthRefName string `json:"authRefName,omitempty"`
-
-	// AuthRefField is the Secret data field selected when the turn started.
-	// +optional
-	AuthRefField string `json:"authRefField,omitempty"`
-
-	// AuthRefResourceVersion is the auth Secret resourceVersion validated
-	// before starting the turn.
-	// +optional
-	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
-
-	// Attempt is the durable harness v1 attempt number.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	Attempt int32 `json:"attempt,omitempty"`
-
-	// TurnID is the deterministic, non-secret harness turn identity.
-	// +optional
-	TurnID string `json:"turnID,omitempty"`
-
-	// RuntimeSessionID is the deterministic, non-secret v1 runtime-session identity.
-	// +optional
-	RuntimeSessionID string `json:"runtimeSessionID,omitempty"`
-
-	// State is the durable harness v1 attempt state projected for operators.
-	// +optional
-	State TaskExecutionState `json:"state,omitempty"`
-
-	// Outcome is set only for a terminal harness v1 attempt.
-	// +optional
-	Outcome TaskExecutionOutcome `json:"outcome,omitempty"`
-
-	// Reason is a bounded machine-readable terminal reason code.
-	// +kubebuilder:validation:MaxLength=256
-	// +optional
-	Reason string `json:"reason,omitempty"`
-
-	// TerminalReceiptDigest identifies the authoritative terminal or unknown receipt.
-	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +optional
-	TerminalReceiptDigest string `json:"terminalReceiptDigest,omitempty"`
-
-	// RequestDigest binds the canonical StartTurn request admitted by the
-	// durable wrapper ledger.
-	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +optional
-	RequestDigest string `json:"requestDigest,omitempty"`
-
-	// ControllerEpoch records the fenced controller epoch driving the attempt.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	ControllerEpoch int64 `json:"controllerEpoch,omitempty"`
-
-	// LastEventSeq is the highest durably mapped harness frame sequence.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	LastEventSeq int64 `json:"lastEventSeq,omitempty"`
-
-	// CancelRequestedAt records a durable cancellation request. Cancellation
-	// remains nonterminal until a terminal frame or ledger receipt is observed.
-	// +optional
-	CancelRequestedAt *metav1.Time `json:"cancelRequestedAt,omitempty"`
-
-	// Message is bounded, sanitized execution context.
-	// +kubebuilder:validation:MaxLength=1024
-	// +optional
-	Message string `json:"message,omitempty"`
-
-	// LastTransitionTime is the last durable v1 attempt transition projected to
-	// the Task.
-	// +optional
-	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
 // WorkspaceConfig defines repository workspace, validation, and publication intent.
@@ -1006,6 +1240,36 @@ type WorkspaceConfig struct {
 	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
+
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
+
+	// CommitMessage is the message of the commit that publishes the Task's
+	// changes. When empty, the commit is titled "orka: apply agent task <name>".
+	// Trailing newlines are normalized. Secret-like text is rejected at runtime
+	// before publication.
+	// +kubebuilder:validation:MaxLength=4000
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="commitMessage must not be whitespace-only"
+	// +kubebuilder:validation:XValidation:rule="!self.contains('\\r')",message="commitMessage must not contain carriage returns"
+	// +optional
+	CommitMessage string `json:"commitMessage,omitempty"`
 
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.

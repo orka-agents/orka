@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { agentRefSchema, k8sMetadataSchema } from './task'
+import { agentRefSchema, conditionSchema, k8sMetadataSchema } from './task'
 
 const findingCountsSchema = z.object({
   total: z.number().optional(),
@@ -44,6 +44,7 @@ const repositoryScanStatusSchema = z.object({
   lastProcessedCommit: z.string().optional(),
   threatModelVersion: z.number().optional(),
   findingCounts: findingCountsSchema.optional(),
+  conditions: z.array(conditionSchema).optional(),
 })
 
 export const repositoryScanSchema = z.object({
@@ -99,6 +100,7 @@ const findingEvidenceRefSchema = z.object({
   endLine: z.number().optional(),
   symbol: z.string().optional(),
   quote: z.string().optional(),
+  role: z.string().optional(),
 })
 
 export const securityFindingSchema = z.object({
@@ -195,6 +197,7 @@ export const patchProposalSchema = z.object({
   diffArtifact: z.string().optional(),
   summaryArtifact: z.string().optional(),
   status: z.string(),
+  reason: z.string().optional(),
   prNumber: z.number().optional(),
   prURL: z.string().optional(),
   createdAt: z.string(),

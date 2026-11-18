@@ -3,22 +3,63 @@
 
 const {themes: prismThemes} = require('prism-react-renderer');
 
+const baseUrl = '/orka/';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Orka',
   tagline: 'Kubernetes-native AI task orchestration',
   url: 'https://orka-agents.github.io',
-  baseUrl: '/orka/',
+  baseUrl,
+  // The SVG favicon is the small mark on a white disc, so it reads on light and dark tabs. The
+  // 32 px PNG comes first, with sizes, for browsers without SVG favicons; browsers that support
+  // SVG still pick the SVG.
+  headTags: [
+    {
+      tagName: 'link',
+      attributes: {rel: 'icon', type: 'image/png', sizes: '32x32', href: `${baseUrl}img/favicon.png`},
+    },
+    {
+      tagName: 'link',
+      attributes: {rel: 'icon', type: 'image/svg+xml', href: `${baseUrl}img/favicon.svg`},
+    },
+  ],
   organizationName: 'orka-agents',
   projectName: 'orka',
   trailingSlash: false,
 
   onBrokenLinks: 'throw',
+  onBrokenAnchors: 'throw',
   markdown: {
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
     },
   },
+
+  themes: [
+    '@docusaurus/theme-mermaid',
+    // Search is built into the static site at build time and runs in the browser, so it needs no
+    // hosted index, API key or third-party request. The index exists only in production builds.
+    [
+      require.resolve('@easyops-cn/docusaurus-search-local'),
+      /** @type {import('@easyops-cn/docusaurus-search-local').PluginOptions} */
+      ({
+        hashed: true,
+        language: ['en'],
+        indexDocs: true,
+        indexBlog: false,
+        indexPages: false,
+        docsRouteBasePath: '/docs',
+        highlightSearchTermsOnTargetPage: true,
+        explicitSearchResultPath: true,
+        searchBarShortcutHint: true,
+      }),
+    ],
+  ],
+
+  // Self-hosted Geist and Geist Mono (no runtime font CDN).
+  clientModules: [require.resolve('./src/clientModules/fonts.js')],
 
   i18n: {
     defaultLocale: 'en',
@@ -48,14 +89,38 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
+      colorMode: {
+        respectPrefersColorScheme: true,
+      },
+      mermaid: {
+        theme: {light: 'neutral', dark: 'dark'},
+      },
       navbar: {
         title: 'Orka',
+        logo: {
+          alt: '',
+          // 32 px and smaller use the small mark: heavier ring, two waves.
+          src: 'img/orka-mark-small.svg',
+          srcDark: 'img/orka-mark-small-dark.svg',
+          width: 30,
+          height: 30,
+        },
         items: [
           {
             type: 'docSidebar',
             sidebarId: 'tutorialSidebar',
             position: 'left',
             label: 'Docs',
+          },
+          {
+            to: '/docs/demos',
+            label: 'Demos',
+            position: 'left',
+          },
+          {
+            to: 'pathname:///demo/',
+            label: 'Dashboard demo',
+            position: 'left',
           },
           {
             href: 'https://github.com/orka-agents/orka',
@@ -66,17 +131,48 @@ const config = {
       },
       footer: {
         style: 'dark',
+        logo: {
+          alt: 'Orka',
+          src: 'img/orka-mark-dark.svg',
+          width: 44,
+          height: 44,
+        },
         links: [
           {
             title: 'Docs',
             items: [
               {
-                label: 'Getting Started',
+                label: 'What is Orka?',
+                to: '/docs',
+              },
+              {
+                label: 'Getting started',
                 to: '/docs/getting-started',
               },
               {
-                label: 'API Reference',
+                label: 'Resource reference',
+                to: '/docs/resources',
+              },
+              {
+                label: 'API reference',
                 to: '/docs/api-reference',
+              },
+            ],
+          },
+          {
+            title: 'Try it',
+            items: [
+              {
+                label: 'Interactive dashboard demo',
+                to: 'pathname:///demo/',
+              },
+              {
+                label: 'Demo videos',
+                to: '/docs/demos',
+              },
+              {
+                label: 'Examples',
+                href: 'https://github.com/orka-agents/orka/tree/main/examples',
               },
             ],
           },
@@ -87,14 +183,23 @@ const config = {
                 label: 'GitHub',
                 href: 'https://github.com/orka-agents/orka',
               },
+              {
+                label: 'Issues',
+                href: 'https://github.com/orka-agents/orka/issues',
+              },
+              {
+                label: 'Contributing',
+                href: 'https://github.com/orka-agents/orka/blob/main/CONTRIBUTING.md',
+              },
             ],
           },
         ],
         copyright: `Copyright © ${new Date().getFullYear()} Orka contributors.`,
       },
+      // Code blocks stay dark in both colour modes; custom.css sets their ground.
       prism: {
-        theme: prismThemes.github,
-        darkTheme: prismThemes.dracula,
+        theme: prismThemes.vsDark,
+        darkTheme: prismThemes.vsDark,
       },
     }),
 };

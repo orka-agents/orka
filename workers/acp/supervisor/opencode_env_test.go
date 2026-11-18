@@ -113,6 +113,10 @@ func TestOpenCodeProviderProfileIsImmutableAndGoverned(t *testing.T) {
 			if config["lsp"] != false || config["formatter"] != false || config["snapshot"] != false {
 				t.Fatalf("OpenCode local discovery/state features are not disabled: %#v", config)
 			}
+			agents := config["agent"].(map[string]any)
+			if agents["title"].(map[string]any)["disable"] != true {
+				t.Fatal("OpenCode can issue background title inference outside ACP prompt settlement")
+			}
 			instructions := config["instructions"].([]any)
 			if len(instructions) != 2 || instructions[0] != openCodeRootInstructionPath || instructions[1] != "/sessions/private/workspace/AGENTS.md" {
 				t.Fatalf("OpenCode instructions = %#v", instructions)
@@ -221,8 +225,9 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 		true,
 	)
 	request.Profile.ModelLimits = testOpenCodeModelLimits()
-	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("OpenCode systemPrompt projection error = %v, want rejection", err)
+	projection, err := profile.ProjectSession(request, paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != request.AgentConfiguration.SystemPrompt || projection.Instructions.RelativePath != ".orka/agent-instructions.md" {
+		t.Fatalf("OpenCode native instruction projection failed: %v", err)
 	}
 
 	request.AgentConfiguration = nil
@@ -310,6 +315,29 @@ func TestOpenCodeBrokeredPermissionsUseDisjointNativeNamespace(t *testing.T) {
 	}
 	if _, exists := permissions["bash"]; exists {
 		t.Fatalf("brokered permission overwrote native Bash key: %#v", permissions)
+	}
+}
+
+// TestOpenCodeBrokeredPermissionsSkipForwardingTools covers a forwarding Tool
+// whose name normalizes to a built-in's, such as web.fetch beside web_fetch:
+// it is hidden from the model, takes no permission, and so cannot collide.
+func TestOpenCodeBrokeredPermissionsSkipForwardingTools(t *testing.T) {
+	policy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"web_fetch", "web.fetch"},
+		Tools: []harnessv2.MCPToolDescriptor{
+			{Name: "web_fetch", Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly},
+			{
+				Name: "web.fetch", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly,
+				Forward: &harnessv2.MCPToolForward{Protocol: "AzureResourceManager", Origin: "https://management.azure.com"},
+			},
+		},
+	}
+	permissions, err := openCodeBrokeredPermissions(policy)
+	if err != nil {
+		t.Fatalf("openCodeBrokeredPermissions() = %v, want the forwarding Tool skipped", err)
+	}
+	if len(permissions) != 1 || !permissions["orka_web_fetch"] {
+		t.Fatalf("permissions = %#v, want only the built-in", permissions)
 	}
 }
 
@@ -437,9 +465,13 @@ func TestOpenCodeSessionConfigRequiresProviderModel(t *testing.T) {
 	}
 }
 
-func TestOpenCodeDefaultProtocolLimitUsesStandardUpdateRate(t *testing.T) {
-	if got := defaultProtocolLimits(providerKindOpencode).MaxUpdateEventsPerSecond; got != harnessv2.DefaultMaxUpdateEventsPerSecond {
-		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, harnessv2.DefaultMaxUpdateEventsPerSecond)
+func TestOpenCodeDefaultProtocolLimitUsesRuntimeUpdateRate(t *testing.T) {
+	// A live OpenCode research prompt streamed tool output above the generic
+	// 100/s protocol default; the controller enforced the advertised limit,
+	// broke the stream at the terminal event, and a completed prompt was lost
+	// as RuntimeLost. Every built-in runtime advertises the burst ceiling.
+	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
+		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}
 }
 

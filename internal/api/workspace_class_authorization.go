@@ -9,8 +9,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 func authorizeTaskWorkspaceClassUse(
@@ -19,11 +19,16 @@ func authorizeTaskWorkspaceClassUse(
 	userInfo *UserInfo,
 	task *corev1alpha1.Task,
 ) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		task.Spec.Execution.Workspace.ClassRef == nil {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
 	}
-	return authorizeWorkspaceClassUse(
+	if task.Spec.Execution.Workspace.ClassRef == nil || strings.TrimSpace(task.Spec.Execution.Workspace.ClassRef.Name) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "execution workspace classRef.name is required")
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return fiber.NewError(fiber.StatusBadRequest, "execution workspace is only supported for type: agent tasks")
+	}
+	if err := authorizeWorkspaceClassUse(
 		ctx,
 		clientset,
 		userInfo,
@@ -31,7 +36,13 @@ func authorizeTaskWorkspaceClassUse(
 		task.Spec.Execution.Workspace.ClassRef.Name,
 		"task",
 		task.Name,
-	)
+	); err != nil {
+		return err
+	}
+	if ref := task.Spec.Execution.Workspace.RestoreFrom; ref != nil {
+		return authorizeWorkspaceResourceUse(ctx, clientset, userInfo, task.Namespace, ref.Name, "task", task.Name, "executionworkspacecheckpoints", "checkpoint")
+	}
+	return nil
 }
 
 func authorizeToolWorkspaceClassUse(
@@ -63,6 +74,10 @@ func authorizeWorkspaceClassUse(
 	objectKind string,
 	objectName string,
 ) error {
+	return authorizeWorkspaceResourceUse(ctx, clientset, userInfo, namespace, className, objectKind, objectName, "executionworkspaceclasses", "class")
+}
+
+func authorizeWorkspaceResourceUse(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, namespace, className, objectKind, objectName, resource, description string) error {
 	className = strings.TrimSpace(className)
 	if className == "" {
 		return nil
@@ -80,7 +95,7 @@ func authorizeWorkspaceClassUse(
 			"objectKind", objectKind,
 			"object", objectName,
 		)
-		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace class")
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace "+description)
 	}
 
 	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
@@ -98,7 +113,7 @@ func authorizeWorkspaceClassUse(
 				Verb:      "use",
 				Group:     workspacev1alpha1.GroupVersion.Group,
 				Version:   workspacev1alpha1.GroupVersion.Version,
-				Resource:  "executionworkspaceclasses",
+				Resource:  resource,
 				Name:      className,
 			},
 		},
@@ -111,18 +126,17 @@ func authorizeWorkspaceClassUse(
 			"objectKind", objectKind,
 			"object", objectName,
 		)
-		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace class")
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace "+description)
 	}
-	if !review.Status.Allowed {
+	if review == nil || !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
 		log.Info("workspace class use authorization denied",
 			"username", username,
 			"namespace", namespace,
 			"class", className,
 			"objectKind", objectKind,
 			"object", objectName,
-			"reason", review.Status.Reason,
 		)
-		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace class")
+		return fiber.NewError(fiber.StatusForbidden, "not authorized to use workspace "+description)
 	}
 	return nil
 }

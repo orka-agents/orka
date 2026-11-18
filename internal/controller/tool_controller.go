@@ -7,10 +7,12 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	goerrors "errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -36,12 +38,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
+	toolConditionAvailable = "Available"
+	// toolConditionEgressPolicyReady reports whether a Substrate MCP actor's
+	// native egress policy was installed and verified before resume.
+	toolConditionEgressPolicyReady = "EgressPolicyReady"
+
 	// toolHealthCheckInterval is how often tools are re-checked.
 	toolHealthCheckInterval = 5 * time.Minute
 
@@ -74,15 +84,32 @@ type ToolReconciler struct {
 	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
 	SkipSSRFValidation bool
 
-	// SubstrateEnabled enables durable MCP tool actors.
-	SubstrateEnabled            bool
+	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
+	// a Tool behind a connection-mode or agentIdentity outbound access policy
+	// may target a private or cluster-local endpoint. Local fixtures only.
+	AllowPrivateConnectorEndpoints bool
+
+	// SubstrateMCPToolsEnabled enables durable MCP tool actors.
+	SubstrateMCPToolsEnabled    bool
 	SubstrateConfig             SubstrateConfig
 	EnforceNamespaceIsolation   bool
 	WorkspaceProviderAPIEnabled bool
 	OutboundAccessTrust         outboundaccess.TrustConfig
 
 	// SubstrateExecutorFactory is injectable for tests.
-	SubstrateExecutorFactory func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
+	SubstrateExecutorFactory   func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	// SubstrateEgressPolicyApplier installs and verifies an MCP actor's
+	// native egress policy. Nil uses the Substrate control API. Injectable
+	// for tests.
+	SubstrateEgressPolicyApplier func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error
+	// SubstrateEgressPolicyStateApplier is SubstrateEgressPolicyApplier for a
+	// test that also sets when the stored policy was written. It takes
+	// precedence.
+	SubstrateEgressPolicyStateApplier func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error)
+	// SubstrateRouterHTTPClient reaches MCP actors for readiness checks. Nil
+	// builds the mTLS router client from SubstrateConfig. Injectable for tests.
+	SubstrateRouterHTTPClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
@@ -115,13 +142,36 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
 
+	// Accepted is remote-only, including while a new actor backend is still being provisioned.
+	if !aitools.IsRemoteMCP(tool) && meta.RemoveStatusCondition(&tool.Status.Conditions, "Accepted") {
+		if err := r.Status().Update(ctx, tool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Validate the tool configuration
 	if err := r.validateTool(ctx, tool); err != nil {
 		logger.Error(err, "Tool validation failed")
+		if aitools.IsRemoteMCP(tool) {
+			return r.updateRemoteMCPStatus(ctx, tool, err)
+		}
+		if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+			return r.failSubstrateMCPToolValidation(ctx, tool, err)
+		}
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.reconcileSubstrateMCPTool(ctx, tool)
+	}
+
+	if aitools.IsRemoteMCP(tool) {
+		return r.updateRemoteMCPStatus(ctx, tool, nil)
+	}
+
+	if tool.Spec.HTTP.GatewayTaskPass {
+		// There is no controller-wide probe authority; issuance and readiness
+		// are verified under the bound Task on every call.
+		return r.updateStatus(ctx, tool, true, "")
 	}
 
 	// Perform health check on the HTTP endpoint
@@ -134,17 +184,61 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return r.updateStatus(ctx, tool, true, "")
 }
 
+func (r *ToolReconciler) updateRemoteMCPStatus(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
+	// A controller-wide HEAD request cannot establish Task-authorized MCP readiness.
+	previous := tool.Status.DeepCopy()
+	tool.Status.Available = false
+	tool.Status.LastCheck = nil
+	tool.Status.Error = ""
+	tool.Status.Endpoint = ""
+	tool.Status.Actor = nil
+	tool.Status.Workspace = nil
+	accepted := metav1.Condition{
+		Type: "Accepted", Status: metav1.ConditionTrue, Reason: "RemoteConfigurationAccepted",
+		Message: "Remote configuration accepted; discovery is verified under Task authority", ObservedGeneration: tool.Generation,
+	}
+	available := metav1.Condition{
+		Type: toolConditionAvailable, Status: metav1.ConditionUnknown, Reason: "TaskVerificationRequired",
+		Message: "Authenticated MCP readiness is verified by the native worker", ObservedGeneration: tool.Generation,
+	}
+	if validationErr != nil {
+		tool.Status.Error = validationErr.Error()
+		accepted.Status, accepted.Reason, accepted.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+		available.Status, available.Reason, available.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, accepted)
+	meta.SetStatusCondition(&tool.Status.Conditions, available)
+	if reflect.DeepEqual(*previous, tool.Status) {
+		return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, r.Status().Update(ctx, tool)
+}
+
 // validateTool validates the Tool spec.
 func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.Tool) error {
 	// Validate description
 	if tool.Spec.Description == "" {
 		return fmt.Errorf("description is required")
 	}
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.GatewayTaskPass {
+		return workerexecutor.ValidateGatewayTaskPassTool(tool)
+	}
+	if aitools.IsRemoteMCP(tool) {
+		if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
+			return err
+		}
+		if err := r.validateToolHTTPURL(tool.Spec.MCP.Remote.URL, false); err != nil {
+			return err
+		}
+	}
 	if err := r.validateToolHTTPAuth(ctx, tool); err != nil {
 		return err
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.validateSubstrateMCPTool(ctx, tool)
+	}
+	if aitools.IsRemoteMCP(tool) {
+		return nil
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.Workspace != nil {
 		if !r.WorkspaceProviderAPIEnabled {
@@ -155,16 +249,59 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	return r.validateToolHTTPURL(tool.Spec.HTTP.URL)
+	// Admission cannot see the schemaless parameters field, so a forwarding
+	// Tool's schema is refused here, as prompt policy refuses it.
+	if tool.Spec.HTTP.Forward != nil && tool.Spec.Parameters != nil && len(tool.Spec.Parameters.Raw) > 0 {
+		return fmt.Errorf("a forwarding tool takes no parameter schema; its protocol defines the call")
+	}
+	// Only a Tool behind a connection-mode or agentIdentity outbound access
+	// policy may point at a private endpoint under the fixture allowance.
+	allowPrivate := false
+	if r.AllowPrivateConnectorEndpoints {
+		fixtureMode, err := r.toolPolicyAllowsPrivateFixture(ctx, tool)
+		if err != nil {
+			return err
+		}
+		allowPrivate = fixtureMode
+	}
+	if allowPrivate {
+		// The allowance relaxes where such a call may go, never how:
+		// execution refuses plain http for credential-injecting policies,
+		// so a private endpoint is accepted only over HTTPS and the Tool's
+		// status matches what can actually run.
+		if parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL)); err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+			return fmt.Errorf("a private connector endpoint requires an HTTPS Tool URL")
+		}
+	}
+	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 
-func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
+// toolPolicyAllowsPrivateFixture reports whether the Tool's outbound access
+// policy injects a linked-account or Agent identity credential, the two modes
+// the fixture-only private-endpoint allowance covers.
+func (r *ToolReconciler) toolPolicyAllowsPrivateFixture(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
+	if ref == nil {
+		return false, nil
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
+		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+	}
+	_, connectorBacked := outboundaccess.ConnectionProviderName(policy)
+	return connectorBacked || policy.Spec.AgentIdentity != nil, nil
+}
+
+// validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
+// private, loopback, and link-local address rules are skipped, for local
+// fixtures only; the fixed metadata and API server hosts stay blocked.
+func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) error {
 	// Validate URL
 	if rawURL == "" {
 		return fmt.Errorf("http.url is required")
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != "https") {
 		return fmt.Errorf("invalid http.url")
 	}
 	if parsedURL.User != nil {
@@ -182,15 +319,17 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 
 	// Block private/internal network targets (unless in test mode)
 	if !r.SkipSSRFValidation {
-		host := parsedURL.Hostname()
-		blockedHosts := []string{
-			"169.254.169.254",
-			"metadata.google.internal",
-			"kubernetes.default",
-			"kubernetes.default.svc",
-		}
-		if slices.Contains(blockedHosts, host) {
+		// DNS names are case-insensitive and a trailing dot names the
+		// same host, so the fixed block list compares canonical forms.
+		host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
+		// The same infrastructure block list the connector validator keeps
+		// under the fixture allowance: metadata services and the Kubernetes
+		// API service under any cluster domain, by name or address.
+		if connectors.InfrastructureHostDenied(host) {
 			return fmt.Errorf("tool URL host %q is not allowed", host)
+		}
+		if allowPrivate {
+			return nil
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
@@ -217,11 +356,17 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 	return nil
 }
 
+//nolint:gocyclo // Each HTTP auth mode has its own validation branch.
 func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if tool == nil || tool.Spec.HTTP == nil {
 		return nil
 	}
 	if ref := tool.Spec.HTTP.OutboundAccessPolicyRef; ref != nil {
+		if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+			// Workers reach actors only through the Orka MCP proxy, which never
+			// forwards caller-resolved outbound credentials or gateway routes.
+			return fmt.Errorf("mcp.substrateActor tools do not support outboundAccessPolicyRef; use http.authSecretRef for actor credentials and mcp.substrateActor.egress for actor egress")
+		}
 		if strings.TrimSpace(ref.Name) == "" {
 			return fmt.Errorf("outboundAccessPolicyRef.name is required")
 		}
@@ -244,17 +389,18 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
-		if policy.Spec.Direct != nil {
+		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil ||
+			policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
+			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
+		}
+		if err := forwardingPolicySupported(tool, policy); err != nil {
+			return err
+		}
+		if policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
-				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
+				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
 			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
-			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
-				targetURL = strings.TrimSpace(tool.Status.Endpoint)
-				if targetURL == "" {
-					return nil
-				}
-			}
 			parsed, err := url.Parse(targetURL)
 			if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 				return fmt.Errorf("direct outbound access policy %q requires an HTTPS Tool URL", ref.Name)
@@ -270,16 +416,19 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 			}
 			return fmt.Errorf("failed to get auth secret %q: %w", tool.Spec.HTTP.AuthSecretRef.Name, err)
 		}
+		if aitools.IsRemoteMCP(tool) && strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])) == "" {
+			return fmt.Errorf("remote MCP auth Secret key is empty or missing")
+		}
 		if _, ok := secret.Data[tool.Spec.HTTP.AuthSecretRef.Key]; !ok {
 			return fmt.Errorf("key %q not found in auth secret %q", tool.Spec.HTTP.AuthSecretRef.Key, tool.Spec.HTTP.AuthSecretRef.Name)
 		}
 	}
 
 	// Validate authInject + authBodyKey combination
-	if tool.Spec.HTTP.AuthInject == "body" && tool.Spec.HTTP.AuthBodyKey == "" {
+	if tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField && tool.Spec.HTTP.AuthBodyKey == "" {
 		return fmt.Errorf("authBodyKey is required when authInject is 'body'")
 	}
-	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == "body" {
+	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField {
 		return fmt.Errorf("MCP tools do not support authInject=body")
 	}
 
@@ -287,8 +436,8 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 }
 
 func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) error {
-	if !r.SubstrateEnabled {
-		return fmt.Errorf("MCP substrateActor requires substrate to be enabled")
+	if !r.SubstrateMCPToolsEnabled {
+		return fmt.Errorf("MCP substrateActor requires Substrate MCP tools to be enabled with --substrate-mcp-tools-enabled")
 	}
 	actor := tool.Spec.MCP.SubstrateActor
 	if strings.TrimSpace(actor.TemplateRef.Name) == "" {
@@ -296,6 +445,18 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 	}
 	if actor.PoolRef != nil && strings.TrimSpace(actor.PoolRef.Name) == "" {
 		return fmt.Errorf("mcp.substrateActor.poolRef.name is required")
+	}
+	if _, err := workerexecutor.SubstrateMCPActorPath(tool); err != nil {
+		return err
+	}
+	if err := validateSubstrateMCPToolHeaders(tool); err != nil {
+		return err
+	}
+	if err := workspace.ValidateSubstrateEgressRules(substrateMCPEgressRules(tool, r.SubstrateConfig.EgressCredentialProvider)); err != nil {
+		return fmt.Errorf("invalid mcp.substrateActor.egress: %w", err)
+	}
+	if err := r.validateSubstrateMCPEgressCredentials(ctx, tool); err != nil {
+		return err
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
 	if r.EnforceNamespaceIsolation && templateRequest.TemplateNamespace != tool.Namespace {
@@ -306,13 +467,20 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 			tool.Namespace,
 		)
 	}
-	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
 		return err
 	}
 	if _, _, _, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *ToolReconciler) validateSubstrateMCPTemplate(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+	if r.SubstrateTemplateValidator != nil {
+		return r.SubstrateTemplateValidator(ctx, request)
+	}
+	return validateNativeSubstrateRoutableTemplate(ctx, r.SubstrateConfig, request)
 }
 
 func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *ExecutionWorkspaceRequest {
@@ -330,13 +498,22 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 	}
 }
 
+//nolint:gocyclo // Tool admission and Actor lifecycle checks must complete before publishing readiness.
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
+		return r.failSubstrateMCPTool(ctx, tool, err.Error())
+	}
 	actorID := deterministicSubstrateToolActorID(tool.Namespace, tool.Name, templateRequest.TemplateNamespace, templateRequest.TemplateName)
 	poolName, poolNamespace, pool, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest)
 	if err != nil {
-		return r.updateStatus(ctx, tool, false, err.Error())
+		return r.failSubstrateMCPTool(ctx, tool, err.Error())
+	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, templateRequest, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	var poolRef *corev1alpha1.SubstrateActorPoolReference
 	if poolName != "" {
@@ -349,7 +526,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 			templateRequest.TemplateNamespace,
 			templateRequest.TemplateName,
 		)
-		actorID = deterministicSubstratePoolActorID(prefix, ordinal)
+		actorID = workspace.SubstrateActorKey(templateRequest.TemplateNamespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		poolRef = &corev1alpha1.SubstrateActorPoolReference{Name: poolName, Namespace: poolNamespace}
 		if assignedActorID := assignedSubstrateMCPPoolActorID(tool, poolName, poolNamespace, prefix, int(pool.Spec.TargetActors)); assignedActorID != "" {
 			actorID = assignedActorID
@@ -357,7 +534,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	}
 	cleanupRef, err := r.substrateMCPReplacementCleanupRef(ctx, tool, actorID)
 	if err != nil {
-		return r.updateStatus(ctx, tool, false, err.Error())
+		return r.failSubstrateMCPTool(ctx, tool, err.Error())
 	}
 	ownershipChanged := ensureSubstrateMCPToolActorOwnership(tool, actorID, poolRef)
 	pendingCleanupChanged := ensureSubstrateMCPToolCleanupState(tool, actorID, cleanupRef)
@@ -370,16 +547,16 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	if poolRef != nil {
 		reservedActorID, reserved, err := r.reserveSubstrateMCPPoolActor(ctx, tool, poolNamespace, actorID, int(pool.Spec.TargetActors))
 		if err != nil {
-			return r.updateStatus(ctx, tool, false, err.Error())
+			return r.failSubstrateMCPTool(ctx, tool, err.Error())
 		}
 		if !reserved {
-			return r.updateStatus(ctx, tool, false, fmt.Sprintf("all substrate pool actors in %q/%q are leased", poolNamespace, poolName))
+			return r.failSubstrateMCPTool(ctx, tool, fmt.Sprintf("all substrate pool actors in %q/%q are leased", poolNamespace, poolName))
 		}
 		if reservedActorID != actorID {
 			actorID = reservedActorID
 			cleanupRef, err = r.substrateMCPReplacementCleanupRef(ctx, tool, actorID)
 			if err != nil {
-				return r.updateStatus(ctx, tool, false, err.Error())
+				return r.failSubstrateMCPTool(ctx, tool, err.Error())
 			}
 			ownershipChanged = ensureSubstrateMCPToolActorOwnership(tool, actorID, poolRef)
 			pendingCleanupChanged = ensureSubstrateMCPToolCleanupState(tool, actorID, cleanupRef)
@@ -393,25 +570,19 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	}
 	if poolRef == nil {
 		if err := r.ensureSubstrateMCPToolActorLease(ctx, tool, actorID); err != nil {
-			return r.updateStatus(ctx, tool, false, err.Error())
+			return r.failSubstrateMCPTool(ctx, tool, err.Error())
 		}
 	}
 	cfg := r.SubstrateConfig.WithDefaults()
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	executor, err := executorFactory(cfg)
 	if err != nil {
-		return r.updateStatus(ctx, tool, false, err.Error())
+		return r.failSubstrateMCPTool(ctx, tool, err.Error())
 	}
 	defer closeWorkspaceExecutor(ctx, executor)
 	claim, err := executor.Claim(ctx, workspace.ClaimRequest{
@@ -421,31 +592,35 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		Template: workspace.TemplateRef{
 			Namespace: templateRequest.TemplateNamespace,
 			Name:      templateRequest.TemplateName,
+			UID:       templateRequest.TemplateUID,
 		},
 		Timeout: cfg.ClaimTimeout,
 	})
 	if err != nil {
-		return r.updateStatus(ctx, tool, false, err.Error())
+		return r.failSubstrateMCPTool(ctx, tool, err.Error())
 	}
-	if result, done, err := r.waitForSubstrateMCPToolActor(ctx, tool, executor, claim, actorID, actorSpec.Boot, cfg.ClaimTimeout); done || err != nil {
+	stop := substrateMCPActorStop{
+		actorID: actorID, ref: claim.Ref, leaseNamespace: tool.Namespace,
+		suspendUnsupported: templateRequest.TemplateSuspendUnsupported,
+	}
+	if poolRef != nil {
+		stop.pooled, stop.leaseNamespace = true, poolNamespace
+	}
+	if result, done, err := r.waitForSubstrateMCPToolActor(ctx, tool, executor, claim, stop, actorSpec.Boot, cfg.ClaimTimeout); done || err != nil {
 		return result, err
 	}
 
-	path := strings.TrimSpace(tool.Spec.MCP.Path)
-	if path == "" {
-		path = "/mcp"
-	}
-	endpoint := strings.TrimRight(cfg.RouterURL, "/") + "/" + strings.TrimLeft(path, "/")
-	routeHost := actorID + "." + strings.Trim(strings.TrimSpace(cfg.ActorDNSSuffix), ".")
+	// Workers and other callers reach the actor only through the Orka API
+	// proxy; the router URL and actor target never leave the manager.
+	endpoint := workerexecutor.SubstrateMCPProxyPath(tool.Namespace, tool.Name)
 	templateRef := &corev1alpha1.WorkspaceTemplateReference{Name: templateRequest.TemplateName, Namespace: templateRequest.TemplateNamespace}
 	actorStatus := &corev1alpha1.ToolActorStatus{
 		Provider:    corev1alpha1.WorkspaceProviderSubstrate,
 		ActorID:     actorID,
-		RouteHost:   routeHost,
 		TemplateRef: templateRef,
 		PoolRef:     poolRef,
 	}
-	if err := r.waitForMCPActorEndpoint(ctx, endpoint, routeHost, cfg.ClaimTimeout); err != nil {
+	if err := r.waitForMCPActorEndpoint(ctx, cfg, tool, actorID, cfg.ClaimTimeout); err != nil {
 		if cleanupRef != nil && tool.Status.Actor != nil {
 			previousActor := *tool.Status.Actor
 			return r.updateStatusWithActor(ctx, tool, false, err.Error(), tool.Status.Endpoint, &previousActor)
@@ -463,13 +638,82 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	tool *corev1alpha1.Tool,
 	executor workspace.WorkspaceExecutor,
 	claim *workspace.ClaimResult,
-	actorID string,
+	stop substrateMCPActorStop,
 	bootRequested bool,
 	timeout time.Duration,
 ) (ctrl.Result, bool, error) {
+	actorID := stop.actorID
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
+	// Substrate v1 routes all actor egress through the gateway under the
+	// actor's native policy. Install and verify it before every resume; any
+	// failure leaves the actor suspended.
+	policy, err := r.applySubstrateMCPActorEgress(ctx, tool, actorID)
+	if err != nil {
+		message := "actor egress policy was not applied; actor not resumed: " + err.Error()
+		var suspendErr error
+		// An actor this claim created has never been resumed, and one observed
+		// suspended has nothing running; neither needs a call.
+		if !claim.Created && claim.Phase != workspace.PhaseRetained {
+			suspendErr = r.stopSubstrateMCPActor(ctx, tool, executor, stop, timeout)
+		}
+		// A Tool that moved to another Actor still has its previous one
+		// running until the replacement is ready, which it now is not.
+		if previous := tool.Status.Actor; suspendErr == nil && previous != nil &&
+			previous.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
+			strings.TrimSpace(previous.ActorID) != "" && strings.TrimSpace(previous.ActorID) != actorID {
+			suspendErr = r.stopSubstrateMCPStatusActor(ctx, tool)
+		}
+		if suspendErr != nil {
+			message += "; the actor could not be suspended and may still run under its previous egress policy: " + suspendErr.Error()
+		}
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyFailed",
+			Message: message, ObservedGeneration: tool.Generation,
+		})
+		result, updateErr := r.updateStatus(ctx, tool, false, message)
+		if updateErr == nil && suspendErr != nil {
+			// Retry with backoff until the actor is confirmed suspended.
+			return ctrl.Result{}, true, suspendErr
+		}
+		return result, true, updateErr
+	}
+	if wait := r.substrateMCPEgressPropagationWait(policy); wait > 0 {
+		// The stored policy is right, but the gateway may still apply other
+		// rules under this Actor's name. Until it cannot, the Actor must not
+		// run and the Tool is not offered.
+		message := fmt.Sprintf("actor egress policy is stored; the egress gateway may apply earlier rules for up to %s more",
+			wait.Round(time.Second))
+		requeue := wait
+		var stopErr error
+		if !claim.Created && claim.Phase != workspace.PhaseRetained {
+			if stopErr = r.stopSubstrateMCPActor(ctx, tool, executor, stop, timeout); stopErr != nil {
+				message += "; the actor could not be stopped and may still reach what those rules allow: " + stopErr.Error()
+			} else if stop.suspendUnsupported {
+				// The Actor was deleted. Create its replacement now, so that
+				// its own wait starts at once instead of after this one.
+				requeue = time.Second
+			}
+		}
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyPropagating",
+			Message: message, ObservedGeneration: tool.Generation,
+		})
+		if _, updateErr := r.updateStatus(ctx, tool, false, message); updateErr != nil {
+			return ctrl.Result{}, true, updateErr
+		}
+		if stopErr != nil {
+			// Retry with backoff until the actor is confirmed stopped.
+			return ctrl.Result{}, true, stopErr
+		}
+		return ctrl.Result{RequeueAfter: requeue}, true, nil
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+		Type: toolConditionEgressPolicyReady, Status: metav1.ConditionTrue, Reason: "EgressPolicyApplied",
+		Message: "Actor egress policy is installed and verified", ObservedGeneration: tool.Generation,
+	})
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:                   claim.Ref,
+		Template:              claim.Template,
 		Timeout:               timeout,
 		Boot:                  bootActor,
 		SkipDaemonHealthCheck: true,
@@ -487,6 +731,278 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 		}
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// substrateMCPActorStop names an Actor that must not keep running because its
+// egress policy is not verified for the Tool's current specification.
+type substrateMCPActorStop struct {
+	actorID string
+	ref     workspace.WorkspaceRef
+	// leaseNamespace holds the Actor's ownership lease: the pool's namespace
+	// for a pooled Actor, otherwise the Tool's.
+	leaseNamespace string
+	pooled         bool
+	// suspendUnsupported selects deletion; see
+	// ExecutionWorkspaceRequest.TemplateSuspendUnsupported.
+	suspendUnsupported bool
+}
+
+const substrateMCPActorStopReason = "egress policy was not verified"
+
+// stopSubstrateMCPActor stops an Actor the Tool still owns. It may be running
+// under the policy an earlier reconcile installed, which can be broader than
+// the Tool now allows. An Actor that keeps data is suspended, and the next
+// successful reconcile resumes it. One that Substrate cannot suspend is deleted
+// under its UID, as Tool deletion does, and the next claim creates it again.
+func (r *ToolReconciler) stopSubstrateMCPActor(
+	ctx context.Context,
+	tool *corev1alpha1.Tool,
+	executor workspace.WorkspaceExecutor,
+	stop substrateMCPActorStop,
+	timeout time.Duration,
+) error {
+	held, err := r.substrateMCPActorHeld(ctx, tool, stop)
+	if err != nil || !held {
+		// Without the lease the Actor is not this Tool's to stop.
+		return err
+	}
+	if stop.suspendUnsupported {
+		if err := deleteSubstrateMCPActor(ctx, executor, stop.actorID, substrateMCPActorStopReason, timeout); err != nil {
+			return err
+		}
+		return r.forgetSubstrateMCPToolActor(ctx, tool, stop.actorID)
+	}
+	// MCP actors run no workspace daemon, so there is nothing to scrub.
+	_, err = executor.Release(ctx, workspace.ReleaseRequest{
+		Ref:       stop.ref,
+		Retain:    true,
+		Reason:    substrateMCPActorStopReason,
+		Timeout:   timeout,
+		SkipScrub: true,
+	})
+	return err
+}
+
+// substrateMCPActorHeld reports whether the Tool holds the lease that makes
+// the Actor its own.
+func (r *ToolReconciler) substrateMCPActorHeld(ctx context.Context, tool *corev1alpha1.Tool, stop substrateMCPActorStop) (bool, error) {
+	var held bool
+	var err error
+	if stop.pooled {
+		_, held, err = r.substrateMCPPoolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
+	} else {
+		_, held, err = r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
+	}
+	return held, err
+}
+
+// forgetSubstrateMCPToolActor drops what the Tool recorded about an Actor it
+// has deleted: that status names it, and that it was booted. The Actor created
+// in its place under the same name has never run, and may be resumed by a later
+// reconcile than the one that creates it, which must still ask for a boot from
+// scratch. The caller writes the status.
+func (r *ToolReconciler) forgetSubstrateMCPToolActor(ctx context.Context, tool *corev1alpha1.Tool, actorID string) error {
+	if previous := tool.Status.Actor; previous != nil && strings.TrimSpace(previous.ActorID) == actorID {
+		tool.Status.Actor = nil
+	}
+	if !substrateMCPToolActorBootRecorded(tool, actorID) {
+		return nil
+	}
+	// A patch of this one annotation, on a copy: the Tool in hand carries
+	// status changes that have not been written yet.
+	patched := tool.DeepCopy()
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, substrateMCPToolBootedIDAnno)
+	if err := r.Patch(ctx, patched, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	delete(tool.Annotations, substrateMCPToolBootedIDAnno)
+	tool.ResourceVersion = patched.ResourceVersion
+	return nil
+}
+
+// substrateMCPEgressVerified reports whether the Actor's egress policy was
+// installed and verified for the Tool's current specification.
+func substrateMCPEgressVerified(tool *corev1alpha1.Tool) bool {
+	condition := meta.FindStatusCondition(tool.Status.Conditions, toolConditionEgressPolicyReady)
+	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == tool.Generation
+}
+
+// failSubstrateMCPTool reports a reconcile that failed before the Actor's
+// egress policy could be applied. If the policy is not verified for the current
+// specification, the Actor status names must not keep running under the
+// previous one: it is stopped, and the reconcile retries until it is.
+func (r *ToolReconciler) failSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool, message string) (ctrl.Result, error) {
+	actor := tool.Status.Actor
+	hasActor := actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != ""
+	recorded := meta.FindStatusCondition(tool.Status.Conditions, toolConditionEgressPolicyReady) != nil
+	if substrateMCPEgressVerified(tool) || (!hasActor && !recorded) {
+		return r.updateStatus(ctx, tool, false, message)
+	}
+	var stopErr error
+	if hasActor {
+		if stopErr = r.stopSubstrateMCPStatusActor(ctx, tool); stopErr != nil {
+			message += "; the actor could not be stopped and may still run under its previous egress policy: " + stopErr.Error()
+		}
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+		Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyUnverified",
+		Message:            "actor egress policy is not verified for this specification: " + message,
+		ObservedGeneration: tool.Generation,
+	})
+	result, updateErr := r.updateStatus(ctx, tool, false, message)
+	if updateErr == nil && stopErr != nil {
+		// Retry with backoff until the actor is confirmed stopped.
+		return ctrl.Result{}, stopErr
+	}
+	return result, updateErr
+}
+
+// stopSubstrateMCPStatusActor stops the Actor that Tool status names.
+func (r *ToolReconciler) stopSubstrateMCPStatusActor(ctx context.Context, tool *corev1alpha1.Tool) error {
+	actor := tool.Status.Actor
+	actorID := strings.TrimSpace(actor.ActorID)
+	held := substrateMCPHeldActor{actorID: actorID, leaseNamespace: tool.Namespace}
+	if actor.PoolRef != nil {
+		held.pooled = true
+		if namespace := strings.TrimSpace(actor.PoolRef.Namespace); namespace != "" {
+			held.leaseNamespace = namespace
+		}
+	}
+	if actor.TemplateRef == nil || strings.TrimSpace(actor.TemplateRef.Name) == "" {
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, held.stop(), fmt.Errorf("tool status does not name the actor's template"))
+	}
+	return r.stopHeldSubstrateMCPActor(ctx, tool, held,
+		strings.TrimSpace(actor.TemplateRef.Name), cmp.Or(strings.TrimSpace(actor.TemplateRef.Namespace), tool.Namespace))
+}
+
+// stopUnnamedSubstrateMCPActor stops a held Actor that Tool status does not
+// name. Its template is the one Substrate reports for it: the Tool's
+// specification may have moved on since it was claimed, and the template
+// decides between suspending and deleting it.
+func (r *ToolReconciler) stopUnnamedSubstrateMCPActor(ctx context.Context, tool *corev1alpha1.Tool, held substrateMCPHeldActor) error {
+	cfg := r.SubstrateConfig.WithDefaults()
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return err
+	}
+	description, err := executor.Describe(ctx, workspace.DescribeRequest{Ref: workspace.WorkspaceRef{ClaimName: held.actorID, ID: held.actorID}})
+	closeWorkspaceExecutor(ctx, executor)
+	if err != nil {
+		if workspace.IsKind(err, workspace.ErrorKindNotFound) {
+			// Substrate no longer has it: nothing runs.
+			return nil
+		}
+		return fmt.Errorf("read the actor's template: %w", err)
+	}
+	if description.Phase == workspace.PhaseDeleted {
+		// Describe reports an absent Actor as deleted, with no template.
+		return nil
+	}
+	templateName := strings.TrimSpace(description.Template.Name)
+	if templateName == "" {
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, held.stop(), fmt.Errorf("substrate does not report the actor's template"))
+	}
+	return r.stopHeldSubstrateMCPActor(ctx, tool, held, templateName, cmp.Or(strings.TrimSpace(description.Template.Namespace), tool.Namespace))
+}
+
+// stopHeldSubstrateMCPActor stops an Actor the Tool holds a lease on, running
+// the named template.
+func (r *ToolReconciler) stopHeldSubstrateMCPActor(
+	ctx context.Context, tool *corev1alpha1.Tool, held substrateMCPHeldActor, templateName, templateNamespace string,
+) error {
+	stop := held.stop()
+	// Whether to suspend or delete depends on the template the Actor runs.
+	cfg := r.SubstrateConfig.WithDefaults()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:                 templateName,
+		TemplateNamespace:            templateNamespace,
+		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,
+		SubstrateBootstrapSecretKey:  cfg.BootstrapSecretKey,
+	}
+	var templateErr error
+	if err := r.validateSubstrateMCPTemplate(ctx, request); err != nil {
+		templateErr = fmt.Errorf("read the actor's template: %w", err)
+	}
+	if templateErr != nil {
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, stop, templateErr)
+	}
+	stop.suspendUnsupported = request.TemplateSuspendUnsupported
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeWorkspaceExecutor(ctx, executor)
+	return r.stopSubstrateMCPActor(ctx, tool, executor, stop, cfg.ClaimTimeout)
+}
+
+// denySubstrateMCPActorEgressWithoutTemplate keeps an Actor whose template
+// cannot be read from reaching anything. Substrate refuses to suspend an Actor
+// without its template, before it touches the workload, so the Actor cannot be
+// stopped that way. Replacing its egress policy with one that denies all needs
+// no template, but the gateway applies it only once its cached copy of the
+// previous rules expires. While it may not, an Actor that is not suspended is
+// deleted, as one whose template cannot be suspended is: that discards any data
+// on its durable volumes, which only the template declares, but leaves nothing
+// running under rules the Tool no longer allows. Once the deny-all is enforced
+// the Actor is left as it is, and the error is still returned, so the reconcile
+// retries the stop.
+func (r *ToolReconciler) denySubstrateMCPActorEgressWithoutTemplate(
+	ctx context.Context, tool *corev1alpha1.Tool, stop substrateMCPActorStop, templateErr error,
+) error {
+	held, err := r.substrateMCPActorHeld(ctx, tool, stop)
+	if err != nil {
+		return goerrors.Join(templateErr, err)
+	}
+	if !held {
+		return templateErr
+	}
+	policy, err := r.applySubstrateMCPActorEgressRules(ctx, stop.actorID, nil)
+	if err != nil {
+		return goerrors.Join(templateErr, fmt.Errorf("deny the actor's egress: %w", err))
+	}
+	denied := fmt.Errorf("%w; the actor's egress is denied instead", templateErr)
+	if r.substrateMCPEgressPropagationWait(policy) <= 0 {
+		return denied
+	}
+	cfg := r.SubstrateConfig.WithDefaults()
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return goerrors.Join(denied, err)
+	}
+	defer closeWorkspaceExecutor(ctx, executor)
+	description, err := executor.Describe(ctx, workspace.DescribeRequest{Ref: stop.ref})
+	if err != nil {
+		return goerrors.Join(denied, fmt.Errorf("read the actor's state: %w", err))
+	}
+	if description.Phase == workspace.PhaseRetained || description.Phase == workspace.PhaseDeleted {
+		// Nothing runs that could use the previous rules.
+		return denied
+	}
+	if err := deleteSubstrateMCPActor(ctx, executor, stop.actorID, substrateMCPActorStopReason, cfg.ClaimTimeout); err != nil {
+		return goerrors.Join(denied, fmt.Errorf("delete the actor while the gateway may still apply its previous egress rules: %w", err))
+	}
+	return r.forgetSubstrateMCPToolActor(ctx, tool, stop.actorID)
 }
 
 func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, requested bool, created bool) bool {
@@ -601,6 +1117,12 @@ func (r *ToolReconciler) resolveSubstrateMCPActorPool(
 	if err != nil {
 		return "", "", nil, err
 	}
+	if pool.Status.TemplateUID == "" {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has not pinned its native ActorTemplate UID", poolName, poolNamespace)
+	}
+	if pool.Status.TemplateUID != templateRequest.TemplateUID {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has a different native ActorTemplate UID; create another pool to use its new identity", poolName, poolNamespace)
+	}
 	return poolName, poolNamespace, pool, nil
 }
 
@@ -608,17 +1130,20 @@ func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *cor
 	if !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	request, pool, err := r.substrateMCPFinalizerMigrationContext(ctx, tool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, request, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	cfg := r.SubstrateConfig.WithDefaults()
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	poolRefs := substrateMCPPoolActorLeaseRefs(tool)
@@ -791,12 +1316,11 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 	if actorID == "" {
 		return nil
 	}
-	key := types.NamespacedName{Namespace: tool.Namespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	lease := &coordinationv1.Lease{}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
+	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, tool.Namespace, actorID)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
 		lease = newSubstrateMCPToolActorLease(tool, tool.Namespace, actorID)
 		if err := r.Create(ctx, lease); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -806,7 +1330,7 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 		}
 		return nil
 	}
-	if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+	if !held {
 		return fmt.Errorf("substrate MCP tool actor lease %q in namespace %q is held by another owner", lease.Name, lease.Namespace)
 	}
 	patch := client.MergeFromWithOptions(lease.DeepCopy(), client.MergeFromWithOptimisticLock{})
@@ -863,10 +1387,10 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseDeleteRefs(
 	refs := make([]substrateMCPActorDeleteRef, 0, len(leases.Items))
 	for i := range leases.Items {
 		lease := &leases.Items[i]
-		if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+		if !substratePoolActorLeaseHeldByTool(lease, tool) {
 			continue
 		}
-		actorID := substrateMCPToolActorLeaseActorID(lease)
+		actorID := substratePoolActorLeaseActorID(lease)
 		if actorID == "" {
 			continue
 		}
@@ -886,19 +1410,29 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 	if actorID == "" || leaseNamespace == "" {
 		return nil, false, nil
 	}
-	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: leaseNamespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, false, nil
+	var selected *coordinationv1.Lease
+	names := []string{substratePoolActorLeaseName(actorID)}
+	if names[0] != actorID {
+		// Early native controllers wrote the qualified ID as the lease name.
+		// Read both forms without creating a second ownership claim.
+		names = append(names, actorID)
+	}
+	for _, name := range names {
+		lease := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: leaseNamespace, Name: name}, lease); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return nil, false, err
 		}
-		return nil, false, err
+		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substratePoolActorLeaseHeldByTool(lease, tool) {
+			return lease, false, nil
+		}
+		if selected == nil {
+			selected = lease
+		}
 	}
-	if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose ||
-		!substrateMCPToolActorLeaseHeldByTool(lease, tool) {
-		return lease, false, nil
-	}
-	return lease, true, nil
+	return selected, selected != nil, nil
 }
 
 func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
@@ -907,26 +1441,30 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 	leaseNamespace string,
 	actorID string,
 ) error {
-	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
-	if err != nil {
-		return err
-	}
-	if lease == nil || !held {
-		return nil
-	}
-	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
-		if errors.IsConflict(err) {
-			stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
-				return substrateMCPToolActorLeaseHeldByTool(latest, tool)
-			})
-			if verifyErr != nil {
-				return verifyErr
-			}
-			if !stillHeld {
-				return nil
-			}
+	// A partially upgraded controller may have left both lease-name forms.
+	// Remove each only while both remain attributable to this exact Tool.
+	for range 2 {
+		lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
+		if err != nil {
+			return err
 		}
-		return err
+		if lease == nil || !held {
+			return nil
+		}
+		if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
+			if errors.IsConflict(err) {
+				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
+					return substratePoolActorLeaseHeldByTool(latest, tool)
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if !stillHeld {
+					return nil
+				}
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -1080,7 +1618,8 @@ func (r *ToolReconciler) reserveSubstrateMCPPoolActor(
 	}
 	for offset := range target {
 		ordinal := (startOrdinal + offset) % target
-		actorID := deterministicSubstratePoolActorID(prefix, ordinal)
+		_, atespace, _ := strings.Cut(startActorID, ".")
+		actorID := workspace.SubstrateActorKey(atespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		reserved, err := r.tryReserveSubstrateMCPPoolActor(ctx, tool, leaseNamespace, actorID)
 		if err != nil {
 			return "", false, err
@@ -1121,22 +1660,28 @@ func (r *ToolReconciler) substrateMCPPoolActorLeaseForTool(
 	return "", false, nil
 }
 
+// heldSubstrateMCPPoolActorLeaseRefs returns the refs whose pool lease the
+// Tool holds. A lease that cannot be read does not stop the others from being
+// checked: it returns every ref proven held together with the joined lookup
+// errors.
 func (r *ToolReconciler) heldSubstrateMCPPoolActorLeaseRefs(
 	ctx context.Context,
 	tool *corev1alpha1.Tool,
 	refs []substrateMCPPoolActorLeaseRef,
 ) ([]substrateMCPPoolActorLeaseRef, error) {
 	heldRefs := make([]substrateMCPPoolActorLeaseRef, 0, len(refs))
+	var errs []error
 	for _, ref := range refs {
 		_, held, err := r.substrateMCPPoolActorLeaseHeldByTool(ctx, tool, ref.poolNamespace, ref.actorID)
 		if err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("read the pool lease of actor %q: %w", ref.actorID, err))
+			continue
 		}
 		if held {
 			heldRefs = append(heldRefs, ref)
 		}
 	}
-	return heldRefs, nil
+	return heldRefs, goerrors.Join(errs...)
 }
 
 func substrateMCPPoolActorLeaseRefs(tool *corev1alpha1.Tool) []substrateMCPPoolActorLeaseRef {
@@ -1473,6 +2018,14 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 		if policy.Spec.Gateway != nil {
 			return nil
 		}
+		// Under the fixture allowance a connection-mode or agentIdentity
+		// Tool skipped the DNS-based private-address rule, so its probe
+		// dials through the hardened private-endpoint dialer (infrastructure
+		// addresses refused, no proxy, no redirect hops) rather than the
+		// plain one.
+		if r.AllowPrivateConnectorEndpoints && (policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
+			httpClient = privateEndpointHealthClient(httpClient.Timeout)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, tool.Spec.HTTP.URL, nil)
@@ -1520,7 +2073,7 @@ func sensitiveURLParameter(name string) bool {
 		strings.Contains(normalized, "apikey") {
 		return true
 	}
-	if normalized == "token" {
+	if normalized == defaultACPWorkspaceCredentialKey {
 		return true
 	}
 	if !strings.HasSuffix(normalized, "-token") {
@@ -1534,26 +2087,33 @@ func sensitiveURLParameter(name string) bool {
 	}, prefix)
 }
 
-func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string) error {
-	httpClient := r.getHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, router *workerexecutor.SubstrateMCPRouter, tool *corev1alpha1.Tool) error {
+	req, err := router.NewRequest(ctx, tool, http.MethodHead, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create MCP endpoint check request: %w", err)
 	}
-	if routeHost != "" {
-		req.Host = routeHost
+	httpClient := *router.HTTPClient()
+	if httpClient.Timeout <= 0 {
+		httpClient.Timeout = toolHealthCheckTimeout
 	}
-
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("MCP endpoint unreachable: %w", err)
+		return fmt.Errorf("MCP endpoint unreachable through the Substrate router")
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
+	// An Actor protected by spec.http.authSecretRef answers this unauthenticated
+	// probe with 401/403 and is still reachable. The router may reject an
+	// unlisted client either during TLS or with a 403, so a 403 alone cannot
+	// distinguish the two; a router identity problem surfaces on Tool calls.
+	// Redirects are never followed for Actor traffic, so an Actor that
+	// answers its MCP path with one cannot serve MCP through the proxy.
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
+	case resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest:
+		return fmt.Errorf("MCP endpoint returned HTTP %d; redirects are not followed", resp.StatusCode)
 	case resp.StatusCode >= http.StatusInternalServerError:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
 	default:
@@ -1561,8 +2121,29 @@ func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoi
 	}
 }
 
-func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string, timeout time.Duration) error {
-	lastErr := r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+// waitForMCPActorEndpoint polls the actor's MCP path through the router with
+// the controller's mTLS identity and the ate-target-actor header.
+func (r *ToolReconciler) waitForMCPActorEndpoint(
+	ctx context.Context, cfg SubstrateConfig, tool *corev1alpha1.Tool, actorID string, timeout time.Duration,
+) error {
+	routerClient := r.SubstrateRouterHTTPClient
+	if routerClient == nil {
+		// A fresh client reloads the rotated pod certificate; release its
+		// connections once readiness is decided.
+		built, err := workspace.NewSubstrateRouterHTTPClient(cfg.WorkspaceClientConfig())
+		if err != nil {
+			return err
+		}
+		defer built.CloseIdleConnections()
+		routerClient = built
+	}
+	router, err := workerexecutor.NewSubstrateMCPRouter(cfg.RouterURL, routerClient)
+	if err != nil {
+		return err
+	}
+	probe := tool.DeepCopy()
+	probe.Status.Actor = &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: actorID}
+	lastErr := r.healthCheckMCPActorEndpoint(ctx, router, probe)
 	if lastErr == nil || timeout <= 0 {
 		return lastErr
 	}
@@ -1580,7 +2161,7 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint s
 		case <-timer.C:
 			return lastErr
 		case <-ticker.C:
-			lastErr = r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+			lastErr = r.healthCheckMCPActorEndpoint(ctx, router, probe)
 			if lastErr == nil {
 				return nil
 			}
@@ -1588,7 +2169,289 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint s
 	}
 }
 
+func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool *corev1alpha1.Tool, actorID string) (workspace.SubstrateEgressPolicyState, error) {
+	rules := substrateMCPEgressRules(tool, r.SubstrateConfig.EgressCredentialProvider)
+	if err := workspace.ValidateSubstrateEgressRules(rules); err != nil {
+		return workspace.SubstrateEgressPolicyState{}, err
+	}
+	return r.applySubstrateMCPActorEgressRules(ctx, actorID, rules)
+}
+
+// applySubstrateMCPActorEgressRules installs and verifies an Actor's egress
+// policy. No rules deny all egress.
+func (r *ToolReconciler) applySubstrateMCPActorEgressRules(
+	ctx context.Context, actorID string, rules []workspace.SubstrateEgressRule,
+) (workspace.SubstrateEgressPolicyState, error) {
+	cfg := r.SubstrateConfig.WithDefaults()
+	switch {
+	case r.SubstrateEgressPolicyStateApplier != nil:
+		return r.SubstrateEgressPolicyStateApplier(ctx, cfg, actorID, rules)
+	case r.SubstrateEgressPolicyApplier != nil:
+		return workspace.SubstrateEgressPolicyState{}, r.SubstrateEgressPolicyApplier(ctx, cfg, actorID, rules)
+	}
+	return applyNativeSubstrateActorEgressPolicy(ctx, cfg, actorID, rules)
+}
+
+// failSubstrateMCPToolValidation reports an invalid Substrate MCP Tool and
+// first denies all egress to every actor it still holds. Otherwise an actor
+// that was running before the Tool became invalid (for example a cleared
+// egress credential provider or a credential Secret that no longer resolves)
+// would keep egressing, and keep using a gateway-injected credential, under
+// its last installed policy. The actor is then stopped, because the gateway
+// may apply the previous policy from its cache for a while. A failed
+// revocation or stop is reported and retried. Reconcile reinstalls the Tool's
+// policy before the actor serves again.
+func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
+	message := validationErr.Error()
+	held, revokeErr := r.revokeSubstrateMCPToolActorEgress(ctx, tool)
+	if revokeErr == nil && len(held) == 0 {
+		// This Tool holds no actor lease to revoke. An actor its status still
+		// names is handled as on any other reconcile that fails before the
+		// policy is verified.
+		return r.failSubstrateMCPTool(ctx, tool, message)
+	}
+	if revokeErr != nil {
+		message += "; actor egress was not revoked: " + revokeErr.Error()
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressRevocationFailed",
+			Message: "actor egress was not revoked: " + revokeErr.Error(), ObservedGeneration: tool.Generation,
+		})
+	} else {
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressRevoked",
+			Message: "Tool is invalid; actor egress is denied", ObservedGeneration: tool.Generation,
+		})
+	}
+	// Every actor is stopped as well. A deny-all policy takes effect only once
+	// the egress gateway drops its cached copy of the previous one, and may not
+	// have been installed at all, so until then an actor could keep using its
+	// last rules and any credential the gateway injects for them. That includes
+	// a replacement the Tool holds while its status still names the actor it
+	// replaces.
+	var stopErrs []error
+	statusActorID := ""
+	if actor := tool.Status.Actor; actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != "" {
+		statusActorID = strings.TrimSpace(actor.ActorID)
+		if err := r.stopSubstrateMCPStatusActor(ctx, tool); err != nil {
+			stopErrs = append(stopErrs, fmt.Errorf("actor %q: %w", statusActorID, err))
+		}
+	}
+	for _, actor := range held {
+		if actor.actorID == statusActorID {
+			continue
+		}
+		if err := r.stopUnnamedSubstrateMCPActor(ctx, tool, actor); err != nil {
+			stopErrs = append(stopErrs, fmt.Errorf("actor %q: %w", actor.actorID, err))
+		}
+	}
+	stopErr := goerrors.Join(stopErrs...)
+	if stopErr != nil {
+		message += "; the actor could not be stopped: " + stopErr.Error()
+	}
+	result, updateErr := r.updateStatus(ctx, tool, false, message)
+	// Retry with backoff until egress is revoked and every actor is stopped.
+	if err := goerrors.Join(revokeErr, stopErr); err != nil {
+		return ctrl.Result{}, err
+	}
+	return result, updateErr
+}
+
+// revokeSubstrateMCPToolActorEgress installs a deny-all egress policy on every
+// actor whose Tool or pool lease this Tool still holds; actors leased by
+// another owner are never touched. It only ever revokes: compiled Tool rules
+// are never applied here. It also runs with Substrate MCP Tools disabled, so
+// turning the feature off cannot leave a running actor egressing with
+// gateway-injected credentials; startup validates the recovery configuration
+// whenever a Tool still carries the actor finalizer. An actor Substrate no
+// longer has cannot egress, so it counts as revoked. It returns every actor
+// proven held, and the joined errors of lease lookups that failed and of the
+// actors whose egress was not denied.
+func (r *ToolReconciler) revokeSubstrateMCPToolActorEgress(ctx context.Context, tool *corev1alpha1.Tool) ([]substrateMCPHeldActor, error) {
+	if tool == nil || !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
+		return nil, nil
+	}
+	// A lease that cannot be read must not cost the Actors proven held their
+	// revocation and stop; the lookup error is still returned so the reconcile
+	// retries.
+	var errs []error
+	leased, err := r.substrateMCPToolActorLeaseDeleteRefs(ctx, tool, "")
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list the Tool's actor leases: %w", err))
+	}
+	pooled, err := r.heldSubstrateMCPPoolActorLeaseRefs(ctx, tool, substrateMCPPoolActorLeaseRefs(tool))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	held := make([]substrateMCPHeldActor, 0, len(leased)+len(pooled))
+	seen := map[string]struct{}{}
+	add := func(actor substrateMCPHeldActor) {
+		if actor.actorID == "" {
+			return
+		}
+		if _, ok := seen[actor.actorID]; ok {
+			return
+		}
+		seen[actor.actorID] = struct{}{}
+		held = append(held, actor)
+	}
+	for _, ref := range leased {
+		add(substrateMCPHeldActor{actorID: strings.TrimSpace(ref.actorID), leaseNamespace: tool.Namespace})
+	}
+	for _, ref := range pooled {
+		add(substrateMCPHeldActor{actorID: strings.TrimSpace(ref.actorID), leaseNamespace: ref.poolNamespace, pooled: true})
+	}
+	slices.SortFunc(held, func(a, b substrateMCPHeldActor) int { return strings.Compare(a.actorID, b.actorID) })
+	cfg := r.SubstrateConfig.WithDefaults()
+	apply := func(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+		switch {
+		case r.SubstrateEgressPolicyStateApplier != nil:
+			_, err := r.SubstrateEgressPolicyStateApplier(ctx, cfg, actorID, rules)
+			return err
+		case r.SubstrateEgressPolicyApplier != nil:
+			return r.SubstrateEgressPolicyApplier(ctx, cfg, actorID, rules)
+		}
+		_, err := applyNativeSubstrateActorEgressPolicy(ctx, cfg, actorID, rules)
+		return err
+	}
+	// Every actor is attempted: one that cannot be reached must not leave the
+	// others with their previous rules.
+	for _, actor := range held {
+		if err := apply(ctx, cfg, actor.actorID, nil); err != nil && !workspace.IsKind(err, workspace.ErrorKindNotFound) {
+			errs = append(errs, fmt.Errorf("deny egress for actor %q: %w", actor.actorID, err))
+		}
+	}
+	return held, goerrors.Join(errs...)
+}
+
+// substrateMCPHeldActor names an Actor whose ownership lease the Tool holds.
+type substrateMCPHeldActor struct {
+	actorID string
+	// leaseNamespace holds the lease: the pool's namespace for a pooled Actor,
+	// otherwise the Tool's.
+	leaseNamespace string
+	pooled         bool
+}
+
+// stop is the stop request for this held Actor; whether its template allows
+// suspension is filled in by the caller once the template is read.
+func (h substrateMCPHeldActor) stop() substrateMCPActorStop {
+	return substrateMCPActorStop{
+		actorID: h.actorID, ref: workspace.WorkspaceRef{ClaimName: h.actorID, ID: h.actorID},
+		leaseNamespace: h.leaseNamespace, pooled: h.pooled,
+	}
+}
+
+func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
+	cfg = cfg.WithDefaults()
+	ctx, cancel := context.WithTimeout(ctx, cfg.ClaimTimeout)
+	defer cancel()
+	api, err := workspace.NewSubstrateNativeClient(cfg.WorkspaceClientConfig())
+	if err != nil {
+		return workspace.SubstrateEgressPolicyState{}, err
+	}
+	defer api.Close() //nolint:errcheck
+	return api.ApplyActorEgressPolicy(ctx, actorID, rules)
+}
+
+// substrateMCPEgressPropagationWait returns how much longer the egress gateway
+// may apply rules other than the Actor's stored policy. See
+// workspace.SubstrateEgressPolicyState.EnforcedAfter.
+func (r *ToolReconciler) substrateMCPEgressPropagationWait(policy workspace.SubstrateEgressPolicyState) time.Duration {
+	enforced := policy.EnforcedAfter(r.SubstrateConfig.EgressPolicyPropagation)
+	if enforced.IsZero() {
+		return 0
+	}
+	return max(0, time.Until(enforced))
+}
+
+// substrateMCPEgressRules converts the Tool allowlist. A credential names a
+// Secret key in the Tool's namespace; credentialProvider is the gateway's
+// configured credential provider class, and an empty value makes any
+// credential rule fail validation instead of compiling without it.
+func substrateMCPEgressRules(tool *corev1alpha1.Tool, credentialProvider string) []workspace.SubstrateEgressRule {
+	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil
+	}
+	rules := make([]workspace.SubstrateEgressRule, 0, len(tool.Spec.MCP.SubstrateActor.Egress))
+	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
+		converted := workspace.SubstrateEgressRule{Scheme: string(rule.Scheme), Host: rule.Host, Ports: append([]int32(nil), rule.Ports...)}
+		if credential := rule.Credential; credential != nil {
+			header := credential.Header
+			if header == "" {
+				header = "Authorization"
+			}
+			converted.Credential = &workspace.SubstrateEgressCredential{
+				Header: header, Prefix: credential.Prefix, Provider: strings.TrimSpace(credentialProvider),
+				Namespace: tool.Namespace, Name: credential.SecretRef.Name, Key: credential.SecretRef.Key,
+			}
+		}
+		rules = append(rules, converted)
+	}
+	return rules
+}
+
+// validateSubstrateMCPEgressCredentials requires every referenced credential
+// Secret key to exist and be non-empty, so a misconfigured Tool reports a
+// condition instead of an actor whose requests the gateway denies. The value
+// itself is never copied into the actor or its egress policy.
+func (r *ToolReconciler) validateSubstrateMCPEgressCredentials(ctx context.Context, tool *corev1alpha1.Tool) error {
+	if tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil
+	}
+	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
+		if rule.Credential == nil {
+			continue
+		}
+		ref := rule.Credential.SecretRef
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: tool.Namespace, Name: ref.Name}, secret); err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("mcp.substrateActor.egress credential Secret %q not found", ref.Name)
+			}
+			return fmt.Errorf("failed to get mcp.substrateActor.egress credential Secret %q: %w", ref.Name, err)
+		}
+		if strings.TrimSpace(string(secret.Data[ref.Key])) == "" {
+			return fmt.Errorf("mcp.substrateActor.egress credential Secret %q key %q is empty or missing", ref.Name, ref.Key)
+		}
+	}
+	return nil
+}
+
+// validateSubstrateMCPToolHeaders rejects Tool headers that would override
+// router targeting, MCP session, transaction or credential headers owned by
+// the Orka MCP proxy.
+func validateSubstrateMCPToolHeaders(tool *corev1alpha1.Tool) error {
+	if tool.Spec.HTTP == nil {
+		return nil
+	}
+	for name := range tool.Spec.HTTP.Headers {
+		if workerexecutor.SubstrateMCPReservedHeader(name) ||
+			(strings.EqualFold(strings.TrimSpace(name), "Authorization") && tool.Spec.HTTP.AuthSecretRef != nil) {
+			return fmt.Errorf("mcp.substrateActor tools must not configure reserved header %q", name)
+		}
+	}
+	return nil
+}
+
 // getHTTPClient returns the HTTP client for health checks.
+// privateEndpointHealthClient probes a private connection-mode endpoint
+// without ever following a hop the validator did not see.
+func privateEndpointHealthClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = toolHealthCheckTimeout
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DialContext:       connectors.PrivateEndpointDialContext,
+			DisableKeepAlives: true,
+			TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 func (r *ToolReconciler) getHTTPClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient
@@ -1629,7 +2492,7 @@ func (r *ToolReconciler) updateStatusWithActor(
 	tool.Status.Actor = actor
 
 	condition := metav1.Condition{
-		Type:               "Available",
+		Type:               toolConditionAvailable,
 		LastTransitionTime: now,
 		ObservedGeneration: tool.Generation,
 	}
@@ -1662,7 +2525,7 @@ func deterministicSubstrateToolActorID(namespace, name, templateNamespace, templ
 		strings.TrimSpace(templateName),
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "orka-tool-" + hex.EncodeToString(sum[:])[:32]
+	return workspace.SubstrateActorKey(templateNamespace, "orka-tool-"+hex.EncodeToString(sum[:])[:32])
 }
 
 func (r *ToolReconciler) requestsForOutboundAccessPolicy(ctx context.Context, object client.Object) []reconcile.Request {

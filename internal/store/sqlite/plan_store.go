@@ -17,7 +17,19 @@ import (
 
 // SavePlan upserts an autonomous plan state.
 func (s *Store) SavePlan(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
-	return upsertSQLitePlan(ctx, s.db, namespace, taskName, plan, time.Now().UTC())
+	return writeOperationErr(ctx, s, "SavePlan", func(ctx context.Context) error {
+		return s.savePlanWrite(ctx, namespace, taskName, plan)
+	})
+}
+
+func (s *Store) savePlanWrite(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.savePlanUnfenced(ctx, namespace, taskName, plan)
+	})
+}
+
+func (s *Store) savePlanUnfenced(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
+	return upsertSQLitePlan(ctx, s.taskDataExecutor(ctx), namespace, taskName, plan, time.Now().UTC())
 }
 
 type sqlitePlanExecutor interface {
@@ -49,7 +61,17 @@ func upsertSQLitePlan(
 
 // GetPlan retrieves the autonomous plan state for a task.
 func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store.PlanState, error) {
-	row := s.db.QueryRowContext(ctx,
+	var plan *store.PlanState
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		plan, err = s.getPlanUnfenced(ctx, namespace, taskName)
+		return err
+	})
+	return plan, err
+}
+
+func (s *Store) getPlanUnfenced(ctx context.Context, namespace, taskName string) (*store.PlanState, error) {
+	row := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, task_name, iteration, summary, progress_pct, goal_complete, plan_document, created_at, updated_at
 		 FROM plan_states WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
@@ -68,9 +90,14 @@ func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store
 
 // DeletePlan removes the autonomous plan state for a task.
 func (s *Store) DeletePlan(ctx context.Context, namespace, taskName string) error {
-	_, err := s.db.ExecContext(ctx,
+	return writeOperationErr(ctx, s, "DeletePlan", func(ctx context.Context) error {
+		return s.deletePlanWrite(ctx, namespace, taskName)
+	})
+}
+
+func (s *Store) deletePlanWrite(ctx context.Context, namespace, taskName string) error {
+	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM plan_states WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
 	)
-	return err
 }

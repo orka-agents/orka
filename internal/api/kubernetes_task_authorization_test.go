@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
@@ -96,7 +96,7 @@ func TestHandlers_CreateTaskWorkspaceClassUseChecksContextTokenCaller(t *testing
 	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", map[string]any{
 		"name": "class-task",
 		"spec": map[string]any{
-			"type":  "container",
+			"type":  "agent",
 			"image": "alpine:3.20",
 			"execution": map[string]any{
 				"workspace": map[string]any{
@@ -239,14 +239,15 @@ func TestCreateManualSecurityScanRequiresKubernetesRBACForTaskCreate(t *testing.
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
 	}
+	analysisAgent := securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithRuntimeObjects(scan).
+		WithRuntimeObjects(scan, analysisAgent).
 		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	securityStore := sqlite.NewStore(db, ":memory:")
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{
 		Client:        fakeClient,
 		SecurityStore: securityStore,
@@ -302,4 +303,63 @@ func tokenReviewUserMiddleware(userInfo *UserInfo) fiber.Handler {
 		c.Locals(UserInfoContextKey, userInfo)
 		return c.Next()
 	}
+}
+
+func TestHandlers_CreateTaskRejectsClasslessWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Post("/tasks", handlers.CreateTask)
+	for _, workspace := range []map[string]any{
+		{}, {"classRef": nil}, {"classRef": map[string]any{}}, {"classRef": map[string]any{"name": ""}},
+		{"enabled": true, "provider": "substrate", "templateRef": map[string]any{"name": "infra"}},
+	} {
+		resp := testJSONRequest(t, app, http.MethodPost, "/tasks", map[string]any{"name": "class-required", "spec": map[string]any{"type": "agent", "execution": map[string]any{"workspace": workspace}}})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+	}
+	tasks := &corev1alpha1.TaskList{}
+	require.NoError(t, fakeClient.List(t.Context(), tasks))
+	require.Empty(t, tasks.Items)
+}
+
+// A consolidation run's grants are reviewed for the caller's canonical
+// identity, never for a display name an OIDC caller may choose.
+func TestAuthorizeTaskMemoryConsolidationReviewsTheCanonicalIdentity(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	review := func(userInfo *UserInfo) []authorizationv1.SubjectAccessReviewSpec {
+		t.Helper()
+		var specs []authorizationv1.SubjectAccessReviewSpec
+		clientset := kubefake.NewSimpleClientset()
+		clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			sar := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+			specs = append(specs, sar.Spec)
+			sar.Status.Allowed = true
+			return true, sar, nil
+		})
+		require.NoError(t, authorizeTaskMemoryConsolidation(context.Background(), clientset, userInfo, task))
+		return specs
+	}
+
+	for _, authType := range []string{AuthTypeOIDC, AuthTypeContextToken} {
+		specs := review(&UserInfo{AuthType: authType, Username: "cluster-admin", Issuer: "https://issuer.example",
+			Subject: "subject-1", Groups: []string{"system:masters"}})
+		require.Len(t, specs, 4)
+		for _, spec := range specs {
+			require.Equal(t, "https://issuer.example#subject-1", spec.User, "%s: never the chosen display name", authType)
+			require.Equal(t, []string{"https://issuer.example#system:masters"}, spec.Groups, "%s: groups carry the issuer", authType)
+		}
+	}
+	specs := review(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:curator", UID: "uid",
+		Groups: []string{"system:serviceaccounts"}})
+	require.Equal(t, "system:serviceaccount:default:curator", specs[0].User, "a TokenReview user is as Kubernetes authenticated it")
+	require.Equal(t, []string{"system:serviceaccounts"}, specs[0].Groups)
+
+	clientset := kubefake.NewSimpleClientset()
+	require.Error(t, authorizeTaskMemoryConsolidation(context.Background(), clientset,
+		&UserInfo{AuthType: AuthTypeOIDC, Username: "cluster-admin"}, task), "an OIDC caller without issuer and subject is refused")
 }

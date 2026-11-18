@@ -73,11 +73,11 @@ func (t *CheckPRReviewMarkerTool) Parameters() json.RawMessage {
 		jsonSchemaPropertiesField: map[string]any{
 			taskNameField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials",
+				jsonSchemaDescriptionField: optionalWorkspaceTaskDescription,
 			},
 			repoURLField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope.",
+				jsonSchemaDescriptionField: scopedRepositoryURLDescription,
 			},
 			githubPRNumberField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeInteger,
@@ -101,7 +101,7 @@ func (t *CheckPRReviewMarkerTool) Execute(ctx context.Context, argsJSON json.Raw
 		return "", fmt.Errorf("pr_number is required")
 	}
 
-	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

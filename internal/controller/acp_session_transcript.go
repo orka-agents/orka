@@ -3,13 +3,13 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -234,10 +234,9 @@ func buildACPBootstrapTranscript(messages []store.SessionMessage, limits ACPBoot
 		resultMessages = append(resultMessages, decoded)
 	}
 	artifactBytes := artifact.Bytes()
-	digest := sha256.Sum256(artifactBytes)
 	return &ACPBootstrapTranscript{
 		Messages: resultMessages, Artifact: append([]byte(nil), artifactBytes...),
-		Digest: "sha256:" + hex.EncodeToString(digest[:]), MessageCount: uint32(len(resultMessages)),
+		Digest: store.CanonicalBytesDigest(artifactBytes), MessageCount: uint32(len(resultMessages)),
 		Truncated: truncated,
 	}, nil
 }
@@ -286,6 +285,25 @@ func truncateUTF8WithSuffix(value string, maxBytes int, suffix string) string {
 		return truncateUTF8(suffix, maxBytes)
 	}
 	return truncateUTF8(value, maxBytes-len(suffix)) + suffix
+}
+
+// clockNow returns fn().UTC() when a test clock is injected, else time.Now().UTC().
+func clockNow(fn func() time.Time) time.Time {
+	if fn != nil {
+		return fn().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// sanitizeStatusMessage redacts, normalizes, and bounds a controller status message.
+func sanitizeStatusMessage(message string) string {
+	return sanitizeStatusValue(message, 1024)
+}
+
+// sanitizeStatusValue redacts, normalizes, and bounds a status string to maxBytes.
+func sanitizeStatusValue(value string, maxBytes int) string {
+	value = events.RedactExecutionEventText(strings.TrimSpace(value))
+	return truncateUTF8(strings.ToValidUTF8(value, "�"), maxBytes)
 }
 
 func truncateUTF8(value string, maxBytes int) string {

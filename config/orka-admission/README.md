@@ -13,12 +13,15 @@ Before applying this base:
    `ca.crt`. When using cert-manager direct CA injection, annotate the Secret
    with `cert-manager.io/allow-direct-injection: "true"`.
 3. Patch any trusted controller or worker identities used by the execution
-   authority and provenance handlers. The checked-in example matches the
-   canonical direct-Kustomize controller in `orka-system`, plus Helm releases
+   authority, attachment Secret, and provenance handlers. The checked-in
+   example matches the canonical direct-Kustomize controller in `orka-system`, plus Helm releases
    `orka-v1` in `orka-v1-system` and `orka-v2` in `orka-v2-system`. If any
    release namespace, release name, or ServiceAccount name differs,
-   patch `--controller-usernames`, `--task-provenance-trusted-users`, and
-   `--task-provenance-trusted-service-accounts`. Patch the exact same
+   patch `--controller-usernames`, `--task-provenance-trusted-users`,
+   `--task-provenance-trusted-service-accounts`, and
+   `--worker-service-accounts`. List every worker ServiceAccount in
+   `--worker-service-accounts`, even one the trusted list leaves out, so the
+   identity-bound Agent rule still applies to it. Patch the exact same
    controller usernames in every `route-unless-controller-cleanup-safe`
    condition in `../orka-admission-webhooks/validating_webhook.yaml`.
 
@@ -33,5 +36,7 @@ Install this base once in the platform-owned `orka-system` namespace. Neither
 the v1 nor v2 release owns these cluster-scoped RBAC objects or the shared
 `ValidatingWebhookConfiguration`.
 
-Uninstall in reverse order: delete the webhook configuration first, then the
-runtime base after API server propagation is complete.
+Before uninstalling, disable `--task-provenance-admission-external` on every
+controller that trusts this runtime and wait for those rollouts to complete.
+Then delete the webhook configuration and remove the runtime base after API
+server propagation is complete.

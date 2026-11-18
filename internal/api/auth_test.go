@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -640,6 +641,43 @@ func TestNewAuthMiddleware_OIDCAuthorizationFailureSkipsTokenReviewFallback(t *t
 	}
 }
 
+// TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject covers a person
+// who signed in but is not on the allow-list yet: the answer is 403 and names
+// their own subject, which an administrator needs in order to allow them. A
+// token that fails verification still gets the plain 401.
+func TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = []string{"someone-else"}
+	fakeClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{OIDC: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error { return ctx.SendString("OK") })
+
+	request := func(token string) (int, string) {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set(AuthHeader, "Bearer "+token)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Test request failed: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	status, body := request(provider.issueToken(t, testOIDCTokenOptions{Subject: "new-person-subject"}))
+	if status != http.StatusForbidden || !strings.Contains(body, `"new-person-subject"`) || !strings.Contains(body, "allowed OIDC subjects") {
+		t.Fatalf("not-allowed subject: status = %d, body = %q, want 403 naming the subject", status, body)
+	}
+
+	forged := provider.issueToken(t, testOIDCTokenOptions{Subject: "new-person-subject"})
+	forged = forged[:len(forged)-4] + "AAAA"
+	status, body = request(forged)
+	if status != http.StatusUnauthorized || strings.Contains(body, "new-person-subject") {
+		t.Fatalf("unverified token: status = %d, body = %q, want 401 without the subject", status, body)
+	}
+}
+
 func TestNewAuthMiddleware_OIDCValidationFailureSkipsTokenReviewFallback(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
@@ -1053,7 +1091,7 @@ func TestNewAuthMiddleware_InvalidAuthorizationPreventsXAPIKeyFallback(t *testin
 	}
 }
 
-func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
+func TestNewAuthMiddleware_XAPIKeyTokenReachesTokenReview(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
 		return true
@@ -1083,15 +1121,13 @@ func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
 		Build()
 
 	app := fiber.New()
-	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{
-		TokenSources: []AuthTokenSource{{Header: "X-Custom-Token"}},
-	}))
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{}))
 	app.Get("/test", func(ctx fiber.Ctx) error {
 		return ctx.SendString("OK")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-Custom-Token", "custom-source-token")
+	req.Header.Set(XAPIKeyHeader, "custom-source-token")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -1226,6 +1262,11 @@ func TestParseServiceAccountNamespace(t *testing.T) {
 		{"partial prefix", "system:serviceaccount:", ""},
 		{"missing name part", "system:serviceaccount:ns", ""},
 		{"empty namespace", "system:serviceaccount::sa", ""},
+		{"empty name", "system:serviceaccount:ns:", ""},
+		{"extra colon", "system:serviceaccount:ns:sa:extra", ""},
+		{"invalid namespace", "system:serviceaccount:../ns:sa", ""},
+		{"invalid name", "system:serviceaccount:ns:sa/name", ""},
+		{"valid dotted name", "system:serviceaccount:ns:chat.client", "ns"},
 	}
 
 	for _, tt := range tests {

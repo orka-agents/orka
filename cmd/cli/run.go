@@ -34,17 +34,23 @@ func newRunCmd() *cobra.Command {
   Interactive: orka run
   Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if agent != "" && provider != "" {
-				return fmt.Errorf("--agent and --provider are mutually exclusive")
+			// Without a prompt argument, run reads the prompt from piped stdin,
+			// so a credential cannot come from stdin too. The prompt is empty
+			// on the same condition as below, so "" counts as no prompt.
+			if strings.Join(args, " ") == "" {
+				if stdinStat, err := os.Stdin.Stat(); err == nil && stdinStat.Mode()&os.ModeCharDevice == 0 {
+					if err := rejectStdinCredential(cmd, "orka run uses for the prompt; pass the prompt as an argument"); err != nil {
+						return err
+					}
+				}
 			}
-
 			c := newClientFromCmd(cmd)
 
 			// Pre-flight check (retry once on stale cache)
 			cfg, err := c.GetChatConfig(context.Background())
 			if err != nil {
 				// Clear stale cache and re-discover
-				clearPortForwardCache()
+				clearPortForwardCache(cmd)
 				c = newClientFromCmd(cmd)
 				cfg, err = c.GetChatConfig(context.Background())
 				if err != nil {
@@ -126,7 +132,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agent, "agent", "", "Agent to use for the task")
 	cmd.Flags().StringVar(&session, "session", "", "Resume a specific session")
 	cmd.Flags().StringVar(&model, "model", "", "Model to use")
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider to use")
+	cmd.Flags().StringVar(&provider, "provider", "", "Chat Provider to use (also selects the coordinator Provider for a runtime --agent)")
 	cmd.Flags().CountVarP(&verbose, "verbose", "v", "Verbosity level (-v, -vv)")
 
 	return cmd
@@ -256,7 +262,7 @@ func streamChat(
 		}
 
 		switch evt.Event {
-		case "status":
+		case cliStatusKey:
 			// Session acknowledged — no action needed
 		case "message":
 			if data.Content != "" {
@@ -290,12 +296,13 @@ func streamChat(
 	if hadContent {
 		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
-	return 0
+	fmt.Fprintln(os.Stderr, "\nStream error: response ended before terminal done event")
+	return 1
 }
 
 func handleToolCallEvent(data client.SSEEventData, verbosity int) {
 	switch data.Name {
-	case "create_agent_task", "delegate_task":
+	case toolCreateAgentTask, toolDelegateTask:
 		var args map[string]any
 		if json.Unmarshal(data.Args, &args) == nil {
 			agentName, _ := args["agentRef"].(string)
@@ -328,7 +335,7 @@ func handleToolResultEvent(data client.SSEEventData, verbosity int) {
 				taskName, _ := result["name"].(string)
 				elapsed, _ := result["duration"].(string)
 				if taskName == "" {
-					taskName = "task"
+					taskName = cliTaskCommand
 				}
 				if verbosity < VerbosityVV {
 					fmt.Fprintf(os.Stderr, "  ↻ %s: %s %s\n", taskName, phase, elapsed)

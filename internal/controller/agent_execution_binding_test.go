@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -35,6 +36,9 @@ func bindingTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -112,10 +116,11 @@ func bindingTestNamespace() *corev1.Namespace {
 	}}
 }
 
-func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sqlite.Store) {
+func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sealedTestStore) {
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
 		WithObjects(objects...).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "binding.db"))
@@ -123,19 +128,11 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	snapshotStore := sqlite.NewStore(db, "test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	snapshotStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
-		ACPRuntimeEnabled:       true, ACPRuntimeNamespace: "orka-runtimes",
-		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+		ACPRuntimeImages:        ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}, snapshotStore
 }
 
@@ -189,6 +186,16 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		}
 	}
 
+	recorder := reconciler.Recorder.(*record.FakeRecorder)
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, agentExecutionSettingsReason) || !strings.Contains(event, "model "+acpTestModel) {
+			t.Fatalf("binding event = %q, want the effective model", event)
+		}
+	default:
+		t.Fatal("first binding did not report its execution settings")
+	}
+
 	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
@@ -200,6 +207,95 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("verify pass reported settings again: %q", event)
+	default:
+	}
+}
+
+func TestSettleACPClassWorkspaceRequiresFrozenSessionUID(t *testing.T) {
+	const (
+		boundSessionUID = "bound-session-uid"
+		workspaceName   = "victim-session-workspace"
+		workspaceUID    = "victim-workspace-uid"
+	)
+	for _, test := range []struct {
+		name                string
+		workspaceSessionUID string
+		wantSurvives        bool
+	}{
+		{name: "matching frozen Session UID settles", workspaceSessionUID: boundSessionUID},
+		{name: "same name with another Session UID survives", workspaceSessionUID: "victim-session-uid", wantSurvives: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			task := workspaceBindingTestTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
+				workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+			})
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "shared-session"}
+			task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName}
+			task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: workspaceUID}
+			workspace := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: task.Namespace,
+					Name:      workspaceName,
+					UID:       types.UID(workspaceUID),
+					Labels: map[string]string{
+						workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
+					},
+				},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+					DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+					SessionRef: &workspacev1alpha1.ObjectIdentityReference{
+						Name: task.Spec.SessionRef.Name,
+						UID:  types.UID(test.workspaceSessionUID),
+					},
+					Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+						DeletionPolicy: workspacev1alpha1.ExecutionWorkspaceDeletionPolicy{
+							ProviderResources: workspacev1alpha1.WorkspaceDeletionActionDelete,
+							PersistentVolumes: workspacev1alpha1.WorkspaceDeletionActionDelete,
+							Checkpoints:       workspacev1alpha1.WorkspaceDeletionActionDelete,
+						},
+					},
+				},
+			}
+			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), workspace)
+			installTestACPWorkspaceClass(t, reconciler)
+			reconciler.APIReader = reconciler.Client
+			reconciler.WorkspaceSettlementProtected = true
+			candidate, err := reconciler.resolveAgentExecutionCandidateWithWorkspaceSessionUID(
+				ctx, task, bindingTestAgent(), boundSessionUID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reconciler.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err != nil {
+				t.Fatal(err)
+			}
+			bound := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+
+			done, err := reconciler.settleACPClassWorkspace(ctx, bound)
+			if err != nil || !done {
+				t.Fatalf("settle same-name Session workspace = (%v, %v), want completion", done, err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			err = reconciler.Get(ctx, client.ObjectKeyFromObject(workspace), current)
+			if test.wantSurvives && err != nil {
+				t.Fatalf("workspace from the unmatched frozen Session UID must survive: %v", err)
+			}
+			if !test.wantSurvives && !apierrors.IsNotFound(err) {
+				t.Fatalf("workspace with the matching frozen Session UID must be deleted, got %v", err)
+			}
+		})
 	}
 }
 
@@ -233,6 +329,85 @@ func TestResolveAgentExecutionCandidateDigestIsStable(t *testing.T) {
 	}
 	if third.binding.Snapshot.Digest == first.binding.Snapshot.Digest {
 		t.Fatal("snapshot digest must change when executable inputs change")
+	}
+}
+
+// A Task validated against a stale cached Agent is not bound while the live
+// Agent is a newer generation, such as one whose ceiling was just tightened.
+func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := bindingTestTask()
+	cached := bindingTestAgent()
+	live := cached.DeepCopy()
+	live.Generation = cached.Generation + 1
+	live.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{}}
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), live)
+
+	result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), cached)
+	if err != nil || !handled || result.RequeueAfter == 0 {
+		t.Fatalf("ensure binding = result=%+v handled=%v err=%v, want a requeue", result, handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		t.Fatalf("a stale Agent generation was bound: %+v", current.Status.AgentExecutionBinding)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), live); err != nil || handled {
+		t.Fatalf("binding against the live generation = handled=%v err=%v", handled, err)
+	}
+}
+
+// A ceiling tightened between the live check and the binding write is caught
+// before the bound Task starts: the next binding pass re-judges it against
+// the live Agent and fails it, while a newer generation it still fits leaves
+// it alone.
+func TestBoundTaskIsRejudgedAgainstATightenedCeilingBeforeItStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ceiling *corev1alpha1.AgentRuntimeCeiling
+		fails   bool
+	}{
+		{name: "tightened past the Task", ceiling: &corev1alpha1.AgentRuntimeCeiling{AllowBash: new(bool)}, fails: true},
+		{name: "still within the ceiling", ceiling: &corev1alpha1.AgentRuntimeCeiling{MaxTurns: new(int32(500))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			task := bindingTestTask()
+			agent := bindingTestAgent()
+			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), agent.DeepCopy())
+			if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+				t.Fatalf("first binding = handled=%v err=%v", handled, err)
+			}
+
+			live := &corev1alpha1.Agent{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(agent), live); err != nil {
+				t.Fatal(err)
+			}
+			live.Spec.Runtime.Ceiling = tc.ceiling
+			live.Generation = agent.Generation + 1
+			if err := reconciler.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			bound := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			_, err, handled := reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
+			if err != nil || handled != tc.fails {
+				t.Fatalf("re-judging = handled=%v err=%v, want handled=%v", handled, err, tc.fails)
+			}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+			if failed := bound.Status.Phase == corev1alpha1.TaskPhaseFailed; failed != tc.fails {
+				t.Fatalf("phase = %q message = %q, want failed=%v", bound.Status.Phase, bound.Status.Message, tc.fails)
+			}
+		})
 	}
 }
 
@@ -449,7 +624,7 @@ func TestEnsureAgentExecutionBindingUsesUncachedExistingBinding(t *testing.T) {
 	}
 }
 
-func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T) {
+func TestQueueACPRuntimeTaskUsesFrozenSnapshotAndCurrentImageAfterLiveInputsMutate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	task := bindingTestTask()
@@ -495,7 +670,8 @@ func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T
 	mutatedAgent := agent.DeepCopy()
 	mutatedAgent.Spec.Model.Name = "mutated/model"
 	mutatedAgent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "mutable system prompt must be ignored"}
-	reconciler.ACPRuntimeImages.Codex = "docker.io/example/mutated@sha256:" + strings.Repeat("b", 64)
+	approvedImage := "docker.io/example/mutated@sha256:" + strings.Repeat("b", 64)
+	reconciler.ACPRuntimeImages.Codex = approvedImage
 
 	if _, err := reconciler.queueACPRuntimeTask(ctx, mutatedTask, mutatedAgent); err != nil {
 		t.Fatal(err)
@@ -504,9 +680,12 @@ func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T
 	if err := reconciler.List(ctx, &pools); err != nil {
 		t.Fatal(err)
 	}
-	if len(pools.Items) != 1 || pools.Items[0].Spec.Runtime.Image != wantImage ||
+	if len(pools.Items) != 1 || pools.Items[0].Spec.Runtime.Image != approvedImage ||
 		pools.Items[0].Spec.Runtime.Profile.Digest != wantProfileDigest {
-		t.Fatalf("RuntimePool did not use frozen plan: %#v", pools.Items)
+		t.Fatalf("RuntimePool did not combine the current image with the frozen profile: %#v", pools.Items)
+	}
+	if pools.Items[0].Spec.Runtime.Image == wantImage {
+		t.Fatalf("RuntimePool resurrected the superseded frozen image %q", wantImage)
 	}
 	queued := &corev1alpha1.Task{}
 	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), queued); err != nil {

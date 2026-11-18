@@ -1,0 +1,175 @@
+# Architecture decision records
+
+An architecture decision record (ADR) is a short document explaining **why** Orka works
+the way it does. Each one captures a single decision: the problem, the options, what was
+chosen, and what that choice costs. They exist so that a year later nobody has to guess
+whether something is load-bearing or accidental.
+
+ADRs are historical records, not documentation. They are never rewritten to match the
+current code — when a decision is replaced, the old record stays and a new one supersedes
+it. If you want to know how Orka behaves *today*, read the
+[documentation](../../website/docs/getting-started.md); if you want to know why it behaves
+that way, read here.
+
+## Status labels
+
+| Status | Means |
+| --- | --- |
+| **Accepted** | The decision is in force. The code should match it. |
+| **Superseded** | A later ADR replaced this one. Kept for the reasoning it records. |
+| **Deferred** | The decision was made but the work has not landed, usually because it depends on something outside Orka. |
+| **Proposed** | The decision is under review and has not been implemented. |
+
+## The records
+
+### Harness v1 → v2 migration
+
+How Orka moved from sidecar-wrapped agents to ACP RuntimePools without breaking running
+clusters. See [Harness modes](../../website/docs/operations/harness-modes.md) for what
+shipped.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0016](0016-harness-migration-strategy.md) | Full active coexistence for the v1/v2 migration | Superseded by 0018 |
+| [0017](0017-harness-coexistence-architecture.md) | Coexistence architecture and ownership contracts | Superseded by 0018 |
+| [0018](0018-static-harness-modes-and-namespace-isolation.md) | Static harness modes and namespace-isolated control planes | Superseded by #568 |
+
+### The execution workspace model
+
+What a workspace *is* as an API object, who owns which half of its status, and how an
+attachment is fenced against a stale controller.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0001](0001-execution-workspace-default-provider.md) | An explicit default provider for execution workspaces | Superseded by the ACP RuntimePool cutover |
+| [0002](0002-provider-neutral-execution-workspace-status.md) | Provider-neutral workspace status | Superseded for built-in agent Tasks |
+| [0006](0006-use-wrapper-first-execution-workspace-providers.md) | Wrapper-first workspace providers | Superseded by 0022 and the ACP RuntimePool cutover |
+| [0021](0021-execution-workspace-domain-and-ownership.md) | Workspaces as provider-neutral owned resources | Accepted |
+| [0022](0022-workspace-crd-control-plane-and-agent-data-plane.md) | Generic CRDs for control, a versioned agent for data | Accepted |
+| [0023](0023-workspace-attachment-fencing-and-transport-security.md) | Fence attachments with epochs, rotated tokens, and TLS | Accepted |
+
+### Workspace-backed ACP RuntimePools
+
+Binding a Task's workspace to a dedicated RuntimePool, and what suspend/resume may and may
+not do with a running agent's memory. See
+[Agent Sandbox](../../website/docs/concepts/agent-sandbox.md) and
+[Substrate](../../website/docs/concepts/substrate.md).
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0024](0024-acp-execution-workspace-runtime-pools.md) | Workspace-provider-backed ACP RuntimePools | Accepted |
+| [0025](0025-substrate-backed-runtime-pools.md) | Substrate-backed pools, without suspension | Accepted |
+| [0026](0026-acp-class-backed-execution-workspaces.md) | Class-backed execution workspaces | Accepted |
+| [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted |
+| [0028](0028-agent-sandbox-pvc-cold-resume.md) | Agent Sandbox PVC-backed cold suspension and resume | Accepted |
+| [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted |
+| [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted, partly superseded by 0049 |
+| [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
+| [0049](0049-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
+| [0041](0041-data-only-parked-turns.md) | Release runtime capacity while an agent waits: data-only parked turns | Accepted |
+| [0044](0044-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
+| [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
+| [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
+
+### The Substrate control plane
+
+Decisions about talking to Agent Substrate specifically. Several are deferred: the pinned
+upstream release does not yet expose the API they need.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0003](0003-use-provider-route-for-workspace-daemon.md) | Use the provider route for Workspace Daemon calls | Deferred |
+| [0004](0004-use-minimal-substrate-control-client.md) | A minimal Substrate control API client | Deferred |
+| [0005](0005-require-explicit-substrate-api-trust.md) | Require explicit trust for the Substrate control API | Accepted, not yet active |
+| [0007](0007-substrate-actor-pool-oversubscription.md) | Oversubscription as controller-owned actor pools | Deferred |
+
+### Sessions, pools, and task outcomes
+
+Where session state lives, and the rule that keeps a Task's recorded outcome honest when
+publication fails afterwards.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0008](0008-runtime-session-internal-store-first.md) | Start RuntimeSession persistence as an internal store | Superseded by the Kubernetes cutover |
+| [0009](0009-defer-runtime-session-ui-until-public-api.md) | Defer runtime-session UI until a public API exists | Accepted |
+| [0014](0014-task-outcome-and-workspace-finalization.md) | Separate immutable Task outcome from workspace finalization | Accepted |
+| [0015](0015-provider-versioning-draining-pools-and-services.md) | Pin provider/class revisions; model draining generically | Accepted |
+
+### Gateways
+
+How Orka accepts work from and returns work to external systems exactly once. See
+[Gateways](../../website/docs/operations/gateways.md).
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0012](0012-gateway-inbox-outbox-semantics.md) | Durable at-least-once inbox and outbox semantics | Accepted |
+| [0013](0013-stage-gateway-resource-rollout.md) | Stage the generic gateway resource rollout | Accepted |
+| [0020](0020-gateway-session-canonical-history.md) | Keep external conversation history in Orka Sessions | Accepted |
+| [0032](0032-gateway-interim-delivery.md) | Bounded, capability-gated nonterminal gateway deliveries | Accepted |
+
+### Governance and telemetry
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0010](0010-genai-metrics-export.md) | Export GenAI metrics through OTLP push | Accepted |
+| [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
+| [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
+| [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
+| [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
+| [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
+| [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted, partly superseded by 0054 |
+| [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted |
+| [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
+| [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
+| [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
+| [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
+
+### Agent hosts and the Agent Host Protocol
+
+Long-lived, per-user agent hosts that clients such as the Copilot desktop app connect to,
+and serving the Agent Host Protocol from Orka itself.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+| [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
+| [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
+
+### Repository monitors
+
+How monitors review and repair pull requests.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
+
+## Writing a new one
+
+Copy the shape of a recent record — [0028](0028-agent-sandbox-pvc-cold-resume.md) is a
+good example:
+
+```markdown
+# NN. Short imperative title
+
+Date: YYYY-MM-DD
+
+## Status
+
+Accepted. One or two sentences: what this implements, what it supersedes, what it leaves open.
+
+## Context
+
+The forces at play. What made the decision necessary.
+
+## Decision
+
+What was chosen, stated as rules the code must follow.
+
+## Consequences
+
+What this costs, what it rules out, and what now has to stay true.
+```
+
+Take the next free number. If your ADR replaces an earlier one, say so in your **Status**
+section, edit the older record's **Status** to point at yours, and update the table above —
+but leave the rest of the older record untouched.

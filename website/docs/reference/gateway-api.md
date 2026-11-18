@@ -1,6 +1,10 @@
-# Generic Gateway API
+---
+description: "The gateway resources, REST endpoints, and CLI commands."
+---
 
-Orka exposes a provider-neutral external conversation plane through `GatewayClass`, `Gateway`, and `GatewayBinding` plus durable event and delivery ledgers.
+# Gateway API
+
+Orka exposes a provider-neutral external conversation plane through `GatewayClass`, `Gateway`, and `GatewayBinding` plus durable event and delivery ledgers. To set one up, see [Gateways](../guides/gateways.md); to run one, see [Operating gateways](../operations/gateways.md).
 
 ## Kubernetes resources
 
@@ -30,9 +34,9 @@ orka gateway list
 orka gateway binding list
 orka gateway events list --state DeadLettered
 orka gateway deliveries list --state DeadLettered
-orka gateway deliveries retry <delivery-id>
+orka gateway deliveries retry '<delivery-id>'
 ```
 
 The dashboard **Gateways** view shows readiness and capabilities, semantic bindings, Session queue correlation, event timelines, delivery attempts, dead letters, and manual retry.
 
-The normative adapter contract is in `docs/development/gateway-protocol-v1.md`.
+The normative adapter contract is the [`orka.gateway.v1` protocol](https://github.com/orka-agents/orka/blob/main/docs/development/gateway-protocol-v1.md).

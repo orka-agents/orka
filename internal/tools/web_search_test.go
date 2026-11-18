@@ -9,9 +9,19 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
+
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestWebSearchTool_Name(t *testing.T) {
@@ -45,6 +55,194 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 	// Check required fields
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
+	}
+}
+
+func TestNewBrokeredWebSearchToolIgnoresWorkerConfigurationAndRejectsPrivateEndpoints(t *testing.T) {
+	t.Setenv(workerenv.SearchAPIKey, "configured-worker-value")
+	t.Setenv(workerenv.SearchAPIURL, "http://127.0.0.1:8080/search")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:8081")
+
+	tool := NewBrokeredWebSearchTool()
+	if tool.apiKey != "" || tool.baseURL != "" {
+		t.Fatalf("brokered search inherited worker configuration: apiKey=%t baseURL=%q", tool.apiKey != "", tool.baseURL)
+	}
+	transport, ok := tool.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("brokered search transport = %T, want *http.Transport", tool.client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("brokered search transport inherited proxy configuration")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("brokered search transport has no public-endpoint dial guard")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if connection, err := transport.DialContext(ctx, "tcp", "127.0.0.1:80"); err == nil {
+		connection.Close() //nolint:errcheck
+		t.Fatal("brokered search transport dialed a private endpoint")
+	}
+	privateRedirect := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/internal", nil)
+	if err := tool.client.CheckRedirect(privateRedirect, nil); err == nil {
+		t.Fatal("brokered search client accepted a private redirect")
+	}
+}
+
+func TestWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
+	// Clear any search API so the worker tool takes the DuckDuckGo path.
+	t.Setenv(workerenv.SearchAPIURL, "")
+
+	webSearchResponse := func(status int, body string) http.RoundTripper {
+		return webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: status,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})
+	}
+	failures := []struct {
+		name      string
+		transport http.RoundTripper
+		want      string
+	}{
+		{
+			name: "request failure",
+			transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("offline")
+			}),
+			want: "DuckDuckGo request failed",
+		},
+		{
+			name:      "error status",
+			transport: webSearchResponse(http.StatusServiceUnavailable, "unavailable"),
+			want:      "DuckDuckGo returned HTTP 503",
+		},
+		{
+			name:      "unparseable response",
+			transport: webSearchResponse(http.StatusOK, "markup changed"),
+			want:      "no parseable results",
+		},
+		{
+			// DuckDuckGo answers automated clients with a challenge page.
+			name:      "bot challenge",
+			transport: webSearchResponse(http.StatusAccepted, `<form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>`),
+			want:      "DuckDuckGo returned HTTP 202",
+		},
+		{
+			name: "unreadable body",
+			transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(iotest.ErrReader(errors.New("connection reset"))),
+				}, nil
+			}),
+			want: "read DuckDuckGo response",
+		},
+	}
+	for _, constructor := range []struct {
+		name string
+		new  func() *WebSearchTool
+	}{
+		{name: "worker", new: NewWebSearchTool},
+		{name: "brokered", new: NewBrokeredWebSearchTool},
+	} {
+		for _, test := range failures {
+			t.Run(constructor.name+"/"+test.name, func(t *testing.T) {
+				tool := constructor.new()
+				tool.client = &http.Client{Transport: test.transport}
+				result, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"test"}`))
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Execute() result = %q, error = %v, want error containing %q", result, err, test.want)
+				}
+				if result != "" {
+					t.Fatalf("Execute() returned data with its error: %q", result)
+				}
+			})
+		}
+	}
+}
+
+func TestBrokeredWebSearchRejectsOversizedArgumentsBeforeRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    WebSearchArgs
+		wantErr string
+	}{
+		{
+			name:    "query",
+			args:    WebSearchArgs{Query: strings.Repeat("q", brokeredWebSearchMaxQueryChars+1)},
+			wantErr: "query must be no greater than",
+		},
+		{
+			name:    "limit",
+			args:    WebSearchArgs{Query: "test", Limit: brokeredWebSearchMaxResults + 1},
+			wantErr: "limit must be no greater than",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			tool := NewBrokeredWebSearchTool()
+			tool.client = &http.Client{Transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				called = true
+				return nil, errors.New("unexpected request")
+			})}
+			args, err := json.Marshal(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tool.Execute(t.Context(), args); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Execute() error = %v, want %q", err, test.wantErr)
+			}
+			if called {
+				t.Fatal("oversized brokered web_search arguments reached the HTTP client")
+			}
+		})
+	}
+}
+
+func TestBrokeredWebSearchQueryLimitCountsUnicodeCharacters(t *testing.T) {
+	query := strings.Repeat("é", brokeredWebSearchMaxQueryChars)
+	if len(query) <= brokeredWebSearchMaxQueryChars {
+		t.Fatalf("test query bytes = %d, want greater than character limit %d", len(query), brokeredWebSearchMaxQueryChars)
+	}
+
+	called := false
+	tool := NewBrokeredWebSearchTool()
+	tool.baseURL = "https://search.example.test"
+	tool.client = &http.Client{Transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`[]`)),
+		}, nil
+	})}
+
+	args, err := json.Marshal(WebSearchArgs{Query: query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(t.Context(), args); err != nil {
+		t.Fatalf("Execute() rejected query at character limit: %v", err)
+	}
+	if !called {
+		t.Fatal("query at character limit did not reach the HTTP client")
+	}
+
+	called = false
+	args, err = json.Marshal(WebSearchArgs{Query: query + "é"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(t.Context(), args); err == nil || !strings.Contains(err.Error(), "characters") {
+		t.Fatalf("Execute() error = %v, want character-limit error", err)
+	}
+	if called {
+		t.Fatal("query above character limit reached the HTTP client")
 	}
 }
 
@@ -92,6 +290,8 @@ func TestWebSearchTool_Execute(t *testing.T) {
 	}
 
 	tool := NewWebSearchTool()
+	tool.baseURL = ""
+	tool.client = &http.Client{Transport: duckDuckGoResultsTransport(t, nil)}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,26 +307,61 @@ func TestWebSearchTool_Execute(t *testing.T) {
 	}
 }
 
-func TestWebSearchTool_Execute_MockSearch(t *testing.T) {
-	// Test mock search (no API configured)
-	tool := NewWebSearchTool()
-	// Ensure no API URL is set
-	tool.baseURL = ""
+const duckDuckGoResultsHTML = `<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage1&rut=abc">Example Page 1</a>
+	<a class="result__snippet" href="#">First snippet</a>
+</div>
+<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage2&rut=def">Example Page 2</a>
+	<a class="result__snippet" href="#">Second snippet</a>
+</div>
+<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage3&rut=ghi">Example Page 3</a>
+	<a class="result__snippet" href="#">Third snippet</a>
+</div>`
 
-	args := json.RawMessage(`{"query": "test query"}`)
-	result, err := tool.Execute(context.Background(), args)
+// duckDuckGoResultsTransport answers every request with three DuckDuckGo
+// results, passing each request to inspect first when it is set.
+func duckDuckGoResultsTransport(t *testing.T, inspect func(*http.Request)) http.RoundTripper {
+	t.Helper()
+	return webSearchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if inspect != nil {
+			inspect(request)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader(duckDuckGoResultsHTML)),
+		}, nil
+	})
+}
+
+func TestWebSearchTool_Execute_DuckDuckGoSearch(t *testing.T) {
+	t.Setenv(workerenv.SearchAPIURL, "")
+	tool := NewWebSearchTool()
+	var requested *url.URL
+	tool.client = &http.Client{Transport: duckDuckGoResultsTransport(t, func(request *http.Request) {
+		requested = request.URL
+	})}
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"query": "test query", "limit": 2}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-
-	// Verify result is valid JSON
-	var results []WebSearchResult
-	if err := json.Unmarshal([]byte(result), &results); err != nil {
-		t.Errorf("Execute() returned invalid JSON: %v", err)
+	if requested == nil || requested.Host != "html.duckduckgo.com" || requested.Query().Get("q") != "test query" {
+		t.Fatalf("Execute() requested %v, want the DuckDuckGo HTML endpoint for the query", requested)
 	}
 
-	if len(results) == 0 {
-		t.Error("Execute() returned empty results")
+	var results []WebSearchResult
+	if err := json.Unmarshal([]byte(result), &results); err != nil {
+		t.Fatalf("Execute() returned invalid JSON: %v", err)
+	}
+	want := []WebSearchResult{
+		{Title: "Example Page 1", URL: "https://example.com/page1", Snippet: "First snippet"},
+		{Title: "Example Page 2", URL: "https://example.com/page2", Snippet: "Second snippet"},
+	}
+	if !reflect.DeepEqual(results, want) {
+		t.Fatalf("Execute() results = %+v, want %+v", results, want)
 	}
 }
 
@@ -163,6 +398,204 @@ func TestWebSearchTool_Execute_APISearch(t *testing.T) {
 
 	if result != expectedResponse {
 		t.Errorf("Execute() = %v, want %v", result, expectedResponse)
+	}
+}
+
+func TestWebSearchTool_Execute_APIQueryParameters(t *testing.T) {
+	tests := []struct {
+		name      string
+		basePath  string
+		query     string
+		limit     int
+		wantLimit string
+		wantPath  string
+		wantExtra map[string][]string
+	}{
+		{
+			name:      "plain URL",
+			query:     "test query",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/",
+		},
+		{
+			name:      "path without options",
+			basePath:  "/api/v1/search",
+			query:     "test query",
+			limit:     2,
+			wantLimit: "2",
+			wantPath:  "/api/v1/search",
+		},
+		{
+			name:      "existing options and request options",
+			basePath:  "/search?format=json&q=stale&q=duplicate&limit=99&limit=100",
+			query:     "sample words & 日本語",
+			limit:     3,
+			wantLimit: "3",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+		{
+			name:      "multiple unrelated options preserved",
+			basePath:  "/search?format=json&safesearch=off&lang=en&engines=general",
+			query:     "test query",
+			limit:     4,
+			wantLimit: "4",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format":     {"json"},
+				"safesearch": {"off"},
+				"lang":       {"en"},
+				"engines":    {"general"},
+			},
+		},
+		{
+			name:      "repeated unrelated option preserved",
+			basePath:  "/search?category=news&category=science",
+			query:     "test query",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"category": {"news", "science"},
+			},
+		},
+		{
+			name:      "option without value preserved",
+			basePath:  "/search?verbose&format=json",
+			query:     "test query",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"verbose": {""},
+				"format":  {"json"},
+			},
+		},
+		{
+			name:      "existing query replaced",
+			basePath:  "/search?q=stale",
+			query:     "fresh query",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search",
+		},
+		{
+			name:      "omitted limit uses default",
+			basePath:  "/search?format=json",
+			query:     "test query",
+			wantLimit: strconv.Itoa(defaultWebSearchResults),
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+		{
+			name:      "negative limit uses default",
+			basePath:  "/search?format=json",
+			query:     "test query",
+			limit:     -1,
+			wantLimit: strconv.Itoa(defaultWebSearchResults),
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+		{
+			name:      "reserved characters in query",
+			basePath:  "/search?format=json",
+			query:     "a&b=c d?e#f+g%h/i",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+		{
+			name:      "non-English query",
+			basePath:  "/search?format=json",
+			query:     "日本語 & «тест» — ümlaut",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+		{
+			name:      "encoded path segment preserved",
+			basePath:  "/search%20v2?format=json",
+			query:     "test query",
+			limit:     5,
+			wantLimit: "5",
+			wantPath:  "/search v2",
+			wantExtra: map[string][]string{
+				"format": {"json"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.wantPath {
+					t.Errorf("request path = %q, want %q", r.URL.Path, tt.wantPath)
+				}
+
+				query := r.URL.Query()
+				if got := query["q"]; !reflect.DeepEqual(got, []string{tt.query}) {
+					t.Errorf("q values = %q, want %q", got, []string{tt.query})
+				}
+				if got := query["limit"]; !reflect.DeepEqual(got, []string{tt.wantLimit}) {
+					t.Errorf("limit values = %q, want %q", got, []string{tt.wantLimit})
+				}
+				for key, want := range tt.wantExtra {
+					if got := query[key]; !reflect.DeepEqual(got, want) {
+						t.Errorf("%s values = %q, want %q", key, got, want)
+					}
+				}
+
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`[]`)) //nolint:errcheck
+			}))
+			defer server.Close()
+
+			tool := &WebSearchTool{
+				baseURL: server.URL + tt.basePath,
+				client:  server.Client(),
+			}
+			args, err := json.Marshal(WebSearchArgs{Query: tt.query, Limit: tt.limit})
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+
+			if _, err := tool.Execute(context.Background(), args); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWebSearchTool_Execute_APIInvalidBaseURL(t *testing.T) {
+	called := false
+	tool := &WebSearchTool{
+		baseURL: "://missing-scheme/search",
+		client: &http.Client{Transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			called = true
+			return nil, errors.New("unexpected request")
+		})},
+	}
+
+	args := json.RawMessage(`{"query": "test query"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse search API URL") {
+		t.Fatalf("Execute() error = %v, want error containing %q", err, "failed to parse search API URL")
+	}
+	if called {
+		t.Fatal("unparseable search API URL reached the HTTP client")
 	}
 }
 
@@ -303,4 +736,10 @@ func TestStripHTMLTags(t *testing.T) {
 			}
 		})
 	}
+}
+
+type webSearchRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f webSearchRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }

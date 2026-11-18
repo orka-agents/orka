@@ -5,17 +5,35 @@ import { StatusDot } from '@/components/ui/status-dot'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
+import { timeAgo } from '@/lib/time'
+import { TaskStateBadges } from '@/components/tasks/task-state-badges'
+import { loadProblemText, type LoadProblem } from '@/lib/load-problem'
 
-function timeAgo(timestamp?: string): string {
-  if (!timestamp) return '-'
-  const seconds = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return `${Math.floor(seconds / 86400)}d ago`
-}
-
-export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: boolean }) {
+export function RecentTasks({
+  tasks,
+  isLoading,
+  problem,
+  isTruncated,
+}: {
+  tasks?: Task[]
+  isLoading?: boolean
+  problem?: LoadProblem
+  isTruncated?: boolean
+}) {
+  if (problem) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Tasks</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" role="alert">
+            {loadProblemText('tasks', problem)}
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
   if (isLoading) {
     return (
       <Card>
@@ -34,12 +52,23 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
     )
   }
 
-  const recent = (tasks ?? []).slice(0, 10)
+  const recent = [...(tasks ?? [])]
+    .sort((a, b) => {
+      const aTime = a.metadata.creationTimestamp ? Date.parse(a.metadata.creationTimestamp) : 0
+      const bTime = b.metadata.creationTimestamp ? Date.parse(b.metadata.creationTimestamp) : 0
+      return bTime - aTime
+    })
+    .slice(0, 10)
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Recent Tasks</CardTitle>
+        <CardTitle>{isTruncated ? 'Task sample' : 'Recent Tasks'}</CardTitle>
+        {isTruncated && (
+          <p className="text-xs text-muted-foreground">
+            Sorted by timestamp within the loaded sample. Newer tasks may exist outside it.
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         {recent.length === 0 ? (
@@ -57,8 +86,11 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
                 params={{ taskId: task.metadata.name }}
                 className="flex items-center justify-between rounded-md p-2 hover:bg-accent"
               >
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">{task.metadata.name}</p>
+                <div className="min-w-0 space-y-1">
+                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                    <span>{task.metadata.name}</span>
+                    <TaskStateBadges task={task} />
+                  </p>
                   <p className="text-xs text-muted-foreground tabular-nums">
                     {task.spec.type} · {task.metadata.namespace} · {timeAgo(task.metadata.creationTimestamp)}
                   </p>

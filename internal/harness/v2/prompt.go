@@ -171,7 +171,15 @@ func ValidatePromptLeaseRenewal(current, proposed PromptLease, expectedGeneratio
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if proposed.IssuedAt.Before(now.Add(-time.Second)) || proposed.IssuedAt.After(now.Add(time.Second)) {
+	// A correct renewal can arrive well after it was issued: the controller
+	// replays an ambiguous renewal verbatim, and a remote renewal is checked
+	// again after its network round trip. So the issue time is bounded by the
+	// lease it renews, not by arrival time; maxExtension still bounds expiry
+	// from now, and a later issue time never lengthens the lease.
+	if proposed.IssuedAt.Before(current.IssuedAt) {
+		return fmt.Errorf("renewed prompt lease is issued before the lease it renews")
+	}
+	if proposed.IssuedAt.After(now.Add(time.Second)) {
 		return fmt.Errorf("renewed prompt lease issue timestamp is outside allowed clock skew")
 	}
 	if maxExtension > 0 && proposed.ExpiresAt.After(now.Add(maxExtension)) {

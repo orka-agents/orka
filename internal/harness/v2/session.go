@@ -54,6 +54,15 @@ type RuntimeProfile struct {
 	ProxyCredentialRole      string            `json:"proxyCredentialRole"`
 	ProxyCredentialScope     string            `json:"proxyCredentialScope"`
 	ResourceClass            string            `json:"resourceClass"`
+	// Toolboxes lists the read-only tool images bound into the runtime Pod,
+	// in declared order. An absent list serializes identically to profiles
+	// that predate toolboxes, so their digests are unchanged.
+	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
+	// Skills lists the Agent Skills bound read-only into the runtime Pod and
+	// projected into each session's native skills folder, in declared order.
+	// An absent list serializes identically to profiles that predate skills,
+	// so their digests are unchanged.
+	Skills []RuntimeSkill `json:"skills,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
@@ -101,7 +110,13 @@ func (p RuntimeProfile) Validate() error {
 	if err := validateBoundedString("proxy credential scope", p.ProxyCredentialScope, true, 1024); err != nil {
 		return err
 	}
-	return validateBoundedString("resource class", p.ResourceClass, true, 128)
+	if err := validateBoundedString("resource class", p.ResourceClass, true, 128); err != nil {
+		return err
+	}
+	if err := ValidateRuntimeToolboxes(p.Toolboxes); err != nil {
+		return err
+	}
+	return ValidateRuntimeSkills(p.Skills)
 }
 
 const (
@@ -200,7 +215,7 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 		return err
 	}
 	switch reasoningEffort {
-	case "", reasoningEffortLow, reasoningEffortMedium, reasoningEffortHigh, reasoningEffortXHigh, reasoningEffortMax:
+	case "", "none", reasoningEffortLow, reasoningEffortMedium, reasoningEffortHigh, reasoningEffortXHigh, reasoningEffortMax:
 	default:
 		return fmt.Errorf("unsupported reasoning effort %q", reasoningEffort)
 	}
@@ -210,6 +225,9 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 			return fmt.Errorf("codex provider does not support reasoning effort %q", reasoningEffort)
 		}
 	case providerKindClaude:
+		if reasoningEffort == "none" {
+			return fmt.Errorf("claude provider does not support reasoning effort %q", reasoningEffort)
+		}
 	case providerKindCopilot:
 		if reasoningEffort != "" {
 			return fmt.Errorf("copilot provider does not support reasoning effort")
@@ -271,6 +289,25 @@ type WorkspaceSpec struct {
 	Intent       WorkspaceIntent   `json:"intent"`
 	Baseline     WorkspaceBaseline `json:"baseline"`
 	RelativeRoot string            `json:"relativeRoot,omitempty"`
+	// ExpectDurableResume asserts that this session MUST resume a committed
+	// durable workspace checkpoint: the controller sets it for sessions on a
+	// resumed workspace lineage, and the runtime fails session creation when
+	// no committed checkpoint exists instead of silently materializing a
+	// fresh baseline over lost data.
+	ExpectDurableResume bool `json:"expectDurableResume,omitempty"`
+	// ExpectDurableResumeFrom carries the controller-validated PRIOR
+	// repository identity of a resumed lineage whose continuation
+	// legitimately moved to a new repository (a verified publication
+	// transition, for example the fork a PR publishes to). Under
+	// ExpectDurableResume, a committed checkpoint bound to exactly this
+	// identity may be wiped and re-materialized from the new baseline;
+	// any other foreign identity still fails creation closed.
+	ExpectDurableResumeFrom string `json:"expectDurableResumeFrom,omitempty"`
+	// ExpectDurableResumeMinGeneration carries the controller's persisted
+	// floor for the committed checkpoint's session generation: a same-
+	// identity checkpoint whose recorded generation is OLDER than this floor
+	// is a stale provider restore and fails session creation closed.
+	ExpectDurableResumeMinGeneration uint64 `json:"expectDurableResumeMinGeneration,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {
@@ -278,6 +315,9 @@ func (w WorkspaceSpec) Validate() error {
 		return err
 	}
 	if err := w.Baseline.Validate(); err != nil {
+		return err
+	}
+	if err := validateBoundedString("expected durable resume prior identity", w.ExpectDurableResumeFrom, false, 1024); err != nil {
 		return err
 	}
 	return validateWorkspaceRelativeRoot(w.RelativeRoot)
@@ -349,6 +389,7 @@ type CreateRuntimeSessionRequest struct {
 	MCPConfiguration               MCPPolicyConfiguration     `json:"mcpConfiguration"`
 	Workspace                      WorkspaceSpec              `json:"workspace"`
 	WorkspaceArtifactAuthorization *ArtifactAuthorization     `json:"workspaceArtifactAuthorization,omitempty"`
+	NativeRestore                  *NativeSessionRestore      `json:"nativeRestore,omitempty"`
 	Bootstrap                      *SessionBootstrap          `json:"bootstrap,omitempty"`
 	BootstrapArtifactAuthorization *ArtifactAuthorization     `json:"bootstrapArtifactAuthorization,omitempty"`
 }
@@ -397,6 +438,11 @@ func (r CreateRuntimeSessionRequest) ValidateAt(now time.Time) error {
 	if r.Workspace.Intent != r.Profile.WorkspaceIntent {
 		return fmt.Errorf("workspace intent %q does not match runtime profile intent %q", r.Workspace.Intent, r.Profile.WorkspaceIntent)
 	}
+	if r.NativeRestore != nil {
+		if err := r.NativeRestore.ValidateFor(r); err != nil {
+			return fmt.Errorf("native restore: %w", err)
+		}
+	}
 	if r.Bootstrap != nil {
 		if err := r.Bootstrap.Validate(); err != nil {
 			return fmt.Errorf("bootstrap: %w", err)
@@ -416,17 +462,18 @@ func (r CreateRuntimeSessionRequest) ValidateAt(now time.Time) error {
 }
 
 type RuntimeSessionDescriptor struct {
-	RuntimeSessionID     RuntimeSessionID    `json:"runtimeSessionID"`
-	RuntimeSessionUID    RuntimeSessionUID   `json:"runtimeSessionUID"`
-	Generation           uint64              `json:"generation"`
-	RuntimeInstanceID    RuntimeInstanceID   `json:"runtimeInstanceID"`
-	SupervisorBootID     SupervisorBootID    `json:"supervisorBootID"`
-	RuntimeProfileDigest ProfileDigest       `json:"runtimeProfileDigest"`
-	State                RuntimeSessionState `json:"state"`
-	ProviderSessionID    string              `json:"providerSessionID"`
-	WorkspaceBaseline    WorkspaceBaseline   `json:"workspaceBaseline"`
-	CreatedAt            time.Time           `json:"createdAt"`
-	LastTransitionAt     time.Time           `json:"lastTransitionAt"`
+	RuntimeSessionID     RuntimeSessionID          `json:"runtimeSessionID"`
+	RuntimeSessionUID    RuntimeSessionUID         `json:"runtimeSessionUID"`
+	Generation           uint64                    `json:"generation"`
+	RuntimeInstanceID    RuntimeInstanceID         `json:"runtimeInstanceID"`
+	SupervisorBootID     SupervisorBootID          `json:"supervisorBootID"`
+	RuntimeProfileDigest ProfileDigest             `json:"runtimeProfileDigest"`
+	State                RuntimeSessionState       `json:"state"`
+	NativeRestoration    *NativeSessionRestoration `json:"nativeRestoration,omitempty"`
+	ProviderSessionID    string                    `json:"providerSessionID"`
+	WorkspaceBaseline    WorkspaceBaseline         `json:"workspaceBaseline"`
+	CreatedAt            time.Time                 `json:"createdAt"`
+	LastTransitionAt     time.Time                 `json:"lastTransitionAt"`
 }
 
 func (d RuntimeSessionDescriptor) Validate() error {
@@ -453,6 +500,14 @@ func (d RuntimeSessionDescriptor) Validate() error {
 	}
 	if err := validateBoundedString("provider session ID", d.ProviderSessionID, true, 1024); err != nil {
 		return err
+	}
+	if d.NativeRestoration != nil {
+		if err := d.NativeRestoration.Validate(); err != nil {
+			return err
+		}
+		if d.NativeRestoration.ProviderSessionID != d.ProviderSessionID {
+			return fmt.Errorf("native restoration provider identity does not match descriptor")
+		}
 	}
 	if err := d.WorkspaceBaseline.Validate(); err != nil {
 		return err
@@ -498,6 +553,15 @@ func (r CreateRuntimeSessionResponse) ValidateFor(request CreateRuntimeSessionRe
 		r.Session.Generation != request.Metadata.Fence.RuntimeSessionGeneration ||
 		r.Session.RuntimeProfileDigest != request.Metadata.Fence.RuntimeProfileDigest {
 		return fmt.Errorf("session create response identity does not match request")
+	}
+	if request.NativeRestore != nil {
+		if r.Session.NativeRestoration == nil || !r.Session.NativeRestoration.Loaded ||
+			r.Session.NativeRestoration.DataDigest != request.NativeRestore.Snapshot.DataDigest ||
+			r.Session.ProviderSessionID != request.NativeRestore.Snapshot.ProviderSessionID {
+			return fmt.Errorf("session create response did not confirm requested native restoration")
+		}
+	} else if r.Session.NativeRestoration != nil {
+		return fmt.Errorf("session create response unexpectedly reports native restoration")
 	}
 	return nil
 }

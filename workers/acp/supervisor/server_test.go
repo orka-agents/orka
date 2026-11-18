@@ -31,10 +31,32 @@ const testJSONRPCKey = "jsonrpc"
 const linuxGOOS = "linux"
 
 const providerProxyCanaryMode = "provider-proxy-canary"
+
+// genAITelemetryMode makes one model call through the provider proxy, runs a
+// tool call and reports turn usage, so GenAI spans follow the real prompt path.
+const genAITelemetryMode = "genai-telemetry"
 const providerProjectionCanaryMode = "provider-projection-canary"
 const providerProjectionCanaryValue = "projected"
 const assistantBurstMode = "assistant-burst"
 const toolBurstRPCErrorMode = "tool-burst-rpc-error"
+
+// adapterResumeMode exits after every prompt and advertises session/resume,
+// honoring a resume of the persisted provider session from a fresh process.
+const adapterResumeMode = "resume-after-exit"
+
+// adapterResumeFailureMode advertises resume but rejects the handshake.
+const adapterResumeFailureMode = "resume-fails-after-exit"
+
+// adapterExitAfterPromptMode exits after every prompt without advertising
+// session/resume, so an idle session loses its agent for good.
+const adapterExitAfterPromptMode = "exit-after-prompt"
+
+// adapterResumeModelCallMode is adapterResumeMode plus a model request from the
+// child during session/resume, as Claude Agent ACP sends; the provider proxy's
+// status code is recorded in helperResumeModelCallFile in the child's HOME.
+const adapterResumeModelCallMode = "resume-after-exit-model-call"
+const helperResumeModelCallFile = "acp-helper-resume-model-call"
+const helperProviderSessionFile = "acp-helper-provider-session"
 const testPromptOneID = "prompt-1"
 const testPromptTwoID = "prompt-2"
 const testPromptOperationTwo = "prompt-operation-2"
@@ -45,6 +67,14 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	staged := sessionCreationFailed("workspace materialization", errors.New(secret))
 	if stage := sessionCreationStage(staged); stage != "workspace materialization" {
 		t.Fatalf("session creation stage = %q", stage)
+	}
+	if isSessionCreationResumeLost(staged) {
+		t.Fatal("ordinary session creation failure was classified as resume loss")
+	}
+	resumeLost := sessionCreationResumeLost(errors.New(secret))
+	if !isSessionCreationResumeLost(resumeLost) ||
+		sessionCreationStage(resumeLost) != sessionCreationStageDurableResumeVerification {
+		t.Fatalf("resume loss classification = %#v", resumeLost)
 	}
 	got := safeError(staged)
 	if got != "runtime session failed during workspace materialization" {
@@ -59,6 +89,180 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
+	if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+		cfg.DurableWorkspaceDir,
+		string(request.Metadata.Fence.RuntimeSessionUID),
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+			Revision:                 request.Workspace.Baseline.Revision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        4,
+		},
+	); err != nil {
+		t.Fatalf("stage transition: %v", err)
+	}
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if err == nil || !isSessionCreationResumeLost(err) ||
+		sessionCreationStage(err) != sessionCreationStageDurableResumeVerification ||
+		!strings.Contains(err.Error(), "older than the controller's floor") {
+		t.Fatalf("createSession error = %v, want stale transition generation refusal", err)
+	}
+}
+
+func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, string, harnessv2.CreateRuntimeSessionRequest)
+	}{
+		{name: "missing checkpoint"},
+		{
+			name: "marker without workspace tree",
+			prepare: func(t *testing.T, durableRoot string, request harnessv2.CreateRuntimeSessionRequest) {
+				t.Helper()
+				workspaceDir, _, err := acp.PrepareDurableSessionWorkspace(
+					durableRoot, string(request.Metadata.Fence.RuntimeSessionUID),
+					1,
+				)
+				if err != nil {
+					t.Fatalf("prepare durable checkpoint: %v", err)
+				}
+				if err := acp.CommitDurableSessionWorkspace(
+					durableRoot,
+					string(request.Metadata.Fence.RuntimeSessionUID),
+					acp.DurableWorkspaceBinding{
+						RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+						Revision:                 request.Workspace.Baseline.Revision,
+						SessionIdentityHighWater: 1,
+						SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
+					},
+				); err != nil {
+					t.Fatalf("commit durable checkpoint: %v", err)
+				}
+				if err := os.RemoveAll(workspaceDir); err != nil {
+					t.Fatalf("remove durable workspace tree: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			server.cfg.DurableWorkspaceDir = t.TempDir()
+			request := testCreateSessionRequest(t, cfg, profile)
+			request.Workspace.ExpectDurableResume = true
+			request.Workspace.ExpectDurableResumeMinGeneration = 1
+			if test.prepare != nil {
+				test.prepare(t, server.cfg.DurableWorkspaceDir, request)
+			}
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+
+			assertResumeLost := func(response *httptest.ResponseRecorder) {
+				t.Helper()
+				if response.Code != http.StatusConflict {
+					t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+				}
+				var envelope harnessv2.ErrorResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if envelope.Code != harnessv2.ErrorCodeWorkspaceResumeLost || envelope.Retryable ||
+					envelope.Message != "runtime session failed during "+sessionCreationStageDurableResumeVerification {
+					t.Fatalf("durable resume error = %#v", envelope)
+				}
+			}
+
+			first := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(first)
+			remaining := server.cfg.UIDAllocator.Remaining()
+			replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(replay)
+			if got := server.cfg.UIDAllocator.Remaining(); got != remaining {
+				t.Fatalf("duplicate durable-loss create consumed identity capacity: remaining=%d want=%d", got, remaining)
+			}
+		})
+	}
+}
+
+func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Metadata.Fence.RuntimeSessionGeneration = 6
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
+	const (
+		priorRepository = "github.com/orka-agents/prior"
+		priorRevision   = "fedcba9876543210"
+	)
+	request.Workspace.ExpectDurableResumeFrom = acp.StableDurableWorkspaceIdentity(priorRepository, priorRevision)
+	sessionUID := string(request.Metadata.Fence.RuntimeSessionUID)
+	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID, 1); err != nil {
+		t.Fatalf("prepare prior checkpoint: %v", err)
+	}
+	if err := acp.CommitDurableSessionWorkspace(
+		cfg.DurableWorkspaceDir,
+		sessionUID,
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       priorRepository,
+			Revision:                 priorRevision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
+		},
+	); err != nil {
+		t.Fatalf("commit prior checkpoint: %v", err)
+	}
+	injected := errors.New("injected materialization failure")
+	cfg.WorkspaceMaterializer = WorkspaceMaterializerFunc(func(
+		context.Context,
+		harnessv2.CreateRuntimeSessionRequest,
+		string,
+	) error {
+		return injected
+	})
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if !errors.Is(err, injected) || sessionCreationStage(err) != "workspace materialization" {
+		t.Fatalf("createSession error = %v, want injected materialization failure", err)
+	}
+	transition, err := acp.DurableWorkspaceTransitionTarget(cfg.DurableWorkspaceDir, sessionUID)
+	if err != nil {
+		t.Fatalf("read staged transition: %v", err)
+	}
+	if transition == nil || transition.SessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration ||
+		transition.SessionIdentityHighWater != 1 {
+		t.Fatalf("staged transition = %+v, want session generation %d and identity high-water 1", transition, request.Metadata.Fence.RuntimeSessionGeneration)
+	}
+}
+
 func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -68,7 +272,7 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 	// session initialization.
 	server.mu.Lock()
 	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
-	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now)
+	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now, nil)
 	_, resident := server.sessions[create.RuntimeSessionID]
 	tombstone, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
 	server.mu.Unlock()
@@ -282,7 +486,7 @@ func TestSupervisorCompactsAssistantBurstBeforeHarnessRateLimit(t *testing.T) {
 			streamed.WriteString(event.Update.AssistantMessage.Text)
 		}
 	}
-	want := strings.Repeat("x", runtimeCodexMaxUpdateEventsPerSecond+1)
+	want := strings.Repeat("x", runtimeMaxUpdateEventsPerSecond+1)
 	if streamed.String() != want {
 		t.Fatalf("streamed assistant bytes = %d, want %d exact bytes", streamed.Len(), len(want))
 	}
@@ -580,6 +784,44 @@ func TestSupervisorConcurrentLeaseRenewalHasSingleWinner(t *testing.T) {
 	}
 }
 
+func TestSupervisorRejectsFreshCreateWithStaleFence(t *testing.T) {
+	for _, tc := range []struct {
+		mismatch harnessv2.FenceMismatch
+		mutate   func(*harnessv2.Fence)
+	}{
+		{harnessv2.FenceMismatchRuntimeInstance, func(f *harnessv2.Fence) { f.RuntimeInstanceID = "stale-instance" }},
+		{harnessv2.FenceMismatchSupervisorBoot, func(f *harnessv2.Fence) { f.SupervisorBootID = "stale-boot" }},
+		{harnessv2.FenceMismatchControllerEpoch, func(f *harnessv2.Fence) { f.ControllerEpoch++ }},
+		{harnessv2.FenceMismatchRuntimePoolUID, func(f *harnessv2.Fence) { f.RuntimePoolUID = "stale-pool" }},
+		{harnessv2.FenceMismatchRuntimePoolGeneration, func(f *harnessv2.Fence) { f.RuntimePoolGeneration++ }},
+	} {
+		t.Run(string(tc.mismatch), func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			remaining := cfg.UIDAllocator.Remaining()
+			request := testCreateSessionRequest(t, cfg, profile)
+			tc.mutate(&request.Metadata.Fence)
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			if response.Code != http.StatusGone {
+				t.Errorf("fresh create with stale %s returned HTTP %d, want 410", tc.mismatch, response.Code)
+			}
+			var rejected harnessv2.ErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Code != harnessv2.ErrorCodeStaleFence || rejected.Classification == nil ||
+				rejected.Classification.Class != harnessv2.RequestClassificationStaleFence ||
+				rejected.Classification.FenceMismatch != tc.mismatch {
+				t.Errorf("fresh create classification = %#v, want stale_fence/%s", rejected.Classification, tc.mismatch)
+			}
+			if cfg.UIDAllocator.Remaining() != remaining {
+				t.Error("stale create consumed a session identity")
+			}
+		})
+	}
+}
+
 func TestSupervisorRejectsMissingAuthAndTamperedCapability(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -695,6 +937,60 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 	}
 }
 
+// codex-acp 2.x withholds message phases from non-AIR clients, so a Codex
+// session falls back to its last named message.
+func TestSupervisorUsesLastCodexMessageWithoutPhases(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "codex", provider: providerKindCodex, want: `{"schemaVersion":1,"ok":true}`},
+		{name: "other runtime", provider: providerKindCopilot, want: "I'll inspect the repository.\n" + "Warning: slow\n\n" + `{"schemaVersion":1,"ok":true}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, _ := newTestServer(t, "immediate")
+			server.cfg.Capabilities.Limits.MaxTerminalResultBytes = 4096
+			fence := cfg.Fence
+			fence.RuntimeSessionUID = "message-session-uid"
+			fence.RuntimeSessionGeneration = 1
+			prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+			state := &sessionState{
+				descriptor: harnessv2.RuntimeSessionDescriptor{
+					RuntimeSessionUID: fence.RuntimeSessionUID,
+					Generation:        fence.RuntimeSessionGeneration,
+				},
+				profile: harnessv2.RuntimeProfile{ProviderKind: test.provider},
+			}
+			now := time.Now().UTC()
+			events := []acp.PromptEvent{
+				testAssistantMessagePromptEventWithPhase(t, 1, now, "commentary-message", "", "I'll inspect the repository.\n"),
+				// Adapter notices carry no messageId; a later message supersedes them.
+				testAssistantMessagePromptEventWithPhase(t, 2, now, "", "", "Warning: slow\n\n"),
+				testAssistantMessagePromptEventWithPhase(t, 3, now, "final-message", "", `{"schemaVersion":1,`),
+				testAssistantMessagePromptEventWithPhase(t, 4, now, "final-message", "", `"ok":true}`),
+			}
+			for _, event := range events {
+				if _, err := server.mapRuntimeEvent(state, prompt, event); err != nil {
+					t.Fatalf("map assistant event: %v", err)
+				}
+			}
+			terminal, _, err := server.terminalEvent(state, prompt, acp.PromptResult{
+				Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn,
+				Accepted: true, SettledAt: now.Add(time.Millisecond),
+			})
+			if err != nil {
+				t.Fatalf("build terminal result: %v", err)
+			}
+			if terminal.Completed == nil || len(terminal.Completed.Result.Content) != 1 ||
+				terminal.Completed.Result.Content[0].Text != test.want {
+				t.Fatalf("terminal result = %#v, want %q", terminal.Completed, test.want)
+			}
+		})
+	}
+}
+
 func TestSupervisorDrainIsIdempotent(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	request := harnessv2.DrainRequest{Protocol: harnessv2.ProtocolVersion, Metadata: harnessv2.MutationMetadata{
@@ -779,6 +1075,100 @@ func TestSupervisorPreservesIdentityReserveAndClosesOnlySessionAdmission(t *test
 	}
 }
 
+func TestSupervisorCreateRejectsUnsafeWorkspacePermanently(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	var validated acp.SessionPaths
+	prepared := false
+	server.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+		validated = paths
+		return &workspaceRejectedError{publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage, detail: "found opencode.json"}
+	}
+	server.cfg.Provider.PrepareSession = func(acp.SessionPaths) error {
+		prepared = true
+		return nil
+	}
+	create := testCreateSessionRequest(t, cfg, profile)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe workspace create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var failure harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if err := failure.Validate(); err != nil {
+		t.Fatalf("rejection response is invalid: %v", err)
+	}
+	if failure.Code != harnessv2.ErrorCodeInvalidRequest || failure.Retryable ||
+		failure.Message != acp.OpenCodeProjectConfigurationRejectedMessage {
+		t.Fatalf("unsafe workspace rejection = %#v", failure)
+	}
+	if prepared {
+		t.Fatal("provider preparation ran for a rejected workspace")
+	}
+	if validated.Root == "" {
+		t.Fatal("workspace validation did not run")
+	}
+	if _, err := os.Lstat(validated.Root); !os.IsNotExist(err) {
+		t.Fatalf("rejected create retained session root: %v", err)
+	}
+	remaining := cfg.UIDAllocator.Remaining()
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replay.Code != http.StatusBadRequest || cfg.UIDAllocator.Remaining() != remaining {
+		t.Fatalf("replayed rejection status=%d remaining=%d want %d body=%s", replay.Code, cfg.UIDAllocator.Remaining(), remaining, replay.Body.String())
+	}
+	if len(server.status().Sessions) != 0 {
+		t.Fatal("rejected create left a resident session")
+	}
+}
+
+func TestSupervisorCreateRejectionHidesUnclassifiedValidationErrors(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	server.cfg.Provider.ValidateWorkspace = func(acp.SessionPaths) error {
+		return errors.New("inspect /private/path: permission denied")
+	}
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", testCreateSessionRequest(t, cfg, profile), cfg)
+	var failure harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusBadRequest || failure.Retryable ||
+		failure.Message != acp.WorkspaceValidationFailedMessage {
+		t.Fatalf("unclassified validation failure status=%d response=%#v", response.Code, failure)
+	}
+}
+
+// The controller acts on the harness client's view of the rejection, which
+// enforces its own status/code mapping: the rejection must arrive as a
+// definitive, non-retryable HTTP client error carrying the fixed message.
+func TestSupervisorCreateRejectionIsDefinitiveThroughHarnessClient(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	server.cfg.Provider.ValidateWorkspace = func(acp.SessionPaths) error {
+		return &workspaceRejectedError{publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage, detail: "found opencode.json"}
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client, err := harnessv2.NewClient(httpServer.URL, harnessv2.WithControllerBearerToken(cfg.ControllerBearerToken), harnessv2.WithOperationCapabilitySecret(cfg.CapabilitySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	create := testCreateSessionRequest(t, cfg, profile)
+	for attempt := range 2 {
+		_, err = client.CreateRuntimeSession(ctx, create)
+		clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+		if !ok {
+			t.Fatalf("attempt %d: create error = %v, want a harness client error", attempt, err)
+		}
+		if clientErr.Kind != harnessv2.ClientErrorHTTP || clientErr.StatusCode != http.StatusBadRequest ||
+			clientErr.Code != harnessv2.ErrorCodeInvalidRequest || clientErr.Retryable ||
+			clientErr.Message != acp.OpenCodeProjectConfigurationRejectedMessage {
+			t.Fatalf("attempt %d: create rejection = %#v", attempt, clientErr)
+		}
+	}
+}
+
 func TestSupervisorStatusReportsCreatingRuntimeSession(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	entered := make(chan struct{})
@@ -826,6 +1216,7 @@ func newTestServer(t *testing.T, mode string) (*Server, Config, harnessv2.Runtim
 func newTestServerWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken string) (*Server, Config, harnessv2.RuntimeProfile) {
 	t.Helper()
 	cfg, profile := newTestConfigWithUpstream(t, mode, upstreamURL, upstreamToken)
+	cfg.Capabilities.SupportsNativeSessions = strings.HasPrefix(mode, "native-")
 	if mode == providerProjectionCanaryMode {
 		cfg.Provider.ProjectSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (ProviderSessionProjection, error) {
 			return ProviderSessionProjection{
@@ -893,13 +1284,21 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		Environment: map[string]string{"GO_WANT_SUPERVISOR_ACP_HELPER": "1", "SUPERVISOR_ACP_HELPER_MODE": mode},
 		AdapterName: "fake-acp", AdapterDigest: testDigest("adapter"),
 	}
-	if mode == providerProxyCanaryMode {
+	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode || mode == genAITelemetryMode {
 		provider.EnvironmentForSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 			config, err := json.Marshal(map[string]string{"openai_base_url": proxy.BaseURL})
 			if err != nil {
 				return nil, err
 			}
 			return map[string]string{"CODEX_API_KEY": proxy.Credential, "CODEX_CONFIG": string(config)}, nil
+		}
+	}
+	// ACP children run as a distinct UID and need search permission on the
+	// two test-owned ancestors above the private session tree.
+	sessionTestDir := t.TempDir()
+	for _, dir := range []string{sessionTestDir, filepath.Dir(sessionTestDir)} {
+		if err := os.Chmod(dir, 0o711); err != nil {
+			t.Fatal(err)
 		}
 	}
 	cfg := Config{
@@ -927,7 +1326,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		},
 		Provider:              provider,
 		ControllerBearerToken: strings.Repeat("t", 32), CapabilitySecret: []byte(strings.Repeat("s", 32)), RequireCapabilities: true,
-		SessionBaseDir: filepath.Join(t.TempDir(), "sessions"), UIDAllocator: allocator,
+		SessionBaseDir: filepath.Join(sessionTestDir, "sessions"), UIDAllocator: allocator,
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: upstreamURL, UpstreamBearerToken: upstreamToken,
 			ProviderKind: providerKindCodex, Model: "test-model",
@@ -1102,6 +1501,7 @@ func testDigest(label string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+//nolint:gocyclo // Helper process dispatches every scripted supervisor scenario in one switch.
 func TestSupervisorACPHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_SUPERVISOR_ACP_HELPER") != "1" {
 		return
@@ -1121,6 +1521,9 @@ func TestSupervisorACPHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	var sessionID = "provider-session"
+	if strings.HasPrefix(mode, "native-") {
+		sessionID = testNativeThreadID
+	}
 	var promptID json.RawMessage
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -1139,24 +1542,52 @@ func TestSupervisorACPHelper(t *testing.T) {
 		}
 		switch message.Method {
 		case acp.MethodInitialize:
+			agentCapabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]any{"http": true}}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || strings.HasPrefix(mode, "native-") {
+				agentCapabilities["sessionCapabilities"] = map[string]any{acp.SessionCapabilityResume: map[string]any{}}
+			}
 			writeHelperMessage(writer, map[string]any{
 				testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
 				"result": map[string]any{
 					"protocolVersion":   acp.ProtocolVersion,
-					"agentCapabilities": map[string]any{"mcpCapabilities": map[string]any{"http": true}},
+					"agentCapabilities": agentCapabilities,
 				},
 			})
+		case acp.MethodSessionResume:
+			if mode != adapterResumeMode && mode != adapterResumeFailureMode && mode != adapterResumeModelCallMode {
+				handleSupervisorNativeResume(writer, message.ID, message.Params)
+				continue
+			}
+			var request acp.ResumeSessionRequest
+			persisted, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile))
+			if err := json.Unmarshal(message.Params, &request); err != nil || (mode != adapterResumeMode && mode != adapterResumeModelCallMode) ||
+				request.SessionID == "" || request.SessionID != string(persisted) || request.Meta["orka.runtimeSessionID"] != "session-1" {
+				writeHelperMessage(writer, map[string]any{
+					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
+					"error": map[string]any{"code": -32602, "message": "cannot resume session"},
+				})
+				continue
+			}
+			if mode == adapterResumeModelCallMode {
+				recordProviderCallDuringResume()
+			}
+			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
-			if mode == providerProjectionCanaryMode {
-				var request acp.NewSessionRequest
-				if err := json.Unmarshal(message.Params, &request); err != nil || request.Meta["provider.canary"] != providerProjectionCanaryValue ||
-					request.Meta["orka.runtimeSessionID"] != "session-1" || request.Meta["orka.profileDigest"] == "" {
-					writeHelperMessage(writer, map[string]any{
-						testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
-						"error": map[string]any{"code": -32602, "message": "provider session metadata was not projected"},
-					})
-					continue
-				}
+			if strings.HasPrefix(mode, "native-resume") {
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
+				continue
+			}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
+				// The child's HOME is the session home, which real agents use
+				// for the state a fresh adapter process resumes from.
+				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
+			}
+			if mode == providerProjectionCanaryMode && !validSupervisorProjection(message.Params) {
+				writeHelperMessage(writer, map[string]any{
+					testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID),
+					"error": map[string]any{"code": -32602, "message": "provider session metadata was not projected"},
+				})
+				continue
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{"sessionId": sessionID}})
 		case acp.MethodSessionPrompt:
@@ -1171,13 +1602,23 @@ func TestSupervisorACPHelper(t *testing.T) {
 					os.Exit(4)
 				}
 			}
+			if mode == genAITelemetryMode {
+				writeGenAITelemetryHelperTurn(writer, sessionID, promptID)
+				promptID = nil
+				continue
+			}
+			if strings.HasPrefix(mode, "native-prompt-error") {
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "error": map[string]any{"code": -32603, "message": "native provider prompt failed"}})
+				promptID = nil
+				continue
+			}
 			if mode == toolBurstRPCErrorMode {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
 					"sessionId": sessionID, "update": map[string]any{
 						"sessionUpdate": "tool_call", "toolCallId": "provider-call-1", "title": "Read repository", "kind": "read",
 					},
 				}})
-				for range runtimeCodexMaxUpdateEventsPerSecond + 1 {
+				for range runtimeMaxUpdateEventsPerSecond + 1 {
 					writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
 						"sessionId": sessionID, "update": map[string]any{
 							"sessionUpdate": "tool_call_update", "toolCallId": "provider-call-1",
@@ -1202,7 +1643,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			assistantUpdates := []string{"hello from ACP"}
 			if mode == assistantBurstMode {
-				assistantUpdates = make([]string, runtimeCodexMaxUpdateEventsPerSecond+1)
+				assistantUpdates = make([]string, runtimeMaxUpdateEventsPerSecond+1)
 				for index := range assistantUpdates {
 					assistantUpdates[index] = "x"
 				}
@@ -1215,6 +1656,10 @@ func TestSupervisorACPHelper(t *testing.T) {
 			if mode != "wait" {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
+			}
+			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
+				// Simulate an adapter crash while the session is idle.
+				os.Exit(0)
 			}
 		case acp.MethodSessionCancel:
 			if len(promptID) > 0 {
@@ -1293,6 +1738,29 @@ func validateProviderProxyChildIsolation() error {
 		return err
 	}
 	return nil
+}
+
+// recordProviderCallDuringResume sends a model request from the adapter child
+// while session/resume is in flight and records the provider proxy's status
+// code in the child's HOME.
+func recordProviderCallDuringResume() {
+	var status string
+	baseURL, err := providerProxyBaseURLFromChild()
+	if err != nil {
+		status = "error: " + err.Error()
+	} else if request, err := http.NewRequest(http.MethodPost, baseURL+"/responses", strings.NewReader(`{"model":"test-model","input":"Hi"}`)); err != nil {
+		status = "error: " + err.Error()
+	} else {
+		request.Header.Set(providerAuthorizationHeader, "Bearer "+os.Getenv("CODEX_API_KEY"))
+		request.Header.Set("Content-Type", "application/json")
+		if response, err := http.DefaultClient.Do(request); err != nil {
+			status = "error: " + err.Error()
+		} else {
+			status = strconv.Itoa(response.StatusCode)
+			_ = response.Body.Close()
+		}
+	}
+	_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperResumeModelCallFile), []byte(status), 0o600)
 }
 
 func exerciseProviderProxyFromChild() error {
@@ -1604,7 +2072,7 @@ func TestSupervisorRetiresPoisonedSessionWithoutPoolDrain(t *testing.T) {
 	t.Fatal("poisoned RuntimeSession remained resident without an enclosing pool drain")
 }
 
-func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *testing.T) {
+func TestSupervisorDrainRetainsPublicationPreparedSessionBeforeSettlement(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	now := time.Now().UTC()
 	sessionID := harnessv2.RuntimeSessionID("publication-session")
@@ -1629,10 +2097,19 @@ func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *t
 	if response.Code != http.StatusOK {
 		t.Fatalf("drain status=%d body=%s", response.Code, response.Body.String())
 	}
+	var result harnessv2.DrainResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Drain.Requested || result.Drain.AcceptingNewSessions {
+		t.Fatal("drain did not close admission while publication settlement was pending")
+	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.sessions[sessionID] != state || !state.drainCleanupScheduled {
-		t.Fatalf("publication-prepared RuntimeSession was not scheduled before settlement: resident=%t scheduled=%t", server.sessions[sessionID] == state, state.drainCleanupScheduled)
+	// Cleanup can already have observed the unsettled prompt and cleared its
+	// schedule. Either ordering must retain the session until settlement.
+	if server.sessions[sessionID] != state || state.descriptor.State != harnessv2.RuntimeSessionStatePublicationPrepared || state.prompt.settlement != nil {
+		t.Fatal("publication-prepared RuntimeSession changed before settlement")
 	}
 }
 
@@ -1738,10 +2215,10 @@ func TestSupervisorRejectsFreshPromptWhenDrainCleanupIsScheduled(t *testing.T) {
 }
 
 func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
-	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone{}}
+	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]sessionTombstone{}}
 	now := time.Now().UTC()
-	server.tombstones["fresh"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}
-	server.tombstones["stale"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}
+	server.tombstones["fresh"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}}
+	server.tombstones["stale"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}}
 	server.pruneTombstonesLocked(now)
 	if _, ok := server.tombstones["stale"]; ok {
 		t.Fatal("tombstone older than the retention window was retained")
@@ -1755,9 +2232,9 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	const inWindowTombstones = 4352
 	for i := range inWindowTombstones {
 		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
-		server.tombstones[uid] = harnessv2.RuntimeSessionTombstone{
+		server.tombstones[uid] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{
 			RuntimeSessionUID: uid, DeletedAt: now.Add(-time.Duration(i) * time.Millisecond),
-		}
+		}}
 	}
 	server.pruneTombstonesLocked(now)
 	if got, want := len(server.tombstones), inWindowTombstones+1; got != want {
@@ -1766,4 +2243,102 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	if _, ok := server.tombstones["session-04351"]; !ok {
 		t.Fatal("oldest in-window tombstone was evicted")
 	}
+}
+
+// A create request rebuilt by the controller for the same attempt (fresh
+// expiry, fresh workspace capability) reaches a supervisor that already created
+// the session from an earlier send. The supervisor must answer digest_conflict
+// with the recorded phase and keep the resident session in status so the
+// controller can adopt it.
+func TestCreateSessionRebuiltRequestConflictsWhileSessionStaysResident(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	now := time.Now().UTC()
+	state := &sessionState{
+		id: create.RuntimeSessionID,
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionID: create.RuntimeSessionID, RuntimeSessionUID: create.Metadata.Fence.RuntimeSessionUID,
+			Generation: create.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: cfg.Fence.RuntimeInstanceID,
+			SupervisorBootID: cfg.Fence.SupervisorBootID, RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest,
+			State: harnessv2.RuntimeSessionStateIdle, CreatedAt: now, LastTransitionAt: now,
+		},
+	}
+	recordSessionOperationLocked(state, create.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	server.mu.Lock()
+	server.sessions[create.RuntimeSessionID] = state
+	server.mu.Unlock()
+
+	rebuilt := create
+	rebuilt.Metadata.ExpiresAt = create.Metadata.ExpiresAt.Add(time.Minute)
+	sealRequest(t, &rebuilt.Metadata.RequestDigest, rebuilt)
+	if rebuilt.Metadata.RequestDigest == create.Metadata.RequestDigest {
+		t.Fatal("rebuilt create request kept the original digest")
+	}
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", rebuilt, cfg)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("rebuilt create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var apiError harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &apiError); err != nil {
+		t.Fatal(err)
+	}
+	if apiError.Code != harnessv2.ErrorCodeDigestConflict || apiError.Classification == nil ||
+		apiError.Classification.Class != harnessv2.RequestClassificationDigestConflict ||
+		apiError.Classification.Phase != harnessv2.OperationPhaseApplied {
+		t.Fatalf("rebuilt create error = %#v, want digest_conflict with the applied phase", apiError)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
+	statusReq.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
+	statusNonce, err := harnessv2.NewCapabilityNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBinding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest}
+	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(statusBinding, statusNonce, time.Now().UTC().Add(time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusReq.Header.Set(OperationCapabilityHeader, statusCapability)
+	statusResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusResponse, statusReq)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+	var status harnessv2.StatusResponse
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Sessions) != 1 || status.Sessions[0].RuntimeSessionID != create.RuntimeSessionID ||
+		status.Sessions[0].Generation != create.Metadata.Fence.RuntimeSessionGeneration ||
+		status.Sessions[0].State != harnessv2.RuntimeSessionStateIdle {
+		t.Fatalf("resident session was not reported admissible after the rejected rebuild: %#v", status.Sessions)
+	}
+}
+
+func writeGenAITelemetryHelperTurn(writer *bufio.Writer, sessionID string, promptID json.RawMessage) {
+	update := func(value map[string]any) {
+		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
+			"sessionId": sessionID, "update": value,
+		}})
+	}
+	status := "error"
+	if baseURL, err := providerProxyBaseURLFromChild(); err == nil {
+		request, _ := http.NewRequest(http.MethodPost, baseURL+"/responses", strings.NewReader(`{"model":"test-model","input":"PRIVATE_PROMPT"}`))
+		request.Header.Set(providerAuthorizationHeader, "Bearer "+os.Getenv("CODEX_API_KEY"))
+		request.Header.Set("Content-Type", "application/json")
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			status = strconv.Itoa(response.StatusCode)
+		}
+	}
+	update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "Run PRIVATE_TITLE", "kind": "execute",
+		"rawInput": map[string]any{"command": "PRIVATE_ARGUMENT"}})
+	update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
+		"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "PRIVATE_RESULT"}}}})
+	update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "PRIVATE_COMPLETION model=" + status}})
+	writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{
+		"stopReason": acp.StopReasonEndTurn, "usage": map[string]any{"inputTokens": 120, "outputTokens": 30, "totalTokens": 150},
+	}})
 }

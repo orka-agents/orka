@@ -1,8 +1,9 @@
 ---
 slug: /repository-security-scanning
+description: "Scanning a repository for security findings and turning them into remediation pull requests."
 ---
 
-# Repository Security Scanning
+# Repository security scanning
 
 Repository security scanning provides a human-in-the-loop workflow: register a GitHub
 repository, generate an editable threat model, scan history and new commits for likely
@@ -13,11 +14,15 @@ The feature is GitHub-first and built on Orka's existing task, agent runtime, ar
 scheduling, and PR plumbing. Remediation (patch generation and PR creation) always requires
 an explicit user action.
 
-- For the CRD field reference, see [Configuration → RepositoryScan](../concepts/configuration.md#repositoryscan).
+- For the CRD field reference, see [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan).
 - For the REST endpoints, see [API Reference → Security](../reference/api-reference.md#security).
 - For the internal design and storage model, see [Repository Security Scanning Design](../development/security-scanning-design.md).
 
-## How It Works
+:::tip[Video demo]
+Watch [Turn a security finding into a pull request](https://www.youtube.com/watch?v=o7C_Kot_h8M).
+:::
+
+## How it works
 
 ```text
 Register repository (UI or RepositoryScan CRD)
@@ -33,7 +38,7 @@ JSON, validation evidence, patch summaries, and patch diffs) that the
 `RepositoryScan` controller ingests into the security store and surfaces through the
 `/api/v1/security/*` API and the **Security** area of the dashboard.
 
-## Quick Start (Dashboard)
+## Quick start (dashboard)
 
 1. Create or choose an Agent that can run repository security analysis (a `type: agent`
    runtime Agent with a git workspace, e.g. a Claude or Codex runtime agent).
@@ -47,25 +52,38 @@ JSON, validation evidence, patch summaries, and patch diffs) that the
 6. From a finding detail page, optionally validate/reproduce the finding, generate a patch
    proposal, review the patch artifacts, and create a remediation pull request.
 
-## Quick Start (GitOps / API)
+## Quick start (GitOps / API)
 
 You can drive the same workflow declaratively with the `RepositoryScan` CRD or the
 `/api/v1/security/*` endpoints.
+
+These examples use `orka-system`, the namespace watched by the standard installation.
+Create the referenced Agents and Secrets there, or adapt the namespace references to
+your installation.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryScan
 metadata:
   name: example-repo
-  namespace: default
+  namespace: orka-system
 spec:
   provider: github
   repoURL: "https://github.com/example/app"
   branch: main
   ref: "v1.2.3"                 # optional tag, branch, or commit SHA checkout override
   subPath: "services/api"        # optional monorepo scope
-  gitSecretRef:                   # optional for private repositories
+  gitSecretRef:                   # optional for private repositories (scan read only)
     name: github-credentials
+  # Required before patch generation / remediation PRs: four distinct Secrets.
+  readCredentialRef:
+    name: github-source-read
+  publicationReadCredentialRef:
+    name: github-publication-read
+  publicationCredentialRef:
+    name: github-publication-write
+  forgeCredentialRef:
+    name: github-forge
   schedule: "0 2 * * *"          # optional cron for incremental scans
   validationMode: light           # off, light, or full
   analysisAgentRef:
@@ -77,36 +95,125 @@ spec:
 
 For patch Tasks, the Workspace/Publisher—not the ACP child—prepares and publishes the branch.
 
-See [Configuration → RepositoryScan](../concepts/configuration.md#repositoryscan) for every
+See [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan) for every
 spec and status field, and [API Reference → Security](../reference/api-reference.md#security)
 for the endpoint and query-parameter reference, including the typical findings → validate →
 patch → pull-request remediation flow.
 
-## Scan Phases
+## Scan phases
 
 | Phase | What happens |
 |-------|--------------|
-| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. |
+| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. Full-repository scans also review cross-component slices; see [Cross-component review](#cross-component-review). |
 | **Threat model review** | The repository detail page shows the generated threat model in an editor. Saving an edit (or a regenerated model) replaces the current threat model and influences ranking on later scans. Prior threat models are not retained as history. |
 | **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata drives changed-file-based selection. Manual re-scan stays available and intentionally reruns even if the same range was scanned before; scheduled/incremental active runs use an idempotency key to avoid duplicate in-flight work. |
-| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Valid candidates then pass a deterministic false-positive filter before the max-finding cap. Invalid, filtered, or capped output is recorded as dropped diagnostics instead of becoming a finding. |
-| **Patch generation** | From a finding, Orka creates a dedicated patch task that writes a patch summary and diff artifact. The proposal is marked ready only when the recorded changed files and diff match the actual workspace result. |
-| **PR creation** | Orka uses the latest successful, verified patch proposal to open a PR against the configured base branch. |
+| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges from the review context manifest: an included excerpt, or a reference file within its recorded line count. A citation outside both is removed, and a finding without any remaining citation is dropped. Valid candidates then pass a deterministic false-positive filter before the max-finding cap. Invalid, filtered, or capped output is recorded as dropped diagnostics instead of becoming a finding. |
+| **Patch generation** | From a finding, Orka creates a dedicated write-intent patch task. The agent edits the workspace and returns an identity-bound `orka.security.patch.v1` result envelope (summary, changed files, tests run, risk); it never writes artifact files into the workspace. The clean-room Workspace/Publisher commits the delta and opens the pull request, and the controller derives the reviewable diff from that published commit (read with `forgeCredentialRef`) and stores the diff and summary artifacts. The proposal is marked ready only when the envelope's changed files exactly match the published commit. |
+| **PR receipt** | The pull request already exists at this point — the clean-room publisher opened it during patch generation as part of the same governed, verified publication. The pull-request endpoint is idempotent: it records and returns the verified PR receipt (number and URL) from the proposal rather than opening a second PR, and the controller re-titles the publisher's generic PR with the finding (`fix(security): …`). |
 
-## Validation Modes
+## Following a scan from the CLI
+
+`orka security scan run <repo>` starts a scan and prints its ID. A scan is a series of
+Tasks in stages (threat model, map the code, review slices, validate findings, and patch
+on request), and `orka security scan status` shows where it is. The counts come from the
+`orka.ai/security-scan-id` and `orka.ai/security-stage` labels on the scan's Tasks, and a
+caller only needs security read permission to see them.
+
+```console
+$ orka security scan status nodejs-goof
+Scan:   scan-1d0c9f2e manual
+Phase:  running, started 6m ago
+Slices: 9 of 14 reviewed
+
+STAGE              TASKS  PENDING  RUNNING  SUCCEEDED  FAILED
+threat model       1      0        0        1          0
+map the code       1      0        0        1          0
+review slices      15     0        6        9          0
+validate findings  0      0        0        0          0
+patch findings     0      0        0        0          0
+```
+
+With `--watch` the table is reprinted when a count changes and the command exits when the
+scan finishes: exit code 0 when it succeeded, 1 when it failed. Failed Tasks are listed by
+name under the table, so the next step is `orka task status <name>`. `--scan <id>` picks
+an older run, and `-o json` returns the same counts for scripts.
+
+Once the scan finishes, list the findings. The table is sorted critical-first, then
+validated before unvalidated, and titles are cut to the terminal width:
+
+```console
+$ orka security finding list nodejs-goof --recommended --validation-status validated
+SEVERITY  VALIDATED  ID                TITLE                                                  FILE
+critical  yes        fnd_a9d4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
+critical  yes        fnd_4ceb0dc790e6  Unauthenticated command injection via exec('identify…  routes/index.js:118
+high      yes        fnd_11a364071e0b  Hard-coded express-session secret enables cookie for…  app.js:31
+```
+
+`orka security finding get <id>` prints one finding as a readable field list, and
+`orka security scan list <repo>` shows each run's phase, slices reviewed, and the number
+of findings kept and dropped.
+
+## Validation modes
 
 | Mode | Behavior |
 |------|----------|
 | `off` | No validation tasks; schema, evidence, and deterministic false-positive filters still run. |
-| `light` | Default. Validates a small number of likely high-impact/high-confidence findings when safe and practical. |
+| `light` | Default. Validates, mainly from source, every kept finding of at least medium severity or confidence, up to 25 per run. |
 | `full` | More aggressive validation/reproduction for kept findings, including builds where useful. |
 
 Scanning never requires a buildable repository; validation may build when useful. Automatic
 validation can be tuned with `validationMaxFindingsPerRun`, `validationMinSeverity`, and
-`validationMinConfidence`; failed validations are excluded from recommended patch candidates,
-while validated findings rank above unvalidated findings of the same severity.
+`validationMinConfidence` (light defaults: 25, `medium`, `medium`). A `failed` validation means
+the validator refuted the finding, and such findings are excluded from recommended patch
+candidates. A validation that produced no verdict, for example because its result could not be
+decoded, is recorded as `error` and leaves the finding eligible. A validated finding takes the
+severity and confidence its validator assigns, which the validator calibrates against the code.
+Validated findings rank above unvalidated findings of the same severity. Missing runtime reproduction alone does not fail a
+finding that its source supports.
 
-## Custom Scan Policy ConfigMaps
+## Cross-component review
+
+Package-sized slices cannot see a vulnerability whose attacker-controlled source, failing
+control, and sensitive operation live in different components. Full-repository scans
+(initial and manual runs without a base commit) add three things:
+
+- **Reference files.** Each review may read files beyond its excerpts in its workspace and cite
+  them. A Go package slice can cite the in-repository packages it imports and those that import
+  it, and TypeScript or JavaScript files can cite the files they import (relative imports, workspace
+  packages through their `exports`, `main`, or index files, and tsconfig `paths` aliases) and those
+  that import them; every slice can cite its own files past the
+  excerpt.
+- **Threat-model investigations.** The threat model stage returns up to eight cross-component
+  security questions. They are saved in the threat model under **Cross-component
+  investigations**, where you can edit them, and each becomes its own review slice that can
+  cite any indexed repository file.
+- **Independent audit.** One extra slice reviews the repository's trust boundaries without
+  per-component slicing.
+
+When a review reports a broken control that the run has already kept, that is, both findings
+cite an overlapping `root_control` location (or, when neither marks one, an overlapping `sink`), the
+repeat is stored as a duplicate of the first finding and does not count toward
+`maxFindingsPerRun`.
+
+Review slices run as concurrent Tasks, up to the smaller of the controller's ACP dispatch
+limit (`controller.acpRuntime.dispatch.maxConcurrentTasks`) and the RuntimePool's
+`maxRunningPrompts`; both default to 4. A run keeps at most four review Tasks outstanding per
+prompt it can run at once (16 by default; four until a review is queued to its RuntimePool),
+and all scans together keep at most four per dispatch place. More start as earlier reviews
+finish, so queued slices do not spend their Task deadline waiting for a runtime.
+
+A review slice is retried once when its prompt fails or returns an invalid result. If the
+retry prompt also fails, for example because the model provider stopped the response, the
+slice is marked `failed` and the run continues; the run summary reports how many slices
+could not be reviewed, and the run fails only when none could. A result that still fails
+validation after the retry fails the run.
+
+Each review also records coverage: `scan.reviewedFiles` lists the files it read and
+`scan.resolvedQuestions` lists the questions it checked and ruled out. Both appear in the
+review Task's result. Finding evidence can carry a role (`entrypoint`, `source`,
+`propagation`, `root_control`, `sink`, or `context`), shown on the finding detail page.
+
+## Custom scan policy ConfigMaps
 
 Teams can attach additive policy text from same-namespace ConfigMaps instead of putting long
 instructions directly in the `RepositoryScan` spec. The ConfigMap must opt in with
@@ -121,6 +228,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: repo-security-policy
+  namespace: orka-system
   labels:
     orka.ai/security-policy: "true"
 data:
@@ -135,7 +243,13 @@ data:
 ---
 apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryScan
+metadata:
+  name: example-repo
+  namespace: orka-system
 spec:
+  repoURL: "https://github.com/example/app"
+  analysisAgentRef:
+    name: security-reviewer
   customScanInstructionsRef:
     name: repo-security-policy
     key: scan
@@ -143,6 +257,10 @@ spec:
     name: repo-security-policy
     key: false-positives
 ```
+
+The ConfigMap and the `RepositoryScan` must live in the same namespace. `repoURL` and
+`analysisAgentRef` are the only two required fields on a `RepositoryScan`; everything else
+above is what the two policy references add.
 
 Suggested custom policy themes:
 
@@ -155,15 +273,16 @@ Suggested custom policy themes:
 - Monorepos: subpath-specific trust boundaries, generated runtime config, shared CI/CD
   scripts, and cross-package credential flows.
 
-## Dropped Findings and Filtering
+## Dropped findings and filtering
 
 The scanner favors precision before persistence. Review prompts ask for concrete exploit
 paths and exclude common noise. The controller also applies a deterministic filter before
 findings are stored. Default dropped classes include docs-only issues, test-only issues,
 generic missing rate limits, generic DoS/resource exhaustion, dependency-version reports,
 client-side-only auth complaints, React XSS without unsafe HTML sinks, shell injection with
-no untrusted input path, non-sensitive logging, and generic prompt injection without a
-privileged Orka effect.
+no untrusted input path, non-sensitive logging, demo, example, or vendored `third_party`
+content that production does not load, and generic prompt injection without a privileged
+Orka effect. The mapper also skips `third_party` directories.
 
 Dropped diagnostics are visible from the API, CLI, and repository detail page. Each dropped
 item has a layer (`validation`, `filter`, or `cap`), reason, and sanitized compact sample.
@@ -175,10 +294,32 @@ metadata is available. Review agents are instructed to focus on newly introduced
 or materially worsened risk; unchanged code can support a finding but should not produce
 old repository-wide findings by itself.
 
+## Large repositories
+
+Each scan Task starts from a source workspace that the Workspace/Publisher builds from
+the whole repository, even when `subPath` is set. By default a workspace may hold up to
+100,000 entries, 64 MiB per file, 96 MiB of file content, and a 100 MiB archive, and a
+larger repository fails its first stage with `repository entry exceeds workspace limits`.
+Raise the limits with the chart's `publisher.workspaceLimits` values, grow
+`publisher.scratchSizeLimit` and the publisher's ephemeral-storage limit to hold the
+fetched objects and the archive, and restart the controller so RuntimePools pick up the
+new archive limit:
+
+```yaml
+publisher:
+  workspaceLimits:
+    maxBytes: 536870912         # 512 MiB of file content
+    maxArtifactBytes: 536870912 # 512 MiB archive
+  scratchSizeLimit: 4Gi
+  resources:
+    limits:
+      ephemeral-storage: 6Gi
+```
+
 ## Safety
 
 - Scan and patch agent Tasks use ACP RuntimePools with private RuntimeSessions; deterministic mapper/container work keeps the native hardened worker path.
-- `RepositoryScan.spec.gitSecretRef` remains the scan-level compatibility reference. Orka maps it to `workspace.readCredentialRef` for scans and to both Task read/publication roles for patch Tasks; the ACP child never receives the Secret.
+- `RepositoryScan.spec.gitSecretRef` remains the scan-level compatibility reference for read-only scan Tasks (`readCredentialRef` takes precedence when both are set). Patch proposals and remediation pull requests are write workflows and require the four explicit, pairwise-distinct roles `readCredentialRef`, `publicationReadCredentialRef`, `publicationCredentialRef`, and `forgeCredentialRef`; a patch request is rejected with `spec.<role> is required for repository scan patch publication` until all four are set. `gitSecretRef` never supplies a publication or forge role, and the ACP child never receives any of these Secrets.
 - Patches and PRs are never created automatically — both are explicit user actions.
 - Patch proposals cannot reach `patch_ready` without a verified publisher branch receipt, patch summary, and
   diff artifact that matches the validated workspace delta.
@@ -188,9 +329,9 @@ old repository-wide findings by itself.
 - Dropped-finding diagnostics contain compact reasons and samples only; they must not
   include raw tokens, credentials, full transcripts, or sensitive request context.
 
-## See Also
+## See also
 
 - [Repository Security Scanning Design](../development/security-scanning-design.md) — CRD,
   storage schema, controller ingestion, artifact contract, and prompt contracts.
-- [Configuration → RepositoryScan](../concepts/configuration.md#repositoryscan)
+- [Resource reference → RepositoryScan](../reference/resources.md#repositoryscan)
 - [API Reference → Security](../reference/api-reference.md#security)

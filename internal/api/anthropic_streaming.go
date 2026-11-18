@@ -17,8 +17,14 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
+)
+
+const (
+	anthropicTextDelta = "text_delta"
 )
 
 // handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.
@@ -56,7 +62,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		blockIndex := 0
 		messages := make([]llm.Message, len(capturedReq.Messages))
 		copy(messages, capturedReq.Messages)
-		totalOutputTokens := 0
+		totalUsage := anthropicStreamingUsage{}
 		repetitionTracker := make(map[string]int)
 		exposedToolNames := completionToolNameSet(capturedReq.Tools)
 		prematureEndRetries := 0
@@ -66,26 +72,28 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			select {
 			case <-streamCtx.Done():
 				// Emit timeout message and close
-				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "Request timed out during tool execution."})
+				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
+					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: anthropicTextDelta, Text: "Request timed out during tool execution."})
 					_ = writeContentBlockStop(w, blockIndex)
 				}
-				_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
+				_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalUsage)
 				_ = writeMessageStop(w)
 				return
 			default:
 			}
 
-			// Truncate conversation if needed
+			// Truncate a view of the whole conversation if needed, never the
+			// conversation itself, so the cut stays where it was and the prompt
+			// prefix stays cacheable.
+			sent := messages
 			if h.config.MaxSessionSize > 0 {
-				tokenBudget := h.config.MaxSessionSize / 4
-				messages = llm.TruncateMessages(messages, tokenBudget)
+				sent = llm.TruncateMessages(messages, h.config.MaxSessionSize/4)
 			}
 
 			// Build request for this iteration
 			compReq := &llm.CompletionRequest{
 				Model:        model,
-				Messages:     messages,
+				Messages:     sent,
 				SystemPrompt: capturedReq.SystemPrompt,
 				Tools:        capturedReq.Tools,
 				MaxTokens:    capturedReq.MaxTokens,
@@ -121,10 +129,14 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 			textContent := resp.Content
 			toolCalls := resp.ToolCalls
-			if resp.OutputTokens > 0 {
-				totalOutputTokens += resp.OutputTokens
-			} else if usedStream {
-				totalOutputTokens += estimateTokens(textContent)
+			usageResponse := *resp
+			if resp.OutputTokens == 0 && usedStream && !resp.UsageReported {
+				usageResponse.OutputTokens = estimateTokens(textContent)
+			}
+			if err := totalUsage.addResponse(&usageResponse); err != nil {
+				anthropicLog.Error(err, "invalid provider usage in tool loop")
+				_ = writeAnthropicStreamError(w, anthropicUsageOutOfRange)
+				return
 			}
 
 			// No tool calls — potentially final response. Guard against premature
@@ -134,10 +146,19 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			// premature text already streamed plus the recovery, but the
 			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
+				if isTokenBudgetTruncatedText(resp) {
+					// The caller's max_tokens budget ended the turn: deliver the
+					// partial text with the truthful stop reason instead of
+					// treating it as a premature end and asking for more work.
+					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
+					_ = writeMessageDelta(w, oaiParamMaxTokens, totalUsage)
+					_ = writeMessageStop(w)
+					return
+				}
 				if hasGoalStateSentinelPrefix(textContent) {
 					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 					stopReason := oaiStopReasonEndTurn
-					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageDelta(w, stopReason, totalUsage)
 					_ = writeMessageStop(w)
 					return
 				}
@@ -148,7 +169,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					)
 					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 					stopReason := oaiStopReasonEndTurn
-					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageDelta(w, stopReason, totalUsage)
 					_ = writeMessageStop(w)
 					return
 				}
@@ -164,11 +185,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				)
 				writeAnthropicTextProgress(w, &blockIndex, "[Continuing workflow...]\n\n")
 				messages = append(messages, llm.Message{
-					Role:    "assistant",
+					Role:    chatRoleAssistant,
 					Content: textContent,
 				})
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: continueMsg,
 				})
 				continue
@@ -187,7 +208,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 			// Append assistant message with tool calls
 			messages = append(messages, llm.Message{
-				Role:      "assistant",
+				Role:      chatRoleAssistant,
 				Content:   textContent,
 				ToolCalls: toolCalls,
 			})
@@ -210,7 +231,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				writeAnthropicTextProgress(w, &blockIndex, formatToolProgress(tc, result))
 
 				messages = append(messages, llm.Message{
-					Role:       "tool",
+					Role:       chatRoleTool,
 					ToolCallID: tc.ID,
 					Name:       tc.Name,
 					Content:    result,
@@ -219,7 +240,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 			if repetitionWarning != "" {
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: repetitionWarning,
 				})
 			}
@@ -231,16 +252,16 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				for {
 					select {
 					case <-streamCtx.Done():
-						_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
+						_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalUsage)
 						_ = writeMessageStop(w)
 						return
 					default:
 					}
 
 					// Emit progress
-					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
+					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
 						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-							Type: "text_delta", Text: "[⏳ Auto-polling tasks...]",
+							Type: anthropicTextDelta, Text: "[⏳ Auto-polling tasks...]",
 						})
 						_ = writeContentBlockStop(w, blockIndex)
 						blockIndex++
@@ -253,7 +274,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					for _, tc := range toolCalls {
 						result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 						messages = append(messages, llm.Message{
-							Role:       "tool",
+							Role:       chatRoleTool,
 							ToolCallID: tc.ID,
 							Name:       tc.Name,
 							Content:    result,
@@ -278,7 +299,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		}
 
 		// Reached iteration limit — emit final message and close
-		_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
+		_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalUsage)
 		_ = writeMessageStop(w)
 	})
 }
@@ -314,6 +335,11 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
 		if err != nil {
+			if llm.IsUsagePersistenceError(err) {
+				anthropicLog.Error(err, "stream usage persistence failed")
+				_ = writeAnthropicStreamError(w, "provider_error")
+				return
+			}
 			// Fallback to non-streaming Complete
 			h.handleStreamingFallback(w, streamCtx, capturedProvider, capturedReq)
 			return
@@ -322,7 +348,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		blockIndex := 0
 		inTextBlock := false
 		hasToolCalls := false
-		outputTokens := 0
+		usageResponse := &llm.CompletionResponse{}
 		terminalStopReason := ""
 
 		for chunk := range streamCh {
@@ -335,14 +361,14 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			if chunk.Content != "" {
 				if !inTextBlock {
 					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-						Type: "text", Text: "",
+						Type: oaiContentTypeText, Text: "",
 					}); err != nil {
 						break
 					}
 					inTextBlock = true
 				}
 				if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-					Type: "text_delta", Text: chunk.Content,
+					Type: anthropicTextDelta, Text: chunk.Content,
 				}); err != nil {
 					break
 				}
@@ -368,9 +394,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 				}
 			}
 
-			if chunk.OutputTokens > 0 {
-				outputTokens = chunk.OutputTokens
-			}
+			retainStreamUsage(usageResponse, chunk)
 
 			if chunk.Done {
 				terminalStopReason = chunk.StopReason
@@ -391,7 +415,13 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			_ = writeAnthropicStreamError(w, terminalStopReason)
 			return
 		}
-		_ = writeMessageDelta(w, stopReason, outputTokens)
+		usage := anthropicStreamingUsage{}
+		if err := usage.addResponse(usageResponse); err != nil {
+			anthropicLog.Error(err, "invalid provider stream usage")
+			_ = writeAnthropicStreamError(w, anthropicUsageOutOfRange)
+			return
+		}
+		_ = writeMessageDelta(w, stopReason, usage)
 		_ = writeMessageStop(w)
 	})
 }
@@ -459,14 +489,14 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 	// Emit text content
 	if resp.Content != "" {
 		if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-			Type: "text",
+			Type: oaiContentTypeText,
 			Text: "",
 		}); err != nil {
 			anthropicLog.Error(err, "fallback: failed to write content_block_start")
 			return
 		}
 		if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-			Type: "text_delta",
+			Type: anthropicTextDelta,
 			Text: resp.Content,
 		}); err != nil {
 			anthropicLog.Error(err, "fallback: failed to write content_block_delta")
@@ -504,7 +534,13 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 		blockIndex++
 	}
 
-	_ = writeMessageDelta(w, stopReason, resp.OutputTokens)
+	usage := anthropicStreamingUsage{}
+	if err := usage.addResponse(resp); err != nil {
+		anthropicLog.Error(err, "invalid fallback usage")
+		_ = writeAnthropicStreamError(w, anthropicUsageOutOfRange)
+		return
+	}
+	_ = writeMessageDelta(w, stopReason, usage)
 	_ = writeMessageStop(w)
 }
 
@@ -523,8 +559,8 @@ func writeAnthropicStreamError(w *bufio.Writer, reason string) error {
 	if strings.TrimSpace(reason) != "" {
 		message = fmt.Sprintf("provider stream ended with non-success outcome %q", reason)
 	}
-	return writeAnthropicSSE(w, "error", AnthropicError{
-		Type: "error",
+	return writeAnthropicSSE(w, apiFieldError, AnthropicError{
+		Type: apiFieldError,
 		Error: AnthropicErrorDetail{
 			Type:    "api_error",
 			Message: message,
@@ -536,11 +572,11 @@ func writeAnthropicTextProgress(w *bufio.Writer, blockIndex *int, text string) {
 	if text == "" {
 		return
 	}
-	if err := writeContentBlockStart(w, *blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err != nil {
+	if err := writeContentBlockStart(w, *blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err != nil {
 		anthropicLog.Error(err, "failed to write progress content_block_start")
 		return
 	}
-	_ = writeContentBlockDelta(w, *blockIndex, AnthropicDelta{Type: "text_delta", Text: text})
+	_ = writeContentBlockDelta(w, *blockIndex, AnthropicDelta{Type: anthropicTextDelta, Text: text})
 	_ = writeContentBlockStop(w, *blockIndex)
 	(*blockIndex)++
 }
@@ -551,8 +587,8 @@ func writeMessageStart(w *bufio.Writer, id, model string, inputTokens int) error
 		Type: "message_start",
 		Message: &AnthropicResponse{
 			ID:         id,
-			Type:       "message",
-			Role:       "assistant",
+			Type:       apiFieldMessage,
+			Role:       chatRoleAssistant,
 			Content:    []AnthropicContentBlock{},
 			Model:      model,
 			StopReason: nil,
@@ -564,16 +600,121 @@ func writeMessageStart(w *bufio.Writer, id, model string, inputTokens int) error
 	})
 }
 
-// writeMessageDelta emits the message_delta event with stop_reason and usage.
-func writeMessageDelta(w *bufio.Writer, stopReason string, outputTokens int) error {
-	return writeAnthropicSSE(w, "message_delta", AnthropicStreamEvent{
+// Anthropic message deltas permit input/cache counts to be absent. Keep them
+// distinct from explicit zero, including when a tool-loop turn omits usage.
+type anthropicStreamingUsage struct {
+	InputTokens           *int64 `json:"input_tokens,omitempty"`
+	OutputTokens          int64  `json:"output_tokens"`
+	CachedInputTokens     *int64 `json:"cache_read_input_tokens,omitempty"`
+	CacheWriteInputTokens *int64 `json:"cache_creation_input_tokens,omitempty"`
+	hasResponse           bool
+	deductedCacheRead     bool
+	deductedCacheWrite    bool
+}
+
+const anthropicUsageOutOfRange = "usage_out_of_range"
+
+func (usage *anthropicStreamingUsage) addResponse(resp *llm.CompletionResponse) error {
+	if resp.InputTokens < 0 || int64(resp.InputTokens) > store.MaxUsageTokenCount ||
+		resp.OutputTokens < 0 || int64(resp.OutputTokens) > store.MaxUsageTokenCount-usage.OutputTokens {
+		return errors.New(anthropicUsageOutOfRange)
+	}
+	for _, count := range []*int64{resp.CachedInputTokens, resp.CacheWriteInputTokens} {
+		if count != nil && (*count < 0 || *count > store.MaxUsageTokenCount) {
+			return errors.New(anthropicUsageOutOfRange)
+		}
+	}
+	var input *int64
+	if resp.UsageReported || resp.InputTokens > 0 {
+		count := int64(resp.InputTokens)
+		// Anthropic input_tokens excludes cache reads and writes. OpenAI
+		// reports an inclusive input count, so remove its known breakdown.
+		if !resp.InputExcludesCache {
+			if resp.CachedInputTokens != nil {
+				count -= *resp.CachedInputTokens
+				usage.deductedCacheRead = usage.deductedCacheRead || *resp.CachedInputTokens > 0
+			}
+			if resp.CacheWriteInputTokens != nil {
+				count -= *resp.CacheWriteInputTokens
+				usage.deductedCacheWrite = usage.deductedCacheWrite || *resp.CacheWriteInputTokens > 0
+			}
+		}
+		if count < 0 {
+			return errors.New(anthropicUsageOutOfRange)
+		}
+		input = &count
+	}
+	if usage.hasResponse {
+		var err error
+		usage.InputTokens, err = addReportedStreamTokens(usage.InputTokens, input)
+		if err != nil {
+			return err
+		}
+		usage.CachedInputTokens, err = addReportedStreamTokens(usage.CachedInputTokens, resp.CachedInputTokens)
+		if err != nil {
+			return err
+		}
+		usage.CacheWriteInputTokens, err = addReportedStreamTokens(usage.CacheWriteInputTokens, resp.CacheWriteInputTokens)
+		if err != nil {
+			return err
+		}
+	} else {
+		usage.InputTokens = input
+		usage.CachedInputTokens = resp.CachedInputTokens
+		usage.CacheWriteInputTokens = resp.CacheWriteInputTokens
+	}
+	// An inclusive count was reduced by these cache tokens. If the aggregate
+	// breakdown is unavailable, the reduced input would silently omit them.
+	if usage.deductedCacheRead && usage.CachedInputTokens == nil || usage.deductedCacheWrite && usage.CacheWriteInputTokens == nil {
+		usage.InputTokens = nil
+	}
+	usage.OutputTokens += int64(resp.OutputTokens)
+	usage.hasResponse = true
+	return nil
+}
+
+func addReportedStreamTokens(total, count *int64) (*int64, error) {
+	if total == nil || count == nil {
+		return nil, nil
+	}
+	if *count > store.MaxUsageTokenCount-*total {
+		return nil, errors.New(anthropicUsageOutOfRange)
+	}
+	value := *total + *count
+	return &value, nil
+}
+
+func retainStreamUsage(resp *llm.CompletionResponse, chunk llm.StreamChunk) {
+	if chunk.UsageReported || chunk.InputTokens > 0 {
+		resp.InputTokens = chunk.InputTokens
+	}
+	if chunk.UsageReported || chunk.OutputTokens > 0 {
+		resp.OutputTokens = chunk.OutputTokens
+	}
+	if chunk.CachedInputTokens != nil {
+		resp.CachedInputTokens = chunk.CachedInputTokens
+	}
+	if chunk.CacheWriteInputTokens != nil {
+		resp.CacheWriteInputTokens = chunk.CacheWriteInputTokens
+	}
+	if chunk.UsageReported || chunk.InputTokens > 0 || chunk.CachedInputTokens != nil || chunk.CacheWriteInputTokens != nil {
+		resp.InputExcludesCache = chunk.InputExcludesCache
+	}
+	resp.UsageReported = resp.UsageReported || chunk.UsageReported
+}
+
+// writeMessageDelta emits cumulative usage for the whole SSE message.
+func writeMessageDelta(w *bufio.Writer, stopReason string, usage anthropicStreamingUsage) error {
+	return writeAnthropicSSE(w, "message_delta", struct {
+		Type  string                  `json:"type"`
+		Delta *AnthropicDelta         `json:"delta"`
+		Usage anthropicStreamingUsage `json:"usage"`
+	}{
 		Type: "message_delta",
 		Delta: &AnthropicDelta{
 			StopReason: &stopReason,
 		},
-		Usage: &AnthropicUsage{
-			OutputTokens: outputTokens,
-		},
+		Usage: usage,
 	})
 }
 
@@ -629,7 +770,7 @@ func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
 			return false
 		}
 		m := messages[i]
-		if m.Role != "tool" {
+		if m.Role != chatRoleTool {
 			return false
 		}
 		if !isTaskStillRunning(m.Content) {
@@ -653,12 +794,6 @@ func isTaskStillRunning(result string) bool {
 	if !parsed.Success {
 		return false
 	}
-	// Terminal phases — auto-poll should stop
-	switch parsed.Data.Phase {
-	case "Succeeded", "Failed", "Cancelled":
-		return false
-	default:
-		// Running, Pending, Scheduled — still active
-		return true
-	}
+	// Auto-poll stops once the Task is terminal.
+	return !corev1alpha1.TaskPhase(parsed.Data.Phase).IsTerminal()
 }

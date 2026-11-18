@@ -687,7 +687,7 @@ func TestCapabilitiesAdvertiseConfiguredPullRequestReconciliation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !capabilities.PullRequestReconciliation || !slices.Contains(capabilities.Operations, OperationPullRequestReconcile) ||
+	if !capabilities.PullRequestReconciliation || !capabilities.PullRequestPresentation || !slices.Contains(capabilities.Operations, OperationPullRequestReconcile) ||
 		!slices.Contains(capabilities.CredentialKinds, CredentialForgeToken) {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
@@ -1261,4 +1261,11 @@ func TestPublicationReclaimIsCapabilityProtectedAndIdempotent(t *testing.T) {
 		data, _ := io.ReadAll(response.Body)
 		t.Fatalf("reclaim without operation capability status = %d, body = %s", response.StatusCode, data)
 	}
+}
+
+// PRReconcilerFactoryFunc adapts a function to PRReconcilerFactory for tests.
+type PRReconcilerFactoryFunc func(context.Context, string) (publisher.PullRequestReconciler, error)
+
+func (f PRReconcilerFactoryFunc) New(ctx context.Context, credentialPath string) (publisher.PullRequestReconciler, error) {
+	return f(ctx, credentialPath)
 }

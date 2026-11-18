@@ -1,0 +1,9 @@
+{
+  "model": "gpt-4.1",
+  "toolSchemaMode": "provider-static",
+  "hostedTarget": {
+    "projectEndpoint": "https://account.services.ai.azure.com/api/projects/project",
+    "agentName": "fibey",
+    "agentVersion": "1"
+  }
+}

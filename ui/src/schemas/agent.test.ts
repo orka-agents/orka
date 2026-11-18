@@ -54,9 +54,23 @@ describe('agentRuntimeSchema', () => {
       defaultAllowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
       defaultAllowBash: true,
       defaultReasoningEffort: 'max',
+      ceiling: { allowedTools: ['Read', 'Edit'], allowBash: false, maxTurns: 80 },
     }
     expect(builtInAgentRuntimeSchema.parse(runtime)).toEqual(runtime)
     expect(agentRuntimeSchema.parse(runtime)).toEqual(runtime)
+  })
+
+  it('keeps an Agent identity binding when a spec round-trips', () => {
+    const spec = {
+      runtime: { type: 'claude', ceiling: { allowedTools: ['Read'] } },
+      identity: { entra: { agentIdentityID: '00000000-0000-0000-0000-000000000001' } },
+    }
+    expect(agentSpecSchema.parse(spec)).toEqual(spec)
+    expect(() => agentSpecSchema.parse({ ...spec, identity: { entra: { agentIdentityID: 'x' }, okta: {} } })).toThrow()
+  })
+
+  it('rejects unknown ceiling fields', () => {
+    expect(() => agentRuntimeSchema.parse({ type: 'claude', ceiling: { allowedTools: [], delegateTo: [] } })).toThrow()
   })
 
   it('rejects removed, ambiguous, or malformed runtime selectors', () => {
@@ -79,8 +93,7 @@ describe('agentSpecSchema', () => {
       skills: [{ configMapRef: { name: 'skill-cm', key: 'skill.md' } }],
       resources: { limits: { memory: '256Mi' } },
       secretRef: { name: 'api-keys' },
-      session: { persistence: 'always', ttl: '1h', maxMessages: 100 },
-      rateLimit: { requestsPerMinute: 60, tokensPerMinute: 10000 },
+      session: { maxMessages: 100 },
       coordination: {
         enabled: true,
         allowedAgents: [{ name: 'helper', namespace: 'default' }],
@@ -122,12 +135,12 @@ describe('agentSpecSchema', () => {
       model: { name: 'openai/gpt-5.4', contextWindow: 32768, maxTokens: 4096 },
       systemPrompt: { inline: 'You write code' },
       runtime: { type: 'opencode' },
-    })).toThrow('OpenCode does not support Agent systemPrompt')
+    })).not.toThrow()
     expect(() => agentSpecSchema.parse({
       model: { name: 'openai/gpt-5.4', contextWindow: 32768, maxTokens: 4096 },
       systemPrompt: { configMapRef: { name: 'prompt', key: 'system.txt' } },
       runtime: { type: 'opencode' },
-    })).toThrow('OpenCode does not support Agent systemPrompt')
+    })).not.toThrow()
   })
 })
 
@@ -176,5 +189,22 @@ describe('exported types', () => {
     expect(agentSchema.parse(agent)).toBeDefined()
     expect(agentSpecSchema.parse(spec)).toBeDefined()
     expect(agentStatusSchema.parse(status)).toBeDefined()
+  })
+})
+
+describe('soul configuration', () => {
+  it('preserves inline persona separately from role instructions', () => {
+    const result = agentSpecSchema.parse({ systemPrompt: { inline: 'Role' }, soul: { inline: 'Persona' } })
+    expect(result.soul?.inline).toBe('Persona')
+    expect(result.systemPrompt?.inline).toBe('Role')
+  })
+  it('requires a digest for ConfigMap sources and rejects ambiguous sources', () => {
+    expect(() => agentSpecSchema.parse({ soul: { configMapRef: { name: 'soul', key: 'SOUL.md' } } })).toThrow()
+    expect(() => agentSpecSchema.parse({ soul: { inline: 'Persona', configMapRef: { name: 'soul', key: 'SOUL.md' }, digest: `sha256:${'a'.repeat(64)}` } })).toThrow()
+    expect(() => agentSpecSchema.parse({ soul: { configMapRef: { name: 'soul', key: 'SOUL.md' }, digest: `sha256:${'a'.repeat(64)}` } })).not.toThrow()
+  })
+  it('enforces the UTF-8 byte limit and excludes external runtimes', () => {
+    expect(() => agentSpecSchema.parse({ soul: { inline: '語'.repeat(3000) } })).toThrow()
+    expect(() => agentSpecSchema.parse({ soul: { inline: 'Persona' }, runtime: { runtimeRef: { name: 'external' } } })).toThrow()
   })
 })

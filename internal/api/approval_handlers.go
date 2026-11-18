@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -26,12 +27,23 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 )
 
+// ListTaskApprovalsResponse is one read of a Task and the approvals filtered
+// against it. TaskUID, TaskPhase, and TaskDeleting come from that same read,
+// so a client polling the list can tell whether a pending request still
+// belongs to a live Task that DecideTaskApproval would accept, without a
+// second, separately timed lookup by name.
 type ListTaskApprovalsResponse struct {
-	Namespace string               `json:"namespace"`
-	TaskName  string               `json:"taskName"`
-	Approvals []approvals.Approval `json:"approvals"`
+	Namespace string `json:"namespace"`
+	TaskName  string `json:"taskName"`
+	TaskUID   string `json:"taskUID,omitempty"`
+	TaskPhase string `json:"taskPhase,omitempty"`
+	// TaskDeleting is true when the Task has a deletion timestamp; decisions
+	// on its requests are refused even while its phase is not terminal.
+	TaskDeleting bool                 `json:"taskDeleting,omitempty"`
+	Approvals    []approvals.Approval `json:"approvals"`
 }
 
 const (
@@ -63,13 +75,26 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
-	return c.JSON(ListTaskApprovalsResponse{Namespace: namespace, TaskName: taskName, Approvals: deriveTaskApprovalState(filterTaskApprovalEvents(listed, task))})
+	return c.JSON(ListTaskApprovalsResponse{
+		Namespace:    namespace,
+		TaskName:     taskName,
+		TaskUID:      string(task.UID),
+		TaskPhase:    string(task.Status.Phase),
+		TaskDeleting: !task.DeletionTimestamp.IsZero(),
+		Approvals:    deriveTaskApprovalState(filterTaskApprovalEvents(listed, task)),
+	})
 }
 
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
+//
+//nolint:gocyclo // Decision validation, authorization, and replay checks stay together so none can be skipped.
 func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	taskName := c.Params("id")
-	approvalID := strings.TrimSpace(c.Params("approvalID"))
+	approvalID, err := url.PathUnescape(c.Params("approvalID"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "approvalID is invalid")
+	}
+	approvalID = strings.TrimSpace(approvalID)
 	if approvalID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "approvalID is required")
 	}
@@ -86,6 +111,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	}
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
 		return err
+	}
+	// A client that answered a Task it resolved earlier never decides a
+	// later Task that reuses the name and an approval ID.
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
 	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
@@ -117,6 +147,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !found {
 		return fiber.NewError(fiber.StatusNotFound, "approval not found")
 	}
+	if current.Binding != nil {
+		if err := validateV2ApprovalTask(current, task); err != nil {
+			return err
+		}
+	}
 	if current.Status != approvals.StatusPending {
 		if (current.Status == approvals.StatusApproved && decision == approvalDecisionApprove) || (current.Status == approvals.StatusDeclined && decision == approvalDecisionDecline) {
 			if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, current); err != nil {
@@ -129,7 +164,14 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if decision == approvalDecisionApprove {
+		if err := requireRequesterApprovesDelegatedWrite(task, GetUserInfo(c)); err != nil {
+			return err
+		}
+	}
+	// A parked turn has ended, but its sign-off approval stays decidable
+	// while the wait is active: the decision starts the continuation turn.
+	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
@@ -184,6 +226,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
 	}
+	approvals.RecordDecision(current, appended)
 	listed = append(listed, *appended)
 	updated, _ := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, updated); err != nil {
@@ -200,10 +243,31 @@ func filterTaskApprovalEvents(input []store.ExecutionEvent, task *corev1alpha1.T
 }
 
 func deriveTaskApprovalState(input []store.ExecutionEvent) []approvals.Approval {
-	// V1 does not passively expire approvals. Until an expiry producer appends
-	// explicit ApprovalExpired events, pending approvals must remain human-
-	// decidable and must match controller parking semantics.
-	return approvals.Derive(input, time.Time{})
+	// Preserve AI-worker parking semantics. Only broker-owned v2 reviews have
+	// an enforced wait deadline, including when their original runtime is lost.
+	values := approvals.Derive(input, time.Time{})
+	now := time.Now().UTC()
+	for i := range values {
+		if values[i].Binding != nil && values[i].Status == approvals.StatusPending && values[i].ExpiresAt != nil && !now.Before(*values[i].ExpiresAt) {
+			values[i].Status = approvals.StatusExpired
+		}
+	}
+	return values
+}
+
+func validateV2ApprovalTask(approval approvals.Approval, task *corev1alpha1.Task) error {
+	binding := approval.Binding
+	execution := task.Status.Execution
+	if approval.TaskUID == "" || approval.TaskUID != string(task.UID) || execution == nil ||
+		execution.Attempt != int32(binding.TaskAttempt) || execution.PromptID != binding.PromptID ||
+		execution.RuntimeSessionUID != binding.RuntimeSessionUID || execution.RuntimeSessionGeneration != int64(binding.RuntimeSessionGeneration) ||
+		store.CanonicalBytesDigest([]byte(execution.RuntimeInstanceID)) != binding.RuntimeInstanceIDDigest ||
+		store.CanonicalBytesDigest([]byte(execution.RuntimeSessionSupervisorBootID)) != binding.SupervisorBootIDDigest ||
+		execution.ControllerEpoch != int64(binding.ControllerEpoch) ||
+		(execution.State != corev1alpha1.TaskExecutionStateAccepted && execution.State != corev1alpha1.TaskExecutionStateRunning) {
+		return fiber.NewError(fiber.StatusConflict, "approval belongs to a task run that is no longer active")
+	}
+	return nil
 }
 
 func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, namespace, taskName string, approval approvals.Approval) error {
@@ -214,6 +278,9 @@ func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, name
 		current := &corev1alpha1.Task{}
 		if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, current); err != nil {
 			return err
+		}
+		if approval.TaskUID != "" && approval.TaskUID != string(current.UID) {
+			return errors.New("task identity changed after approval decision")
 		}
 		base := current.DeepCopy()
 		if current.Annotations == nil {

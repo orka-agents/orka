@@ -30,6 +30,20 @@ export const handlers = [
     return HttpResponse.json({ items: [], metadata: {} })
   }),
 
+  // Attention read models
+  http.get(`${API}/attention`, () => {
+    return HttpResponse.json({
+      namespace: 'default', generatedAt: new Date().toISOString(), items: [], total: 0, counts: {},
+      incomplete: false, sources: { approvals: 'included', monitors: 'included' }, metadata: {},
+    })
+  }),
+  http.get(`${API}/approvals`, () => {
+    return HttpResponse.json({
+      namespace: 'default', generatedAt: new Date().toISOString(), items: [], total: 0, counts: {},
+      incomplete: false, sources: { approvals: 'included', monitors: 'notRequested' }, metadata: {},
+    })
+  }),
+
   // Execution events
   http.get(`${API}/tasks/:id/events`, ({ params }) => {
     return HttpResponse.json({
@@ -172,6 +186,7 @@ export const handlers = [
       maxTasksPerTurn: 3,
       maxConcurrent: 5,
       availableTools: ['create_task', 'list_tasks'],
+      connectorsEnabled: true,
     })
   }),
   http.delete(`${API}/chat/:sessionId`, () => {

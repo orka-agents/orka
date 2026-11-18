@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -26,9 +25,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -51,11 +50,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
-	"github.com/orka-agents/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
+)
+
+const (
+	baselineField = "baseline"
+	runtimeField  = "runtime"
 )
 
 var (
@@ -106,6 +111,7 @@ const (
 	runtimePoolControllerTokenFileEnv  = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
 	runtimePoolCapabilitySecretFileEnv = "ORKA_ACP_CAPABILITY_SECRET_FILE"
 	runtimePoolProviderTokenFileEnv    = "ORKA_ACP_PROVIDER_TOKEN_FILE"
+	runtimePoolE2EPromptWriteAmbiguity = "ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"
 
 	runtimePoolAuthVolume               = "pool-auth"
 	runtimePoolProviderCapabilityVolume = "provider-capability"
@@ -199,6 +205,21 @@ func (c RuntimePoolProviderProxyConfig) Validate() error {
 	return err
 }
 
+// runtimePoolServiceHostInNamespace reports whether host names a Service in
+// namespace: "<service>.<namespace>.svc", optionally followed by the cluster
+// domain, which Core does not know and so accepts as any DNS name.
+func runtimePoolServiceHostInNamespace(host, namespace string) bool {
+	service, clusterDomain, found := strings.Cut(host, "."+namespace+".svc")
+	if !found || service == "" {
+		return false
+	}
+	if clusterDomain == "" {
+		return true
+	}
+	domain, dotted := strings.CutPrefix(clusterDomain, ".")
+	return dotted && len(validation.IsDNS1123Subdomain(domain)) == 0
+}
+
 func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyConfig, error) {
 	baseURL := strings.TrimSpace(c.BaseURL)
 	if baseURL == "" {
@@ -213,9 +234,7 @@ func (c RuntimePoolProviderProxyConfig) normalized() (runtimePoolProviderProxyCo
 	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy namespace is required and must be a DNS label")
 	}
-	hostname := strings.ToLower(parsed.Hostname())
-	serviceSuffix := "." + strings.ToLower(namespace) + ".svc"
-	if !strings.HasSuffix(hostname, serviceSuffix) && !strings.HasSuffix(hostname, serviceSuffix+".cluster.local") {
+	if !runtimePoolServiceHostInNamespace(strings.ToLower(parsed.Hostname()), strings.ToLower(namespace)) {
 		return runtimePoolProviderProxyConfig{}, fmt.Errorf("authenticated provider proxy base URL must address a Service in its configured namespace")
 	}
 	port := int32(80)
@@ -297,6 +316,9 @@ func validateRuntimePoolProviderToken(token []byte) error {
 	if len(token) < 32 || len(token) > 4096 {
 		return fmt.Errorf("authenticated provider proxy bearer token is required")
 	}
+	if string(token) == harnessv2.ProviderTokenEgressInjectionPlaceholder {
+		return fmt.Errorf("authenticated provider proxy bearer token must not be the public egress injection placeholder")
+	}
 	for _, value := range token {
 		if value <= ' ' || value == 0x7f {
 			return fmt.Errorf("authenticated provider proxy bearer token is invalid")
@@ -310,6 +332,8 @@ type RuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
 	Scheme    *k8sruntime.Scheme
+	// ControlStore preserves native boot witnesses independently of Pod lifetime.
+	ControlStore store.DurableControlStore
 
 	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
 	RuntimeNamespace string
@@ -322,14 +346,28 @@ type RuntimePoolReconciler struct {
 	// WorkspaceArtifactMaxBytes is the Publisher-advertised maximum inbound
 	// workspace artifact size propagated to every built-in runtime.
 	WorkspaceArtifactMaxBytes int64
+	// NativeSessionMaxBytes bounds encoded native session bundles in every built-in runtime.
+	// Zero selects the default 8 MiB policy.
+	NativeSessionMaxBytes int
 	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
 	ProviderProxy RuntimePoolProviderProxyConfig
+	// AllowProviderTokenInSandbox lets a gateway-enforced native workspace
+	// whose provider cannot inject the provider-proxy token at its egress
+	// gateway receive the token through its sealed bootstrap instead. Off by
+	// default: such workspaces are refused admission.
+	AllowProviderTokenInSandbox bool
 	// ControllerEpoch is a test/static override. Production uses Epochs.
 	ControllerEpoch int64
 	// Epochs supplies the current durable leader epoch.
 	Epochs *ControllerEpochManager
 	// EnablePDB protects a serving singleton from voluntary disruption.
 	EnablePDB bool
+	// EnableTelemetry projects non-secret trace and metrics exporter settings into supervisors.
+	EnableTelemetry bool
+	// TelemetryCollectorEgress admits the projected OTLP collector origins to
+	// the egress allowlist of gateway-enforced native runtimes. It has no
+	// effect without EnableTelemetry, and never changes NetworkPolicy shapes.
+	TelemetryCollectorEgress bool
 	// AllowedImages is the controller-configured immutable image allowlist for
 	// built-in pools. RuntimePool is controller-owned; its public spec cannot be
 	// used to select an arbitrary privileged supervisor image.
@@ -337,44 +375,43 @@ type RuntimePoolReconciler struct {
 	// CleanupOnly keeps deletion finalization active while ACP runtime admission
 	// is disabled without adding finalizers or creating runtime resources.
 	CleanupOnly bool
+	// WorkspaceCleanupOnly disables external workspace admission while keeping
+	// ordinary Deployment-backed pools and exact workspace cleanup active.
+	WorkspaceCleanupOnly bool
+	// E2EPromptWriteAmbiguityMarker is a disabled-by-default live-conformance
+	// fault marker projected into built-in runtime supervisors.
+	E2EPromptWriteAmbiguityMarker string
+	// ToolboxPolicy configures how frozen profile toolboxes are bound into
+	// runtime Pods. Pools whose profile carries toolboxes fail closed with
+	// ToolboxUnavailable when the policy cannot honor them.
+	ToolboxPolicy ACPToolboxPolicy
 
-	// AgentSandboxEnabled admits Agent Sandbox-backed workspace pools.
-	AgentSandboxEnabled bool
-	// SubstrateEnabled admits Substrate-backed workspace pools.
-	SubstrateEnabled bool
-	// SubstrateConfig carries the externally operated Substrate control-plane
-	// and router configuration for Substrate-backed workspace pools.
-	SubstrateConfig SubstrateConfig
-	// SubstrateActorControlFactory builds the narrow, suspension-free actor
-	// control client. Tests inject fakes; production defaults to the gRPC client.
-	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
-	// SubstrateCredentialSeeder overrides the credential bootstrap PUT for
-	// tests; production seeds through the router transport.
-	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error
-	// WorkspaceCredentialSeeder overrides the Agent Sandbox credential
+	// WorkspaceCredentialSeeder overrides the external runtime credential
 	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint
 	// directly after provider materialization is verified.
 	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
 
 	SupervisorClient RuntimePoolSupervisorClient
 	HTTPClient       *http.Client
-	Rand             io.Reader
-	Now              func() time.Time
-
-	substrateSupervisorOnce  sync.Once
-	substrateSupervisorHTTP  *http.Client
-	substrateSupervisorSetup error
+	// SubstrateRouter reaches routed native runtimes (Agent Substrate v1)
+	// through core's configured router with the controller's pod-certificate
+	// mTLS identity. Without it routed startup evidence fails closed.
+	SubstrateRouter *RuntimePoolSubstrateRouter
+	Rand            io.Reader
+	Now             func() time.Time
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;services;secrets;namespaces;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the singleton Deployment and publishes exact-Pod pool status.
+//
+//nolint:gocyclo // Pool finalization, admission, materialization, and readiness form one lifecycle.
 func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	pool := &corev1alpha1.RuntimePool{}
@@ -385,12 +422,19 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
+	if runtimePoolHasExternalWorkspace(pool) {
+		return r.reconcileExternalWorkspaceRuntimePool(ctx, pool)
+	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		return ctrl.Result{}, fmt.Errorf("legacy workspace RuntimePool %s/%s must retire under its original provider before upgrade", pool.Namespace, pool.Name)
+	}
 	if !pool.DeletionTimestamp.IsZero() {
 		orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
-		if pool.Spec.ExecutionWorkspace != nil && !runtimePoolWorkspaceDeletionDrainComplete(pool) {
-			return r.reconcileDeletingWorkspaceRuntimePool(ctx, pool)
-		}
+
 		return r.finalizeRuntimePool(ctx, pool)
+	}
+	if err := r.reconcileNativeRuntimePoolRetirement(ctx, pool); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
 	}
 	if r.CleanupOnly {
 		return ctrl.Result{}, nil
@@ -407,12 +451,25 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil && acpRuntimePoolImageRequiresHistoricalRecovery(pool, r.AllowedImages) {
+		if historicalConfig, historicalErr := r.runtimePoolConfigForDrain(pool); historicalErr == nil {
+			authorized, authorizationErr := r.historicalRuntimePoolImageAuthorized(ctx, pool, historicalConfig)
+			if authorizationErr != nil {
+				return ctrl.Result{}, authorizationErr
+			}
+			if authorized {
+				cfg = historicalConfig
+				err = nil
+			}
+		}
+	}
 	if err != nil {
+
 		status := r.baseRuntimePoolStatus(pool, 0)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -420,25 +477,19 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logger.Info("Reconciling RuntimePool", "runtimePool", pool.Name, "runtimeNamespace", cfg.namespace, "desiredReplicas", pool.Spec.DesiredReplicas)
 
-	if runtimePoolIsSubstrateBacked(pool) {
-		return r.reconcileSubstrateBackedRuntimePool(ctx, pool, cfg)
-	}
-
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
-		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
-			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, pool, cfg)
-		}
+
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	if pool.Spec.ExecutionWorkspace != nil {
-		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
+	if err := r.runtimePoolToolboxAdmission(pool, cfg); err != nil {
+		return r.finishRuntimePoolToolboxFailure(ctx, pool, cfg, err)
 	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
@@ -495,52 +546,22 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
 }
 
-func runtimePoolWorkspaceDeletionDrainComplete(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && pool.Status.ObservedGeneration == pool.Generation &&
-		pool.Status.DesiredReplicas == 0 && pool.Status.CurrentReplicas == 0 &&
-		pool.Status.ActiveInstance == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped
-}
-
 // reconcileDeletingWorkspaceRuntimePool routes deletion through the same
 // authenticated scale-to-zero state machine as idle shutdown. The local spec
 // override is never persisted; it only closes admission and proves quiescence
 // before finalization removes the provider workload and isolation boundary.
-func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
-	ctx context.Context,
-	pool *corev1alpha1.RuntimePool,
-) (ctrl.Result, error) {
-	draining := pool.DeepCopy()
-	draining.Spec.DesiredReplicas = 0
-	cfg, err := r.runtimePoolConfigForDrain(draining)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if runtimePoolIsSubstrateBacked(draining) {
-		return r.reconcileSubstrateBackedRuntimePool(ctx, draining, cfg)
-	}
-	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
-	}
-	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, draining, cfg)
-	if err != nil {
-		if errors.Is(err, errWorkspaceRuntimePoolAuthBindingLost) {
-			return r.reconcileWorkspaceRuntimePoolMissingAuthSecret(ctx, draining, cfg)
-		}
-		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
-	}
-	return r.reconcileWorkspaceBackedRuntimePool(ctx, draining, cfg, authSecret, providerSecret)
-}
 
 type runtimePoolConfig struct {
-	namespace           string
-	baseName            string
-	labels              map[string]string
-	controllerEpoch     int64
-	maxResidentSessions int32
-	maxRunningPrompts   int32
-	protocol            corev1alpha1.RuntimePoolProtocolVersion
-	profile             harnessv2.RuntimeProfile
-	providerProxy       runtimePoolProviderProxyConfig
+	namespace             string
+	baseName              string
+	labels                map[string]string
+	controllerEpoch       int64
+	maxResidentSessions   int32
+	maxRunningPrompts     int32
+	nativeSessionMaxBytes int
+	protocol              corev1alpha1.RuntimePoolProtocolVersion
+	profile               harnessv2.RuntimeProfile
+	providerProxy         runtimePoolProviderProxyConfig
 }
 
 type runtimePoolBootstrapInstanceBinding struct {
@@ -552,17 +573,258 @@ func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool
 	return r.runtimePoolConfigWithImageAdmission(pool, true)
 }
 
-// runtimePoolConfigForDrain reconstructs the deployed pool configuration for
-// authenticated deletion-time drain. The image must remain digest-pinned, but
-// an approved-image rotation must not strand the previously admitted workload.
+// runtimePoolConfigForDrain reconstructs the exact pool configuration without
+// applying the current-image allowlist. Callers outside deletion must first
+// prove that the historical image was authorized for this exact pool object.
 func (r *RuntimePoolReconciler) runtimePoolConfigForDrain(pool *corev1alpha1.RuntimePool) (runtimePoolConfig, error) {
 	return r.runtimePoolConfigWithImageAdmission(pool, false)
+}
+
+func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (bool, error) {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	if condition != nil && condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
+		condition.Reason == acpRuntimePoolImageProvenanceReason {
+		// RuntimePool UID plus the CRD's immutable runtime image/profile,
+		// trust-domain, runtime-namespace, and workspace binding keep this proof
+		// attached to one exact workload identity. Controller-owned replica and
+		// capacity changes may advance generation without invalidating it.
+		return true, nil
+	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		return r.backfillHistoricalWorkspaceRuntimePoolImageProvenance(ctx, pool)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: cfg.baseName}, deployment); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for key, value := range map[string]string{
+		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
+		runtimePoolUIDLabel:       string(pool.UID),
+		runtimePoolNameLabel:      pool.Name,
+		runtimePoolNamespaceLabel: pool.Namespace,
+	} {
+		if deployment.Labels[key] != value || deployment.Spec.Template.Labels[key] != value {
+			return false, nil
+		}
+	}
+	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
+}
+
+func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProvenance(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	reader := uncachedReader(r.APIReader, r.Client)
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(pool.Namespace)); err != nil {
+		return false, fmt.Errorf("list Tasks for historical workspace RuntimePool image provenance: %w", err)
+	}
+	message := ""
+	for i := range tasks.Items {
+		if !historicalWorkspaceRuntimePoolTaskBindingMatches(&tasks.Items[i], pool) {
+			continue
+		}
+		message = "RuntimePool image and profile match an exact controller-written Task execution binding"
+		break
+	}
+	if message == "" {
+		matches, err := r.historicalWorkspaceRuntimePoolSessionLineageMatches(ctx, reader, pool)
+		if err != nil {
+			return false, err
+		}
+		if !matches {
+			return false, nil
+		}
+		message = "RuntimePool image and profile match an admitted workspace and immutable Session lineage"
+	}
+	r.setRuntimePoolCondition(
+		pool,
+		&pool.Status,
+		acpRuntimePoolImageProvenanceCondition,
+		metav1.ConditionTrue,
+		acpRuntimePoolImageProvenanceReason,
+		message,
+	)
+	return true, nil
+}
+
+func historicalWorkspaceRuntimePoolTaskBindingMatches(
+	task *corev1alpha1.Task,
+	pool *corev1alpha1.RuntimePool,
+) bool {
+	if task == nil || pool == nil || task.Namespace != pool.Namespace || task.UID == "" || pool.UID == "" {
+		return false
+	}
+	execution := task.Status.Execution
+	binding := task.Status.AgentExecutionBinding
+	if execution == nil || binding == nil ||
+		strings.TrimSpace(execution.RuntimePoolName) != pool.Name ||
+		strings.TrimSpace(execution.RuntimePoolUID) != string(pool.UID) ||
+		binding.SchemaVersion != 1 ||
+		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool ||
+		binding.Task.UID != task.UID || binding.Task.BoundSpecGeneration != task.Generation ||
+		binding.RuntimeType != corev1alpha1.AgentRuntimeType(pool.Spec.Runtime.Profile.ProviderKind) ||
+		binding.RuntimeProfileDigest != pool.Spec.Runtime.Profile.Digest ||
+		binding.RuntimeProfileDigestSchemaVersion != 1 {
+		return false
+	}
+	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*binding)
+	return err == nil && canonicalDigest == binding.BindingDigest
+}
+
+func (r *RuntimePoolReconciler) historicalWorkspaceRuntimePoolSessionLineageMatches(
+	ctx context.Context,
+	reader client.Reader,
+	pool *corev1alpha1.RuntimePool,
+) (bool, error) {
+	// Session workspaces may outlive every Task that used them. The core
+	// admission marker and condition prove the linked workspace was admitted by
+	// Orka, while the immutable Session UID, deterministic pool name, and
+	// append-once lineage digest bind that workspace to this historical runtime
+	// image, profile, and workspace configuration.
+	sessionName, sessionUID, matched, err := historicalWorkspaceRuntimePoolSessionIdentity(ctx, reader, pool)
+	if err != nil || !matched {
+		return false, err
+	}
+	return historicalWorkspaceRuntimePoolSessionControlMatches(ctx, reader, pool, sessionName, sessionUID)
+}
+
+func historicalWorkspaceRuntimePoolSessionIdentity(
+	ctx context.Context,
+	reader client.Reader,
+	pool *corev1alpha1.RuntimePool,
+) (string, string, bool, error) {
+	workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel])
+	workspaceUID := strings.TrimSpace(pool.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if workspaceName == "" || workspaceUID == "" || pool.Spec.ExecutionWorkspace == nil {
+		return "", "", false, nil
+	}
+	linkedWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: workspaceName}, linkedWorkspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("read linked ExecutionWorkspace for historical RuntimePool image provenance: %w", err)
+	}
+	if linkedWorkspace.UID == "" || string(linkedWorkspace.UID) != workspaceUID ||
+		linkedWorkspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+		linkedWorkspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name ||
+		linkedWorkspace.Annotations[acpWorkspaceBackendAnnotation] != string(pool.Spec.ExecutionWorkspace.Provider) ||
+		linkedWorkspace.Spec.Mode != workspacev1alpha1.ExecutionWorkspaceModeInteractive ||
+		linkedWorkspace.Spec.SessionRef == nil || !workspaceHasCoreAdmissionEvidence(linkedWorkspace) {
+		return "", "", false, nil
+	}
+	sessionName := strings.TrimSpace(linkedWorkspace.Spec.SessionRef.Name)
+	sessionUID := strings.TrimSpace(string(linkedWorkspace.Spec.SessionRef.UID))
+	workspaceSlot := strings.TrimSpace(linkedWorkspace.Spec.Slot)
+	if workspaceSlot == "" {
+		workspaceSlot = defaultWorkspaceSlotName
+	}
+	if sessionName == "" || sessionUID == "" {
+		return "", "", false, nil
+	}
+	poolIdentity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		acpWorkspaceSessionUIDMapKey: sessionUID,
+		acpWorkspaceSlotMapKey:       workspaceSlot,
+	})
+	if err != nil {
+		return "", "", false, err
+	}
+	matched := pool.Name == acpWorkspaceRuntimePoolName("session", harnessv2.ProfileDigest(poolIdentity))
+	return sessionName, sessionUID, matched, nil
+}
+
+func historicalWorkspaceRuntimePoolSessionControlMatches(
+	ctx context.Context,
+	reader client.Reader,
+	pool *corev1alpha1.RuntimePool,
+	sessionName string,
+	sessionUID string,
+) (bool, error) {
+	sessionControl := &corev1alpha1.RuntimeSessionControl{}
+	controlKey := types.NamespacedName{
+		Namespace: pool.Namespace,
+		Name:      storekube.RuntimeSessionControlObjectName(sessionName),
+	}
+	if err := reader.Get(ctx, controlKey, sessionControl); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read RuntimeSessionControl for historical RuntimePool image provenance: %w", err)
+	}
+	lineage := sessionControl.Status.Lineage
+	if sessionControl.Spec.SessionName != sessionName || sessionControl.Spec.SessionUID != sessionUID ||
+		sessionControl.Spec.Owner.Kind != "Session" || sessionControl.Spec.Owner.UID != sessionUID ||
+		sessionControl.Status.Version < 1 || lineage == nil || lineage.SessionUID != sessionUID || lineage.Generation < 1 ||
+		lineage.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 ||
+		lineage.RuntimeIdentity != pool.Spec.Runtime.Profile.ProviderKind || lineage.EstablishedAt.IsZero() {
+		return false, nil
+	}
+	if ref := strings.TrimSpace(sessionControl.Spec.RuntimePoolRef); ref != "" && ref != pool.Name {
+		return false, nil
+	}
+	if uid := strings.TrimSpace(sessionControl.Spec.RuntimePoolUID); uid != "" && uid != string(pool.UID) {
+		return false, nil
+	}
+	if digest := strings.TrimSpace(sessionControl.Spec.RuntimeProfileDigest); digest != "" && digest != pool.Spec.Runtime.Profile.Digest {
+		return false, nil
+	}
+
+	namespace := &corev1.Namespace{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: pool.Namespace}, namespace); err != nil {
+		return false, fmt.Errorf("read namespace identity for historical RuntimePool image provenance: %w", err)
+	}
+	if namespace.UID == "" || lineage.NamespaceUID != namespace.UID {
+		return false, nil
+	}
+	expectedLineage, err := acpSessionLineageConfigurationDigest(
+		pool.Spec.Runtime.Profile.Digest,
+		pool.Spec.Runtime.Image,
+		pool.Spec.ExecutionWorkspace.BindingDigest,
+	)
+	if err != nil {
+		return false, err
+	}
+	return lineage.ConfigDigest == expectedLineage, nil
+}
+
+func historicalRuntimePoolTemplateMatches(
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	template corev1.PodTemplateSpec,
+) bool {
+	if pool == nil || len(template.Spec.Containers) != 1 ||
+		template.Spec.Containers[0].Image != pool.Spec.Runtime.Image {
+		return false
+	}
+	deployedPool, deployedConfig, err := runtimePoolValidationTargetFromTemplate(pool, template)
+	if err != nil {
+		return false
+	}
+	return deployedPool.Generation <= pool.Generation &&
+		deployedPool.Spec.Runtime.Profile.Digest == pool.Spec.Runtime.Profile.Digest &&
+		deployedConfig.protocol == cfg.protocol &&
+		reflect.DeepEqual(deployedConfig.profile, cfg.profile)
 }
 
 func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	pool *corev1alpha1.RuntimePool,
 	enforceApprovedImage bool,
 ) (runtimePoolConfig, error) {
+	nativeSessionMaxBytes, err := harnessv2.NormalizeNativeSessionMaxBytes(r.NativeSessionMaxBytes)
+	if err != nil {
+		return runtimePoolConfig{}, err
+	}
 	if err := validateRuntimePoolObject(pool); err != nil {
 		return runtimePoolConfig{}, err
 	}
@@ -582,9 +844,6 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	}
 	namespace, err := r.runtimePoolNamespace(pool)
 	if err != nil {
-		return runtimePoolConfig{}, err
-	}
-	if err := validateRuntimePoolExecutionWorkspaceNamespace(pool, namespace); err != nil {
 		return runtimePoolConfig{}, err
 	}
 	epoch := r.effectiveControllerEpoch(pool)
@@ -615,7 +874,7 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 	}
 	return runtimePoolConfig{
 		namespace: namespace, baseName: baseName, labels: labels, controllerEpoch: epoch,
-		maxResidentSessions: maxSessions, maxRunningPrompts: maxPrompts, protocol: protocol, profile: profile,
+		maxResidentSessions: maxSessions, maxRunningPrompts: maxPrompts, nativeSessionMaxBytes: nativeSessionMaxBytes, protocol: protocol, profile: profile,
 		providerProxy: providerProxy,
 	}, nil
 }
@@ -644,16 +903,9 @@ func (r *RuntimePoolReconciler) validateRuntimePoolImage(pool *corev1alpha1.Runt
 		return err
 	}
 	image := strings.TrimSpace(pool.Spec.Runtime.Image)
-	allowedImage := ""
-	switch strings.TrimSpace(pool.Spec.Runtime.Profile.ProviderKind) {
-	case runtimePoolProviderCodex:
-		allowedImage = strings.TrimSpace(r.AllowedImages.Codex)
-	case runtimePoolProviderClaude:
-		allowedImage = strings.TrimSpace(r.AllowedImages.Claude)
-	case runtimePoolProviderCopilot:
-		allowedImage = strings.TrimSpace(r.AllowedImages.Copilot)
-	case runtimePoolProviderOpencode:
-		allowedImage = strings.TrimSpace(r.AllowedImages.Opencode)
+	allowedImage, err := configuredACPRuntimeImage(pool.Spec.Runtime.Profile.ProviderKind, r.AllowedImages)
+	if err != nil {
+		return err
 	}
 	if allowedImage == "" || image != allowedImage {
 		return fmt.Errorf("spec.runtime.image is not the controller-approved image for provider %q", pool.Spec.Runtime.Profile.ProviderKind)
@@ -770,14 +1022,46 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 	authSecret *corev1.Secret,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
+	return r.reconcileRuntimePoolServingWithPostProbeFence(
+		ctx, pool, cfg, pods, readyPods, authSecret, status, nil,
+	)
+}
+
+type runtimePoolPostProbeFence func(
+	context.Context,
+	*corev1alpha1.RuntimePoolActiveInstanceStatus,
+) (ctrl.Result, bool, error)
+
+//nolint:gocyclo // Serving reconciliation rechecks every post-probe fence before admitting sessions.
+func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	pods []corev1.Pod,
+	readyPods []corev1.Pod,
+	authSecret *corev1.Secret,
+	status corev1alpha1.RuntimePoolStatus,
+	postProbeFence runtimePoolPostProbeFence,
+) (ctrl.Result, error) {
+	if err := r.observeRuntimePoolToolboxPullFailures(ctx, pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills)); err != nil {
+		return ctrl.Result{}, err
+	}
 	if len(readyPods) == 0 {
 		if runtimePoolActiveInstancePodPresent(status.ActiveInstance, pods) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "previously active runtime Pod is not Ready; preserving its exact fence while admission is closed"
+			rolloutReason := corev1alpha1.RuntimePoolReasonRolloutFailed
+			// A restarted active Pod that fails its toolbox checks must still
+			// surface ToolboxUnavailable so waiting Tasks fail instead of
+			// retrying against a fence that can never serve again.
+			if reason, message, ok := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills), r.now()); ok {
+				rolloutReason = reason
+				status.Message = message
+			}
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, rolloutReason, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.ActiveInstance = nil
@@ -785,7 +1069,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "waiting for one Ready runtime Pod"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-		if reason, message, ok := runtimePoolPodFailure(pods); ok {
+		if reason, message, ok := runtimePoolToolboxFailure(pods, runtimePoolBoundImages(cfg.profile.Toolboxes, cfg.profile.Skills), r.now()); ok {
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.Message = message
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, reason, message)
+		} else if reason, message, ok := runtimePoolPodFailure(pods); ok {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.Message = message
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, reason, message)
@@ -805,6 +1093,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	boot, err := r.observeNativeRuntimePoolBoot(ctx, pool, cfg, &readyPods[0])
+	if err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		if !runtimePoolActiveInstanceMatchesPod(status.ActiveInstance, &readyPods[0]) {
@@ -812,7 +1104,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage("authenticated runtime status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated runtime status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -824,18 +1116,47 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if postProbeFence != nil {
+		result, handled, fenceErr := postProbeFence(ctx, active)
+		if fenceErr != nil || handled {
+			return result, fenceErr
+		}
+	}
 	if runtimePoolSupervisorRestartedInPlace(pool.Status.ActiveInstance, active) {
 		return r.reconcileRuntimePoolInPlaceSupervisorRestart(ctx, pool, nil, &readyPods[0], active, status)
+	}
+	if err := r.enrollRuntimePoolBoot(ctx, pool, cfg, &readyPods[0], boot, probe.Status); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
+	if boot != nil {
+		// Enrollment patches Pod retention. Exact recycling must use the new
+		// resourceVersion, not the pre-enrollment cached deletion precondition.
+		current := &corev1.Pod{}
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(&readyPods[0]), current); err != nil {
+			return r.failRuntimePoolBootReconcile(ctx, pool, err)
+		}
+		if current.UID != readyPods[0].UID {
+			return r.failRuntimePoolBootReconcile(ctx, pool, fmt.Errorf("%w: enrolled runtime Pod UID changed", store.ErrConflict))
+		}
+		readyPods[0].ResourceVersion = current.ResourceVersion
 	}
 	status.ActiveInstance = active
 	applyRuntimePoolProbeCapacity(&status, cfg, probe)
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionTrue, "PodScheduled", "selected runtime Pod is scheduled")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ExactInstanceReady", "selected runtime Pod and supervisor profile are ready")
+	if probe.Status.Lifecycle != harnessv2.SupervisorLifecycleUnhealthy {
+		// A worker eviction must start its deadline-bound retirement even when
+		// it arrives during a capacity drain, which the rotation below would
+		// otherwise keep handling without the eviction deadline.
+		if result, handled, err := r.observeExternalSupervisorEviction(ctx, pool, probe.Status); err != nil || handled {
+			return result, err
+		}
+	}
 	if probe.Status.SessionIdentityCapacity == nil {
 		probe.Status.SessionIdentityCapacity = &harnessv2.SessionIdentityCapacity{Total: 2, Remaining: 1, ExhaustionReserve: 1}
 		return r.reconcileRuntimePoolIdentityCapacityRotation(ctx, pool, &readyPods[0], authSecret, active, probe, status)
@@ -850,7 +1171,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime supervisor reported unhealthy; recycling exact instance"
 		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
-			return ctrl.Result{}, err
+			status.Message = sanitizeStatusMessage("runtime supervisor reported unhealthy; exact instance recycling failed: " + err.Error())
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.ActiveInstance = nil
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
@@ -868,13 +1192,13 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime pool is at configured capacity"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAtCapacity, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	default:
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
 		status.Message = "one exact runtime instance is ready"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionTrue, "Serving", status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -989,7 +1313,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated identity-capacity drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated identity-capacity drain request failed: " + err.Error())
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, runtimePoolIdentityCapacityReasonDraining, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
@@ -1003,6 +1327,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, runtimePoolIdentityCapacityReasonDraining, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
+	if err := r.recordNativeRuntimePoolDrain(ctx, pool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if !runtimePoolIdentityCapacityQuiescencePersisted(pool, active) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
@@ -1011,6 +1338,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	// Data-only Substrate pools store the allocator high-water with the
+	// DurableDir data. Cold-booting the same actor leaves its identity capacity
+	// exhausted, while resetting that state would reuse a prior child UID/GID.
+	// recycleSubstrateActor therefore records checkpoint loss before teardown;
+	// safe rollover requires a separate durable-ownership migration contract.
 	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1193,6 +1525,9 @@ func (r *RuntimePoolReconciler) reconcileReadyRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	if err := r.recordNativeRuntimePoolDrain(ctx, validationPool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -1219,7 +1554,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolRolloutFailure(
 ) (ctrl.Result, error) {
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	status.Message = sanitizeRuntimePoolMessage(err.Error())
+	status.Message = sanitizeStatusMessage(err.Error())
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
@@ -1348,7 +1683,7 @@ func runtimePoolShortRevision(revision string) string {
 		return revision[:16]
 	}
 	if revision == "" {
-		return "unknown"
+		return repositoryMonitorIssueUnknownValue
 	}
 	return revision
 }
@@ -1406,7 +1741,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("authenticated drain status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated drain status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1415,7 +1750,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1435,7 +1770,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated drain request failed: " + err.Error())
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -1449,6 +1784,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if err := r.recordNativeRuntimePoolDrain(ctx, pool, active, probe.Status); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
@@ -1468,10 +1806,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolNamespace(ctx context.Context, cfg runtimePoolConfig) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	namespace := &corev1.Namespace{}
 	err := reader.Get(ctx, types.NamespacedName{Name: cfg.namespace}, namespace)
 	if err == nil {
@@ -1486,8 +1821,8 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNamespace(ctx context.Context, 
 			"app.kubernetes.io/name":             "orka",
 			"app.kubernetes.io/component":        "acp-runtime",
 			"app.kubernetes.io/managed-by":       "orka",
-			"orka.ai/runtime-namespace":          "true",
-			"pod-security.kubernetes.io/enforce": "baseline",
+			"orka.ai/runtime-namespace":          booleanTrueValue,
+			"pod-security.kubernetes.io/enforce": baselineField,
 			"pod-security.kubernetes.io/warn":    "restricted",
 			"pod-security.kubernetes.io/audit":   "restricted",
 		},
@@ -1514,7 +1849,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 		runtimePoolCapabilitySecretKey: 32,
 		runtimePoolBootstrapNonceKey:   32,
 	}, map[string]string{
-		runtimePoolAuthLabel:            "true",
+		runtimePoolAuthLabel:            booleanTrueValue,
 		runtimePoolCredentialEpochLabel: epoch,
 	})
 	if err != nil {
@@ -1522,7 +1857,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	}
 	providerName := runtimePoolChildName(cfg.baseName, "provider-e"+strconv.FormatInt(cfg.controllerEpoch, 10)+"-g"+cfg.providerProxy.tokenGeneration)
 	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: "true",
+		runtimePoolProviderCredentialLabel: booleanTrueValue,
 		runtimePoolCredentialEpochLabel:    epoch,
 		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
 	})
@@ -1541,45 +1876,11 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
-
-	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
+	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, strconv.FormatInt(cfg.controllerEpoch, 10))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	var providerSecrets corev1.SecretList
-	if err := reader.List(ctx, &providerSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
-		runtimePoolUIDLabel:       string(pool.UID),
-	}); err != nil {
-		return nil, nil, err
-	}
-	providerMatches := runtimePoolProviderSecretsForGeneration(
-		providerSecrets.Items, cfg.controllerEpoch, cfg.providerProxy.tokenGeneration,
-	)
-	if len(providerMatches) > 1 {
-		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private provider Secret for controller epoch %d and token generation %s", cfg.controllerEpoch, cfg.providerProxy.tokenGeneration)
-	}
-	providerName := ""
-	if len(providerMatches) == 1 {
-		providerName = providerMatches[0].Name
-	} else {
-		suffix, err := r.randomHex(12)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate private RuntimePool provider Secret name: %w", err)
-		}
-		providerName = runtimePoolChildName(cfg.baseName, "provider-e"+epoch+"-g"+cfg.providerProxy.tokenGeneration+"-"+suffix)
-	}
-	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
-		runtimePoolProviderCredentialLabel: "true",
-		runtimePoolCredentialEpochLabel:    epoch,
-		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
-	})
+	provider, err := r.ensureExternalPrivateProviderCredential(ctx, pool, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1592,68 +1893,10 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	cfg runtimePoolConfig,
 	epoch string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
+	if epoch != strconv.FormatInt(cfg.controllerEpoch, 10) {
+		return nil, fmt.Errorf("private credential controller epoch differs from the admitted configuration")
 	}
-	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
-	authKeys := map[string]int{
-		runtimePoolControllerTokenKey:      32,
-		runtimePoolCapabilitySecretKey:     32,
-		runtimePoolBootstrapNonceKey:       32,
-		runtimePoolBootstrapSigningSeedKey: 32,
-	}
-	authLabels := map[string]string{
-		runtimePoolAuthLabel:            "true",
-		runtimePoolCredentialEpochLabel: epoch,
-	}
-	binding := strings.TrimSpace(pool.Annotations[bindingKey])
-	if binding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, cfg.controllerEpoch)
-	}
-
-	var candidates corev1.SecretList
-	if err := reader.List(ctx, &candidates, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true",
-		runtimePoolUIDLabel:  string(pool.UID),
-	}); err != nil {
-		return nil, err
-	}
-	authoritativePool := &corev1alpha1.RuntimePool{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), authoritativePool); err != nil {
-		return nil, fmt.Errorf("refresh RuntimePool before private auth Secret cleanup: %w", err)
-	}
-	if authoritativePool.UID != pool.UID {
-		return nil, fmt.Errorf("RuntimePool UID changed before private auth Secret cleanup")
-	}
-	if authoritativeBinding := strings.TrimSpace(authoritativePool.Annotations[bindingKey]); authoritativeBinding != "" {
-		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, authoritativePool, cfg, cfg.controllerEpoch)
-	}
-	matches := runtimePoolAuthSecretsForEpoch(candidates.Items, cfg.controllerEpoch)
-	for i := range matches {
-		if !runtimePoolPrivateAuthSecretMatchesPool(&matches[i], pool, cfg) {
-			return nil, fmt.Errorf("refusing to adopt an unbound private RuntimePool auth Secret for controller epoch %d", cfg.controllerEpoch)
-		}
-	}
-	for i := range matches {
-		if err := r.deleteRuntimePoolManagedSecret(ctx, &matches[i]); err != nil {
-			return nil, fmt.Errorf("discard unbound private RuntimePool auth Secret: %w", err)
-		}
-	}
-
-	suffix, err := r.randomHex(12)
-	if err != nil {
-		return nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
-	}
-	name := runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
-	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, authKeys, authLabels)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
-		return nil, err
-	}
-	return secret, nil
+	return r.ensureExternalPrivateAuthCredential(ctx, pool, cfg)
 }
 
 func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
@@ -1671,10 +1914,7 @@ func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
 	if err != nil {
 		return nil, err
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1857,10 +2097,7 @@ func (r *RuntimePoolReconciler) pruneStaleRuntimePoolSecrets(
 	if deployment == nil {
 		return nil
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	liveDeployment := &appsv1.Deployment{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}, liveDeployment); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -2071,29 +2308,6 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 	return false
 }
 
-func runtimePoolProviderSecretsForGeneration(
-	secrets []corev1.Secret,
-	epoch int64,
-	generation string,
-) []corev1.Secret {
-	epochValue := strconv.FormatInt(epoch, 10)
-	legacySuffix := "provider-e" + epochValue + "-g" + generation
-	randomSuffixPrefix := legacySuffix + "-"
-	matched := make([]corev1.Secret, 0, 1)
-	for i := range secrets {
-		secretEpoch := strings.TrimSpace(secrets[i].Labels[runtimePoolCredentialEpochLabel])
-		secretGeneration := strings.TrimSpace(secrets[i].Labels[runtimePoolProviderGenerationLabel])
-		labeledMatch := secretEpoch == epochValue && secretGeneration == generation
-		legacyMatch := secretEpoch == "" && secretGeneration == "" &&
-			(strings.HasSuffix(secrets[i].Name, legacySuffix) ||
-				strings.HasPrefix(runtimePoolProviderSuffixPattern.FindString(secrets[i].Name), randomSuffixPrefix))
-		if labeledMatch || legacyMatch {
-			matched = append(matched, *secrets[i].DeepCopy())
-		}
-	}
-	return matched
-}
-
 func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -2101,10 +2315,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	name string,
 	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	// Uncached read: see ensureRuntimePoolSecret.
 	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
@@ -2151,10 +2362,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecret(
 	keys map[string]int,
 	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	// Uncached read: pool Secrets always live in the runtime namespace, but the
 	// namespace-scoped manager cache is configured independently, so a direct
@@ -2295,13 +2503,6 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	zero := int64(0)
 	mode := int32(0o400)
 	terminationGrace := int64(120)
-	adapterDigestsJSON, _ := json.Marshal(cfg.profile.AdapterDigests)
-	modelContextLimit := ""
-	modelOutputLimit := ""
-	if cfg.profile.ModelLimits != nil {
-		modelContextLimit = strconv.FormatInt(cfg.profile.ModelLimits.Context, 10)
-		modelOutputLimit = strconv.FormatInt(cfg.profile.ModelLimits.Output, 10)
-	}
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
 		Spec: corev1.PodSpec{
@@ -2315,45 +2516,11 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
-				Name:            "runtime",
+				Name:            runtimeField,
 				Image:           pool.Spec.Runtime.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports:           []corev1.ContainerPort{{Name: "control", ContainerPort: runtimePoolPort, Protocol: corev1.ProtocolTCP}},
-				Env: []corev1.EnvVar{
-					{Name: "ORKA_ACP_LISTEN_ADDRESS", Value: ":8080"},
-					{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
-					{Name: "ORKA_ACP_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-					{Name: "ORKA_ACP_POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
-					{Name: "ORKA_ACP_CONTROLLER_EPOCH", Value: strconv.FormatInt(cfg.controllerEpoch, 10)},
-					{Name: "ORKA_ACP_RUNTIME_POOL_UID", Value: string(pool.UID)},
-					{Name: "ORKA_ACP_RUNTIME_POOL_GENERATION", Value: strconv.FormatInt(pool.Generation, 10)},
-					{Name: "ORKA_ACP_RUNTIME_PROFILE_DIGEST", Value: pool.Spec.Runtime.Profile.Digest},
-					{Name: "ORKA_ACP_PROFILE_DIGEST_SCHEMA_VERSION", Value: pool.Spec.Runtime.Profile.DigestSchemaVersion},
-					{Name: "ORKA_ACP_ACP_PROFILE", Value: cfg.profile.ACPProfile},
-					{Name: "ORKA_ACP_ADAPTER_DIGESTS_JSON", Value: string(adapterDigestsJSON)},
-					{Name: "ORKA_ACP_PROVIDER", Value: cfg.profile.ProviderKind},
-					{Name: "ORKA_ACP_PROVIDER_PROXY_BASE_URL", Value: cfg.providerProxy.baseURL},
-					{Name: "ORKA_ACP_MODEL", Value: cfg.profile.Model},
-					{Name: "ORKA_ACP_MODEL_CONTEXT_LIMIT", Value: modelContextLimit},
-					{Name: "ORKA_ACP_MODEL_OUTPUT_LIMIT", Value: modelOutputLimit},
-					{Name: "ORKA_ACP_WORKSPACE_INTENT", Value: string(cfg.profile.WorkspaceIntent)},
-					{Name: "ORKA_ACP_AGENT_CONFIGURATION_DIGEST", Value: cfg.profile.AgentConfigurationDigest},
-					{Name: "ORKA_ACP_TOOL_POLICY_DIGEST", Value: cfg.profile.ToolPolicyDigest},
-					{Name: "ORKA_ACP_APPROVAL_POLICY_DIGEST", Value: cfg.profile.ApprovalPolicyDigest},
-					{Name: "ORKA_ACP_MCP_CONFIGURATION_DIGEST", Value: cfg.profile.MCPConfigurationDigest},
-					{Name: "ORKA_ACP_PROXY_CREDENTIAL_ROLE", Value: cfg.profile.ProxyCredentialRole},
-					{Name: "ORKA_ACP_PROXY_CREDENTIAL_SCOPE", Value: cfg.profile.ProxyCredentialScope},
-					{Name: "ORKA_ACP_RESOURCE_CLASS", Value: cfg.profile.ResourceClass},
-					{Name: runtimePoolControllerTokenFileEnv, Value: runtimePoolControllerTokenPath},
-					{Name: runtimePoolCapabilitySecretFileEnv, Value: runtimePoolCapabilitySecretPath},
-					{Name: runtimePoolProviderTokenFileEnv, Value: runtimePoolProviderTokenPath},
-					{Name: "ORKA_ACP_PROVIDER_TOKEN_GENERATION", Value: cfg.providerProxy.tokenGeneration},
-					{Name: "ORKA_ACP_ARTIFACT_API_URL", Value: strings.TrimRight(r.ControllerAPIURL, "/")},
-					{Name: "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES", Value: strconv.FormatInt(r.WorkspaceArtifactMaxBytes, 10)},
-					{Name: "ORKA_ACP_MCP_BROKER_URL", Value: strings.TrimRight(r.ControllerAPIURL, "/")},
-					{Name: "ORKA_ACP_TRUST_NAMESPACE", Value: pool.Spec.TrustDomain.Namespace},
-					{Name: "ORKA_ACP_SESSION_BASE_DIR", Value: "/sessions"},
-				},
+				Env:             r.runtimePoolEnvironment(pool, cfg),
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser:                &zero,
 					RunAsGroup:               &zero,
@@ -2372,8 +2539,8 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 					{Name: runtimePoolProviderCapabilityVolume, MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
 					{Name: runtimePoolSessionsVolume, MountPath: "/sessions"},
-					{Name: runtimePoolTempVolume, MountPath: "/tmp"},
-					{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
+					{Name: runtimePoolTempVolume, MountPath: workerTempPath},
+					{Name: runtimePoolHomeVolume, MountPath: workerHomePath},
 				},
 				StartupProbe:   runtimePoolHTTPProbe(30, 2, 1),
 				ReadinessProbe: runtimePoolHTTPProbe(3, 5, 2),
@@ -2392,17 +2559,132 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 			},
 		},
 	}
+	template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, runtimePoolTelemetryEnv(r.EnableTelemetry, os.Getenv)...)
+	if marker := strings.TrimSpace(r.E2EPromptWriteAmbiguityMarker); marker != "" {
+		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: runtimePoolE2EPromptWriteAmbiguity, Value: marker,
+		})
+	}
+	if pool.Spec.ExecutionWorkspace == nil {
+		template.Annotations[runtimePoolBootEnrollmentAnnotation] = runtimePoolBootEnrollmentVersion
+	}
+	// Toolbox wiring is a no-op without toolboxes. A policy error here is
+	// unreachable after runtimePoolToolboxAdmission; the template then omits
+	// the toolbox projection and the supervisor's digest check fails closed.
+	_ = applyRuntimePoolToolboxTemplate(&template, cfg.profile.Toolboxes, r.ToolboxPolicy)
+	_ = applyRuntimePoolSkillTemplate(&template, cfg.profile.Skills, cfg.maxResidentSessions, len(cfg.profile.Toolboxes) > 0, r.ToolboxPolicy)
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template
 }
 
-func runtimePoolJSONRevision(payload any) (string, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal RuntimePool template revision: %w", err)
+// runtimePoolToolboxAdmission fails closed when a pool's frozen profile
+// declares toolboxes or skills that this controller cannot bind: the feature
+// is off, mounting is unavailable, the mount method is invalid, the runtime has
+// no native skills folder, or the pool is workspace-backed.
+func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	toolboxes, skills := cfg.profile.Toolboxes, cfg.profile.Skills
+	if len(toolboxes) == 0 && len(skills) == 0 {
+		return nil
 	}
-	digest := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	if !r.ToolboxPolicy.Enabled {
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "toolboxes are disabled on this controller")
+	}
+	if len(skills) > 0 && !r.ToolboxPolicy.SkillsEnabled {
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "skills are disabled on this controller")
+	}
+	if reason := strings.TrimSpace(r.ToolboxPolicy.UnavailableReason); reason != "" {
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, reason)
+	}
+	if _, err := ParseACPToolboxMountMethod(string(r.ToolboxPolicy.MountMethod)); err != nil {
+		return fmt.Errorf("%s%v", acpToolboxUnavailablePrefix, err)
+	}
+	if pool != nil && pool.Spec.ExecutionWorkspace != nil {
+		return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, "execution-workspace RuntimePools cannot mount toolboxes or skills")
+	}
+	if len(skills) > 0 {
+		if reason := acpSkillRuntimeUnsupportedReason(corev1alpha1.AgentRuntimeType(cfg.profile.ProviderKind)); reason != "" {
+			return fmt.Errorf("%s%s", acpToolboxUnavailablePrefix, reason)
+		}
+	}
+	// The frozen profile was admitted under the allowlist of its day. Recheck
+	// it against the current allowlist so removing a registry also stops
+	// existing pools from recreating Pods with its images.
+	for i := range toolboxes {
+		if !ToolboxImageAllowed(toolboxes[i].Image, r.ToolboxPolicy.AllowedRegistries) {
+			return fmt.Errorf("%stoolbox image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, toolboxes[i].Image)
+		}
+	}
+	for i := range skills {
+		if !ToolboxImageAllowed(skills[i].Image, r.ToolboxPolicy.AllowedRegistries) {
+			return fmt.Errorf("%sskill image %q is no longer from an allowed toolbox registry", acpToolboxUnavailablePrefix, skills[i].Image)
+		}
+	}
+	return nil
+}
+
+// finishRuntimePoolToolboxFailure drains a pool whose frozen toolboxes are no
+// longer admitted (feature disabled, registry removed, mounting unavailable)
+// in two phases, like the rollout drain paths. The first reconcile persists
+// the admission-closed barrier with the ToolboxUnavailable condition while
+// preserving the exact active-instance fence, so the dispatcher can no longer
+// reserve against the pool. Later reconciles stop the Deployment only after
+// an authenticated quiescence observation of the active supervisor, or after
+// its Pod is confirmed gone, and clear the fence only once the workload is
+// stopped. The Deployment controller therefore never keeps a Pod with an
+// image the current policy rejects, and in-flight work is never interrupted.
+func (r *RuntimePoolReconciler) finishRuntimePoolToolboxFailure(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	err error,
+) (ctrl.Result, error) {
+	status := r.baseRuntimePoolStatus(pool, 0)
+	status.ControllerEpoch = cfg.controllerEpoch
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.ActiveInstance = pool.Status.ActiveInstance.DeepCopy()
+	status.Message = sanitizeStatusMessage(err.Error())
+	barrierPersisted := pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionClosed &&
+		runtimePoolRolloutConditionReason(pool) == corev1alpha1.RuntimePoolReasonToolboxUnavailable
+	if pool.Spec.ExecutionWorkspace == nil && barrierPersisted {
+		deployment := &appsv1.Deployment{}
+		getErr := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: cfg.baseName}, deployment)
+		switch {
+		case apierrors.IsNotFound(getErr):
+			status.ActiveInstance = nil
+		case getErr != nil:
+			return ctrl.Result{}, getErr
+		case ptr.Deref(deployment.Spec.Replicas, 0) > 0 || pool.Status.ActiveInstance != nil:
+			idle, idleErr := r.runtimePoolToolboxWorkloadIdle(ctx, pool, cfg, deployment)
+			if idleErr != nil {
+				return ctrl.Result{}, idleErr
+			}
+			if idle {
+				if stopErr := r.stopRuntimePoolDeployment(ctx, deployment); stopErr != nil {
+					return ctrl.Result{}, stopErr
+				}
+				status.ActiveInstance = nil
+				status.Message = sanitizeStatusMessage(err.Error() + "; runtime workload scaled to zero")
+			} else {
+				status.Message = sanitizeStatusMessage(err.Error() + "; admission is closed and the runtime workload is scaled to zero once its sessions and prompts finish")
+			}
+		default:
+			status.ActiveInstance = nil
+		}
+	}
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonToolboxUnavailable, status.Message)
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+}
+
+// runtimePoolRolloutConditionReason returns the persisted RolloutReady reason
+// for the pool's current generation, or empty.
+func runtimePoolRolloutConditionReason(pool *corev1alpha1.RuntimePool) string {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if condition == nil || condition.ObservedGeneration != pool.Generation {
+		return ""
+	}
+	return condition.Reason
 }
 
 func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
@@ -2412,8 +2694,7 @@ func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
 	if err != nil {
 		panic(fmt.Sprintf("marshal RuntimePool Pod template revision: %v", err))
 	}
-	digest := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(digest[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 func runtimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
@@ -2446,6 +2727,9 @@ func runtimePoolHTTPProbe(failureThreshold, periodSeconds, timeoutSeconds int32)
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolService(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "Service")
+	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: cfg.baseName, Namespace: cfg.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		service.Labels = mergeStringMap(service.Labels, cfg.labels)
@@ -2474,7 +2758,7 @@ func controllerNamespaceForRuntimePool(namespace string) string {
 	return namespace
 }
 
-func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+func (r *RuntimePoolReconciler) runtimePoolNetworkPolicies(cfg runtimePoolConfig) []networkingv1.NetworkPolicy {
 	selector := metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}
 	controllerNamespace := controllerNamespaceForRuntimePool(r.ControllerNamespace)
 	policies := make([]networkingv1.NetworkPolicy, 0, 6)
@@ -2491,7 +2775,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 				Ingress: []networkingv1.NetworkPolicyIngressRule{{
 					From: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
-						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: controllerNameValue}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(runtimePoolPort))}},
 				}},
@@ -2536,13 +2820,18 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 				Egress: []networkingv1.NetworkPolicyEgressRule{{
 					To: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
-						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: controllerNameValue}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(r.ControllerAPIPort))}},
 				}},
 			},
 		},
 	)
+	return policies
+}
+
+func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	policies := r.runtimePoolNetworkPolicies(cfg)
 	for i := range policies {
 		policy := &networkingv1.NetworkPolicy{ObjectMeta: policies[i].ObjectMeta}
 		desired := policies[i].Spec
@@ -2562,6 +2851,21 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolNetworkPolicies(ctx context.Con
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolPDB(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
+	if runtimePoolHasExternalWorkspace(pool) && cfg.namespace != pool.Namespace {
+		if r.EnablePDB {
+			return r.ensureExternalDiscoveryResource(ctx, pool, cfg, "PodDisruptionBudget")
+		}
+		object := externalDiscoveryObject(cfg, "PodDisruptionBudget")
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		owned, err := externalDiscoveryResourceOwned(pool, cfg, object)
+		if err != nil || !owned {
+			return err
+		}
+		_, err = r.deleteExternalCoreResource(ctx, object)
+		return err
+	}
 	name := runtimePoolChildName(cfg.baseName, "pdb")
 	pdb := &policyv1.PodDisruptionBudget{}
 	key := types.NamespacedName{Namespace: cfg.namespace, Name: name}
@@ -2649,7 +2953,7 @@ func runtimePoolSchedulingFailure(pods []corev1.Pod) (string, string, bool) {
 	for i := range pods {
 		condition := findRuntimePoolPodCondition(pods[i].Status.Conditions, corev1.PodScheduled)
 		if condition != nil && condition.Status == corev1.ConditionFalse {
-			message := sanitizeRuntimePoolMessage(condition.Message)
+			message := sanitizeStatusMessage(condition.Message)
 			if message == "" {
 				message = "runtime Pod is unschedulable"
 			}
@@ -2673,8 +2977,8 @@ func runtimePoolPodFailure(pods []corev1.Pod) (string, string, bool) {
 				continue
 			}
 			switch waiting.Reason {
-			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "RunContainerError", "CrashLoopBackOff":
-				message := sanitizeRuntimePoolMessage(waiting.Message)
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", podWaitingReasonCreateContainerConfig, "RunContainerError", "CrashLoopBackOff":
+				message := sanitizeStatusMessage(waiting.Message)
 				if message == "" {
 					message = "runtime container failed: " + waiting.Reason
 				}
@@ -2694,7 +2998,7 @@ func (r *RuntimePoolReconciler) applyDeploymentFailureConditions(pool *corev1alp
 		if condition.Type != appsv1.DeploymentReplicaFailure || condition.Status != corev1.ConditionTrue {
 			continue
 		}
-		message := sanitizeRuntimePoolMessage(condition.Message)
+		message := sanitizeStatusMessage(condition.Message)
 		lower := strings.ToLower(message)
 		switch {
 		case strings.Contains(lower, "podsecurity"), strings.Contains(lower, "pod security"), strings.Contains(lower, "restricted:"):
@@ -2753,6 +3057,14 @@ func runtimePoolValidationTargetFromTemplate(
 	if err != nil {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool model limits are invalid: %w", err)
 	}
+	toolboxes, err := runtimePoolToolboxesFromEnvironment(environment)
+	if err != nil {
+		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool toolboxes are invalid: %w", err)
+	}
+	skills, err := runtimePoolSkillsFromEnvironment(environment)
+	if err != nil {
+		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool skills are invalid: %w", err)
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               environment["ORKA_ACP_ACP_PROFILE"],
 		AdapterDigests:           adapterDigests,
@@ -2767,6 +3079,8 @@ func runtimePoolValidationTargetFromTemplate(
 		ProxyCredentialRole:      environment["ORKA_ACP_PROXY_CREDENTIAL_ROLE"],
 		ProxyCredentialScope:     environment["ORKA_ACP_PROXY_CREDENTIAL_SCOPE"],
 		ResourceClass:            environment["ORKA_ACP_RESOURCE_CLASS"],
+		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	if err := profile.Validate(); err != nil {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool profile is invalid: %w", err)
@@ -3067,7 +3381,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	status.ActiveInstance = nil
-	status.Message = sanitizeRuntimePoolMessage(err.Error())
+	status.Message = sanitizeStatusMessage(err.Error())
 	reason := corev1alpha1.RuntimePoolReasonRolloutFailed
 	lower := strings.ToLower(status.Message)
 	switch {
@@ -3084,29 +3398,179 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
 
+// runtimePoolToolboxWorkloadIdle reports whether the drained pool's workload
+// can be stopped without interrupting work. The toolbox gate runs before the
+// rollout probe that refreshes the pool's capacity counters, so this path
+// observes the live state itself: the controller must hold no reservation or
+// finalization work; with an active instance whose Pod is confirmed gone
+// nothing can be running; otherwise every Ready supervisor that may hold work
+// (the active one, or each Ready Pod when no instance was recorded) must be
+// probed and report the complete drained-and-quiescent invariant used by the
+// rollout paths (a requested drain that stopped new sessions, and no resident
+// session, prompt, queued admission, pending permission, or live descendant).
+// A NotReady or unreachable active supervisor is never assumed idle.
+func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	deployment *appsv1.Deployment,
+) (bool, error) {
+	pods, err := r.listRuntimePoolPods(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	active := pool.Status.ActiveInstance
+	readyPods := readyRuntimePoolPods(pods)
+	if active == nil {
+		if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
+			return false, nil
+		}
+		// A Pod can become Ready after admission closed, before any instance
+		// was recorded. It is never assumed idle: each Ready Pod passes the
+		// same authenticated drain before the workload stops.
+		idle := true
+		for i := range readyPods {
+			drained, err := r.runtimePoolToolboxPodDrained(ctx, pool, deployment, &readyPods[i], nil)
+			if err != nil {
+				return false, err
+			}
+			idle = idle && drained
+		}
+		return idle, nil
+	}
+	if !runtimePoolActiveInstancePodPresent(active, pods) {
+		return runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity), nil
+	}
+	for i := range readyPods {
+		if runtimePoolActiveInstanceMatchesPod(active, &readyPods[i]) {
+			return r.runtimePoolToolboxPodDrained(ctx, pool, deployment, &readyPods[i], active)
+		}
+	}
+	return false, nil
+}
+
+// runtimePoolToolboxPodDrained authenticates one Ready runtime Pod with the
+// deployed instance's credentials and applies the rollout drain barrier to
+// it. With an active instance the observed identity must match it exactly; a
+// supervisor that restarted in place is recycled instead.
+func (r *RuntimePoolReconciler) runtimePoolToolboxPodDrained(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	deployment *appsv1.Deployment,
+	pod *corev1.Pod,
+	active *corev1alpha1.RuntimePoolActiveInstanceStatus,
+) (bool, error) {
+	// Admission may change across a controller epoch. Authenticate the exact
+	// deployed instance, not the credentials rendered for its replacement.
+	validationPool, validationConfig, err := runtimePoolDeploymentValidationTarget(pool, deployment)
+	if err != nil {
+		return false, err
+	}
+	authSecret, err := r.runtimePoolDeploymentAuthSecret(ctx, deployment)
+	if err != nil {
+		return false, err
+	}
+	supervisor := r.supervisorClientForPool(pool)
+	endpoint := runtimePoolInstanceEndpoint(pool, pod)
+	token := string(authSecret.Data[runtimePoolControllerTokenKey])
+	capability := authSecret.Data[runtimePoolCapabilitySecretKey]
+	probe, err := supervisor.Probe(ctx, endpoint, token, capability)
+	if err != nil {
+		return false, nil
+	}
+	observed, err := validateRuntimePoolProbeForRollout(validationPool, validationConfig, pod, probe, r.now())
+	if err != nil {
+		return false, err
+	}
+	if active != nil {
+		if runtimePoolSupervisorRestartedInPlace(active, observed) {
+			// The old session tree is no longer trustworthy. Admission was
+			// closed in an earlier reconcile; use the existing UID-fenced
+			// recycle path rather than repeatedly comparing the old boot
+			// against the new one.
+			if err := r.stopRuntimePoolDeployment(ctx, deployment); err != nil {
+				return false, err
+			}
+			if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
+			return false, fmt.Errorf("authenticated runtime identity changed before toolbox drain")
+		}
+	}
+	if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
+		return false, nil
+	}
+	// Same two-step barrier as the rollout drain: the supervisor must stop
+	// accepting sessions itself (closing the window between a dispatcher's
+	// stale read of the pool and the scale-down), and only a later probe that
+	// shows the drained supervisor completely quiescent allows the stop.
+	if !probe.Status.Drain.Requested {
+		if err := supervisor.RequestDrain(ctx, endpoint, token, capability, probe.Status, harnessv2.DrainReasonToolboxUnavailable); err != nil {
+			return false, nil
+		}
+		return false, nil
+	}
+	if !runtimePoolRolloutProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
+		return false, nil
+	}
+	// Preserve task-scoped receipts while the authenticated retirement fence
+	// still exists. A failed write must prevent scale-down and fence removal.
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, observed, probe.Status); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// runtimePoolConflictRequeue is how soon a reconcile that lost the status
+// optimistic lock re-reads the pool.
+const runtimePoolConflictRequeue = time.Second
+
 func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	status corev1alpha1.RuntimePoolStatus,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	recorded, err := r.recordRuntimePoolStatus(ctx, pool, status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !recorded {
+		// Another writer (the drain, session, or supervisor probe path)
+		// advanced the pool first; recompute from the fresh object instead
+		// of surfacing the optimistic-lock miss as a reconcile error.
+		return ctrl.Result{RequeueAfter: runtimePoolConflictRequeue}, nil
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// recordRuntimePoolStatus persists status and reports whether the stored pool
+// now holds it. An optimistic-lock conflict is not an error: it reports false
+// so the caller recomputes from the fresh object.
+func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, pool *corev1alpha1.RuntimePool, status corev1alpha1.RuntimePoolStatus) (bool, error) {
 	clearRuntimePoolUnfencedProbePressure(&status)
-	status.Message = sanitizeRuntimePoolMessage(status.Message)
+	status.Message = sanitizeStatusMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
 		recordRuntimePoolMetrics(pool, status)
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		return true, nil
 	}
 	scaledToZero := runtimePoolCompletedScaleToZero(pool.Status, status)
 	base := pool.DeepCopy()
 	pool.Status = status
 	if err := r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return ctrl.Result{}, err
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return true, nil
 }
 
 // Supervisor pressure belongs to one exact authenticated runtime instance.
@@ -3175,7 +3639,7 @@ func (r *RuntimePoolReconciler) setRuntimePoolCondition(
 		ObservedGeneration: pool.Generation,
 		LastTransitionTime: metav1.NewTime(r.now()),
 		Reason:             sanitizeRuntimePoolReason(reason),
-		Message:            sanitizeRuntimePoolMessage(message),
+		Message:            sanitizeStatusMessage(message),
 	})
 }
 
@@ -3183,25 +3647,14 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if !controllerutil.ContainsFinalizer(pool, runtimePoolFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	if err := r.reconcileNativeRuntimePoolRetirement(ctx, pool); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
 	cfg, err := r.runtimePoolConfigForDeletion(pool)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if pool.Spec.ExecutionWorkspace != nil {
-		var workspaceRemaining bool
-		var workspaceErr error
-		if runtimePoolIsSubstrateBacked(pool) {
-			workspaceRemaining, workspaceErr = r.deleteSubstrateRuntimePoolChildren(ctx, pool, cfg)
-		} else {
-			workspaceRemaining, workspaceErr = r.deleteRuntimePoolWorkspaceChildren(ctx, pool, cfg)
-		}
-		if workspaceErr != nil {
-			return ctrl.Result{}, workspaceErr
-		}
-		if workspaceRemaining {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
+
 	remaining, err := r.deleteRuntimePoolChildren(ctx, cfg)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -3209,9 +3662,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	base := pool.DeepCopy()
-	controllerutil.RemoveFinalizer(pool, runtimePoolFinalizer)
-	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.removeRuntimePoolFinalizer(ctx, pool); err != nil {
 		return ctrl.Result{}, err
 	}
 	orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
@@ -3361,135 +3812,40 @@ func (r *RuntimePoolReconciler) supervisorClient() RuntimePoolSupervisorClient {
 }
 
 // supervisorClientForPool selects the transport for the pool's workload
-// backend: Substrate-backed pools reach the exact actor through the provider
-// router with the logical route host preserved; every other pool dials the
-// exact Pod address directly.
+// backend: a pool bound to a routed native process reaches it only through
+// core's configured Substrate router with its exact target header; every other
+// pool dials the exact bound endpoint directly.
 func (r *RuntimePoolReconciler) supervisorClientForPool(pool *corev1alpha1.RuntimePool) RuntimePoolSupervisorClient {
-	if r.SupervisorClient != nil {
-		return r.SupervisorClient
+	routed, err := externalRoutedPoolHTTPClient(r.SubstrateRouter, pool, runtimePoolProbeTimeout)
+	if err != nil {
+		return unavailableSupervisorClient{err: err}
 	}
-	if pool != nil && pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		httpClient, err := r.substrateSupervisorHTTPClient()
-		if err != nil {
-			return &runtimePoolFailingSupervisorClient{err: err}
-		}
-		return &runtimePoolHTTPSupervisorClient{client: httpClient, now: r.now}
+	if routed == nil || r.SupervisorClient != nil {
+		return r.supervisorClient()
 	}
-	return r.supervisorClient()
+	return &runtimePoolHTTPSupervisorClient{client: routed, now: r.now}
 }
 
-func (r *RuntimePoolReconciler) substrateSupervisorHTTPClient() (*http.Client, error) {
-	r.substrateSupervisorOnce.Do(func() {
-		transport, err := substrateRouteHTTPTransport(r.SubstrateConfig.RouterURL, r.SubstrateConfig.ActorDNSSuffix)
-		if err != nil {
-			r.substrateSupervisorSetup = err
-			return
-		}
-		client := &http.Client{Timeout: runtimePoolProbeTimeout, Transport: transport}
-		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-		r.substrateSupervisorHTTP = client
-	})
-	return r.substrateSupervisorHTTP, r.substrateSupervisorSetup
-}
-
-// runtimePoolFailingSupervisorClient surfaces a supervisor-transport
-// configuration failure as an authenticated-probe failure so the pool degrades
-// with a sanitized message instead of dialing an unintended endpoint.
-type runtimePoolFailingSupervisorClient struct{ err error }
-
-func (c *runtimePoolFailingSupervisorClient) Probe(context.Context, string, string, []byte) (RuntimePoolProbeResult, error) {
-	return RuntimePoolProbeResult{}, c.err
-}
-
-func (c *runtimePoolFailingSupervisorClient) RequestDrain(
-	context.Context, string, string, []byte, harnessv2.StatusResponse, string,
-) error {
-	return c.err
-}
-
-// runtimePoolInstanceEndpoint resolves the authenticated control endpoint for
-// the exact selected instance. Substrate-backed pools use the actor route host
-// (dialed through the provider router by the pool's substrate transport);
-// every other pool dials the exact Pod address.
+// Only Core's exact native-process binding can supply a routed endpoint.
+// Real runtime Pods always use their independently observed address.
 func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod) string {
-	if pool != nil && pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		return urlSchemeHTTP + "://" + strings.TrimSpace(pod.Status.PodIP)
+	if runtimePoolHasExternalWorkspace(pool) {
+		evidence, err := externalRuntimeEvidence(pool)
+		if err != nil {
+			return ""
+		}
+		if evidence != nil && evidence.NativeProcess {
+			if evidence.WorkspaceUID != pool.Spec.ExecutionWorkspace.WorkspaceRef.UID ||
+				pod == nil || pod.UID != evidence.RuntimeUID {
+				return ""
+			}
+			return evidence.Endpoint
+		}
+		if slices.Contains(pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
+			return ""
+		}
 	}
 	return runtimePoolPodEndpoint(pod)
-}
-
-// substrateRouteHTTPTransport dials the Substrate router for every host under
-// the actor DNS suffix while preserving the logical route host as the HTTP
-// Host header, exactly like the verified MCP actor routing. Hosts outside the
-// suffix are refused: this transport exists only for actor-routed requests.
-type substrateRouteRoundTripper struct {
-	scheme    string
-	basePath  string
-	transport *http.Transport
-}
-
-func (t *substrateRouteRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request == nil || request.URL == nil {
-		return nil, fmt.Errorf("substrate route request URL is required")
-	}
-	clone := request.Clone(request.Context())
-	urlCopy := *request.URL
-	urlCopy.Scheme = t.scheme
-	if t.basePath != "" {
-		urlCopy.Path = strings.TrimRight(t.basePath, "/") + "/" + strings.TrimLeft(urlCopy.Path, "/")
-		// Path now contains the decoded combination. Clear RawPath so net/http
-		// derives a matching escaped form instead of reusing the actor-relative
-		// path from the original request.
-		urlCopy.RawPath = ""
-	}
-	clone.URL = &urlCopy
-	return t.transport.RoundTrip(clone)
-}
-
-func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTripper, error) {
-	parsed, err := url.Parse(strings.TrimSpace(routerURL))
-	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
-		return nil, fmt.Errorf("substrate router URL is invalid")
-	}
-	routerAddress := parsed.Host
-	if parsed.Port() == "" {
-		port := "80"
-		if parsed.Scheme == urlSchemeHTTPS {
-			port = "443"
-		}
-		routerAddress = net.JoinHostPort(parsed.Hostname(), port)
-	}
-	normalizedSuffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
-	if normalizedSuffix == "" {
-		return nil, fmt.Errorf("substrate actor DNS suffix is required")
-	}
-	if problems := validation.IsDNS1123Subdomain(normalizedSuffix); len(problems) > 0 {
-		return nil, fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
-	}
-	suffix := "." + normalizedSuffix
-	transport := harnessv2.NewProxylessTransport()
-	if parsed.Scheme == urlSchemeHTTPS {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: parsed.Hostname(),
-		}
-	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, _, splitErr := net.SplitHostPort(address)
-		if splitErr != nil {
-			host = address
-		}
-		if !strings.HasSuffix(strings.ToLower(host), suffix) {
-			return nil, fmt.Errorf("substrate route transport refuses non-actor host")
-		}
-		return dialer.DialContext(ctx, network, routerAddress)
-	}
-	return &substrateRouteRoundTripper{
-		scheme: parsed.Scheme, basePath: strings.TrimRight(parsed.Path, "/"), transport: transport,
-	}, nil
 }
 
 func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {
@@ -3517,10 +3873,7 @@ func (r *RuntimePoolReconciler) randomHex(size int) (string, error) {
 }
 
 func (r *RuntimePoolReconciler) now() time.Time {
-	if r.Now != nil {
-		return r.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(r.Now)
 }
 
 func runtimePoolResourceName(namespace, name string) string {
@@ -3528,7 +3881,7 @@ func runtimePoolResourceName(namespace, name string) string {
 	suffix := hex.EncodeToString(hash[:5])
 	prefix := strings.Trim(strings.ToLower(name), "-")
 	if prefix == "" {
-		prefix = "runtime"
+		prefix = runtimeField
 	}
 	maxPrefix := 63 - len(suffix) - 1
 	if len(prefix) > maxPrefix {
@@ -3561,7 +3914,7 @@ func runtimePoolRuntimeInstanceID(podUID types.UID, bootID harnessv2.SupervisorB
 
 func runtimePoolPodEndpoint(pod *corev1.Pod) string {
 	host := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(runtimePoolPort)))
-	return (&url.URL{Scheme: "http", Host: host}).String()
+	return (&url.URL{Scheme: urlSchemeHTTP, Host: host}).String()
 }
 
 func runtimePoolDigestSchemaMatches(spec string, observed uint32) bool {
@@ -3591,6 +3944,8 @@ func runtimePoolHarnessProfile(spec corev1alpha1.RuntimePoolProfileSpec) (harnes
 		ProxyCredentialRole:      strings.TrimSpace(spec.ProxyCredentialRole),
 		ProxyCredentialScope:     strings.TrimSpace(spec.ProxyCredentialScope),
 		ResourceClass:            strings.TrimSpace(spec.ResourceClass),
+		Toolboxes:                runtimeToolboxesFromPool(spec.Toolboxes),
+		Skills:                   runtimeSkillsFromPool(spec.Skills),
 	}
 	if err := profile.Validate(); err != nil {
 		return harnessv2.RuntimeProfile{}, fmt.Errorf("spec.runtime.profile is invalid: %w", err)
@@ -3615,11 +3970,6 @@ func validSHA256Digest(value string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
 	return err == nil
-}
-
-func sanitizeRuntimePoolMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func sanitizeRuntimePoolReason(reason string) string {
@@ -3788,9 +4138,19 @@ func runtimePoolRequestForChild(_ context.Context, object client.Object) []recon
 
 // SetupWithManager sets up watches for RuntimePools and their cross-namespace children.
 func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1alpha1.RuntimePool{}).
-		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
+	builder := ctrl.NewControllerManagedBy(mgr).For(&corev1alpha1.RuntimePool{})
+	if _, err := mgr.GetRESTMapper().RESTMapping(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace").GroupKind(), workspacev1alpha1.GroupVersion.Version); err == nil {
+		builder = builder.Watches(&workspacev1alpha1.ExecutionWorkspace{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+			name := obj.GetAnnotations()[acpExecutionWorkspacePoolAnnotation]
+			if name == "" {
+				return nil
+			}
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}
+		}))
+	} else if !meta.IsNoMatchError(err) {
+		return err
+	}
+	return builder.Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).

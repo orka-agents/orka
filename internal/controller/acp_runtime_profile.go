@@ -5,14 +5,19 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 type ACPRuntimeImages struct {
@@ -22,6 +27,11 @@ type ACPRuntimeImages struct {
 	Opencode string
 }
 
+const (
+	acpRuntimePoolIdentityProfileDigestKey = "profileDigest"
+	acpRuntimePoolIdentityRuntimeImageKey  = "runtimeImage"
+)
+
 type ACPRuntimePlan struct {
 	PoolName string
 	Image    string
@@ -30,6 +40,12 @@ type ACPRuntimePlan struct {
 	// Workspace, when set, binds the pool to an execution-workspace provider.
 	// It changes PoolName so workspace-backed sessions never share a plain pool.
 	Workspace *ACPRuntimeWorkspaceBinding
+}
+
+type acpRuntimeDeliverySelection struct {
+	plan                   ACPRuntimePlan
+	allowPoolCreation      bool
+	requiredRuntimePoolUID types.UID
 }
 
 // validateACPRuntimePlanningAgent gates ACP planning on a complete built-in
@@ -124,18 +140,27 @@ func PlanACPRuntimeWithConfiguration(
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
+	toolboxes := RuntimeToolboxesFromAgent(agent.Spec.Runtime.Toolboxes)
+	if err := harnessv2.ValidateRuntimeToolboxes(toolboxes); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("ACP runtime toolboxes: %w", err)
+	}
+	skills := RuntimeSkillsFromAgent(agent.Spec.Runtime.Skills)
+	if err := harnessv2.ValidateRuntimeSkills(skills); err != nil {
+		return ACPRuntimePlan{}, fmt.Errorf("ACP runtime skills: %w", err)
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile: harnessv2.ACPProfileV1, AdapterDigests: adapterDigests, ProviderKind: provider, Model: model,
 		ModelLimits: modelLimits, AgentConfigurationDigest: agentDigest, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
 		MCPConfigurationDigest: mcpDigest, WorkspaceIntent: harnessv2.WorkspaceIntent(intent),
 		ProxyCredentialRole: "provider-inference", ProxyCredentialScope: "model:" + model, ResourceClass: "standard",
+		Toolboxes: toolboxes, Skills: skills,
 	}
 	digest, err := harnessv2.CanonicalProfileDigest(profile)
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
 	poolIdentityDigest, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		"profileDigest": string(digest), "runtimeImage": image,
+		acpRuntimePoolIdentityProfileDigestKey: string(digest), acpRuntimePoolIdentityRuntimeImageKey: image,
 	})
 	if err != nil {
 		return ACPRuntimePlan{}, err
@@ -144,6 +169,83 @@ func PlanACPRuntimeWithConfiguration(
 		PoolName: acpRuntimePoolName(provider, harnessv2.ProfileDigest(poolIdentityDigest)),
 		Image:    image, Profile: profile, Digest: digest,
 	}, nil
+}
+
+// currentACPRuntimeDeliveryPlan validates the controller-owned runtime
+// artifacts and refreshes the derived plain-pool identity while preserving the
+// Task's immutable runtime profile. Workspace-backed pools keep their frozen
+// plan because rotating their physical workspace has separate lifecycle and
+// lineage requirements. A retired workspace image is usable only through an
+// exact preexisting pool, so the caller must preserve the creation decision.
+func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages) (acpRuntimeDeliverySelection, error) {
+	adapterDigests, image, err := acpRuntimeArtifacts(
+		corev1alpha1.AgentRuntimeType(strings.TrimSpace(plan.Profile.ProviderKind)),
+		images,
+	)
+	if err != nil {
+		return acpRuntimeDeliverySelection{}, err
+	}
+	image = strings.TrimSpace(image)
+	if image != "" && !ACPRuntimeImageAvailable(image) {
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
+	}
+	if !maps.Equal(adapterDigests, plan.Profile.AdapterDigests) {
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime adapters for %s do not match the frozen runtime profile", plan.Profile.ProviderKind)
+	}
+	if plan.Workspace != nil {
+		return acpRuntimeDeliverySelection{
+			plan:              plan,
+			allowPoolCreation: image != "" && image == strings.TrimSpace(plan.Image),
+		}, nil
+	}
+	if !ACPRuntimeImageAvailable(image) {
+		return acpRuntimeDeliverySelection{}, fmt.Errorf("current ACP runtime image for %s must be a configured digest-pinned image", plan.Profile.ProviderKind)
+	}
+	if image == plan.Image {
+		return acpRuntimeDeliverySelection{plan: plan, allowPoolCreation: true}, nil
+	}
+	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest), acpRuntimePoolIdentityRuntimeImageKey: image,
+	})
+	if err != nil {
+		return acpRuntimeDeliverySelection{}, err
+	}
+	plan.Image = image
+	plan.PoolName = acpRuntimePoolName(plan.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+	return acpRuntimeDeliverySelection{plan: plan, allowPoolCreation: true}, nil
+}
+
+func configuredACPRuntimeImage(provider string, images ACPRuntimeImages) (string, error) {
+	_, image, err := acpRuntimeArtifacts(corev1alpha1.AgentRuntimeType(strings.TrimSpace(provider)), images)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(image), nil
+}
+
+func acpRuntimePoolImageRequiresHistoricalRecovery(pool *corev1alpha1.RuntimePool, images ACPRuntimeImages) bool {
+	if pool == nil || validateRuntimePoolImageReference(pool) != nil {
+		return false
+	}
+	if pool.Spec.ExecutionWorkspace == nil {
+		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+			acpRuntimePoolIdentityProfileDigestKey: pool.Spec.Runtime.Profile.Digest,
+			acpRuntimePoolIdentityRuntimeImageKey:  strings.TrimSpace(pool.Spec.Runtime.Image),
+		})
+		if err != nil || pool.Name != acpRuntimePoolName(
+			pool.Spec.Runtime.Profile.ProviderKind,
+			harnessv2.ProfileDigest(identity),
+		) {
+			return false
+		}
+	}
+	approved, err := configuredACPRuntimeImage(pool.Spec.Runtime.Profile.ProviderKind, images)
+	return err == nil && approved != strings.TrimSpace(pool.Spec.Runtime.Image)
+}
+
+func acpRuntimePoolImageSuperseded(pool *corev1alpha1.RuntimePool, images ACPRuntimeImages) bool {
+	return pool != nil && pool.Spec.ExecutionWorkspace == nil &&
+		acpRuntimePoolImageRequiresHistoricalRecovery(pool, images)
 }
 
 func RuntimePoolProfileFromPlan(plan ACPRuntimePlan) corev1alpha1.RuntimePoolProfileSpec {
@@ -164,6 +266,8 @@ func RuntimePoolProfileFromPlan(plan ACPRuntimePlan) corev1alpha1.RuntimePoolPro
 		WorkspaceIntent:     corev1alpha1.WorkspaceIntent(plan.Profile.WorkspaceIntent),
 		ProxyCredentialRole: plan.Profile.ProxyCredentialRole, ProxyCredentialScope: plan.Profile.ProxyCredentialScope,
 		ResourceClass: plan.Profile.ResourceClass,
+		Toolboxes:     runtimePoolToolboxesFromProfile(plan.Profile.Toolboxes),
+		Skills:        runtimePoolSkillsFromProfile(plan.Profile.Skills),
 	}
 }
 
@@ -183,17 +287,17 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 		workspace.BindingDigest != plan.Workspace.BindingDigest {
 		return false
 	}
-	switch plan.Workspace.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		return workspace.Substrate == nil &&
-			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		return workspace.Substrate != nil &&
-			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
-			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName
-	default:
-		return false
+	if plan.Workspace.Class != nil && plan.Workspace.Class.ControllerName != "" {
+		class := plan.Workspace.Class
+		return workspace.WorkspaceRef != nil &&
+			workspace.WorkspaceRef.Name != "" && workspace.WorkspaceRef.UID != "" &&
+			workspace.Workload != nil && workspace.Workload.ContractVersion == workspacev1alpha1.LifecycleContractV1 &&
+			workspace.Workload.ProtocolVersion == corev1alpha1.RuntimePoolProtocolHarnessV2 &&
+			reflect.DeepEqual(workspace.ParametersRef, class.ParametersRef) &&
+			reflect.DeepEqual(workspace.ParametersBinding, class.ParametersBinding) &&
+			reflect.DeepEqual(workspace.RestoreFrom, acpWorkspaceWorkloadCheckpointReference(plan.Workspace.RestoreFrom))
 	}
+	return false
 }
 
 func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool *corev1alpha1.RuntimePool) bool {
@@ -214,6 +318,38 @@ func effectiveACPWorkspaceIntent(task *corev1alpha1.Task) corev1alpha1.Workspace
 }
 
 func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
+	values := requestedACPAllowedTools(task, agent)
+	if injectsACPCoordinationTools(task, agent) {
+		// Materialize the implicit native grant before adding brokered tools.
+		// Appending to nil would otherwise replace native defaults with an
+		// allowlist containing only the injected messaging tools.
+		if values == nil && agent != nil && agent.Spec.Runtime != nil {
+			values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
+		}
+		values = append(values, acpInjectedCoordinationTools...)
+	}
+	return sortedUnique(values)
+}
+
+var acpInjectedCoordinationTools = []string{"send_message", "check_messages"}
+
+// injectsACPCoordinationTools reports whether Orka adds the messaging tools
+// to a delegated child Task's allowlist.
+func injectsACPCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil {
+		return false
+	}
+	_, delegatedChild := task.Labels[labels.LabelParentTask]
+	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
+	runtimeRefAgent := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+	return delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent
+}
+
+// requestedACPAllowedTools resolves the tool allowlist a Task asks for from
+// its own override or the Agent defaults, before Orka injects coordination
+// tools. A nil result keeps the implicit full native grant.
+func requestedACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	var values []string
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtime := agent.Spec.Runtime
@@ -228,6 +364,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	}
 	if taskRequestsReadOnlyAgent(task) && taskUsesReadOnlyAgentToolPreset(task) &&
 		agent != nil && agent.Spec.Runtime != nil {
+		brokered := repositoryMonitorReadOnlyBrokeredTools(task)
 		// Repository-monitor presets use Claude-style path-scoped names, which
 		// are not canonical provider-native descriptors, so translate the
 		// preset into the exact read-only surface each runtime can enforce.
@@ -236,7 +373,10 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// OpenCode's Grep permission cannot carry the path-specific
 			// secret-file exclusions applied to Read, so it stays disabled.
 			values = []string{providerNativeToolRead, providerNativeToolGlob}
-		case corev1alpha1.AgentRuntimeClaude:
+		case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+			// Copilot exposes the same read-only trio; it has no LS tool, so
+			// the untranslated preset would be rejected as an invalid
+			// runtime profile.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		case corev1alpha1.AgentRuntimeCodex:
 			// Codex has no per-tool switches; this exact surface is enforced
@@ -245,20 +385,42 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// workspace delta classification fails any modifying turn.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		}
+		values = append(values, brokered...)
 	}
-	if task != nil {
-		_, delegatedChild := task.Labels[labels.LabelParentTask]
-		disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
-		if delegatedChild && !disableCoordinationToolInjection {
-			values = append(values, "send_message", "check_messages")
-		}
-	}
-	return sortedUnique(values)
+	return values
 }
 
 func taskUsesReadOnlyAgentToolPreset(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil &&
-		slices.Equal(sortedUnique(task.Spec.AgentRuntime.AllowedTools), sortedUnique(readOnlyAgentAllowedTools()))
+	if task == nil || task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.AllowedTools == nil {
+		return false
+	}
+	allowed := sortedUnique(task.Spec.AgentRuntime.AllowedTools)
+	base := sortedUnique(readOnlyAgentAllowedTools())
+	for _, required := range base {
+		if !slices.Contains(allowed, required) {
+			return false
+		}
+	}
+	for _, name := range allowed {
+		if slices.Contains(base, name) || name == tools.RunValidationToolName || name == repositoryMonitorWaitForTasksToolName {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func repositoryMonitorReadOnlyBrokeredTools(task *corev1alpha1.Task) []string {
+	if task == nil || task.Spec.AgentRuntime == nil {
+		return nil
+	}
+	var brokered []string
+	for _, name := range task.Spec.AgentRuntime.AllowedTools {
+		if name == tools.RunValidationToolName || name == repositoryMonitorWaitForTasksToolName {
+			brokered = append(brokered, name)
+		}
+	}
+	return sortedUnique(brokered)
 }
 
 func normalizeACPRuntimeToolPolicy(

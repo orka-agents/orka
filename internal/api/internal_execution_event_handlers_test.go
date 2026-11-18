@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,13 +24,15 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
-	storetest "github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 func TestInternalSubmitExecutionEvent(t *testing.T) {
-	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	eventStore := storetest.NewFakeExecutionEventStoreWithClock(func() time.Time { return now })
+	now := time.Now().UTC()
+	eventStore := newInternalExecutionEventStore(t)
 	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
 
 	redactionValue := strings.Join([]string{"bearer", "value", "for", "redaction"}, "-")
@@ -51,7 +54,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&submitted); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if submitted.ID == "" || submitted.ID == "client-id-is-ignored" || submitted.Seq != 1 || !submitted.CreatedAt.Equal(now) {
+	if submitted.ID == "" || submitted.ID == "client-id-is-ignored" || submitted.Seq != 1 || submitted.CreatedAt.Before(now) {
 		t.Fatalf("response = %#v, want assigned id seq createdAt", submitted)
 	}
 
@@ -68,7 +71,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 		t.Fatalf("stored len = %d, want 1", len(stored))
 	}
 	event := stored[0]
-	if event.ID == "client-id-is-ignored" || event.Seq != 1 || !event.CreatedAt.Equal(now) {
+	if event.ID == "client-id-is-ignored" || event.Seq != 1 || !event.CreatedAt.Equal(submitted.CreatedAt) {
 		t.Fatalf("stored assignment = %#v", event)
 	}
 	if event.TaskName != "task-1" || event.Type != events.ExecutionEventTypeModelMessage || event.Severity != events.ExecutionEventSeverityError {
@@ -92,7 +95,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-owned"}
-	eventStore := storetest.NewFakeExecutionEventStore()
+	eventStore := newInternalExecutionEventStore(t)
 	app := setupInternalExecutionEventAppWithClient(
 		eventStore,
 		testInternalExecutionEventClient(t, task, job, pod),
@@ -137,6 +140,100 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	}
 }
 
+func TestInternalSubmitExecutionEventAttributesChatSessionTasks(t *testing.T) {
+	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
+	// attributes its events to that chat Session so the chat's timeline is
+	// not empty. The label counts only for an existing chat Session.
+	ctx := context.Background()
+	sqliteStore := newInternalExecutionEventStore(t)
+	for _, session := range []*store.SessionRecord{
+		{Namespace: "default", Name: "chat-1", SessionType: store.SessionTypeChat},
+		{Namespace: "default", Name: "task-session", SessionType: "task"},
+	} {
+		if err := sqliteStore.CreateSession(ctx, session); err != nil {
+			t.Fatalf("CreateSession(%s): %v", session.Name, err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		label       string
+		sessionRef  string
+		wantSession string
+	}{
+		{name: "chat session label", label: "chat-1", wantSession: "chat-1"},
+		{name: "sessionRef wins over the label", label: "chat-1", sessionRef: "task-session", wantSession: "task-session"},
+		{name: "label naming a non-chat session", label: "task-session", wantSession: ""},
+		{name: "label naming a missing session", label: "deleted-chat", wantSession: ""},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskName := fmt.Sprintf("chat-task-%d", i)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects(taskName)
+			task.Labels = map[string]string{labels.LabelChatSession: tt.label}
+			if tt.sessionRef != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: tt.sessionRef}
+			}
+			h := NewInternalHandlers(nil, sqliteStore, nil, nil, nil, InternalHandlersConfig{
+				Client:              testInternalExecutionEventClient(t, task, job, pod),
+				ExecutionEventStore: sqliteStore,
+			})
+			app := setupInternalExecutionEventAppWithHandler(h, testInternalExecutionEventWorkerUser(taskName+"-pod"))
+
+			resp := doJSONRequest(t, app, "/internal/v1/events/default/task/"+taskName,
+				map[string]any{"type": events.ExecutionEventTypeWorkerStarted})
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("status = %d, want 201", resp.StatusCode)
+			}
+			stored, err := sqliteStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+				Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: taskName, Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("ListExecutionEvents: %v", err)
+			}
+			if len(stored) != 1 || stored[0].SessionName != tt.wantSession {
+				t.Fatalf("stored = %#v, want one event attributed to session %q", stored, tt.wantSession)
+			}
+		})
+	}
+
+	// The chat Session's timeline now lists the chat-created Task's event.
+	sessionHandlers := NewHandlers(HandlersConfig{SessionStore: sqliteStore, ExecutionEventStore: sqliteStore})
+	app := fiber.New()
+	app.Get("/sessions/:id/events", sessionHandlers.ListSessionEvents)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/chat-1/events?namespace=default", nil))
+	if err != nil {
+		t.Fatalf("list session events: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list session events status = %d, want 200", resp.StatusCode)
+	}
+	var listed ListSessionExecutionEventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode session events: %v", err)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].TaskName != "chat-task-0" || listed.Events[0].Seq != 1 || listed.LatestSeq != 1 {
+		t.Fatalf("chat session timeline = %#v, want the chat-created task's event", listed)
+	}
+}
+
+func TestExecutionEventSessionNameWithoutSessionStore(t *testing.T) {
+	// Without a store a sessionRef is taken as given, but a chat label cannot
+	// be shown to name a chat Session and attributes nothing.
+	labeled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelChatSession: "chat-1"}}}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", labeled); err != nil || got != "" {
+		t.Fatalf("chat-labeled session = %q, %v; want none", got, err)
+	}
+	referenced := labeled.DeepCopy()
+	referenced.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-1"}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", referenced); err != nil || got != "session-1" {
+		t.Fatalf("sessionRef session = %q, %v; want session-1", got, err)
+	}
+	if got, err := executionEventSessionName(context.Background(), nil, "default", nil); err != nil || got != "" {
+		t.Fatalf("nil task session = %q, %v; want none", got, err)
+	}
+}
+
 func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
 	otherTask, otherJob, _ := testInternalExecutionEventOwnedWorkerObjects("other-task")
@@ -145,7 +242,7 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	deletingTask.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	terminalTask, terminalJob, terminalPod := testInternalExecutionEventOwnedWorkerObjects("terminal-task")
 	terminalTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
-	eventStore := storetest.NewFakeExecutionEventStore()
+	eventStore := newInternalExecutionEventStore(t)
 	k8sClient := testInternalExecutionEventClient(
 		t,
 		task, job, pod,
@@ -221,8 +318,8 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 }
 
 func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
-	eventStore := storetest.NewFakeExecutionEventStore()
-	authenticatedApp := setupInternalExecutionEventApp(eventStore, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
+	eventStore := newInternalExecutionEventStore(t)
+	authenticatedApp := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
 
 	tests := []struct {
 		name string
@@ -254,6 +351,15 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 			body: map[string]any{
 				"type":    events.ExecutionEventTypeApprovalApproved,
 				"content": map[string]any{"approvalID": "approval-1"},
+			},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "approval execution outcome denied",
+			path: "/internal/v1/events/default/task/task-1",
+			body: map[string]any{
+				"type":    events.ExecutionEventTypeApprovalExecutionUpdated,
+				"content": map[string]any{"approvalID": "approval-1", "executionOutcome": "succeeded"},
 			},
 			want: http.StatusForbidden,
 		},
@@ -295,12 +401,25 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 }
 
 func TestInternalSubmitExecutionEventRequiresCurrentTaskWorker(t *testing.T) {
-	eventStore := storetest.NewFakeExecutionEventStore()
+	eventStore := newInternalExecutionEventStore(t)
 	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "other-pod", "other-pod-uid")
 	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
+}
+
+// newInternalExecutionEventStore returns the storage client over an
+// in-memory SQLite store, as production wires the API.
+func newInternalExecutionEventStore(t *testing.T) *storageclient.Client {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	storage := storageclienttest.NewEmbedded(t, sqlite.NewStore(db, ":memory:"))
+	return storage
 }
 
 func setupInternalExecutionEventApp(eventStore store.ExecutionEventStore, userInfo *UserInfo) *fiber.App {
@@ -324,43 +443,40 @@ func setupOwnedInternalExecutionEventApp(t *testing.T, eventStore store.Executio
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
-		Status:     corev1alpha1.TaskStatus{JobName: taskName + "-job"},
+		Status:     corev1alpha1.TaskStatus{JobName: taskName + "-job", JobUID: string(jobUID)},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name:      taskName + "-job",
 		Namespace: "default",
 		UID:       jobUID,
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: corev1alpha1.GroupVersion.String(),
-			Kind:       "Task",
-			Name:       taskName,
-			UID:        taskUID,
-		}},
+		OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+			corev1alpha1.GroupVersion.String(), kubernetesTaskKind, taskName, taskUID,
+		)},
 	}}
-	workerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      "worker-pod",
-		Namespace: "default",
-		UID:       types.UID("worker-pod-uid"),
-		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(taskName)},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: batchv1.SchemeGroupVersion.String(),
-			Kind:       "Job",
-			Name:       taskName + "-job",
-			UID:        jobUID,
-		}},
-	}}
-	otherPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      "other-pod",
-		Namespace: "default",
-		UID:       types.UID("other-pod-uid"),
-		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue("other-task")},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: batchv1.SchemeGroupVersion.String(),
-			Kind:       "Job",
-			Name:       taskName + "-job",
-			UID:        jobUID,
-		}},
-	}}
+	workerPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-pod",
+			Namespace: "default",
+			UID:       types.UID("worker-pod-uid"),
+			Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(taskName)},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, taskName+"-job", jobUID,
+			)},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
+	otherPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-pod",
+			Namespace: "default",
+			UID:       types.UID("other-pod-uid"),
+			Labels:    map[string]string{labels.LabelTask: labels.SelectorValue("other-task")},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, taskName+"-job", jobUID,
+			)},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, workerPod, otherPod).Build()
 	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient, ExecutionEventStore: eventStore})
 	return setupInternalExecutionEventAppWithHandler(h, &UserInfo{
@@ -435,19 +551,16 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{JobName: jobName},
+		Status:     corev1alpha1.TaskStatus{JobName: jobName, JobUID: string(jobUID)},
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: "default",
 			UID:       jobUID,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       taskName,
-				UID:        taskUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, taskName, taskUID,
+			)},
 		},
 	}
 	pod := &corev1.Pod{
@@ -458,13 +571,11 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 			Labels: map[string]string{
 				labels.LabelTask: labels.SelectorValue(taskName),
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       jobName,
-				UID:        jobUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, jobName, jobUID,
+			)},
 		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
 	}
 	return task, job, pod
 }

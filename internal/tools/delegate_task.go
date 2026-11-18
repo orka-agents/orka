@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -16,13 +17,19 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/publisher"
+	"github.com/orka-agents/orka/internal/store"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -66,7 +73,23 @@ type WorkspaceArgs struct {
 	ForgeCredentialRef           string `json:"forgeCredentialRef,omitempty"`
 	PushBranch                   string `json:"pushBranch,omitempty"`
 	PRBaseBranch                 string `json:"prBaseBranch,omitempty"`
+	PRTitle                      string `json:"prTitle,omitempty"`
+	PRBody                       string `json:"prBody,omitempty"`
 	CreatePR                     bool   `json:"createPR,omitempty"`
+}
+
+// UnmarshalJSON rejects invalid PR text types before encoding/json can treat
+// an explicit null string as an omitted field and silently select the fallback.
+func (w *WorkspaceArgs) UnmarshalJSON(data []byte) error {
+	var wsMap map[string]any
+	if err := json.Unmarshal(data, &wsMap); err != nil {
+		return err
+	}
+	if wsErr := agentWorkspacePullRequestArgTypeError(wsMap); wsErr != nil {
+		return wsErr
+	}
+	type workspaceArgs WorkspaceArgs
+	return json.Unmarshal(data, (*workspaceArgs)(w))
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -103,8 +126,10 @@ type DelegateTaskArgs struct {
 
 // DelegateTaskResult represents the delegation result
 type DelegateTaskResult struct {
-	TaskName string `json:"taskName"`
-	Status   string `json:"status"`
+	TaskName      string `json:"taskName"`
+	TaskUID       string `json:"taskUID,omitempty"`
+	ParentTaskUID string `json:"parentTaskUID,omitempty"`
+	Status        string `json:"status"`
 }
 
 // NewDelegateTaskTool creates a new delegate task tool
@@ -250,6 +275,16 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 						"type": "string",
 						"description": "Pull request base branch. Required when createPR is true."
 					},
+					"prTitle": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestTitleLength) + `,
+						"description": "` + workspacePRTitleDescription + `"
+					},
+					"prBody": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestBodyLength) + `,
+						"description": "` + workspacePRBodyDescription + `"
+					},
 					"createPR": {
 						"type": "boolean",
 						"description": "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."
@@ -357,6 +392,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	allowedAgents := os.Getenv(envOrkaCoordinationAllowedAgents)
 	maxDepthStr := os.Getenv(envOrkaCoordinationMaxDepth)
 	toolCtx := GetToolContext(ctx)
+	policyReader := toolPolicyReader(ctx, t.k8sClient)
 	brokered := toolCtx != nil && toolCtx.Brokered
 	if brokered {
 		parentName = strings.TrimSpace(toolCtx.TaskID)
@@ -425,7 +461,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		if parentLookupNS == "" {
 			parentLookupNS = taskNS
 		}
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: parentLookupNS}, parentTask); err != nil {
+		if err := policyReader.Get(ctx, types.NamespacedName{Name: parentName, Namespace: parentLookupNS}, parentTask); err != nil {
 			return nil, fmt.Errorf("failed to get parent task: %w", err)
 		}
 	}
@@ -447,7 +483,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 			parentAgentNamespace = value
 		}
 		parentAgent := &corev1alpha1.Agent{}
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{
+		if err := policyReader.Get(ctx, types.NamespacedName{
 			Name: parentTask.Spec.AgentRef.Name, Namespace: parentAgentNamespace,
 		}, parentAgent); err != nil {
 			return nil, fmt.Errorf("failed to get parent agent: %w", err)
@@ -513,7 +549,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 
 	// Look up the target Agent to determine task type.
 	targetAgent := &corev1alpha1.Agent{}
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{
+	if err := policyReader.Get(ctx, types.NamespacedName{
 		Name: delegateArgs.Agent, Namespace: agentNS,
 	}, targetAgent); err != nil {
 		return nil, fmt.Errorf("failed to get agent %q: %w", namespacedDelegateAgent(agentNS, delegateArgs.Agent), err)
@@ -612,6 +648,22 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 	}
 
 	inheritTaskProvenance(childTask, dc.parentTask)
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.Brokered {
+		if dc.parentTask.UID == "" {
+			return nil, fmt.Errorf("brokered delegation requires an immutable parent Task UID")
+		}
+		childTask.Annotations[labels.AnnotationParentTaskUID] = string(dc.parentTask.UID)
+		if dc.parentTask.Namespace != "" {
+			childTask.Annotations[labels.AnnotationParentTaskNamespace] = dc.parentTask.Namespace
+		}
+		if toolCtx.ExternalEffects != nil || strings.TrimSpace(toolCtx.SessionID) != "" || strings.TrimSpace(toolCtx.OperationID) != "" {
+			effectID, err := brokeredDelegationEffectID(toolCtx)
+			if err != nil {
+				return nil, err
+			}
+			childTask.Annotations[labels.AnnotationDelegationEffectID] = effectID
+		}
+	}
 
 	// Set owner reference only for same-namespace children. Kubernetes treats
 	// cross-namespace owner references for namespaced objects as invalid and may
@@ -662,6 +714,8 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 			PublicationGitRepo: publicationGitRepo,
 			PushBranch:         dc.args.Workspace.PushBranch,
 			PRBaseBranch:       dc.args.Workspace.PRBaseBranch,
+			PRTitle:            dc.args.Workspace.PRTitle,
+			PRBody:             dc.args.Workspace.PRBody,
 			CreatePR:           dc.args.Workspace.CreatePR,
 		}
 		if workspaceRequestsPublication(workspace) {
@@ -703,6 +757,13 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	}
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
+	}
+	if err := materializeRuntimeRefAllowedTools(ctx, toolPolicyReader(ctx, t.k8sClient), childTask, dc.targetAgent); err != nil {
+		return err
+	}
+	if dc.args.PriorTask != "" && dc.targetAgent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(dc.targetAgent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
 	}
 	return nil
 }
@@ -886,7 +947,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(orkatracing.DelegateAttributes(dc.parentName, "")...)
 	orkatracing.StampTaskTraceContext(ctx, childTask)
-	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, dc.parentTask, childTask, dc.args.Agent); err != nil {
+	if err := validateChildTaskAgainstParentTransaction(ctx, toolPolicyReader(ctx, t.k8sClient), dc.parentTask, childTask, dc.args.Agent); err != nil {
 		return "", err
 	}
 
@@ -901,13 +962,33 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
+	parentReader := toolPolicyReader(ctx, t.k8sClient)
+	if cancelled, err := delegationParentCancelled(ctx, parentReader, dc.parentTask); err != nil || cancelled {
+		if childTokenExchangeEnabled {
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
+		}
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("parent task %s is being cancelled; it can delegate no more work", dc.parentName)
+	}
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		if childTokenExchangeEnabled {
 			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
 		}
+		// A Create cut short, by the caller's cancellation for example, may
+		// still have committed a child whose name this call never learned.
+		// The parent's cascade misses it when it listed first, and a child
+		// in another namespace never wakes the parent, so look for it.
+		if childCreateOutcomeUnknown(err) {
+			go func() {
+				_ = cancelChildrenAfterUnknownCreate(ctx, parentReader, t.k8sClient, dc.parentTask, childTask)
+			}()
+		}
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
 	span.SetAttributes(orkatracing.DelegateAttributes("", childTask.Name)...)
+	sealTaskCreate(ctx, GetToolContext(ctx), childTask)
 
 	if childTokenExchangeEnabled {
 		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, childTask); err != nil {
@@ -920,9 +1001,20 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
+	// The parent can be cancelled while the child is created, after its
+	// cascade listed its children. Reading it again closes the gap: either
+	// the cascade's list saw this child, or this read sees the cancel. It
+	// runs once the child's credentials are adopted, so a failure here
+	// leaves a complete child for the parent's next cascade.
+	if err := ensureLateChildCancelled(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the child of a cancelled parent task", "child", childTask.Name)
+	}
+
 	result := DelegateTaskResult{
-		TaskName: childTask.Name,
-		Status:   GitHubPullRequestStatusCreated,
+		TaskName:      childTask.Name,
+		TaskUID:       string(childTask.UID),
+		ParentTaskUID: string(dc.parentTask.UID),
+		Status:        GitHubPullRequestStatusCreated,
 	}
 
 	output, err := json.Marshal(result)
@@ -931,6 +1023,23 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(output), nil
+}
+
+func brokeredDelegationEffectID(toolCtx *ToolContext) (string, error) {
+	if toolCtx == nil || !toolCtx.Brokered {
+		return "", nil
+	}
+	identity := store.ExternalEffectIdentity{
+		Kind:        "acp-mcp-tool",
+		Namespace:   strings.TrimSpace(toolCtx.Namespace),
+		AggregateID: strings.TrimSpace(toolCtx.SessionID),
+		OperationID: strings.TrimSpace(toolCtx.OperationID),
+	}
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return "", fmt.Errorf("bind brokered delegation to its durable effect: %w", err)
+	}
+	return id, nil
 }
 
 func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {
@@ -971,3 +1080,145 @@ func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Cl
 
 // Ensure DelegateTaskTool implements Tool
 var _ Tool = (*DelegateTaskTool)(nil)
+
+// lateChildCheckTimeout bounds the post-create parent check, which outlives
+// the caller: the broker cancels the call's context when the caller's
+// authority ends, which is when this check matters most.
+const lateChildCheckTimeout = 30 * time.Second
+
+// unknownCreateBackoff paces the search for a child whose Create outcome is
+// unknown. It keeps looking for its whole span, since the commit can land
+// after any one list.
+var unknownCreateBackoff = wait.Backoff{Steps: 6, Duration: 250 * time.Millisecond, Factor: 2, Cap: 5 * time.Second}
+
+// childCreateOutcomeUnknown reports whether a failed Create may still have
+// committed the child: anything but a definitive answer from the API server.
+func childCreateOutcomeUnknown(err error) bool {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return true
+	}
+	return apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err)
+}
+
+// cancelChildrenAfterUnknownCreate requests cancellation of the child a Create
+// with an unknown outcome may have committed, while its parent is cancelled.
+// The child's name was generated by the API server, so it is found by the
+// parent that delegated it: its parent label and UID, and its delegation
+// effect when the delegation was brokered, which names this child alone. It
+// runs on a context the caller cannot cancel, for its whole bounded window
+// even while the parent is live: the parent can be cancelled, and its
+// cascade list, before the commit lands, and a child in another namespace
+// would never wake it.
+func cancelChildrenAfterUnknownCreate(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	if parent == nil || parent.UID == "" {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lateChildCheckTimeout)
+	defer cancel()
+	effect := child.Annotations[labels.AnnotationDelegationEffectID]
+	var last error
+	err := wait.ExponentialBackoffWithContext(checkCtx, unknownCreateBackoff, func(ctx context.Context) (bool, error) {
+		cancelled, err := delegationParentCancelled(ctx, reader, parent)
+		if err != nil {
+			last = err
+			return false, nil
+		}
+		if !cancelled {
+			return false, nil
+		}
+		var tasks corev1alpha1.TaskList
+		if err := reader.List(ctx, &tasks, client.InNamespace(child.Namespace),
+			client.MatchingLabels{labels.LabelParentTask: child.Labels[labels.LabelParentTask]}); err != nil {
+			last = err
+			return false, nil
+		}
+		found := false
+		for i := range tasks.Items {
+			candidate := &tasks.Items[i]
+			if candidate.Annotations[labels.AnnotationParentTaskUID] != string(parent.UID) ||
+				(effect != "" && candidate.Annotations[labels.AnnotationDelegationEffectID] != effect) {
+				continue
+			}
+			if err := cancelChildOfCancelledParent(ctx, reader, writer, parent, candidate); err != nil {
+				last = err
+				continue
+			}
+			found = found || effect != ""
+		}
+		// Only a brokered delegation's effect names this child; without one
+		// a found sibling says nothing about it, so the search goes on.
+		return found, nil
+	})
+	if err != nil && last != nil {
+		return last
+	}
+	return nil
+}
+
+// ensureLateChildCancelled runs cancelChildOfCancelledParent on a context the
+// caller's cancellation cannot end, retrying transient failures, since no
+// later cascade is guaranteed to reach a child in another namespace.
+func ensureLateChildCancelled(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lateChildCheckTimeout)
+	defer cancel()
+	backoff := wait.Backoff{Steps: 6, Duration: 250 * time.Millisecond, Factor: 2, Cap: 5 * time.Second}
+	return retry.OnError(backoff, func(err error) bool { return checkCtx.Err() == nil }, func() error {
+		return cancelChildOfCancelledParent(checkCtx, reader, writer, parent, child)
+	})
+}
+
+// delegationParentCancelled reports whether a delegating Task was asked to
+// stop, or is gone or replaced, as the API server sees it now.
+func delegationParentCancelled(ctx context.Context, reader client.Reader, parent *corev1alpha1.Task) (bool, error) {
+	if parent == nil || parent.Name == "" || parent.UID == "" {
+		return false, nil
+	}
+	live := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: parent.Namespace, Name: parent.Name}, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("re-read the parent task: %w", err)
+	}
+	if live.UID != parent.UID || !live.DeletionTimestamp.IsZero() || live.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		return true, nil
+	}
+	_, requested := live.Annotations[labels.AnnotationCancelRequested]
+	return requested, nil
+}
+
+// cancelChildOfCancelledParent asks a just-created child to cancel when its
+// parent was cancelled meanwhile. It re-reads the child, so a replacement
+// under its name, a finished child, or a cancel already requested by someone
+// else is left as it is, and it patches under an optimistic lock.
+func cancelChildOfCancelledParent(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	cancelled, err := delegationParentCancelled(ctx, reader, parent)
+	if err != nil || !cancelled {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(child), live); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if live.UID != child.UID || !live.DeletionTimestamp.IsZero() {
+			return nil
+		}
+		if _, requested := live.Annotations[labels.AnnotationCancelRequested]; requested {
+			return nil
+		}
+		if phase := live.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+			return nil
+		}
+		base := live.DeepCopy()
+		if live.Annotations == nil {
+			live.Annotations = map[string]string{}
+		}
+		live.Annotations[labels.AnnotationCancelRequested] = "cancelled with its parent task " + parent.Name
+		if err := writer.Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
+}

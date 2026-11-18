@@ -2,17 +2,20 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/store"
@@ -102,6 +105,55 @@ func TestHandleCompletedRetiresArtifactsAfterDurableSettlement(t *testing.T) {
 	}
 }
 
+func TestHandleCompletedSettlesWorkspaceOnlyAfterArtifactRetirement(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	task := artifactRetentionTask()
+	task.Status.Execution.RuntimePoolName = "acp-ws-terminal-order"
+	workspace := acpAdapterWorkspace(t, "acp-ws-terminal-order")
+	workspace.Namespace = task.Namespace
+	workspace.Name = "acp-ws-terminal-order"
+	workspace.UID = types.UID("acp-ws-terminal-order-uid")
+	workspace.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(),
+		Kind:       taskResourceKind,
+		Name:       task.Name,
+		UID:        task.UID,
+	}}
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+
+	reconciler, retirer := newSettledArtifactRetentionReconciler(t, task)
+	reconciler.WorkspaceSettlementProtected = true
+	if err := reconciler.Create(ctx, workspace); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	retirer.err = errors.New("artifact retirement blocked")
+	result, err := reconciler.handleCompleted(ctx, task)
+	if err != nil || result.RequeueAfter != 30*time.Second {
+		t.Fatalf("blocked retirement result = (%#v, %v), want 30s requeue", result, err)
+	}
+	currentWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); err != nil {
+		t.Fatalf("workspace was settled before artifact retirement: %v", err)
+	}
+
+	retirer.err = nil
+	currentTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	result, err = reconciler.handleCompleted(ctx, currentTask)
+	if err != nil || !result.IsZero() {
+		t.Fatalf("completed settlement result = (%#v, %v), want zero", result, err)
+	}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(workspace), currentWorkspace); !apierrors.IsNotFound(err) {
+		t.Fatalf("workspace survived post-retirement Delete settlement: %v", err)
+	}
+}
+
 func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T) {
 	t.Parallel()
 	var webhookAttempts atomic.Int32
@@ -114,12 +166,20 @@ func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T
 	task := artifactRetentionTask()
 	task.Spec.WebhookURL = server.URL
 	reconciler, retirer := newSettledArtifactRetentionReconciler(t, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
+	clock := &webhookTestClock{now: time.Unix(1_800_000_000, 0)}
+	notifier := newTestWebhookNotifier(t, newWebhookTestKeys(t), clock)
 	reconciler.WebhookNotifier = notifier
+	deliveries := attachTestWebhookDispatcher(t, reconciler)
 
 	for wantWebhookAttempts := int32(1); wantWebhookAttempts <= 2; wantWebhookAttempts++ {
 		current := &corev1alpha1.Task{}
+		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reconciler.handleCompleted(context.Background(), current); err != nil {
+			t.Fatal(err)
+		}
+		deliveries.drain(context.Background())
 		if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
 			t.Fatal(err)
 		}
@@ -127,9 +187,10 @@ func TestHandleCompletedRetiresArtifactsBeforeRetryingFailedWebhook(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.RequeueAfter != 30*time.Second {
-			t.Fatalf("handleCompleted() requeue = %v, want 30s", result.RequeueAfter)
+		if want := notifier.backoff(wantWebhookAttempts); result.RequeueAfter != want {
+			t.Fatalf("handleCompleted() requeue = %v, want %v", result.RequeueAfter, want)
 		}
+		clock.now = clock.now.Add(result.RequeueAfter)
 		if got := webhookAttempts.Load(); got != wantWebhookAttempts {
 			t.Fatalf("webhook attempts = %d, want %d", got, wantWebhookAttempts)
 		}

@@ -53,6 +53,14 @@ export const sessionListItemSchema = z.object({
 export const transcriptMessageSchema = z.object({
   role: z.string(),
   content: z.string(),
+  name: z.string().optional(),
+  toolCallID: z.string().optional(),
+  toolCalls: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    arguments: z.unknown(),
+    argumentsText: z.string().optional(),
+  })).optional(),
   timestamp: z.string().optional(),
   model: z.string().optional(),
   inputTokens: z.number().optional(),

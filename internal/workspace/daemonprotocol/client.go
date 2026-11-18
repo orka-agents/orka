@@ -13,27 +13,29 @@ import (
 
 const maxErrorBodyBytes = 1024
 
-type Client interface {
-	Health(ctx context.Context, req ActorRequest) error
-	Exec(ctx context.Context, req ActorRequest, body ExecRequest) (*ExecResponse, error)
-	ExecStatus(ctx context.Context, req ActorRequest, execID string) (*ExecResponse, error)
-	Upload(ctx context.Context, req ActorRequest, body UploadRequest) (*UploadResponse, error)
-	UploadNoResponse(ctx context.Context, req ActorRequest, body UploadRequest) error
-	Download(ctx context.Context, req ActorRequest, body DownloadRequest) (*DownloadResponse, error)
-	Scrub(ctx context.Context, req ActorRequest, body ScrubRequest) error
-}
-
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-type HTTPClient struct {
-	RouterURL      string
-	ActorDNSSuffix string
-	HTTPClient     HTTPDoer
+// TargetActorHeader selects the Actor behind the Substrate router. The router
+// ignores Host and :authority for routing.
+const TargetActorHeader = "ate-target-actor"
+
+// TargetActor converts a qualified "name.atespace" Actor ID into the router's
+// "atespace/name" target. Unqualified IDs are rejected so a request can never
+// be routed to an Actor in an implied Atespace.
+func TargetActor(actorID string) (string, bool) {
+	name, atespace, qualified := strings.Cut(strings.TrimSpace(actorID), ".")
+	if !qualified || name == "" || atespace == "" || strings.ContainsAny(atespace, "./") || strings.Contains(name, "/") {
+		return "", false
+	}
+	return atespace + "/" + name, true
 }
 
-var _ Client = HTTPClient{}
+type HTTPClient struct {
+	RouterURL  string
+	HTTPClient HTTPDoer
+}
 
 type ActorRequest struct {
 	ActorID   string
@@ -137,7 +139,11 @@ func (c HTTPClient) do(ctx context.Context, req ActorRequest, method, relPath st
 	if err != nil {
 		return &Error{Reason: ErrorReasonCreateRequest, Message: "failed to create request", Cause: err}
 	}
-	httpReq.Host = strings.TrimSpace(req.ActorID) + "." + strings.TrimSpace(c.ActorDNSSuffix)
+	target, ok := TargetActor(req.ActorID)
+	if !ok {
+		return &Error{Reason: ErrorReasonCreateRequest, Message: "daemon request requires a qualified Actor ID"}
+	}
+	httpReq.Header.Set(TargetActorHeader, target)
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}

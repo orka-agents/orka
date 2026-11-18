@@ -5,13 +5,48 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Sparkline } from '@/components/ui/sparkline'
 import { phaseStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
+import type { LoadProblem } from '@/lib/load-problem'
 
 interface StatsCardsProps {
   tasks?: Task[]
+  /** True when the bounded task walk stopped with more pages available. */
+  tasksTruncated?: boolean
+  /** Set when the tasks list could not be loaded; shown instead of a fabricated "0". */
+  tasksProblem?: LoadProblem
   sessionCount?: number
+  /** True when the bounded session walk stopped with more pages available. */
+  sessionsTruncated?: boolean
+  /** Set when the sessions list could not be loaded; shown instead of a fabricated "0". */
+  sessionsProblem?: LoadProblem
   agentCount?: number
+  /** Set when the agents list could not be loaded; shown instead of a fabricated "0". */
+  agentsProblem?: LoadProblem
   toolCount?: number
+  /** Set when the tools list could not be loaded; shown instead of a fabricated "0". */
+  toolsProblem?: LoadProblem
+  /** Every list is still loading: render skeleton cards only. */
   isLoading?: boolean
+  /** Per-list loading, so each card fills in as its own data arrives. */
+  loading?: { tasks?: boolean; sessions?: boolean; agents?: boolean; tools?: boolean }
+}
+
+function ValueSkeleton() {
+  return <Skeleton className="h-8 w-16" />
+}
+
+/** The body a stat card renders instead of a fabricated count. */
+function ProblemStat({ resource, problem }: { resource: string; problem: LoadProblem }) {
+  const detail = problem.message ? ` (${problem.message})` : ''
+  return (
+    <div className="space-y-0.5" role="alert">
+      <div className="text-sm font-medium">{problem.forbidden ? 'Not authorized' : 'Could not load'}</div>
+      <div className="text-xs text-muted-foreground">
+        {problem.forbidden
+          ? <>Your token lacks <code>{resource}</code> read permission{detail}.</>
+          : <>The <code>{resource}</code> request failed{detail}.</>}
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -55,7 +90,20 @@ function taskWindow(tasks: Task[]): { min: number; max: number } | null {
   return { min: Math.min(...times), max: Math.max(...times) }
 }
 
-export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoading }: StatsCardsProps) {
+export function StatsCards({
+  tasks,
+  tasksTruncated,
+  tasksProblem,
+  sessionCount,
+  sessionsTruncated,
+  sessionsProblem,
+  agentCount,
+  agentsProblem,
+  toolCount,
+  toolsProblem,
+  isLoading,
+  loading = {},
+}: StatsCardsProps) {
   if (isLoading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -91,7 +139,7 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
   // when there are no failures, rather than echoing the total trend).
   const window = taskWindow(allTasks)
   const stats = [
-    { label: 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground', spark: 'text-primary', series: cumulativeSeries(allTasks, window) },
+    { label: tasksTruncated ? 'Tasks loaded' : 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground', spark: 'text-primary', series: cumulativeSeries(allTasks, window) },
     { label: 'Running', value: running, icon: Play, color: phaseStyle('Running').textClass, spark: phaseStyle('Running').textClass, series: cumulativeSeries(runningTasks, window) },
     {
       label: 'Succeeded',
@@ -99,7 +147,9 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
       icon: CheckCircle,
       color: phaseStyle('Succeeded').textClass,
       spark: phaseStyle('Succeeded').textClass,
-      sub: successRate !== null ? `${successRate}% success rate` : undefined,
+      sub: successRate !== null
+        ? (tasksTruncated ? `${successRate}% of loaded finished tasks` : `${successRate}% success rate`)
+        : undefined,
       series: cumulativeSeries(succeededTasks, window),
     },
     { label: 'Failed', value: failed, icon: XCircle, color: phaseStyle('Failed').textClass, spark: phaseStyle('Failed').textClass, series: cumulativeSeries(failedTasks, window) },
@@ -114,25 +164,37 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
             <Icon className={`h-4 w-4 ${color}`} />
           </CardHeader>
           <CardContent>
-            <div className="flex items-end justify-between gap-2">
-              <div>
-                <div className="text-2xl font-bold tabular-nums">{value}</div>
-                {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+            {loading.tasks ? (
+              <ValueSkeleton />
+            ) : tasksProblem ? (
+              <ProblemStat resource="tasks" problem={tasksProblem} />
+            ) : (
+              <div className="flex items-end justify-between gap-2">
+                <div>
+                  <div className="text-2xl font-bold tabular-nums">{value}</div>
+                  {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+                </div>
+                {series.length > 1 && (
+                  <Sparkline data={series} className={cn('opacity-80', spark)} aria-label={`${label} trend`} />
+                )}
               </div>
-              {series.length > 1 && (
-                <Sparkline data={series} className={cn('opacity-80', spark)} aria-label={`${label} trend`} />
-              )}
-            </div>
+            )}
           </CardContent>
         </Card>
       ))}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Sessions</CardTitle>
+          <CardTitle className="text-sm font-medium">{sessionsTruncated ? 'Sessions loaded' : 'Sessions'}</CardTitle>
           <MessageSquare className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
+          {loading.sessions ? (
+            <ValueSkeleton />
+          ) : sessionsProblem ? (
+            <ProblemStat resource="sessions" problem={sessionsProblem} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
       <Card>
@@ -141,7 +203,13 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
           <Bot className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
+          {loading.agents ? (
+            <ValueSkeleton />
+          ) : agentsProblem ? (
+            <ProblemStat resource="agents" problem={agentsProblem} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
       <Card>
@@ -150,7 +218,13 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
           <Wrench className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>
+          {loading.tools ? (
+            <ValueSkeleton />
+          ) : toolsProblem ? (
+            <ProblemStat resource="tools" problem={toolsProblem} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
     </div>

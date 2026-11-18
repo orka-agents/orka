@@ -18,13 +18,6 @@ var (
 	testOnlyNegationPattern = regexp.MustCompile(`\bnot(?:\s+\w+){0,3}\s+(?:test-only|test only|only test|test fixture only)\b`)
 )
 
-type FindingFilterOptions struct {
-	RepositoryScan string
-	ScanRunID      string
-	TaskName       string
-	SliceID        string
-}
-
 type FindingFilterResult struct {
 	Kept    []*store.Finding
 	Dropped []DroppedFindingDiagnostic
@@ -32,7 +25,7 @@ type FindingFilterResult struct {
 
 // FilterFindings applies deterministic hard false-positive exclusions after
 // schema/evidence validation and before durable finding persistence.
-func FilterFindings(findings []*store.Finding, _ FindingFilterOptions) FindingFilterResult {
+func FilterFindings(findings []*store.Finding) FindingFilterResult {
 	result := FindingFilterResult{Kept: make([]*store.Finding, 0, len(findings))}
 	for index, finding := range findings {
 		if finding == nil {
@@ -76,6 +69,14 @@ func filterDropReason(finding *store.Finding) string {
 		}
 		if !containsAny(text, "loaded by production", "shipped", "production fixture", "embedded fixture", "runtime loads") {
 			return "test-only finding without production exposure"
+		}
+	}
+	if allPathsAreExampleOnly(allPaths) {
+		if likelyAuditableSensitiveDisclosure(text) {
+			return ""
+		}
+		if !containsAny(text, "loaded by production", "shipped", "installed by default", "production deployment", "runtime loads") {
+			return "demo or example content without production exposure"
 		}
 	}
 	if containsAny(text, "dependency version", "outdated dependency", "vulnerable dependency", "vulnerable package", "cve-") {
@@ -188,7 +189,8 @@ func likelyNonCredentialSensitiveDisclosure(text string) bool {
 }
 
 func normalizedFindingText(finding *store.Finding) string {
-	parts := []string{
+	parts := make([]string, 0, 11+3*len(finding.Evidence))
+	parts = append(parts,
 		finding.Title,
 		finding.Category,
 		finding.Summary,
@@ -200,7 +202,7 @@ func normalizedFindingText(finding *store.Finding) string {
 		finding.WhyTestsDoNotAlreadyCoverThis,
 		finding.SuggestedRegressionTest,
 		finding.MinimumFixScope,
-	}
+	)
 	for _, evidence := range finding.Evidence {
 		parts = append(parts, evidence.Label, evidence.Path, evidence.Symbol)
 	}
@@ -350,6 +352,31 @@ func allPathsAreTestOnly(paths []string) bool {
 	return true
 }
 
+// allPathsAreExampleOnly reports evidence confined to demo, example, or
+// vendored third-party directories.
+func allPathsAreExampleOnly(paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !isExamplePath(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func isExamplePath(value string) bool {
+	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
+	for segment := range strings.SplitSeq(path.Dir(p), "/") {
+		switch segment {
+		case "demo", "demos", "example", "examples", "third_party":
+			return true
+		}
+	}
+	return false
+}
+
 func isDocsPath(value string) bool {
 	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
 	if strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "website/docs/") {
@@ -383,7 +410,9 @@ func isTestPath(value string) bool {
 	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
 	base := path.Base(p)
 	return strings.HasPrefix(p, "test/") || strings.HasPrefix(p, "tests/") || strings.HasPrefix(p, "__tests__/") ||
+		strings.HasPrefix(p, "e2e/") || strings.HasPrefix(p, "testdata/") ||
 		strings.Contains(p, "/test/") || strings.Contains(p, "/tests/") || strings.Contains(p, "/__tests__/") ||
+		strings.Contains(p, "/e2e/") || strings.Contains(p, "/testdata/") ||
 		strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
 		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx") || strings.HasSuffix(base, ".test.js") ||
 		strings.HasSuffix(base, ".spec.js")

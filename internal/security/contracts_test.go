@@ -21,11 +21,6 @@ func TestParseContractsAcceptValidExamples(t *testing.T) {
 	if _, err := ParseReviewContextManifest(contextData); err != nil {
 		t.Fatalf("ParseReviewContextManifest() error = %v", err)
 	}
-
-	findingsData := []byte(`{"schemaVersion":2,"repository":{"repoURL":"https://github.com/example/app","branch":"main","subPath":"","baseSHA":"","headSHA":""},"scan":{"mode":"initial","sliceId":"slice_demo","summary":"Reviewed."},"findings":[]}`)
-	if _, err := ParseFindingsV2Artifact(findingsData); err != nil {
-		t.Fatalf("ParseFindingsV2Artifact() error = %v", err)
-	}
 }
 
 func TestParseContractsRejectMalformedExamples(t *testing.T) {
@@ -34,9 +29,6 @@ func TestParseContractsRejectMalformedExamples(t *testing.T) {
 	}
 	if _, err := ParseReviewContextManifest([]byte(`{"schemaVersion":1,"sliceId":"slice_bad","includedFiles":[{"path":"app.go","role":"owned","includedLineRanges":[{"startLine":5,"endLine":3}]}]}`)); err == nil {
 		t.Fatal("ParseReviewContextManifest() error = nil, want invalid range rejected")
-	}
-	if _, err := ParseFindingsV2Artifact([]byte(`{"schemaVersion":2}`)); err == nil {
-		t.Fatal("ParseFindingsV2Artifact() error = nil, want missing findings array rejected")
 	}
 }
 
@@ -426,6 +418,24 @@ func TestFindingV2FingerprintCanonicalizesEquivalentEvidence(t *testing.T) {
 	right := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", second)
 	if left != right {
 		t.Fatalf("fingerprints differ for equivalent evidence refs: %q vs %q", left, right)
+	}
+}
+
+func TestFindingV2TargetKeyCanonicalizesInputAndSeparatesBranches(t *testing.T) {
+	canonical := FindingV2TargetKey("https://github.com/example/app", "main", "services/api")
+	equivalent := FindingV2TargetKey(" https://github.com/example/app ", " main ", "/services/api/")
+	sshEquivalent := FindingV2TargetKey("git@github.com:example/app.git", "main", "services/api")
+	dotGitEquivalent := FindingV2TargetKey("https://github.com/example/app.git", "main", "services/api")
+	otherBranch := FindingV2TargetKey("https://github.com/example/app", "release", "services/api")
+
+	if canonical != equivalent {
+		t.Fatalf("equivalent target keys differ: %q vs %q", canonical, equivalent)
+	}
+	if canonical != sshEquivalent || canonical != dotGitEquivalent {
+		t.Fatalf("canonical repository target keys differ: HTTPS %q, SSH %q, HTTPS .git %q", canonical, sshEquivalent, dotGitEquivalent)
+	}
+	if canonical == otherBranch {
+		t.Fatalf("target key %q does not distinguish branches", canonical)
 	}
 }
 

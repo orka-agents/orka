@@ -9,15 +9,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
@@ -29,7 +33,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const customToolName = "custom_tool"
@@ -96,7 +99,10 @@ func TestGetAPIKey_NotFound(t *testing.T) {
 
 func TestLoadSessionContext_NoFile(t *testing.T) {
 	// When file doesn't exist, should return nil
-	messages := loadSessionContext()
+	messages, err := loadSessionContext(filepath.Join(t.TempDir(), "missing.jsonl"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if messages != nil {
 		t.Errorf("loadSessionContext() = %v, want nil", messages)
 	}
@@ -280,6 +286,35 @@ func TestBuildLLMTools_Empty(t *testing.T) {
 	}
 }
 
+func TestBuildLLMTools_MemoryFollowsEnabledList(t *testing.T) {
+	t.Setenv(workerenv.ControllerURL, "http://controller.example")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "task")
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	registerMemoryTools()
+	for _, tc := range []struct {
+		name    string
+		enabled []string
+	}{
+		{name: "empty controller-resolved list"},
+		{name: "single controller-resolved tool", enabled: []string{"recall_memory"}},
+		{name: "coordination", enabled: []string{"recall_memory", "remember", "propose_memory", "search_transcript"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildLLMTools(normalizeEnabledTools(tc.enabled), nil)
+			if len(got) != len(tc.enabled) {
+				t.Fatalf("got %d tools, want %d", len(got), len(tc.enabled))
+			}
+			for i, tool := range got {
+				if tool.Name != tc.enabled[i] {
+					t.Fatalf("tool %d = %q, want %q", i, tool.Name, tc.enabled[i])
+				}
+			}
+		})
+	}
+}
+
 func TestBuildLLMTools_NotFound(t *testing.T) {
 	enabledTools := []string{"nonexistent_tool"}
 	customTools := map[string]*corev1alpha1.Tool{}
@@ -374,35 +409,6 @@ func TestAppendMemoryReflectionGuidance_IncludesRememberGuidance(t *testing.T) {
 	}
 }
 
-func TestAutoEnableMemoryTools_WhenControllerConfigPresent(t *testing.T) {
-	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_TASK_NAME", "task-1")
-
-	got := autoEnableMemoryTools([]string{"web_search", "recall_memory", " web_search "})
-	want := []string{"web_search", "recall_memory", "remember", "propose_memory", "search_transcript"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
-	}
-}
-
-func TestAutoEnableMemoryTools_NoControllerConfigDoesNotMutateTools(t *testing.T) {
-	t.Setenv("ORKA_CONTROLLER_URL", "")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_TASK_NAME", "task-1")
-
-	got := autoEnableMemoryTools([]string{"web_search"})
-	want := []string{"web_search"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
-	}
-	for _, toolName := range memoryToolNames {
-		if containsTool(got, toolName) {
-			t.Fatalf("autoEnableMemoryTools() added memory tool %q without controller config: %#v", toolName, got)
-		}
-	}
-}
-
 func TestLoadPlanContext(t *testing.T) {
 	t.Run("successful plan fetch", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +430,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result == "" {
 			t.Fatal("expected non-empty plan context")
 		}
@@ -446,7 +455,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for 404, got: %s", result)
 		}
@@ -457,7 +469,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "")
 		t.Setenv("ORKA_TASK_NAMESPACE", "")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for missing env vars, got: %s", result)
 		}
@@ -504,7 +519,7 @@ func TestRun_MissingProvider(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "test-model")
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_PROVIDER")
 	}
@@ -518,7 +533,7 @@ func TestRun_MissingModel(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "")
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_MODEL")
 	}
@@ -532,12 +547,50 @@ func TestRun_MissingPrompt(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "gpt-4")
 	t.Setenv("ORKA_AI_PROMPT", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_PROMPT")
 	}
 	if !strings.Contains(err.Error(), "ORKA_AI_PROMPT is required") {
 		t.Errorf("error = %q, want mention of ORKA_AI_PROMPT", err)
+	}
+}
+
+func TestRun_InvalidModelSettingsFailBeforeDependencies(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "temperature", field: workerenv.AITemperature, value: "invalid-temperature-value"},
+		{name: "max tokens", field: workerenv.AIMaxTokens, value: "invalid-max-tokens-value"},
+	}
+	for _, tt := range tests {
+		for _, withAPIKey := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/key=%t", tt.name, withAPIKey), func(t *testing.T) {
+				t.Setenv(workerenv.AIProvider, "openai")
+				t.Setenv(workerenv.AIModel, "test-model")
+				t.Setenv(workerenv.AIPrompt, "hello")
+				t.Setenv(workerenv.AITemperature, "")
+				t.Setenv(workerenv.AIMaxTokens, "")
+				t.Setenv(workerenv.EnableTelemetry, "false")
+				t.Setenv(workerenv.ControllerURL, "")
+				t.Setenv("KUBERNETES_SERVICE_HOST", "")
+				t.Setenv("OPENAI_API_KEY", "")
+				if withAPIKey {
+					t.Setenv("OPENAI_API_KEY", "test-key")
+				}
+				t.Setenv(tt.field, tt.value)
+
+				err := run("")
+				if err == nil || !strings.Contains(err.Error(), tt.field) {
+					t.Fatalf("run() error = %v, want validation failure naming %s before dependency setup", err, tt.field)
+				}
+				if strings.Contains(err.Error(), tt.value) {
+					t.Fatal("validation error echoed the supplied environment value")
+				}
+			})
+		}
 	}
 }
 
@@ -548,7 +601,7 @@ func TestRun_MissingAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing API key")
 	}
@@ -570,7 +623,7 @@ func TestCreateK8sClient_OutsideCluster(t *testing.T) {
 
 func TestLoadCustomTools_NilClient(t *testing.T) {
 	// With nil client and no tool names, should return empty map
-	tools := loadCustomTools(context.Background(), nil, "default", nil)
+	tools, _ := loadCustomTools(context.Background(), nil, "default", nil)
 	if len(tools) != 0 {
 		t.Errorf("expected empty map, got %d tools", len(tools))
 	}
@@ -578,7 +631,7 @@ func TestLoadCustomTools_NilClient(t *testing.T) {
 
 func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
 	// Built-in tools should be skipped (no k8s lookup needed)
-	tools := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
+	tools, _ := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
 	if len(tools) != 0 {
 		t.Errorf("expected empty map for built-in tools, got %d tools", len(tools))
 	}
@@ -606,6 +659,134 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 	}
 	if result != "Task completed successfully" {
 		t.Errorf("result = %q, want 'Task completed successfully'", result)
+	}
+}
+
+func TestExecuteAgentLoop_PreservesModelSettings(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(staticTestTool{name: customToolName})
+	llmTools := toolspkg.DefaultRegistry.ToLLMTools([]string{customToolName})
+	// The loop must use its explicit configuration, not re-read process settings.
+	t.Setenv(workerenv.AITemperature, "invalid-loop-temperature")
+	t.Setenv(workerenv.AIMaxTokens, "invalid-loop-max-tokens")
+
+	settingsCases := []struct {
+		name            string
+		temperature     string
+		maxTokens       string
+		wantTemperature float64
+		wantSet         bool
+		wantMaxTokens   int
+	}{
+		{name: "defaults", wantMaxTokens: 4096},
+		{name: "explicit zero and small cap", temperature: "0", maxTokens: "256", wantSet: true, wantMaxTokens: 256},
+		{
+			name: "positive temperature and large cap", temperature: "0.75", maxTokens: "8192",
+			wantTemperature: 0.75, wantSet: true, wantMaxTokens: 8192,
+		},
+		{name: "temperature only", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 4096},
+		{name: "cap only", maxTokens: "256", wantMaxTokens: 256},
+		{name: "zero cap", maxTokens: "0", wantMaxTokens: 4096},
+		{name: "negative cap", maxTokens: "-256", wantMaxTokens: 4096},
+	}
+	paths := []struct {
+		name         string
+		responses    []*llm.CompletionResponse
+		errs         []error
+		wantRequests int
+	}{
+		{
+			name:         "initial",
+			responses:    []*llm.CompletionResponse{{Content: doneResult, StopReason: "end_turn"}},
+			wantRequests: 1,
+		},
+		{
+			name: "tool followup",
+			responses: []*llm.CompletionResponse{
+				{
+					ToolCalls:  []llm.ToolCall{{ID: "call-settings", Name: customToolName, Arguments: json.RawMessage(`{}`)}},
+					StopReason: "tool_use",
+				},
+				{Content: doneResult, StopReason: "end_turn"},
+			},
+			wantRequests: 2,
+		},
+		{
+			name:         "context overflow retry",
+			responses:    []*llm.CompletionResponse{{Content: doneResult, StopReason: "end_turn"}},
+			errs:         []error{&llm.ProviderError{StatusCode: http.StatusBadRequest, Message: "context window too long"}},
+			wantRequests: 2,
+		},
+		{
+			name: "blank final followup",
+			responses: []*llm.CompletionResponse{
+				{Content: " \n", StopReason: "end_turn"},
+				{Content: doneResult, StopReason: "end_turn"},
+			},
+			wantRequests: 2,
+		},
+	}
+	for _, settingsCase := range settingsCases {
+		t.Run(settingsCase.name, func(t *testing.T) {
+			settings, err := parseModelSettings(workerenv.AIWorkerEnv{
+				Temperature: settingsCase.temperature,
+				MaxTokens:   settingsCase.maxTokens,
+			})
+			if err != nil {
+				t.Fatalf("parseModelSettings() error = %v", err)
+			}
+			for _, path := range paths {
+				t.Run(path.name, func(t *testing.T) {
+					provider := &mockProvider{responses: path.responses, errs: path.errs}
+					messages := []llm.Message{
+						{Role: roleUser, Content: "investigate"},
+						{Role: roleUser, Content: strings.Repeat("older question ", 200)},
+						{Role: "assistant", Content: strings.Repeat("older context ", 200)},
+						{Role: roleUser, Content: "continue"},
+					}
+					result, err := executeAgentLoopWithEvents(
+						context.Background(), provider, messages, "system prompt", "test-model", settings,
+						llmTools, nil, nil, common.NoopEventRecorder{},
+					)
+					if err != nil || result != doneResult {
+						t.Fatalf("executeAgentLoopWithEvents() = %q, %v, want done without error", result, err)
+					}
+					if len(provider.requests) != path.wantRequests {
+						t.Fatalf("requests = %d, want %d", len(provider.requests), path.wantRequests)
+					}
+					for i, req := range provider.requests {
+						if req.Temperature != settingsCase.wantTemperature ||
+							req.TemperatureSet != settingsCase.wantSet || req.HasTemperature() != settingsCase.wantSet {
+							t.Errorf("request %d temperature = %v (set %t, present %t), want %v (set %t)",
+								i+1, req.Temperature, req.TemperatureSet, req.HasTemperature(),
+								settingsCase.wantTemperature, settingsCase.wantSet)
+						}
+						if req.MaxTokens != settingsCase.wantMaxTokens {
+							t.Errorf("request %d max tokens = %d, want %d", i+1, req.MaxTokens, settingsCase.wantMaxTokens)
+						}
+					}
+					switch path.name {
+					case "tool followup":
+						followup := provider.requests[1].Messages
+						last := followup[len(followup)-1]
+						if last.Role != "tool" || last.ToolCallID != "call-settings" || last.Content != "tool result" {
+							t.Fatalf("tool followup did not contain the executed tool result: %#v", last)
+						}
+					case "context overflow retry":
+						if len(provider.requests[1].Messages) >= len(provider.requests[0].Messages) {
+							t.Fatal("overflow retry did not truncate the context")
+						}
+					case "blank final followup":
+						retry := provider.requests[1]
+						last := retry.Messages[len(retry.Messages)-1]
+						if len(retry.Tools) != 0 || last.Role != roleUser || last.Content != finalAnswerRetryPrompt {
+							t.Fatal("blank final followup did not request a final answer without tools")
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -737,7 +918,7 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
-		nil, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -765,7 +946,8 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	if strings.Contains(string(data), "sk-test12345678901234567890") {
 		t.Fatalf("AI worker events leaked fake API key: %s", data)
 	}
-	var sawTelemetryProvider bool
+	// The task trace reads the "provider" and "model" content keys.
+	var sawResponseTelemetry bool
 	for _, event := range recorder.Events() {
 		if event.Type != events.ExecutionEventTypeModelRequestCompleted {
 			continue
@@ -774,13 +956,13 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 		if err := json.Unmarshal(event.Content, &content); err != nil {
 			t.Fatalf("unmarshal model event content: %v", err)
 		}
-		if content["provider"] == "azure.ai.openai" {
-			sawTelemetryProvider = true
+		if content["provider"] == "azure.ai.openai" && content["model"] == "test-model" {
+			sawResponseTelemetry = true
 			break
 		}
 	}
-	if !sawTelemetryProvider {
-		t.Fatalf("model completion event did not preserve response provider: %#v", recorder.Events())
+	if !sawResponseTelemetry {
+		t.Fatalf("model completion event did not preserve response provider and model: %#v", recorder.Events())
 	}
 }
 
@@ -803,7 +985,7 @@ func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
 
 	if _, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use disabled tool"}}, "", "test-model",
-		nil, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	); err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
@@ -846,7 +1028,7 @@ func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
-		llmTools, nil, nil, recorder,
+		modelSettings{maxTokens: 4096}, llmTools, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -881,7 +1063,7 @@ func TestAIWorkerEventContextTruncated(t *testing.T) {
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider,
 		[]llm.Message{{Role: roleUser, Content: strings.Repeat("hello ", 200)}},
-		"", "test-model", nil, nil, nil, recorder,
+		"", "test-model", modelSettings{maxTokens: 4096}, nil, nil, nil, recorder,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -896,7 +1078,7 @@ func TestAIWorkerEventRecorderFailureDoesNotChangeResult(t *testing.T) {
 	provider := &mockProvider{response: &llm.CompletionResponse{Content: "ok", StopReason: "end_turn"}}
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
-		nil, nil, nil, panicEventRecorder{},
+		modelSettings{maxTokens: 4096}, nil, nil, nil, panicEventRecorder{},
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -930,7 +1112,7 @@ func TestAIWorkerEventRecordsValidationFailure(t *testing.T) {
 	t.Setenv(workerenv.AIModel, "")
 	t.Setenv(workerenv.AIPrompt, "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("run() error = nil, want validation failure")
 	}
@@ -968,11 +1150,125 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 	}
 }
 
+func TestFinishAIWorkerRun_SettlesBeforeTerminalPublication(t *testing.T) {
+	for _, canceledBefore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceledBefore=%t", canceledBefore), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if canceledBefore {
+				cancel()
+			}
+			recorder := &terminalAIEventRecorder{cancel: cancel}
+			err := finishAIWorkerRun(ctx, recorder, "task", nil)
+			want := "WorkerCompleted"
+			if canceledBefore {
+				want = "WorkerFailed"
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want cancellation", err)
+				}
+			} else if err != nil {
+				t.Fatalf("settled success changed after publication: %v", err)
+			}
+			if len(recorder.types) != 1 || recorder.types[0] != want {
+				t.Fatalf("terminal events = %v, want only %s", recorder.types, want)
+			}
+			if !recorder.bounded || !recorder.activeAfterCancel {
+				t.Fatal("terminal publication needs an independent bounded context")
+			}
+			if !errors.Is(recorder.ctx.Err(), context.Canceled) {
+				t.Fatal("publication context was not released")
+			}
+		})
+	}
+}
+
+type terminalAIEventRecorder struct {
+	cancel            context.CancelFunc
+	types             []string
+	ctx               context.Context
+	bounded           bool
+	activeAfterCancel bool
+}
+
+func (r *terminalAIEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
+	// Model persistence followed by cancellation before the response is read.
+	r.types = append(r.types, eventType)
+	r.cancel()
+	r.ctx = ctx
+	_, r.bounded = ctx.Deadline()
+	r.activeAfterCancel = ctx.Err() == nil
+}
+
+func TestUploadAIArtifacts_ReturnsCancellationDuringFailureEvent(t *testing.T) {
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("create artifacts dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "evidence.txt"), []byte("evidence"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	t.Setenv("ORKA_ARTIFACTS_DIR", artifactDir)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "artifact-failure-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err := uploadAIArtifacts(ctx, cancelAIEventRecorder{cancel: cancel}, "artifact-failure-task")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("uploadAIArtifacts() error = %v, want context canceled", err)
+	}
+}
+
+type cancelAIEventRecorder struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelAIEventRecorder) Record(context.Context, string, ...common.EventOption) {
+	r.cancel()
+}
+
+func TestWriteResult_CancelsInFlightRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(releaseRequest)
+
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- writeResult(ctx, "test result") }()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for result request")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writeResult() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writeResult() did not stop after cancellation")
+	}
+}
+
 func TestWriteResult_NoEndpoint(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", "")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err == nil {
 		t.Fatal("expected error without result endpoint")
 	}
@@ -986,7 +1282,7 @@ func TestWriteResult_Success(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1005,12 +1301,12 @@ func TestLoadSessionContext_WithTempFile(t *testing.T) {
 	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
 	os.WriteFile(transcriptPath, []byte(content), 0o644) //nolint:errcheck
 
-	// loadSessionContext reads from /session/transcript.jsonl which won't
-	// exist in tests. The existing test already covers the nil return.
-	// Here we verify the function handles missing file gracefully.
-	messages := loadSessionContext()
-	if messages != nil {
-		t.Errorf("expected nil (file doesn't exist at fixed path), got %d messages", len(messages))
+	messages, err := loadSessionContext(transcriptPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Content != "Hello" || messages[1].Content != "Hi there" {
+		t.Fatalf("loadSessionContext() = %#v, want user and assistant messages only", messages)
 	}
 }
 
@@ -1024,7 +1320,10 @@ func TestLoadPlanContext_ServerError(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for server error, got: %s", result)
 	}
@@ -1047,7 +1346,10 @@ func TestLoadPlanContext_EmptyPlanDocument(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result for empty PlanDocument, got: %s", result)
 	}
@@ -1064,7 +1366,10 @@ func TestLoadPlanContext_MalformedJSON(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for malformed JSON, got: %s", result)
 	}
@@ -1201,7 +1506,7 @@ func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
 	baseToolCtx := &toolspkg.ToolContext{TaskID: "task-a", Namespace: "team-a", Tenant: "team-a"}
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
-		llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
+		modelSettings{maxTokens: 4096}, llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
 	)
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -1358,7 +1663,10 @@ func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages := parseSessionContext(append(encoded, '\n'))
+	messages, err := parseSessionContext(append(encoded, '\n'), false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 1 || messages[0].Role != roleUser {
 		t.Fatalf("parseSessionContext() = %#v", messages)
 	}
@@ -1366,5 +1674,141 @@ func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
 		if !strings.Contains(messages[0].Content, want) {
 			t.Fatalf("parsed content = %q, want %q", messages[0].Content, want)
 		}
+	}
+}
+
+func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
+	var path, auth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.EscapedPath(), r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previous := sealHTTPClient
+	sealHTTPClient = server.Client
+	t.Cleanup(func() { sealHTTPClient = previous })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	wantPath := "/internal/v1/tasks/default/parent-task/children/child%20task/requester-stamp"
+	if path != wantPath || auth != "Bearer sa-token" {
+		t.Fatalf("path = %q auth = %q", path, auth)
+	}
+	// A child without a requester has nothing to seal.
+	path = ""
+	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}
+	if err := sealChildTaskViaController(context.Background(), nil, plain); err != nil || path != "" {
+		t.Fatalf("plain child: err = %v path = %q", err, path)
+	}
+}
+
+// A conflict means a reconcile touched the child between the controller's
+// read and its fenced seal; the worker asks again rather than leaving the
+// child unsealed.
+func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previousClient, previousBackoff := sealHTTPClient, sealConflictBackoff
+	sealHTTPClient, sealConflictBackoff = server.Client, time.Millisecond
+	t.Cleanup(func() { sealHTTPClient, sealConflictBackoff = previousClient, previousBackoff })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want two conflicts then success", got)
+	}
+	// A conflict that never clears stops after a bounded number of tries.
+	attempts.Store(-1000)
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != -996 {
+		t.Fatalf("bounded attempts = %d, want 4", got+1000)
+	}
+}
+
+// TestSealChildTaskViaControllerRetriesTransientFailures covers a controller
+// that is briefly unavailable: a 5xx is retried like a conflict, while a
+// definitive 4xx is final.
+func TestSealChildTaskViaControllerRetriesTransientFailures(t *testing.T) {
+	var attempts atomic.Int32
+	var status atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(int(status.Load()))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previousClient, previousBackoff := sealHTTPClient, sealConflictBackoff
+	sealHTTPClient, sealConflictBackoff = server.Client, time.Millisecond
+	t.Cleanup(func() { sealHTTPClient, sealConflictBackoff = previousClient, previousBackoff })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	for _, tc := range []struct {
+		status int32
+		want   int32
+	}{{http.StatusServiceUnavailable, 2}, {http.StatusForbidden, 1}} {
+		attempts.Store(0)
+		status.Store(tc.status)
+		if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+			t.Fatal(err)
+		}
+		if got := attempts.Load(); got != tc.want {
+			t.Fatalf("status %d: attempts = %d, want %d", tc.status, got, tc.want)
+		}
+	}
+}
+
+// TestSealHTTPClientStaysOnTheController covers the client that carries the
+// worker's ServiceAccount token to the controller: it ignores proxy settings
+// and never follows a redirect elsewhere.
+func TestSealHTTPClientStaysOnTheController(t *testing.T) {
+	client := sealHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatalf("transport = %#v, want no proxy", client.Transport)
+	}
+	if client.CheckRedirect == nil || client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("the seal client must not follow redirects")
 	}
 }

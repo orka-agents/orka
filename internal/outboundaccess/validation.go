@@ -22,6 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
@@ -57,14 +59,127 @@ func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	if policy == nil {
 		return invalid("policy is required")
 	}
-	direct, gateway := policy.Spec.Direct, policy.Spec.Gateway
-	if (direct == nil) == (gateway == nil) {
-		return invalid("exactly one of direct or gateway is required")
+	direct, gateway, connection, identity := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection, policy.Spec.AgentIdentity
+	modes := 0
+	for _, set := range []bool{direct != nil, gateway != nil, connection != nil, identity != nil} {
+		if set {
+			modes++
+		}
 	}
-	if direct != nil {
+	if modes != 1 {
+		return invalid("exactly one of direct, gateway, connection, or agentIdentity is required")
+	}
+	switch {
+	case direct != nil:
 		return validateDirectSpec(direct)
+	case connection != nil:
+		return validateConnectionSpec(connection)
+	case identity != nil:
+		return validateAgentIdentitySpec(identity)
 	}
 	return validateGatewaySpec(gateway)
+}
+
+// AgentIdentityMode returns the policy's mode with its default applied.
+func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) string {
+	if identity == nil || strings.TrimSpace(identity.Mode) == "" {
+		return corev1alpha1.OutboundAgentIdentityModeSelf
+	}
+	return strings.TrimSpace(identity.Mode)
+}
+
+// ConnectionProviderName returns the ConnectorProvider whose Connections a
+// policy draws on: a connection-mode policy, or an agentIdentity policy in
+// Delegated mode, which exchanges the requester's token for the Agent's.
+func ConnectionProviderName(policy *corev1alpha1.OutboundAccessPolicy) (string, bool) {
+	switch {
+	case policy == nil:
+		return "", false
+	case policy.Spec.Connection != nil:
+		return policy.Spec.Connection.ProviderRef.Name, true
+	case policy.Spec.AgentIdentity != nil && policy.Spec.AgentIdentity.Delegated != nil &&
+		AgentIdentityMode(policy.Spec.AgentIdentity) == corev1alpha1.OutboundAgentIdentityModeDelegated:
+		return policy.Spec.AgentIdentity.Delegated.ProviderRef.Name, true
+	}
+	return "", false
+}
+
+func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAccess) *Issue {
+	switch AgentIdentityMode(identity) {
+	case corev1alpha1.OutboundAgentIdentityModeSelf:
+		if identity.Delegated != nil {
+			return invalid("agentIdentity delegated is allowed only with mode Delegated")
+		}
+	case corev1alpha1.OutboundAgentIdentityModeDelegated:
+		if identity.Delegated == nil {
+			return invalid("agentIdentity mode Delegated requires delegated")
+		}
+		name := strings.TrimSpace(identity.Delegated.ProviderRef.Name)
+		if name == "" || name != identity.Delegated.ProviderRef.Name {
+			return invalid("agentIdentity delegated providerRef name is required and must not contain surrounding whitespace")
+		}
+		if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			return invalid("agentIdentity delegated providerRef name must be a valid resource name")
+		}
+		if age := identity.Delegated.MaxDelegationAge; age != nil && age.Duration <= 0 {
+			return invalid("agentIdentity delegated maxDelegationAge must be positive")
+		}
+	default:
+		return invalid("agentIdentity mode must be Self or Delegated")
+	}
+	if identity.Entra == nil {
+		return invalid("agentIdentity requires an entra target")
+	}
+	resource := identity.Entra.Resource
+	if strings.TrimSpace(resource) != resource || resource == "" || strings.ContainsAny(resource, " \t\r\n") {
+		return invalid("agentIdentity entra.resource is required and must not contain whitespace")
+	}
+	if !strings.HasPrefix(resource, "https://") && !strings.HasPrefix(resource, "api://") {
+		return invalid("agentIdentity entra.resource must start with https:// or api://")
+	}
+	if strings.HasSuffix(resource, "/.default") {
+		return invalid("agentIdentity entra.resource names the resource; Orka appends /.default")
+	}
+	// Orka appends /.default, so a query or fragment would leave a scope
+	// Entra refuses on every call.
+	if strings.ContainsAny(resource, "?#") {
+		return invalid("agentIdentity entra.resource must not contain a query or fragment")
+	}
+	// Entra refuses a scope without an authority, such as https://:123.
+	if parsed, err := url.Parse(resource); err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return invalid("agentIdentity entra.resource must name a host or application ID")
+	}
+	return validateCredentialOutput(identity.Output)
+}
+
+func validateConnectionSpec(connection *corev1alpha1.ConnectionOutboundAccess) *Issue {
+	name := strings.TrimSpace(connection.ProviderRef.Name)
+	if name == "" || name != connection.ProviderRef.Name {
+		return invalid("connection providerRef name is required and must not contain surrounding whitespace")
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return invalid("connection providerRef name must be a valid resource name")
+	}
+	return validateCredentialOutput(connection.Output)
+}
+
+func validateCredentialOutput(output *corev1alpha1.OutboundCredentialOutput) *Issue {
+	header := defaultCredentialHeader
+	if output != nil && strings.TrimSpace(output.Header) != "" {
+		header = output.Header
+	}
+	if err := ValidateCredentialHeader(header); err != nil {
+		return invalid(err.Error())
+	}
+	if output != nil && output.Prefix != nil && strings.ContainsAny(*output.Prefix, "\r\n") {
+		return invalid("output prefix must not contain carriage returns or newlines")
+	}
+	// The prefix is joined with the credential into one header value, so it
+	// must itself be a valid field value: no other control bytes or DEL.
+	if output != nil && output.Prefix != nil && !validHeaderValueBytes(*output.Prefix) {
+		return invalid("output prefix must be a valid HTTP header value without control bytes")
+	}
+	return nil
 }
 
 func validateDirectSpec(direct *corev1alpha1.DirectOutboundAccess) *Issue {
@@ -109,17 +224,7 @@ func validateDirectSpec(direct *corev1alpha1.DirectOutboundAccess) *Issue {
 	if issue := validateClientAuthentication(direct.ClientAuthentication); issue != nil {
 		return issue
 	}
-	header := defaultCredentialHeader
-	if direct.Output != nil && strings.TrimSpace(direct.Output.Header) != "" {
-		header = direct.Output.Header
-	}
-	if err := ValidateCredentialHeader(header); err != nil {
-		return invalid(err.Error())
-	}
-	if direct.Output != nil && direct.Output.Prefix != nil && strings.ContainsAny(*direct.Output.Prefix, "\r\n") {
-		return invalid("output prefix must not contain carriage returns or newlines")
-	}
-	return nil
+	return validateCredentialOutput(direct.Output)
 }
 
 func validateTokenEndpoint(endpoint corev1alpha1.OutboundTokenEndpoint) *Issue {
@@ -308,16 +413,27 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 	if issue := ValidateSpec(policy); issue != nil {
 		return issue, nil
 	}
+	if connection := policy.Spec.Connection; connection != nil {
+		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
+	}
+	if policy.Spec.AgentIdentity != nil {
+		// The identity comes from the Task binding at call time. Only a
+		// delegated policy references a cluster object: its provider.
+		if provider, ok := ConnectionProviderName(policy); ok {
+			return resolveConnectorProvider(ctx, reader, policy.Namespace, provider)
+		}
+		return nil, nil
+	}
 	if policy.Spec.Direct != nil {
 		direct := policy.Spec.Direct
 		if issue, err := resolveTokenEndpoint(ctx, reader, policy.Namespace, direct.TokenEndpoint, trust.TokenEndpoints); issue != nil || err != nil {
 			return issue, err
 		}
-		if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, direct.Subject); issue != nil || err != nil {
+		if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, direct.Subject, trust); issue != nil || err != nil {
 			return issue, err
 		}
 		if direct.Actor != nil {
-			if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, *direct.Actor); issue != nil || err != nil {
+			if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, *direct.Actor, trust); issue != nil || err != nil {
 				return issue, err
 			}
 		}
@@ -349,7 +465,9 @@ func resolveTokenEndpoint(ctx context.Context, reader client.Reader, namespace s
 	return resolveService(ctx, reader, namespace, *endpoint.ServiceRef, trusted)
 }
 
-func resolveTokenSource(ctx context.Context, reader client.Reader, namespace string, source corev1alpha1.OutboundTokenSource) (*Issue, error) {
+func resolveTokenSource(
+	ctx context.Context, reader client.Reader, namespace string, source corev1alpha1.OutboundTokenSource, trust TrustConfig,
+) (*Issue, error) {
 	switch source.Source {
 	case corev1alpha1.OutboundTokenSourceSecretRef:
 		return resolveSecret(ctx, reader, namespace, *source.SecretRef)
@@ -361,6 +479,15 @@ func resolveTokenSource(ctx context.Context, reader client.Reader, namespace str
 				return unresolved(ReasonReferenceNotFound, "referenced ServiceAccount was not found"), nil
 			}
 			return nil, fmt.Errorf("resolve outbound ServiceAccount reference: %w", err)
+		}
+		// A ServiceAccount source lets the AI worker request that account's
+		// token. Orka's own accounts (the controller, other workers, proxies,
+		// publisher) must never be one: the worker would gain their authority.
+		// Its own account is exempt; that token gives it nothing new.
+		platform := serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
+			trust.platformServiceAccount(namespace, serviceAccount.Name)
+		if platform && !trust.tokenRequester(namespace, serviceAccount.Name) {
+			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}
 	return nil, nil
@@ -422,6 +549,22 @@ func resolveTLS(ctx context.Context, reader client.Reader, namespace string, con
 	return nil, nil
 }
 
+// resolveConnectorProvider verifies the same-namespace ConnectorProvider
+// exists and is Accepted with resolved references for its current generation.
+func resolveConnectorProvider(ctx context.Context, reader client.Reader, namespace, name string) (*Issue, error) {
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, provider); err != nil {
+		if apierrors.IsNotFound(err) {
+			return unresolved(ReasonReferenceNotFound, "referenced ConnectorProvider was not found"), nil
+		}
+		return nil, fmt.Errorf("resolve connector provider reference: %w", err)
+	}
+	if !connectors.ProviderAccepted(provider) {
+		return unresolved(ReasonReferenceInvalid, "referenced ConnectorProvider is not accepted for its current generation"), nil
+	}
+	return nil, nil
+}
+
 func resolveSecret(ctx context.Context, reader client.Reader, policyNamespace string, ref corev1alpha1.NamespacedSecretKeySelector) (*Issue, error) {
 	namespace := strings.TrimSpace(ref.Namespace)
 	if namespace == "" {
@@ -465,8 +608,34 @@ func ValidateCredentialHeader(name string) error {
 	switch strings.ToLower(name) {
 	case "host", "content-length", "transfer-encoding", "connection", "trailer", "upgrade", "proxy-connection":
 		return fmt.Errorf("output header %q is managed by net/http", name)
+	case "traceparent", "tracestate", "baggage":
+		// Trace propagation writes these on the outbound request; a
+		// credential bound to one would be overwritten or would leak
+		// into telemetry context.
+		return fmt.Errorf("output header %q is reserved for trace propagation", name)
+	case "content-type":
+		// Every Tool request carries its own Content-Type before outbound
+		// access applies, so a credential bound to it would collide on
+		// every call: such a policy could be accepted but never used.
+		return fmt.Errorf("output header %q is set by the request body", name)
+	case "idempotency-key":
+		// Brokered consequential calls carry their approval operation key
+		// here before outbound access applies; a credential bound to it
+		// would collide on every write.
+		return fmt.Errorf("output header %q carries the approval operation key", name)
 	}
 	return nil
+}
+
+// validHeaderValueBytes reports whether value is a valid HTTP field value:
+// visible ASCII, spaces, tabs, and obs-text, with no other control byte.
+func validHeaderValueBytes(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < ' ' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validHeaderName(name string) bool {

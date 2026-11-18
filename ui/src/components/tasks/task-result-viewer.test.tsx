@@ -18,6 +18,52 @@ describe('TaskResultViewer', () => {
     useAuthStore.setState({ token: 'test-token' })
   })
 
+  it('loads a terminal task result without a click and keeps a manual refresh', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => {
+        calls += 1
+        return HttpResponse.json({ result: `final answer ${calls}` })
+      }),
+    )
+    const user = userEvent.setup()
+    const { container } = render(<TaskResultViewer taskId="done-task" taskPhase="Succeeded" taskUid="u1" />)
+    expect(await screen.findByText('final answer 1')).toBeInTheDocument()
+    expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
+    // Long results grow with the page and wrap instead of hiding behind a short cap.
+    const pre = container.querySelector('pre')!
+    expect(pre.className).not.toMatch(/max-h-/)
+    expect(pre).toHaveClass('break-words')
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('final answer 2')).toBeInTheDocument()
+  })
+
+  it('says a terminal task recorded no result on 404', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ message: 'not found' }, { status: 404 })),
+    )
+    render(<TaskResultViewer taskId="failed-task" taskPhase="Failed" />)
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('No result was recorded for this task.')
+    })
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
+  })
+
+  it('waits for an explicit load while the task is still running', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => {
+        calls += 1
+        return HttpResponse.json({ result: 'partial' })
+      }),
+    )
+    render(<TaskResultViewer taskId="running-task" taskPhase="Running" />)
+    expect(screen.getByText('Load Result')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(calls).toBe(0)
+  })
+
   it('initial state shows "Load Result" button', () => {
     render(<TaskResultViewer taskId="task-1" />)
     expect(screen.getByText('Load Result')).toBeInTheDocument()
@@ -65,6 +111,80 @@ describe('TaskResultViewer', () => {
     await waitFor(() => {
       expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
     })
+  })
+
+  it('holds the loading state while the first request is unresolved', async () => {
+    let release: (value: unknown) => void = () => {}
+    const gate = new Promise((resolve) => { release = resolve })
+    server.use(
+      http.get('/api/v1/tasks/:id/result', async () => {
+        await gate
+        return HttpResponse.json({ result: 'held result' })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-held" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-loading')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('held result')).not.toBeInTheDocument()
+    release('')
+    await waitFor(() => {
+      expect(screen.getByText('held result')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a server error with Retry and recovers on retry', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ error: { code: 500, message: 'result store failed' } }, { status: 500 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-err" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('result store failed')
+    })
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+    expect(screen.queryByText('No result available', { exact: false })).not.toBeInTheDocument()
+
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result: 'recovered' })),
+    )
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => {
+      expect(screen.getByText('recovered')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a distinct unavailable state on 404', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ message: 'not found' }, { status: 404 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-missing" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('No result available for this task yet.')
+    })
+    expect(screen.getByRole('button', { name: /load result/i })).toBeInTheDocument()
+  })
+
+  it('shows a network failure with Retry', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.error()),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-net" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })
 
   it('renders structured result with verdict badge', async () => {
@@ -138,6 +258,53 @@ describe('TaskResultViewer', () => {
       expect(screen.getByText('{"foo": "bar"}')).toBeInTheDocument()
     })
     expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    '{"files":"README.md"}',
+    '{"summary":{"text":"done"}}',
+    '{"diff":{"patch":"example"}}',
+    '{"files":["README.md",42]}',
+    '{"version":1,"summary":"","data":{"count":2}}',
+    '{"diff":"","data":{"count":2}}',
+    '{"verdict":"","data":{"count":2}}',
+    '{"feedback":"","data":{"count":2}}',
+    '{"pushBranch":"","data":{"count":2}}',
+    '{"files":[],"data":{"count":2}}',
+    '{"summary":"","diff":"","verdict":"","feedback":"","pushBranch":"","files":[],"data":{"count":2}}',
+  ])('falls back to complete plain text for unrenderable structured result %s', async (result) => {
+    const resultText = `\n${result}\n`
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result: resultText })),
+    )
+    const { container } = render(<TaskResultViewer taskId="task-fallback" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(container.querySelector('pre')?.textContent).toBe(resultText)
+    })
+    expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { fields: { summary: 'Task finished' }, text: 'Task finished' },
+    { fields: { files: ['README.md'] }, text: 'README.md' },
+    { fields: { pushBranch: 'feature/test' }, text: 'feature/test' },
+  ])('renders nonempty structured fields alongside empty optional fields: $text', async ({ fields, text }) => {
+    const result = JSON.stringify({
+      summary: '', diff: '', verdict: '', feedback: '', pushBranch: '', files: [],
+      data: { count: 2 },
+      ...fields,
+    })
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result })),
+    )
+    render(<TaskResultViewer taskId="task-partial" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByText(text)).toBeInTheDocument()
+    })
   })
 
   it('renders structured result with diff section', async () => {

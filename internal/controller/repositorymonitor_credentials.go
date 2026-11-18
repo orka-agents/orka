@@ -82,7 +82,7 @@ func repositoryMonitorWriteCredentialsRequired(monitor *corev1alpha1.RepositoryM
 }
 
 func repositoryMonitorForgeCredentialsRequired(monitor *corev1alpha1.RepositoryMonitor) bool {
-	return monitor != nil && (repositoryMonitorWriteCredentialsRequired(monitor) || monitor.Spec.Triggers.GitHub.Labels.Enabled)
+	return monitor != nil && (repositoryMonitorWriteCredentialsRequired(monitor) || monitor.Spec.Triggers.GitHub.Labels.Enabled || monitor.Spec.Review.Publish.Enabled || monitor.Spec.Repair.Enabled)
 }
 
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorCredentialRefs(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {

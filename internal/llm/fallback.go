@@ -150,14 +150,18 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 
 		innerCh, err := c.provider.Stream(ctx, callReq)
 		if err != nil {
+			if IsUsagePersistenceError(err) {
+				return nil, err
+			}
 			lastErr = err
 			logger.Info("provider stream failed, trying fallback",
 				"provider", c.provider.Name(), "error", err)
 			continue
 		}
 
-		// Peek at first chunk
-		firstChunk, ok := <-innerCh
+		// Usage can arrive before output or an initial stream error. The
+		// provider's recorder retains it independently of fallback selection.
+		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
 			close(ch)
@@ -168,6 +172,12 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			lastErr = firstChunk.Error
 			// Drain remaining
 			for range innerCh {
+			}
+			if IsUsagePersistenceError(firstChunk.Error) {
+				ch := make(chan StreamChunk, 1)
+				ch <- firstChunk
+				close(ch)
+				return ch, nil
 			}
 
 			if f.tracker != nil {
@@ -206,6 +216,15 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 	close(ch)
 	return ch, nil
+}
+
+func firstStreamResult(ch <-chan StreamChunk) (StreamChunk, bool) {
+	for chunk := range ch {
+		if chunk.Content != "" || chunk.ToolCall != nil || chunk.Done || chunk.Error != nil {
+			return chunk, true
+		}
+	}
+	return StreamChunk{}, false
 }
 
 func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) StreamChunk {

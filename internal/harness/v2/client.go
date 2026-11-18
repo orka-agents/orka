@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -45,9 +47,26 @@ type Client struct {
 	maxJSONResponseBytes int64
 	maxErrorBodyBytes    int64
 	traceReliable        bool
+	beforeMutation       func(context.Context, string) error
 
 	limitsMu sync.RWMutex
 	limits   ProtocolLimits
+}
+
+// WithBeforeMutation installs a fail-closed check that runs immediately before
+// every mutating request is encoded, capability-signed, and sent. The check's
+// context reserves half of the effective remaining window, bounded by both the
+// request metadata expiry and caller deadline, for the mutation itself. It is
+// intended for callers that must revalidate external authority between
+// otherwise independent mutations.
+func WithBeforeMutation(validate func(context.Context, string) error) ClientOption {
+	return func(c *Client) error {
+		if validate == nil {
+			return fmt.Errorf("before-mutation validator is required")
+		}
+		c.beforeMutation = validate
+		return nil
+	}
 }
 
 func WithHTTPClient(httpClient *http.Client) ClientOption {
@@ -63,7 +82,7 @@ func WithHTTPClient(httpClient *http.Client) ClientOption {
 			return http.ErrUseLastResponse
 		}
 		c.httpClient = &clone
-		c.traceReliable = transportSupportsHTTPTrace(clone.Transport)
+		c.traceReliable = TransportSupportsHTTPTrace(clone.Transport)
 		return nil
 	}
 }
@@ -270,6 +289,31 @@ func (c *Client) FinalizeRuntimeSessionPublication(ctx context.Context, sessionI
 	return &response, nil
 }
 
+func (c *Client) CaptureNativeSession(ctx context.Context, sessionID RuntimeSessionID, request CaptureNativeSessionRequest) (*CaptureNativeSessionResponse, error) {
+	const operation = "capture_native_session"
+	if err := request.ValidateAt(time.Now().UTC()); err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	relative, err := RuntimeSessionNativeSessionPath(sessionID)
+	if err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	var response CaptureNativeSessionResponse
+	if err := c.mutateJSON(ctx, operation, http.MethodPost, relative, request.Metadata, request, &response); err != nil {
+		return nil, err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return nil, c.protocolError(operation, 0, err)
+	}
+	if len(response.Snapshot.Data) > c.protocolLimits().EffectiveMaxNativeSessionBytes() {
+		return nil, c.protocolError(operation, 0, fmt.Errorf("native capture exceeds runtime bundle limit"))
+	}
+	if response.Session.RuntimeSessionID != sessionID {
+		return nil, c.protocolError(operation, 0, fmt.Errorf("native capture response session ID does not match request path"))
+	}
+	return &response, nil
+}
+
 func (c *Client) DeleteRuntimeSession(ctx context.Context, sessionID RuntimeSessionID, request DeleteRuntimeSessionRequest) (*DeleteRuntimeSessionResponse, error) {
 	const operation = "delete_runtime_session"
 	now := time.Now().UTC()
@@ -429,6 +473,9 @@ func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative 
 		return c.validationError(operation, err)
 	}
 	setCommonHeaders(req, "application/json")
+	if operation == "capabilities" {
+		req.Header.Set(NativeSessionLimitsHeader, "1")
+	}
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	}
@@ -465,13 +512,39 @@ func (c *Client) mutateJSON(
 	if err := c.requireMutationAuth(operation); err != nil {
 		return err
 	}
+	if err := c.validateBeforeMutation(ctx, operation, metadata.ExpiresAt); err != nil {
+		if clientErr, ok := errors.AsType[*ClientError](err); ok {
+			copy := *clientErr
+			copy.WriteEvidence = RequestWriteEvidence{State: RequestWriteZeroBytes}
+			err = &copy
+		}
+		return err
+	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return c.validationError(operation, fmt.Errorf("encode request: %w", err))
 	}
 	limits := c.protocolLimits()
-	if len(payload) > limits.MaxRequestBytes {
-		return c.validationError(operation, fmt.Errorf("request body is %d bytes, limit %d", len(payload), limits.MaxRequestBytes))
+	requestLimit := limits.MaxRequestBytes
+	responseLimit := c.maxJSONResponseBytes
+	if create, ok := input.(CreateRuntimeSessionRequest); ok && create.NativeRestore != nil {
+		if len(create.NativeRestore.Snapshot.Data) > limits.EffectiveMaxNativeSessionBytes() {
+			return c.validationError(operation, fmt.Errorf("native restore exceeds runtime bundle limit %d", limits.EffectiveMaxNativeSessionBytes()))
+		}
+		// Only the bundle earns the larger body allowance. All other fields
+		// remain within the negotiated ordinary request limit.
+		create.NativeRestore = nil
+		ordinary, err := json.Marshal(create)
+		if err != nil || len(ordinary) > limits.MaxRequestBytes {
+			return c.validationError(operation, fmt.Errorf("native restore metadata exceeds ordinary request limit"))
+		}
+		requestLimit = NativeSessionJSONLimit(limits.EffectiveMaxNativeSessionBytes())
+	}
+	if operation == "capture_native_session" {
+		responseLimit = int64(NativeSessionJSONLimit(limits.EffectiveMaxNativeSessionBytes()))
+	}
+	if len(payload) > requestLimit {
+		return c.validationError(operation, fmt.Errorf("request body is %d bytes, limit %d", len(payload), requestLimit))
 	}
 	capability, err := SignOperationCapability(c.capabilitySecret, ClaimsForMutation(metadata))
 	if err != nil {
@@ -490,6 +563,9 @@ func (c *Client) mutateJSON(
 	}
 	setCommonHeaders(req, "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	if operation == "capture_native_session" {
+		req.Header.Set(NativeSessionLimitsHeader, "1")
+	}
 	req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	req.Header.Set(OperationCapabilityHeader, capability)
 	resp, err := c.httpClient.Do(req)
@@ -503,19 +579,56 @@ func (c *Client) mutateJSON(
 	if err := requireMediaType(resp.Header.Get("Content-Type"), "application/json"); err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
-	body, err := readBoundedResponseBody(resp, c.maxJSONResponseBytes)
+	body, err := readBoundedResponseBody(resp, responseLimit)
 	if err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
-	if envelope, ok, envelopeErr := decodeErrorEnvelope(body); envelopeErr != nil {
+	if envelope, ok, envelopeErr := decodeErrorEnvelopeWithLimit(body, int(responseLimit)); envelopeErr != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, envelopeErr, tracker.evidence(), capability)
 	} else if ok {
 		return c.httpError(operation, resp.StatusCode, envelope, tracker.evidence(), capability)
 	}
-	if err := decodeSuccessJSON(body, output); err != nil {
+	if err := decodeSuccessJSONWithLimit(body, output, int(responseLimit)); err != nil {
 		return c.protocolErrorWithEvidence(operation, resp.StatusCode, err, tracker.evidence(), capability)
 	}
 	return nil
+}
+
+func (c *Client) validateBeforeMutation(ctx context.Context, operation string, expiresAt time.Time) error {
+	if c == nil || c.beforeMutation == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	effectiveDeadline := expiresAt
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(effectiveDeadline) {
+		effectiveDeadline = callerDeadline
+	}
+	now := time.Now()
+	remaining := effectiveDeadline.Sub(now)
+	if remaining <= 0 {
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check: mutation deadline elapsed before revalidation"), false)
+	}
+	validationCtx, cancel := context.WithDeadline(ctx, now.Add(remaining/2))
+	defer cancel()
+	if err := c.beforeMutation(validationCtx, operation); err != nil {
+		retryable := preMutationRetryable(err) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check: %w", err), retryable)
+	}
+	if err := validationCtx.Err(); err != nil {
+		retryable := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		return c.preMutationValidationError(operation, fmt.Errorf("pre-mutation authority check exceeded its reserved deadline: %w", err), retryable)
+	}
+	return nil
+}
+
+func (c *Client) preMutationValidationError(operation string, err error, retryable bool) error {
+	message := c.redact(err.Error(), "")
+	return &ClientError{
+		Operation: operation, Kind: ClientErrorValidation, Retryable: retryable,
+		Message: message, cause: ErrClientValidation,
+	}
 }
 
 func (c *Client) decodeHTTPError(operation string, response *http.Response, tracker *requestTrace, capability string) error {
@@ -775,10 +888,14 @@ func readBoundedResponseBody(response *http.Response, limit int64) ([]byte, erro
 }
 
 func decodeSuccessJSON(body []byte, output any) error {
+	return decodeSuccessJSONWithLimit(body, output, MaxCanonicalJSONBytes)
+}
+
+func decodeSuccessJSONWithLimit(body []byte, output any, limit int) error {
 	if output == nil {
 		return fmt.Errorf("response target is required")
 	}
-	if _, err := parseCanonicalJSON(body); err != nil {
+	if _, err := parseCanonicalJSONWithLimit(body, limit); err != nil {
 		return fmt.Errorf("invalid JSON response: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -793,7 +910,11 @@ func decodeSuccessJSON(body []byte, output any) error {
 }
 
 func decodeErrorEnvelope(body []byte) (ErrorResponse, bool, error) {
-	if _, err := parseCanonicalJSON(body); err != nil {
+	return decodeErrorEnvelopeWithLimit(body, MaxCanonicalJSONBytes)
+}
+
+func decodeErrorEnvelopeWithLimit(body []byte, limit int) (ErrorResponse, bool, error) {
+	if _, err := parseCanonicalJSONWithLimit(body, limit); err != nil {
 		return ErrorResponse{}, false, fmt.Errorf("invalid JSON error response: %w", err)
 	}
 	var discriminator struct {
@@ -842,17 +963,23 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		return nil
 	}
 	allowed := map[ErrorCode]map[int]struct{}{
-		ErrorCodeInvalidRequest:  {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
-		ErrorCodeUnauthenticated: {http.StatusUnauthorized: {}},
-		ErrorCodeForbidden:       {http.StatusForbidden: {}},
-		ErrorCodeExpired:         {http.StatusGone: {}},
-		ErrorCodeStaleFence:      {http.StatusGone: {}},
-		ErrorCodeDigestConflict:  {http.StatusConflict: {}},
-		ErrorCodeAlreadyAccepted: {http.StatusConflict: {}},
-		ErrorCodeSettled:         {http.StatusGone: {}},
-		ErrorCodeRateLimited:     {http.StatusTooManyRequests: {}},
-		ErrorCodeSessionPoisoned: {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
-		ErrorCodeOutcomeUnknown:  {http.StatusInternalServerError: {}},
+		ErrorCodeInvalidRequest:           {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
+		ErrorCodeUnauthenticated:          {http.StatusUnauthorized: {}},
+		ErrorCodeForbidden:                {http.StatusForbidden: {}},
+		ErrorCodeExpired:                  {http.StatusGone: {}},
+		ErrorCodeStaleFence:               {http.StatusGone: {}},
+		ErrorCodeDigestConflict:           {http.StatusConflict: {}},
+		ErrorCodeAlreadyAccepted:          {http.StatusConflict: {}},
+		ErrorCodeSettled:                  {http.StatusGone: {}},
+		ErrorCodeRateLimited:              {http.StatusTooManyRequests: {}},
+		ErrorCodeSessionPoisoned:          {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
+		ErrorCodePromptNotAccepted:        {http.StatusConflict: {}},
+		ErrorCodeNativeCaptureUnsupported: {http.StatusUnprocessableEntity: {}},
+		ErrorCodeNativeCaptureNotStarted:  {http.StatusConflict: {}},
+		ErrorCodeNativeCaptureRetryReady:  {http.StatusInternalServerError: {}},
+		ErrorCodeWorkspaceResumeLost:      {http.StatusConflict: {}},
+		ErrorCodeOutcomeUnknown:           {http.StatusInternalServerError: {}},
+		ErrorCodeCleanupUnproven:          {http.StatusConflict: {}},
 	}
 	statuses, ok := allowed[response.Code]
 	if !ok {
@@ -952,13 +1079,28 @@ func newTrackedRequest(ctx context.Context, method, endpoint string, payload []b
 	// PUT/DELETE after a connection failure. Replay classification belongs to the
 	// durable controller state machine, never the transport.
 	request.GetBody = nil
+	// Trace context is transport metadata, never canonical JSON or capability claims.
+	// Deliberately exclude baggage.
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(request.Header))
 	return request, nil
 }
 
-func transportSupportsHTTPTrace(roundTripper http.RoundTripper) bool {
+// HTTPTraceDelegatingTransport is implemented by wrapping RoundTrippers that
+// pass every request context unchanged to a transport whose httptrace evidence
+// is exact, such as a wrapper that only adds a routing header.
+type HTTPTraceDelegatingTransport interface {
+	DelegatesHTTPTrace() bool
+}
+
+// TransportSupportsHTTPTrace reports whether httptrace hooks observe the real
+// connection and request writes for this RoundTripper.
+func TransportSupportsHTTPTrace(roundTripper http.RoundTripper) bool {
 	if roundTripper == nil {
 		return true
 	}
-	_, ok := roundTripper.(*http.Transport)
-	return ok
+	if _, ok := roundTripper.(*http.Transport); ok {
+		return true
+	}
+	delegating, ok := roundTripper.(HTTPTraceDelegatingTransport)
+	return ok && delegating.DelegatesHTTPTrace()
 }

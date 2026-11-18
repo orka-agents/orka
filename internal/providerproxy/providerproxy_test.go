@@ -379,3 +379,18 @@ func TestWriteError(t *testing.T) {
 		t.Fatalf("body = %q", recorder.Body.String())
 	}
 }
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestStreamBoundedResponseWrapsDestinationWriteErrors(t *testing.T) {
+	writeErr := errors.New("broken pipe")
+	err := StreamBoundedResponse(failingWriter{err: writeErr}, strings.NewReader("data: {}\n\n"), 1<<20, nil)
+	if !errors.Is(err, ErrDestinationWrite) || !errors.Is(err, writeErr) {
+		t.Fatalf("StreamBoundedResponse destination error = %v, want ErrDestinationWrite wrapping the write error", err)
+	}
+	if err := StreamBoundedResponse(io.Discard, strings.NewReader("0123456789"), 4, nil); !errors.Is(err, ErrResponseTooLarge) || errors.Is(err, ErrDestinationWrite) {
+		t.Fatalf("oversized stream error = %v, want ErrResponseTooLarge only", err)
+	}
+}

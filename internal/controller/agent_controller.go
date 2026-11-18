@@ -9,10 +9,16 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/agentidentity"
+
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,21 +26,76 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/outboundaccess"
+)
+
+const (
+	conditionReasonReady = "Ready"
 )
 
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Mode is the controller's static execution mode. A built-in Agent that
+	// omitted contractVersion is stamped with it on first reconcile so the
+	// stored object carries its classification.
+	Mode executionmode.Mode
+	// ToolboxPolicy gates runtime.toolboxes at admission with the same rules
+	// Task planning applies.
+	ToolboxPolicy ACPToolboxPolicy
+	// Identity configures external Agent identities (ADR 0039).
+	Identity agentidentity.Config
+	// APIReader reads live state for identity claims, so two Agents never
+	// claim one identity from a stale cache.
+	APIReader client.Reader
+	// IdentityVerifier proves identities with their issuer. Nil leaves them
+	// declared but unverified.
+	IdentityVerifier AgentIdentityVerifier
+
+	// issuerBackoff holds back verification for every Agent after the
+	// issuer could not answer, so an outage costs one timeout, not one per
+	// Agent on the single reconcile worker.
+	issuerBackoff struct {
+		sync.Mutex
+		until time.Time
+	}
+	// verifications holds each Agent's last answer from its issuer until it
+	// may be asked again, so the Agent's own status writes, which requeue
+	// it, never ask the issuer again early.
+	verifications struct {
+		sync.Mutex
+		byAgent map[types.NamespacedName]agentIdentityVerification
+	}
+}
+
+// AgentIdentityVerifier proves an Agent's identity with its issuer.
+type AgentIdentityVerifier interface {
+	Verify(context.Context, *corev1alpha1.Agent) error
 }
 
 const (
+	// conditionTypeIdentityVerified reports whether an Agent's identity has
+	// been verified with its issuer.
+	conditionTypeIdentityVerified = outboundaccess.AgentConditionIdentityVerified
+	reasonIdentityDeclared        = "Declared"
+)
+
+const (
+	agentSoulConfigMapDependenciesField = "agent.soulConfigMapDependencies"
+
+	agentReasoningEffortNone   = "none"
 	agentReasoningEffortLow    = "low"
 	agentReasoningEffortMedium = "medium"
 	agentReasoningEffortHigh   = "high"
@@ -44,11 +105,15 @@ const (
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/status,verbs=get;update;patch
+// The API binds Agent identities only for callers it has checked for `bind`,
+// and writes them as the controller.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentidentities/entra,verbs=bind
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile validates the Agent configuration and updates its status.
@@ -59,6 +124,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	agent := &corev1alpha1.Agent{}
 	if err := r.Get(ctx, req.NamespacedName, agent); err != nil {
 		if errors.IsNotFound(err) {
+			r.forgetAgentIdentityVerification(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -66,8 +132,28 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	logger.Info("Reconciling Agent", "agent", agent.Name)
 
+	if r.Mode != "" && agentOmitsBuiltInContract(agent) {
+		if err := executionmode.DefaultBuiltInAgentContract(agent, r.Mode); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.Update(ctx, agent); err != nil {
+			// A conflict just means the object moved; returning the error
+			// requeues with backoff and the next pass reads the fresh copy.
+			return ctrl.Result{}, fmt.Errorf("persist built-in Agent contract: %w", err)
+		}
+		logger.Info("Stamped built-in Agent with the namespace execution mode", "agent", agent.Name, "contract", *agent.Spec.Runtime.ContractVersion)
+	}
+
 	// Validate the agent configuration
 	validationErr := r.validateAgent(ctx, agent)
+	claim, claimErr := r.reconcileIdentityClaim(ctx, agent)
+	if validationErr == nil && claimErr != nil {
+		validationErr = claimErr
+	}
+	identity := r.verifyAgentIdentity(ctx, agent, validationErr)
+	if validationErr == nil && identity.err != nil {
+		validationErr = identity.err
+	}
 
 	// Count active tasks referencing this agent
 	activeTasks, err := r.countActiveTasks(ctx, agent)
@@ -82,14 +168,33 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Update status
-	return r.updateStatus(ctx, agent, activeTasks, validationErr)
+	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim, identity)
+	if err == nil && identity.retryAfter > 0 && (result.RequeueAfter == 0 || result.RequeueAfter > identity.retryAfter) {
+		result.RequeueAfter = identity.retryAfter
+	}
+	if err == nil && identity.declared && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReverifyInterval) {
+		// Identities can be disabled or deleted at the issuer at any time.
+		result.RequeueAfter = agentIdentityReverifyInterval
+	}
+	if err == nil && claim != nil && claim.Releasing && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReleaseRecheck) {
+		// The release finishes on a later pass, once bound Tasks are done.
+		result.RequeueAfter = agentIdentityReleaseRecheck
+	}
+	return result, err
 }
 
 // validateAgent validates the Agent's referenced resources exist and config is coherent.
 func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if err := r.validateAgentIdentity(ctx, agent); err != nil {
+		return err
+	}
 	// Runtime and providerRef are mutually exclusive
 	if agent.Spec.Runtime != nil && agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("runtime and providerRef are mutually exclusive")
+	}
+
+	if err := validateAgentModelLimits(agent.Spec.Model); err != nil {
+		return err
 	}
 
 	// For non-runtime agents, validate model config
@@ -98,6 +203,14 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return fmt.Errorf("either providerRef or model.provider must be specified")
 		}
 	} else {
+		if agent.Spec.Runtime.RuntimeRef != nil {
+			if strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == "" {
+				return fmt.Errorf("runtimeRef.name is required")
+			}
+			if err := validateRuntimeRefAgentTaskRestrictions(nil, agent); err != nil {
+				return err
+			}
+		}
 		if err := validateACPAgentModelControls(agent.Spec.Runtime, agent.Spec.Model); err != nil {
 			return err
 		}
@@ -107,6 +220,15 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 			return err
 		}
+		if err := r.ToolboxPolicy.ValidateAgentToolboxes(withEffectiveBuiltInContract(agent, r.Mode)); err != nil {
+			return err
+		}
+		if err := r.ToolboxPolicy.ValidateAgentSkills(withEffectiveBuiltInContract(agent, r.Mode)); err != nil {
+			return err
+		}
+		if err := validateAgentRuntimeCeiling(nil, agent); err != nil {
+			return fmt.Errorf("runtime defaults exceed the ceiling: %w", err)
+		}
 	}
 
 	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
@@ -114,6 +236,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	}
 
 	if err := r.validateProviderRef(ctx, agent); err != nil {
+		return err
+	}
+	if err := r.validateRuntimeRef(ctx, agent); err != nil {
 		return err
 	}
 	if err := r.validateSecretRef(ctx, agent); err != nil {
@@ -128,7 +253,26 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	if err := r.validateSystemPromptConfigMap(ctx, agent); err != nil {
 		return err
 	}
+	if err := r.validateDefaultInstructions(ctx, agent); err != nil {
+		return err
+	}
 	return r.validateCoordination(ctx, agent)
+}
+
+// validateAgentModelLimits rejects token limits that Agents admitted before
+// the CRD bounds existed can still carry. Workers otherwise silently replace
+// a non-positive maxTokens with their default.
+func validateAgentModelLimits(model *corev1alpha1.ModelConfig) error {
+	if model == nil {
+		return nil
+	}
+	if model.MaxTokens != nil && *model.MaxTokens < 0 {
+		return fmt.Errorf("spec.model.maxTokens must not be negative")
+	}
+	if model.ContextWindow != nil && *model.ContextWindow < 1 {
+		return fmt.Errorf("spec.model.contextWindow must be positive")
+	}
+	return nil
 }
 
 func isBuiltInACPProviderRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
@@ -160,10 +304,10 @@ func validateAgentRuntimeReasoningEffort(runtimeCfg *corev1alpha1.AgentCLIRuntim
 	switch runtimeCfg.Type {
 	case corev1alpha1.AgentRuntimeCodex:
 		switch effort {
-		case agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
+		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
 			return nil
 		default:
-			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be low, medium, high, or xhigh", effort)
+			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, or xhigh", effort)
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 		switch effort {
@@ -204,6 +348,69 @@ func (r *AgentReconciler) validateProviderRef(ctx context.Context, agent *corev1
 		return fmt.Errorf("referenced provider %q is not ready", agent.Spec.ProviderRef.Name)
 	}
 	return nil
+}
+
+// validateRuntimeRef reports a runtime.runtimeRef whose AgentRuntime does not
+// exist in the Agent's namespace. Dispatch still resolves the runtime and
+// checks its live readiness in the Task namespace.
+func (r *AgentReconciler) validateRuntimeRef(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, &corev1alpha1.AgentRuntime{}); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced AgentRuntime %q not found", name)
+		}
+		return fmt.Errorf("failed to get AgentRuntime %q: %w", name, err)
+	}
+	return nil
+}
+
+// agentsForAgentRuntime re-validates the Agents whose runtimeRef names an
+// AgentRuntime that was created or deleted.
+func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for AgentRuntime", "agentRuntime", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == obj.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
+}
+
+// agentsForProvider maps a Provider to the Agents that reference it. A
+// providerRef may name another namespace, so Agents in every watched namespace
+// are matched on the reference's effective namespace.
+func (r *AgentReconciler) agentsForProvider(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for Provider", "provider", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		ref := agent.Spec.ProviderRef
+		if ref == nil || ref.Name != obj.GetName() {
+			continue
+		}
+		namespace := ref.Namespace
+		if namespace == "" {
+			namespace = agent.Namespace
+		}
+		if namespace == obj.GetNamespace() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
 }
 
 // validateSecretRef validates the secretRef if set.
@@ -326,8 +533,7 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 	for i := range taskList.Items {
 		task := &taskList.Items[i]
 		if task.Spec.AgentRef != nil && task.Spec.AgentRef.Name == agent.Name {
-			phase := task.Status.Phase
-			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+			if !task.Status.Phase.IsTerminal() {
 				count++
 			}
 		}
@@ -336,7 +542,7 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
-func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error) (ctrl.Result, error) {
+func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim, identity agentIdentityState) (ctrl.Result, error) {
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
@@ -346,7 +552,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
 	}
@@ -362,17 +568,36 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
+	setAgentIdentityCondition(agent, now, identity)
+	observedClaim := agent.Status.IdentityClaim.DeepCopy()
+	agent.Status.IdentityClaim = claim.DeepCopy()
 
 	activeCount := activeTasks // capture for closure
 	lastUsed := agent.Status.LastUsed
+	decidedUID, decidedGeneration := agent.UID, agent.Generation
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, agent); err != nil {
 			return err
+		}
+		// Validation, the claim, and identity verification judged one
+		// generation of one Agent. Never record them on a recreated or
+		// edited Agent, which could name another identity; the edit
+		// requeues the Agent, and the error retries this pass.
+		if agent.UID != decidedUID || agent.Generation != decidedGeneration {
+			return fmt.Errorf("agent changed while its status was being decided")
 		}
 		agent.Status.ActiveTasks = activeCount
 		agent.Status.Ready = validationErr == nil
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
+		setAgentIdentityCondition(agent, now, identity)
+		// The claim was decided from observedClaim; never write it over a
+		// claim that changed since.
+		if !apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, observedClaim) &&
+			!apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, claim) {
+			return fmt.Errorf("identity claim changed while it was being decided")
+		}
+		agent.Status.IdentityClaim = claim.DeepCopy()
 		return r.Status().Update(ctx, agent)
 	}); err != nil {
 		return ctrl.Result{}, err
@@ -393,12 +618,23 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		}
 	}
 
+	// A failed validation usually waits on something created later (a
+	// Secret, Provider, or AgentRuntime); Secrets are not watched, so recheck.
+	if validationErr != nil {
+		return ctrl.Result{RequeueAfter: agentValidationRecheckInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
+// agentValidationRecheckInterval paces rechecks of an Agent whose referenced
+// resources were missing.
+const agentValidationRecheckInterval = 30 * time.Second
+
 // checkTTLExpiry deletes the agent if its TTL has expired and no tasks are active.
 func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32) (ctrl.Result, bool) {
-	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration == 0 {
+	// Zero means permanent; a negative TTL is invalid and must never delete.
+	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration <= 0 {
 		return ctrl.Result{}, false
 	}
 	if activeTasks > 0 {
@@ -426,10 +662,119 @@ func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha
 	return ctrl.Result{}, true
 }
 
+// agentValidatesDefaultInstructions excludes external and legacy runtimes, whose
+// prompt delivery is not described by the built-in v2 configuration validators.
+func agentValidatesDefaultInstructions(agent *corev1alpha1.Agent) bool {
+	if agent == nil {
+		return false
+	}
+	if agent.Spec.Runtime == nil {
+		return true
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil || agent.BuiltInContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return false
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude,
+		corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// validateDefaultInstructions checks the Agent's default role and soul against
+// the same delivery guards as execution. A Task can override the role or other
+// controls; readiness does not describe those Task-specific configurations.
+func (r *AgentReconciler) validateDefaultInstructions(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if err := validateSoulRuntime(agent); err != nil {
+		return err
+	}
+	soul, err := agentcontext.ResolveSoul(ctx, r.Client, agent)
+	if err != nil {
+		return err
+	}
+	if !agentValidatesDefaultInstructions(agent) || (soul == nil && agent.Spec.SystemPrompt == nil) {
+		return nil
+	}
+	if agent.Spec.Runtime == nil && soul == nil {
+		// No-soul AI keeps the legacy role-source precedence and raw environment
+		// delivery; literal dollar escaping is only used with a soul.
+		jobBuilder := &JobBuilder{Client: r.Client}
+		task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+		return jobBuilder.validateContainerDeliveredPromptSize(ctx, task, agent)
+	}
+	role, err := resolveACPSystemPrompt(ctx, r.Client, agent)
+	if err != nil {
+		return err
+	}
+	prompt := agentcontext.Compose(role, soul)
+	if agent.Spec.Runtime == nil {
+		jobBuilder := &JobBuilder{Client: r.Client}
+		task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+		return jobBuilder.validateContainerDeliveredPromptSize(ctx, task, nil, literalKubernetesPrompt(prompt))
+	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
+	configuration, err := buildACPAgentSessionConfiguration(task, agent, prompt)
+	if err != nil {
+		return err
+	}
+	// This includes Codex's JSON-escaped native environment envelope, not just
+	// the raw ACP configuration bound, and Copilot's literal-instruction policy.
+	return validateACPProviderSystemPrompt(string(agent.Spec.Runtime.Type), configuration)
+}
+
+// agentSoulConfigMapDependencyIndex is a cache-only dependency index. Besides
+// soul sources, index every role source read by Agent readiness validation.
+func agentSoulConfigMapDependencyIndex(object client.Object) []string {
+	agent, ok := object.(*corev1alpha1.Agent)
+	if !ok || agent == nil {
+		return nil
+	}
+	names := make([]string, 0, 2)
+	if agent.Spec.Soul != nil {
+		if ref := agent.Spec.Soul.ConfigMapRef; ref != nil && ref.Name != "" {
+			names = append(names, ref.Name)
+		}
+	}
+	if agent.Spec.SystemPrompt != nil {
+		if ref := agent.Spec.SystemPrompt.ConfigMapRef; ref != nil && ref.Name != "" && !slices.Contains(names, ref.Name) {
+			names = append(names, ref.Name)
+		}
+	}
+	return names
+}
+
+// agentsForSoulConfigMap works for creation and deletion too: it maps declared
+// references without fetching the ConfigMap or depending on its current contents.
+func (r *AgentReconciler) agentsForSoulConfigMap(ctx context.Context, object client.Object) []reconcile.Request {
+	configMap, ok := object.(*corev1.ConfigMap)
+	if !ok || configMap == nil || configMap.Namespace == "" || configMap.Name == "" {
+		return nil
+	}
+	var agents corev1alpha1.AgentList
+	if err := r.List(ctx, &agents, client.InNamespace(configMap.Namespace), client.MatchingFields{
+		agentSoulConfigMapDependenciesField: configMap.Name,
+	}); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents referencing ConfigMap",
+			"namespace", configMap.Namespace, "configMap", configMap.Name)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(agents.Items))
+	for i := range agents.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents.Items[i])})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1alpha1.Agent{}, agentSoulConfigMapDependenciesField, agentSoulConfigMapDependencyIndex); err != nil {
+		return fmt.Errorf("index agent soul ConfigMap references: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Agent{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.agentsForSoulConfigMap)).
 		// Watch Tasks so that when a task completes, the referenced agent
 		// gets reconciled for TTL checking.
 		Watches(&corev1alpha1.Task{}, handler.EnqueueRequestsFromMapFunc(
@@ -445,6 +790,18 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}}
 			})).
+		// Agent readiness depends only on whether a referenced AgentRuntime
+		// exists, so its frequent status updates are ignored.
+		Watches(&corev1alpha1.AgentRuntime{}, handler.EnqueueRequestsFromMapFunc(r.agentsForAgentRuntime),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }})).
+		// A Provider created or changed after the Agent can change its readiness.
+		Watches(&corev1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(r.agentsForProvider)).
+		// Only one Agent may hold an identity, so a claimant appearing, changing,
+		// or going away changes the readiness of the others claiming it.
+		Watches(&corev1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.agentsSharingIdentity)).
 		Named("agent").
+		// Identity claims are decided one Agent at a time; see
+		// reconcileIdentityClaim.
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

@@ -17,8 +17,13 @@ import (
 )
 
 const (
-	chatConfigPath = "/api/v1/chat/config"
-	chatAPIPath    = "/api/v1/chat"
+	chatConfigPath  = "/api/v1/chat/config"
+	chatAPIPath     = "/api/v1/chat"
+	runAgentFlag    = "--agent"
+	runServerFlag   = "--server"
+	runSessionFlag  = "--session"
+	runTestProvider = "openai-chat"
+	runCmdName      = "run"
 )
 
 // ---------------------------------------------------------------------------
@@ -610,8 +615,20 @@ func TestStreamChat_EmptyStream(t *testing.T) {
 	req := client.ChatRequest{Message: "hello", SessionID: "s1"}
 
 	code := streamChat(context.Background(), c, req, VerbosityDefault, false, false)
-	if code != 0 {
-		t.Errorf("streamChat returned %d, want 0 for empty stream", code)
+	if code != 1 {
+		t.Errorf("streamChat returned %d, want 1 when the stream ends without done", code)
+	}
+}
+
+func TestStreamChat_MissingDoneFails(t *testing.T) {
+	msgData, _ := json.Marshal(client.SSEEventData{Content: "partial"})
+	srv := sseServer([]string{fmt.Sprintf("event: message\ndata: %s\n\n", msgData)})
+	defer srv.Close()
+
+	c := client.NewWithNamespace(srv.URL, "", "default")
+	code := streamChat(context.Background(), c, client.ChatRequest{Message: "hello", SessionID: "s1"}, VerbosityDefault, false, false)
+	if code != 1 {
+		t.Errorf("streamChat returned %d, want 1 for a stream without done", code)
 	}
 }
 
@@ -633,24 +650,36 @@ func TestNewRunCmd_Structure(t *testing.T) {
 	}
 }
 
-func TestNewRunCmd_MutuallyExclusiveFlags(t *testing.T) {
+func TestNewRunCmd_AgentWithProvider(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
+	doneData, _ := json.Marshal(client.SSEEventData{})
+	var got client.ChatRequest
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
+		switch r.URL.Path {
+		case chatConfigPath:
+			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
+		case chatAPIPath:
+			json.NewDecoder(r.Body).Decode(&got) //nolint:errcheck
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
+		}
 	}))
 	defer srv.Close()
 
 	root := newRootCmd()
-	root.SetArgs([]string{"run", "--agent", "a", "--provider", "p", "--server", srv.URL, "hello"})
+	root.SetArgs([]string{runCmdName, runAgentFlag, "runtime-agent", "--provider", runTestProvider, runServerFlag, srv.URL, runSessionFlag, "test-sess", "hello"})
 
-	err := root.Execute()
-	if err == nil {
-		t.Error("expected error for mutually exclusive --agent and --provider")
+	// Runtime Agents carry no providerRef, so the chat coordinator's Provider
+	// must remain selectable alongside --agent; the server rejects genuine
+	// conflicts with an Agent-bound providerRef.
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("expected 'mutually exclusive' error, got %q", err.Error())
+	if got.Agent != "runtime-agent" || got.Provider != runTestProvider {
+		t.Fatalf("expected agent and provider forwarded together, got agent=%q provider=%q", got.Agent, got.Provider)
 	}
 }
 
@@ -746,7 +775,7 @@ func TestNewRunCmd_OneShotWithAgent(t *testing.T) { //nolint:dupl
 	defer srv.Close()
 
 	root := newRootCmd()
-	root.SetArgs([]string{"run", "--server", srv.URL, "--agent", "my-agent", "--session", "s1", "do stuff"})
+	root.SetArgs([]string{"run", "--server", srv.URL, runAgentFlag, "my-agent", "--session", "s1", "do stuff"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)

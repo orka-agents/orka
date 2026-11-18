@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -313,6 +314,100 @@ func TestNewTracingMiddleware_PropagatesSpanContextToHandlers(t *testing.T) {
 	}
 	if childParentID != serverID {
 		t.Fatalf("handler child parent = %s, want server span %s", childParentID, serverID)
+	}
+}
+
+func TestEffectiveStatusCodeMapsHandlerErrors(t *testing.T) {
+	// Handler errors are mapped to a response status only after middleware
+	// unwinds, so the raw response code is still 200 when middleware records
+	// telemetry; effectiveStatusCode must report the code the client receives.
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"fiber error keeps its code", fiber.NewError(fiber.StatusServiceUnavailable, "not configured"), fiber.StatusServiceUnavailable},
+		{"plain error maps to 500", errors.New("boom"), fiber.StatusInternalServerError},
+		{"no error keeps response code", nil, fiber.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got int
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				err := c.Next()
+				got = effectiveStatusCode(c, err)
+				return err
+			})
+			app.Get("/probe", func(c fiber.Ctx) error {
+				if tt.err != nil {
+					return tt.err
+				}
+				return c.SendString("OK")
+			})
+			if _, err := app.Test(httptest.NewRequest(http.MethodGet, "/probe", nil)); err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("effectiveStatusCode = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveStatusCodeReportsSPAFallbackAsSuccess(t *testing.T) {
+	// When the app serves the dashboard, a 404 on a non-API path is served as
+	// index.html with 200 by the app error handler after middleware unwinds;
+	// telemetry must not record a successful SPA navigation as a failure. API
+	// and probe paths keep 404, and so does every path without the dashboard.
+	tests := []struct {
+		name      string
+		path      string
+		dashboard bool
+		want      int
+	}{
+		{"client-side route", "/settings/profile", true, fiber.StatusOK},
+		{"client-side route without dashboard", "/settings/profile", false, fiber.StatusNotFound},
+		{"missing static asset", "/assets/index-stale.js", true, fiber.StatusNotFound},
+		{"upper-case missing static asset", "/ASSETS/index-stale.js", true, fiber.StatusNotFound},
+		{"api path", "/api/v1/missing", true, fiber.StatusNotFound},
+		{"healthz", "/healthz", true, fiber.StatusNotFound},
+		{"readyz", "/readyz", true, fiber.StatusNotFound},
+		{"openai compat path", "/openai/v1/nonexistent", true, fiber.StatusNotFound},
+		{"openai unimplemented endpoint", "/openai/v1/conversations", true, fiber.StatusNotImplemented},
+		{"anthropic compat path", "/anthropic/v1/messages/count_tokens", true, fiber.StatusNotFound},
+		{"webhook path", "/webhooks/gitlab", true, fiber.StatusNotFound},
+		{"upper-case compat path", "/OPENAI/v1/nonexistent", true, fiber.StatusNotFound},
+		{"upper-case unimplemented endpoint", "/OpenAI/v1/Conversations", true, fiber.StatusNotImplemented},
+		{"trailing-slash unimplemented endpoint", "/openai/v1/conversations/", true, fiber.StatusNotImplemented},
+		{"openai root", "/openai", true, fiber.StatusNotFound},
+		{"anthropic root", "/anthropic", true, fiber.StatusNotFound},
+		{"internal root", "/internal", true, fiber.StatusNotFound},
+		{"webhooks root", "/webhooks", true, fiber.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got int
+			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+			if tt.dashboard {
+				app.State().Set(dashboardStateKey, true)
+			}
+			app.Use(func(c fiber.Ctx) error {
+				err := c.Next()
+				got = effectiveStatusCode(c, err)
+				return err
+			})
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("client status = %d, want %d", resp.StatusCode, tt.want)
+			}
+			if got != tt.want {
+				t.Fatalf("effectiveStatusCode = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,15 +24,24 @@ import (
 )
 
 const (
-	repositoryMonitorWorkActionStatusQueued    = "queued"
-	repositoryMonitorWorkActionStatusRunning   = "running"
-	repositoryMonitorWorkActionStatusSucceeded = "succeeded"
-	repositoryMonitorWorkActionStatusFailed    = "failed"
-	repositoryMonitorWorkActionStatusBlocked   = "blocked"
-	repositoryMonitorWorkActionStatusCancelled = "cancelled"
+	repositoryMonitorWorkActionStatusQueued    = store.RepositoryMonitorWorkActionStatusQueued
+	repositoryMonitorWorkActionStatusRunning   = store.RepositoryMonitorWorkActionStatusRunning
+	repositoryMonitorWorkActionStatusSucceeded = store.RepositoryMonitorWorkActionStatusSucceeded
+	repositoryMonitorWorkActionStatusFailed    = store.RepositoryMonitorWorkActionStatusFailed
+	repositoryMonitorWorkActionStatusBlocked   = store.RepositoryMonitorWorkActionStatusBlocked
+	repositoryMonitorWorkActionStatusCancelled = store.RepositoryMonitorWorkActionStatusCancelled
+	// Command intake writes completed only for an action it coalesced into an
+	// identical active action; the controller never writes it.
+	repositoryMonitorWorkActionStatusCompleted = store.RepositoryMonitorWorkActionStatusCompleted
 )
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string) error {
+	return r.recordRepositoryMonitorWorkActionStateWithMetadata(ctx, monitor, run, command, targetKind, targetNumber, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason, nil)
+}
+
+// recordRepositoryMonitorWorkActionStateWithMetadata also merges metadata
+// into the action's metadata, replacing keys it already has.
+func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWithMetadata(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string, metadata map[string]any) error {
 	if r.Store == nil || monitor == nil || command == nil {
 		return nil
 	}
@@ -62,7 +71,16 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	}
 	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
-		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume {
+		if existing.Status == repositoryMonitorWorkActionStatusCompleted {
+			// A coalesced action is final; its outcome is the action it joined.
+			return nil
+		}
+		if status == repositoryMonitorWorkActionStatusQueued {
+			// Queue recovery only fills missing actions; it must not rewind state.
+			return nil
+		}
+		verifiedUpdateBranchSuccess := desiredAction == repositoryMonitorCommandIntentUpdateBranch && status == repositoryMonitorWorkActionStatusSucceeded
+		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume && !verifiedUpdateBranchSuccess {
 			return nil
 		}
 		existing.RunID = firstNonEmptyWorkflow(runID(run), existing.RunID)
@@ -80,6 +98,9 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		existing.BlockedReason = blockedReason
 		existing.Error = actionError
 		existing.CompletedAt = completedAt
+		if err := mergeRepositoryMonitorWorkActionMetadata(existing, metadata); err != nil {
+			return err
+		}
 		metrics.RecordRepositoryMonitorWorkAction(existing.DesiredAction, existing.Status)
 		return r.Store.UpdateWorkAction(ctx, existing)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -91,13 +112,18 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			return err
 		}
 		for _, candidate := range active {
-			switch candidate.Status {
-			case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning, store.RepositoryMonitorWorkActionStatusRetryPending:
+			if store.IsRepositoryMonitorWorkActionActive(candidate.Status) {
 				return nil
 			}
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"actionKind": actionKind})
+	initial := map[string]any{}
+	maps.Copy(initial, metadata)
+	initial[repositoryMonitorEventActionKindKey] = actionKind
+	encodedMetadata, err := json.Marshal(initial)
+	if err != nil {
+		return err
+	}
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := r.Store.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -119,7 +145,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		TaskName:             taskName,
 		BlockedReason:        blockedReason,
 		Error:                actionError,
-		MetadataJSON:         string(metadata),
+		MetadataJSON:         string(encodedMetadata),
 		CreatedAt:            time.Now(),
 		CompletedAt:          completedAt,
 	}); err != nil {
@@ -131,7 +157,34 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	return nil
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
+// mergeRepositoryMonitorWorkActionMetadata merges metadata into the action's
+// metadata, replacing keys it already has.
+func mergeRepositoryMonitorWorkActionMetadata(action *store.WorkAction, metadata map[string]any) error {
+	if len(metadata) == 0 {
+		return nil
+	}
+	merged := map[string]any{}
+	if strings.TrimSpace(action.MetadataJSON) != "" {
+		if err := json.Unmarshal([]byte(action.MetadataJSON), &merged); err != nil {
+			return fmt.Errorf("decode work action %s metadata: %w", action.ID, err)
+		}
+	}
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	maps.Copy(merged, metadata)
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return err
+	}
+	action.MetadataJSON = string(encoded)
+	return nil
+}
+
+// repositoryMonitorWorkActionHalted reports whether a command's work must not
+// run or advance: its action was cancelled, or command intake coalesced it
+// into an identical active action (completed), even after its run was queued.
+func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionHalted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
 	if r.Store == nil || monitor == nil || strings.TrimSpace(commandID) == "" {
 		return false, nil
 	}
@@ -149,7 +202,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx c
 		}
 		return false, err
 	}
-	return action.Status == repositoryMonitorWorkActionStatusCancelled, nil
+	return action.Status == repositoryMonitorWorkActionStatusCancelled || action.Status == repositoryMonitorWorkActionStatusCompleted, nil
 }
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {
@@ -164,7 +217,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now()
@@ -184,7 +237,7 @@ func (r *RepositoryMonitorReconciler) updateRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if err := r.Store.UpdateGitHubMutationRecord(ctx, record); err != nil {
 		return err
@@ -297,7 +350,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 	}
 	for i := range tasks.Items {
 		key := types.NamespacedName{Namespace: tasks.Items[i].Namespace, Name: tasks.Items[i].Name}
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := retryTaskStatusOnConflict(retry.DefaultRetry, func() error {
 			var current corev1alpha1.Task
 			if err := r.Get(ctx, key, &current); err != nil {
 				if apierrors.IsNotFound(err) {
@@ -305,14 +358,10 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 				}
 				return err
 			}
-			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+			if current.Status.Phase.IsTerminal() {
 				return nil
 			}
-			now := metav1.Now()
-			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			current.Status.CompletionTime = &now
-			current.Status.Message = reason
-			if err := r.Status().Update(ctx, &current); apierrors.IsNotFound(err) {
+			if err := r.cancelRepositoryMonitorTask(ctx, &current, reason); apierrors.IsNotFound(err) {
 				return nil
 			} else {
 				return err
@@ -322,6 +371,10 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 		}
 	}
 	return nil
+}
+
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTask(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+	return cancelTaskStatus(ctx, r.Client, r.ResultStore, r.DurableControlStore, r.ControllerEpochManager, task, reason)
 }
 
 func repositoryMonitorImplementationJobID(taskName string) string {

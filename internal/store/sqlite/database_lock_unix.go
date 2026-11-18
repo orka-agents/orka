@@ -21,7 +21,7 @@ import (
 const databaseLockSuffix = ".controller.lock"
 
 // lockDatabaseFile holds a non-blocking advisory lock adjacent to the SQLite
-// database. It deliberately runs before sql.Open and migrations.
+// database. It deliberately runs before sql.Open and schema setup.
 func lockDatabaseFile(databasePath string) (io.Closer, error) {
 	databasePath = strings.TrimSpace(databasePath)
 	if databasePath == "" || databasePath == ":memory:" {

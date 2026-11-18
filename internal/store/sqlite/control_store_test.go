@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -208,61 +207,58 @@ func TestPromptAttemptSubmittedUnknownBecomesTerminalOutcomeUnknown(t *testing.T
 	}
 }
 
-func TestPromptAttemptBindingDigestMigrationPreservesLegacyRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy-prompt-attempt.db")
-	legacyDB, err := sql.Open("sqlite", path)
+func TestPromptAttemptProvenNotAcceptedRecoveryPreservesBindings(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	fence := seedControlEpoch(t, s)
+	key := store.PromptAttemptKey{Namespace: "ns", TaskUID: "retryable-unsent-task", Attempt: 1, PromptID: "retryable-unsent-prompt"}
+	attempt, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{
+		Key: key, RequestDigest: controlTestDigest("retryable-unsent-request"),
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = legacyDB.Exec(`CREATE TABLE prompt_attempts (
-		id TEXT PRIMARY KEY,
-		namespace TEXT NOT NULL,
-		task_uid TEXT NOT NULL,
-		attempt INTEGER NOT NULL,
-		prompt_id TEXT NOT NULL,
-		session_uid TEXT NOT NULL DEFAULT '',
-		session_lease_generation INTEGER NOT NULL DEFAULT 0,
-		runtime_instance_id TEXT NOT NULL DEFAULT '',
-		request_digest TEXT NOT NULL,
-		execution_state TEXT NOT NULL,
-		delivery_state TEXT NOT NULL,
-		terminal_reason TEXT NOT NULL DEFAULT '',
-		outcome_marker TEXT NOT NULL DEFAULT '',
-		controller_epoch_name TEXT NOT NULL,
-		controller_epoch INTEGER NOT NULL,
-		last_operation_id TEXT NOT NULL DEFAULT '',
-		last_operation_digest TEXT NOT NULL DEFAULT '',
-		version INTEGER NOT NULL,
-		created_at TIMESTAMP NOT NULL,
-		updated_at TIMESTAMP NOT NULL,
-		UNIQUE(namespace, task_uid, attempt, prompt_id)
-	);
-	INSERT INTO prompt_attempts(
-		id, namespace, task_uid, attempt, prompt_id, request_digest, execution_state,
-		delivery_state, controller_epoch_name, controller_epoch, version, created_at, updated_at
-	) VALUES (?, 'legacy-ns', 'legacy-task-uid', 1, 'legacy-prompt', ?, 'Running',
-		'NotRequested', 'orka-controller', 1, 4, ?, ?)`,
-		"legacy-attempt", controlTestDigest("legacy-request"),
-		time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC), time.Date(2026, 7, 1, 10, 5, 0, 0, time.UTC))
-	if err != nil {
-		_ = legacyDB.Close()
-		t.Fatalf("seed legacy PromptAttempt: %v", err)
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved,
+		store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned,
+		store.PromptExecutionSubmitting,
+	} {
+		transition := store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: "to-" + string(next), OperationDigest: controlTestDigest("to-" + string(next)),
+			UpdatedAt: time.Now().UTC(),
+		}
+		if next == store.PromptExecutionPlanned {
+			transition.RuntimeInstanceID = "runtime-instance"
+			transition.SessionUID = "session-uid"
+			transition.SessionLeaseGeneration = 3
+		}
+		attempt, err = s.TransitionPromptAttemptExecution(ctx, transition)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := legacyDB.Close(); err != nil {
+	withoutProof := store.PromptAttemptPreSubmissionRecovery{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		PreserveBindings: true, OperationID: "recover-without-proof",
+		OperationDigest: controlTestDigest("recover-without-proof"), RecoveredAt: time.Now().UTC(),
+	}
+	if _, err := s.RecoverPromptAttemptPreSubmission(ctx, withoutProof); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("unproven binding-preserving recovery error = %v, want ErrValidation", err)
+	}
+	recovered, err := s.RecoverPromptAttemptPreSubmission(ctx, store.PromptAttemptPreSubmissionRecovery{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		ProvenNotAccepted: true, PreserveBindings: true, OperationID: "recover-retryable-unsent",
+		OperationDigest: controlTestDigest("recover-retryable-unsent"), RecoveredAt: time.Now().UTC(),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	migratedDB, err := NewDB(path)
-	if err != nil {
-		t.Fatalf("migrate legacy PromptAttempt: %v", err)
-	}
-	defer migratedDB.Close() //nolint:errcheck
-	attempt, err := NewStore(migratedDB, path).GetPromptAttempt(context.Background(), "legacy-attempt")
-	if err != nil {
-		t.Fatalf("read migrated legacy PromptAttempt: %v", err)
-	}
-	if attempt.BindingDigest != "" || attempt.SnapshotDigest != "" || attempt.ExecutionState != store.PromptExecutionRunning {
-		t.Fatalf("migrated legacy PromptAttempt = %#v", attempt)
+	if recovered.ExecutionState != store.PromptExecutionReserved || recovered.ID != attempt.ID || recovered.Key != attempt.Key ||
+		recovered.RequestDigest != attempt.RequestDigest || recovered.RuntimeInstanceID != attempt.RuntimeInstanceID ||
+		recovered.SessionUID != attempt.SessionUID || recovered.SessionLeaseGeneration != attempt.SessionLeaseGeneration {
+		t.Fatalf("binding-preserving recovery = %#v, want identity and bindings from %#v", recovered, attempt)
 	}
 }
 
@@ -543,6 +539,76 @@ func TestSessionTurnAtomicFinalizationPersistsAcrossRestart(t *testing.T) {
 	}
 	if got, err := restarted.GetOutboxProjection(ctx, outbox.ID); err != nil || got.State != store.OutboxProjectionPending {
 		t.Fatalf("restarted outbox = %#v, %v", got, err)
+	}
+}
+
+func TestSessionRuntimeGenerationCommit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime-generation.db")
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, dbPath)
+	ctx := context.Background()
+	fence := seedControlEpoch(t, s)
+	now := time.Date(2026, 7, 24, 14, 30, 0, 0, time.UTC)
+	createControlTranscriptSession(t, s, "ns", "runtime-generation", now)
+	control, err := s.CreateSessionControl(ctx, &store.SessionControl{
+		Namespace: "ns", SessionName: "runtime-generation", SessionUID: "runtime-generation-uid",
+		RequestDigest: controlTestDigest("runtime-generation"), CreatedAt: now,
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err = s.AcquireSessionMutationLease(ctx, store.AcquireSessionMutationLeaseRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
+		TaskUID: "runtime-generation-task", Attempt: 1, PromptID: "runtime-generation-prompt",
+		RequestDigest: controlTestDigest("runtime-generation-lease"), AcquiredAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.SessionTurnKey{
+		SessionUID: control.SessionUID, LeaseGeneration: control.LeaseGeneration,
+		TaskUID: control.Lease.TaskUID, Attempt: control.Lease.Attempt, PromptID: control.Lease.PromptID,
+	}
+	request := store.CommitSessionRuntimeGenerationRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Key: key, Fence: fence, ExpectedSessionVersion: control.Version,
+		Generation: 3, CommittedAt: now.Add(2 * time.Minute),
+	}
+	committed, err := s.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.RuntimeSessionGeneration != 3 || committed.Version != control.Version+1 {
+		t.Fatalf("committed Session RuntimeSession generation = %#v", committed)
+	}
+	retry, err := s.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil || retry.Version != committed.Version {
+		t.Fatalf("idempotent generation commit = %#v, %v", retry, err)
+	}
+	regression := request
+	regression.Generation = 2
+	if _, err := s.CommitSessionRuntimeGeneration(ctx, regression); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("generation regression error = %v, want conflict", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	restarted := NewStore(db, dbPath)
+	persisted, err := restarted.GetSessionControl(ctx, control.Namespace, control.SessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.RuntimeSessionGeneration != 3 || persisted.Version != committed.Version {
+		t.Fatalf("restarted Session RuntimeSession generation = %#v", persisted)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,10 +28,15 @@ import (
 )
 
 const (
+	githubActionFix      = "fix"
+	githubActionTriage   = "triage"
+	githubActionResearch = "research"
+)
+
+const (
 	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
 	commandIntentStop             = finishReasonStop
 	commandIntentResume           = "resume"
-	commandIntentApprovePlan      = "approve_plan"
 	commandIntentDecompose        = "decompose"
 	commandIntentPlan             = "plan"
 	commandIntentFixCI            = "fix_ci"
@@ -121,6 +127,11 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
 			return false
 		}
+		// Reject before the label is consumed; the controller re-checks.
+		if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 &&
+			repositoryMonitorWebhookMatchingLabel(slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels), target.Labels) == "" {
+			return false
+		}
 		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
 	}
 	if target.Kind != repositoryMonitorTargetKindIssue || !monitor.Spec.Targets.Issues.Enabled {
@@ -153,64 +164,17 @@ func repositoryMonitorWebhookMatchingLabel(policyLabels, itemLabels []string) st
 }
 
 func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMonitor, target githubLabelTarget, label string) (string, bool) {
-	label = strings.ToLower(strings.TrimSpace(label))
-	if label == "" {
+	if monitor == nil || target.IsPR {
 		return "", false
 	}
-	labels := monitor.Spec.Triggers.GitHub.Labels
-	type commandLabel struct{ intent, label string }
-	var configured []commandLabel
-	if target.IsPR {
-		configured = []commandLabel{
-			{intent: "review", label: labels.PullRequests.Review},
-			{intent: "fix", label: labels.PullRequests.Fix},
-			{intent: commandIntentFixCI, label: labels.PullRequests.FixCI},
-			{intent: commandIntentUpdateBranch, label: labels.PullRequests.UpdateBranch},
-			{intent: "automerge", label: labels.PullRequests.Automerge},
-			{intent: commandIntentStop, label: labels.PullRequests.Stop},
-			{intent: commandIntentResume, label: labels.PullRequests.Resume},
-		}
-	} else {
-		configured = []commandLabel{
-			{intent: "triage", label: labels.Issues.Triage},
-			{intent: "research", label: labels.Issues.Research},
-			{intent: "plan", label: labels.Issues.Plan},
-			{intent: commandIntentApprovePlan, label: labels.Issues.ApprovePlan},
-			{intent: "implement", label: labels.Issues.Implement},
-			{intent: "decompose", label: labels.Issues.Decompose},
-			{intent: commandIntentStop, label: labels.Issues.Stop},
-			{intent: commandIntentResume, label: labels.Issues.Resume},
-		}
+	want := strings.TrimSpace(monitor.Spec.Triggers.GitHub.Labels.Issues.Implement)
+	if want == "" {
+		want = "orka:implement"
 	}
-	matchedIntent := ""
-	for _, entry := range configured {
-		configuredLabel := strings.TrimSpace(entry.label)
-		if configuredLabel == "" {
-			configuredLabel = repositoryMonitorDefaultCommandLabel(entry.intent)
-		}
-		if strings.EqualFold(configuredLabel, label) {
-			if matchedIntent != "" {
-				return "", false
-			}
-			matchedIntent = entry.intent
-		}
+	if strings.EqualFold(strings.TrimSpace(label), want) {
+		return githubActionImplement, true
 	}
-	return matchedIntent, matchedIntent != ""
-}
-
-func repositoryMonitorDefaultCommandLabel(intent string) string {
-	switch intent {
-	case commandIntentApprovePlan:
-		return "orka:approve-plan"
-	case commandIntentFixCI:
-		return "orka:fix-ci"
-	case commandIntentUpdateBranch:
-		return "orka:update-branch"
-	case commandIntentDecompose:
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
+	return "", false
 }
 
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
@@ -427,7 +391,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 
 func repositoryMonitorCommandGuardLabel(monitor *corev1alpha1.RepositoryMonitor, labels []string) string {
 	guards := append([]string{}, monitor.Spec.Policy.ProtectedLabels...)
-	guards = append(guards, monitor.Spec.Policy.PauseLabels...)
+	guards = append(guards, repositoryMonitorAPIPauseLabels(monitor)...)
 	for _, label := range labels {
 		for _, guard := range guards {
 			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(guard)) && strings.TrimSpace(guard) != "" {
@@ -558,7 +522,7 @@ func repositoryMonitorControlCommandIntent(intent string) bool {
 
 func repositoryMonitorReadOnlyCommandIntent(intent string) bool {
 	switch strings.TrimSpace(intent) {
-	case "triage", "research", commandIntentPlan, "review":
+	case githubActionTriage, githubActionResearch, commandIntentPlan, githubActionReview:
 		return true
 	default:
 		return false
@@ -615,7 +579,7 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 	ignored := map[string]struct{}{}
 	if monitor != nil {
 		configured := monitor.Spec.Triggers.GitHub.Labels.Issues
-		for _, label := range []string{configured.Triage, configured.Research, configured.Plan, configured.ApprovePlan, configured.Implement, configured.Decompose, configured.Stop, configured.Resume} {
+		for _, label := range []string{configured.Implement} {
 			if label = strings.ToLower(strings.TrimSpace(label)); label != "" {
 				ignored[label] = struct{}{}
 			}
@@ -672,32 +636,32 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 	blockedReason := ""
 	switch command.Status {
 	case githubCommandStatusRejected:
-		status = repositoryMonitorRunPhaseFailed
+		status = store.RepositoryMonitorWorkActionStatusFailed
 		phase = "rejected"
 		blockedReason = command.Error
 	case githubCommandStatusBlocked:
-		status = githubCommandStatusBlocked
+		status = store.RepositoryMonitorWorkActionStatusBlocked
 		phase = githubCommandStatusBlocked
 		blockedReason = command.Error
 	case githubCommandStatusAccepted, "":
-		status = repositoryMonitorRunPhaseQueued
+		status = store.RepositoryMonitorWorkActionStatusQueued
 	default:
 		status = command.Status
 	}
 	var completedAt *time.Time
 	switch status {
-	case repositoryMonitorRunPhaseFailed, githubCommandStatusBlocked, githubCommandStatusCompleted:
+	case store.RepositoryMonitorWorkActionStatusFailed, store.RepositoryMonitorWorkActionStatusBlocked, store.RepositoryMonitorWorkActionStatusCompleted:
 		now := time.Now()
 		completedAt = &now
 	}
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	if existing, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
-		if existing.Status == githubCommandStatusCompleted && existing.Phase == "coalesced" {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusCompleted && existing.Phase == "coalesced" {
 			command.Status = githubCommandStatusCompleted
-			command.Error = "coalesced with active workflow action " + existing.DependsOnActionID
+			command.Error = store.RepositoryMonitorCoalescedCommandError(existing.DependsOnActionID)
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
-		if existing.Status == "cancelled" && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusCancelled && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
 			command.Status = githubCommandStatusCompleted
 			command.Error = "workflow action was cancelled"
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
@@ -705,14 +669,14 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
 		}
-		if status == repositoryMonitorRunPhaseQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
-			existing.Status = repositoryMonitorRunPhaseQueued
+		if status == store.RepositoryMonitorWorkActionStatusQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
+			existing.Status = store.RepositoryMonitorWorkActionStatusQueued
 			existing.Phase = phase
 			existing.BlockedReason = ""
 			existing.Error = ""
 			existing.CompletedAt = nil
 		}
-		if existing.Status == "queued" && status != "queued" {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusQueued && status != store.RepositoryMonitorWorkActionStatusQueued {
 			existing.Status = status
 			existing.Phase = phase
 			existing.BlockedReason = blockedReason
@@ -732,7 +696,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			return h.persistRepositoryMonitorCoalescedWorkAction(ctx, monitor, command, desiredAction, dedupe, candidate)
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID})
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID})
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -775,7 +739,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 }
 
 func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, dedupe string) (*store.WorkAction, error) {
-	for _, status := range []string{repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning, store.RepositoryMonitorWorkActionStatusRetryPending} {
+	for _, status := range store.RepositoryMonitorWorkActionActiveStatuses() {
 		actions, _, err := h.repositoryMonitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, DedupeKey: dedupe, Status: status, Limit: 1})
 		if err != nil {
 			return nil, err
@@ -790,17 +754,17 @@ func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context
 func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, desiredAction, dedupe string, candidate *store.WorkAction) error {
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	now := time.Now()
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
-	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: githubCommandStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
+	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, action); err != nil {
 		existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)
-		if getErr != nil || existing.DependsOnActionID != candidate.ID || existing.Status != githubCommandStatusCompleted {
+		if getErr != nil || existing.DependsOnActionID != candidate.ID || existing.Status != store.RepositoryMonitorWorkActionStatusCompleted {
 			return err
 		}
 	}
-	metrics.RecordRepositoryMonitorWorkAction(desiredAction, githubCommandStatusCompleted)
+	metrics.RecordRepositoryMonitorWorkAction(desiredAction, store.RepositoryMonitorWorkActionStatusCompleted)
 	command.Status = githubCommandStatusCompleted
-	command.Error = "coalesced with active workflow action " + candidate.ID
+	command.Error = store.RepositoryMonitorCoalescedCommandError(candidate.ID)
 	return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 }
 
@@ -812,20 +776,17 @@ func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx contex
 	if desiredAction == "" {
 		return nil
 	}
-	action, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, desiredAction))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return err
+	// The store checks the status and writes in one step: a finished action is
+	// final, and reopening it, even one the controller completes concurrently,
+	// would run its work again.
+	_, err := h.repositoryMonitorStore.MarkWorkActionRetryPending(ctx, store.MarkWorkActionRetryPendingRequest{
+		Namespace: monitor.Namespace, ID: store.RepositoryMonitorWorkActionID(command.ID, desiredAction), RunID: runID,
+		BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: cause.Error(),
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
 	}
-	action.Status = store.RepositoryMonitorWorkActionStatusRetryPending
-	action.Phase = store.RepositoryMonitorWorkActionStatusRetryPending
-	action.RunID = runID
-	action.Error = cause.Error()
-	action.BlockedReason = store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed
-	action.CompletedAt = nil
-	return h.repositoryMonitorStore.UpdateWorkAction(ctx, action)
+	return err
 }
 
 func (h *Handlers) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {

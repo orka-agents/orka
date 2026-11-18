@@ -23,7 +23,11 @@ import (
 // committed under a valid lease.
 const externalEffectLeaseSettlementMargin = time.Minute
 
-const acpExternalEffectLease = maxACPExternalEffectCallDuration + externalEffectLeaseSettlementMargin
+// Field names inside external-effect request digests.
+const (
+	identityKey = "identity"
+	requestKey  = "request"
+)
 
 // maxACPExternalEffectCallDuration bounds one in-flight brokered custom-Tool
 // call so its outcome can always be committed while the ledger lease is still
@@ -111,6 +115,27 @@ func runExternalEffectWithReplay[T any](
 	)
 }
 
+// errExternalEffectAlreadyStarted reports an effect a previous delivery
+// already claimed, which a run that never reclaims refuses to execute again.
+var errExternalEffectAlreadyStarted = errors.New("external effect was already started")
+
+// runExternalEffectOnceWithReplay is runExternalEffectWithReplay for an
+// effect that is not idempotent: an identity a previous delivery claimed is
+// never claimed again, even after its lease expires, so a request that may
+// have been delivered is never sent twice.
+func runExternalEffectOnceWithReplay[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayMode(
+		ctx, effects, fence, identity, request, externalEffectCallTimeout(identity), false, call,
+	)
+}
+
 // runExternalEffectWithReplayCallTimeout runs one external effect with an
 // explicit bounded call duration. Callers that know the operation's real
 // configured deadline (for example a brokered Tool's spec.http.timeout) use it
@@ -126,6 +151,19 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	callTimeout time.Duration,
 	call func(context.Context) (T, error),
 ) (T, bool, error) {
+	return runExternalEffectWithReplayMode(ctx, effects, fence, identity, request, callTimeout, true, call)
+}
+
+func runExternalEffectWithReplayMode[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	reclaim bool,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
 	var zero T
 	if effects == nil {
 		return zero, false, fmt.Errorf("external-effect store is required")
@@ -134,7 +172,7 @@ func runExternalEffectWithReplayCallTimeout[T any](
 		return zero, false, fmt.Errorf("external-effect call timeout must be positive")
 	}
 	requestDigest, err := acpDomainDigest("external-effect-request", map[string]any{
-		"identity": identity, "request": request,
+		identityKey: identity, requestKey: request,
 	})
 	if err != nil {
 		return zero, false, err
@@ -153,8 +191,19 @@ func runExternalEffectWithReplayCallTimeout[T any](
 		}
 		return response, true, nil
 	}
+	if !reclaim && effect.State == store.ExternalEffectFailed && len(effect.Response) > 0 {
+		// A run that never reclaims settles a definite failure with its
+		// answer, so a redelivery replays that answer.
+		var response T
+		if json.Unmarshal(effect.Response, &response) == nil {
+			return response, true, nil
+		}
+	}
 	if effect.State == store.ExternalEffectFailed || effect.State == store.ExternalEffectOutcomeUnknown {
 		return zero, false, fmt.Errorf("external effect %s is terminal in state %s", effect.ID, effect.State)
+	}
+	if !reclaim && effect.State == store.ExternalEffectInFlight {
+		return zero, false, errExternalEffectAlreadyStarted
 	}
 	// Size the lease from this effect's bounded call duration so the outcome of
 	// a call that runs to its deadline can still be committed under a valid
@@ -203,8 +252,7 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	if err != nil {
 		return zero, false, err
 	}
-	sum := sha256.Sum256(encoded)
-	responseDigest := "sha256:" + hex.EncodeToString(sum[:])
+	responseDigest := store.CanonicalBytesDigest(encoded)
 	completed, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: claimed.ID, Fence: fence, ExpectedVersion: claimed.Version, ExpectedState: store.ExternalEffectInFlight,
 		NewState: store.ExternalEffectSucceeded, RequestDigest: requestDigest,
@@ -349,8 +397,7 @@ func settleExternalEffectStore(
 			return marshalErr
 		}
 		encoded = value
-		sum := sha256.Sum256(value)
-		responseDigest = "sha256:" + hex.EncodeToString(sum[:])
+		responseDigest = store.CanonicalBytesDigest(value)
 	}
 	_, err = effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: effect.State,
@@ -379,7 +426,7 @@ func settleACPExternalEffectError(
 
 const acpExternalEffectReconcileGrace = time.Minute
 
-func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) error {
+func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tasks []corev1alpha1.Task) error {
 	if d.Client == nil || d.Store == nil || d.Epochs == nil {
 		return nil
 	}
@@ -392,13 +439,20 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) err
 		return err
 	}
 	now := time.Now().UTC()
+	approvalEffects := make(map[string]acpMCPApprovalEffect)
 	for i := range effects.Items {
 		effect := &effects.Items[i]
+		if effect.Spec.Kind == acpMCPToolEffectKind && mcpApprovalEffectTaskUID(effect) != "" {
+			candidate := mcpApprovalEffectSnapshot(effect)
+			if mcpApprovalEffectNeedsRecovery(&candidate.ExternalEffect, fence, now) {
+				approvalEffects[effect.Spec.ID] = candidate
+			}
+		}
 		if store.ExternalEffectState(effect.Status.State) != store.ExternalEffectInFlight || effect.Status.LeaseExpiresAt == nil ||
 			now.Before(effect.Status.LeaseExpiresAt.Add(acpExternalEffectReconcileGrace)) {
 			continue
 		}
-		_, err := d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
+		settled, err := d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 			ID: effect.Spec.ID, Fence: fence, ExpectedVersion: effect.Status.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectOutcomeUnknown,
 			RequestDigest: effect.Spec.RequestDigest, ExpectedLeaseOwner: effect.Status.LeaseOwner, UpdatedAt: now,
@@ -406,6 +460,96 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) err
 		if err != nil && !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("reconcile expired external effect %s/%s: %w", effect.Namespace, effect.Name, err)
 		}
+		if err == nil && effect.Spec.Kind == acpMCPToolEffectKind && mcpApprovalEffectTaskUID(effect) != "" {
+			candidate := mcpApprovalEffectSnapshot(effect)
+			candidate.ExternalEffect = *settled
+			approvalEffects[effect.Spec.ID] = candidate
+		}
+	}
+	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
+}
+
+// RunExternalEffectWithReplayCallTimeout runs one idempotent external effect
+// from outside the ACP dispatcher, such as the controller's connector-tool
+// endpoint, with the same reservation, lease, and replay semantics the ACP
+// broker uses. callTimeout is the caller's real operation deadline, so the
+// effect call and its ledger lease cover a legitimately long tool timeout
+// instead of the per-kind clamp.
+func RunExternalEffectWithReplayCallTimeout[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayCallTimeout(ctx, effects, fence, identity, request, callTimeout, call)
+}
+
+// SettleExternalEffect records a terminal state for an effect whose call
+// returned an error, so the ledger never shows it as still in flight.
+func SettleExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	return settleExternalEffectStore(ctx, effects, fence, identity, state, nil)
+}
+
+// ErrExternalEffectNotPending reports an effect another execution moved out
+// of Pending (it is in flight, or settled); only that execution settles it.
+var ErrExternalEffectNotPending = errors.New("external effect is no longer pending")
+
+// SettlePendingExternalEffect moves an effect that is still exactly Pending
+// (reserved, never started) to state. An effect already in state is left
+// as is; one in flight or settled otherwise belongs to another execution and
+// is reported with ErrExternalEffectNotPending, never transitioned.
+func SettlePendingExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return err
+	}
+	effect, err := effects.GetExternalEffect(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if effect.State == state {
+		return nil
+	}
+	if effect.State != store.ExternalEffectPending {
+		return fmt.Errorf("%w: external effect %s is %s", ErrExternalEffectNotPending, effect.ID, effect.State)
+	}
+	// Pinned to the Pending state and version just read: an execution that
+	// claims the record meanwhile makes this transition fail instead.
+	if _, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
+		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: store.ExternalEffectPending,
+		NewState: state, RequestDigest: effect.RequestDigest, ExpectedLeaseOwner: effect.LeaseOwner, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return fmt.Errorf("%w: %w", ErrExternalEffectNotPending, err)
+		}
+		return err
 	}
 	return nil
+}
+
+// ExternalEffectRequestDigest is the digest under which
+// RunExternalEffectWithReplayCallTimeout reserves an effect, so a caller can
+// recognize its own committed record.
+func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
+	return acpDomainDigest("external-effect-request", map[string]any{
+		identityKey: identity, requestKey: request,
+	})
 }

@@ -72,6 +72,8 @@ func serve(server *http.Server, options serverOptions) error {
 
 func main() {
 	options := serverOptions{}
+	interimDelivery := flag.Bool("interim-delivery", true,
+		"advertise and accept interim messages (disable for older controllers)")
 	flag.StringVar(&options.listenAddr, "listen", ":8090", "listen address")
 	flag.StringVar(&options.tlsCertFile, "tls-cert-file", "", "TLS certificate file (requires --tls-key-file)")
 	flag.StringVar(&options.tlsKeyFile, "tls-key-file", "", "TLS private key file (requires --tls-cert-file)")
@@ -83,7 +85,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	server, err := newServer(options, referenceadapter.New(token).Handler())
+	adapter := referenceadapter.New(token, referenceadapter.WithInterimDelivery(*interimDelivery))
+	server, err := newServer(options, adapter.Handler())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -55,13 +56,13 @@ func (m *SessionManager) IsLocked(ctx context.Context, task *corev1alpha1.Task) 
 		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
 			return false, err
 		}
-		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID), time.Now().UTC())
 	}
 	if task.Spec.SessionRef == nil {
 		return false, nil
 	}
 
-	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Session doesn't exist yet, not locked
@@ -81,7 +82,7 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
 			return err
 		}
-		return m.store.AcquireLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		return m.store.AcquireLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID), time.Now().UTC())
 	}
 	if task.Spec.SessionRef == nil {
 		return nil
@@ -100,15 +101,26 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		return fmt.Errorf("session %s not found and create=false: %w", task.Spec.SessionRef.Name, store.ErrNotFound)
 	}
 
-	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC())
 }
 
 // ReleaseLock releases the session lock for a task.
 func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Task) error {
-	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+	return m.ReleaseLockWithTokenUsage(ctx, task, 0, 0)
+}
+
+// ReleaseLockWithTokenUsage releases the session lock for a finished task
+// and adds its token usage to the Session in the same write, so a completion
+// replayed after a crash cannot count the usage twice.
+func (m *SessionManager) ReleaseLockWithTokenUsage(ctx context.Context, task *corev1alpha1.Task, inputTokens, outputTokens int64) error {
+	if _, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
 		return err
 	} else if ok {
-		return m.store.ReleaseLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+		// Gateway terminal projection owns lock release atomically with its
+		// canonical assistant message and delivery outbox row. Generic Task
+		// finalization must remain a no-op even when a malformed session policy
+		// caused the admitted Gateway Task to fail.
+		return nil
 	}
 	if task.Spec.SessionRef == nil {
 		return nil
@@ -117,14 +129,19 @@ func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Tas
 	if task.UID != "" {
 		session, getErr := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
 		if getErr == nil && session.ActiveTask == task.Name && session.ActiveTaskUID == "" {
-			if acquireErr := m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID)); acquireErr != nil {
+			if acquireErr := m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), time.Now().UTC()); acquireErr != nil {
 				return acquireErr
 			}
 		} else if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
 			return getErr
 		}
 	}
-	err := m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	var err error
+	if fenced, ok := m.store.(store.FencedSessionWriteStore); ok && (inputTokens != 0 || outputTokens != 0) {
+		err = fenced.ReleaseLockWithTokenUsage(ctx, taskSessionOwner(task), int(inputTokens), int(outputTokens))
+	} else {
+		err = m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
+	}
 	if err != nil {
 		// Ignore not-found errors (session may have been deleted)
 		if errors.Is(err, store.ErrNotFound) {
@@ -170,7 +187,7 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 	session := &store.SessionRecord{
 		Namespace:     task.Namespace,
 		Name:          task.Spec.SessionRef.Name,
-		SessionType:   "task",
+		SessionType:   acpCancelLogKeyTask,
 		ActiveTask:    task.Name,
 		ActiveTaskUID: string(task.UID),
 		CreatedAt:     now,
@@ -183,15 +200,29 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 // AppendMessages appends messages from a completed task to the session.
 // The resultStore is used to fetch the task result for the assistant message.
 func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.Task, resultStore store.ResultStore) error {
+	if _, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+		return err
+	} else if ok {
+		// Gateway terminal projection is the only writer for the canonical
+		// assistant message. Do not inspect a potentially modified SessionRef or
+		// read the Task result from generic finalization.
+		return nil
+	}
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Append {
 		return nil
 	}
 
-	if _, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil {
+	session, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
 		return err
+	}
+	// Rejected Tasks and scheduled parents can finish without ever acquiring
+	// this Session. Only its current Task incarnation may append a transcript.
+	if task.Name == "" || session.ActiveTask != task.Name || session.ActiveTaskUID != string(task.UID) {
+		return nil
 	}
 
 	var prompt, response string
@@ -231,11 +262,48 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 		})
 	}
 
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		for i := range messages {
+			messages[i].Metadata = map[string]string{store.SessionSoulDigestMetadata: digest}
+		}
+	}
+
 	if len(messages) == 0 {
 		return nil
 	}
+	// Stable message IDs make appending the same Task's turn again a no-op,
+	// so completion can be retried after a write whose outcome is unknown.
+	// The store keeps the time of the first append: a repeat leaves it unset,
+	// so it matches the stored message instead of conflicting with it, and a
+	// message the first append did not carry, such as a response read later,
+	// is still added.
+	if task.UID != "" {
+		for i := range messages {
+			messages[i].ID = taskSessionMessageID(string(task.UID), messages[i].Role)
+			messages[i].Timestamp = time.Time{}
+		}
+	}
 
-	return m.store.AppendMessages(ctx, task.Namespace, task.Spec.SessionRef.Name, messages)
+	fenced, ok := m.store.(store.FencedSessionWriteStore)
+	if !ok {
+		return fmt.Errorf("session store does not support fenced transcript writes")
+	}
+	return fenced.AppendMessagesWithLock(ctx, taskSessionOwner(task), messages)
+}
+
+// taskSessionOwner names task as the owner of its Session's lock, at the
+// controller clock.
+func taskSessionOwner(task *corev1alpha1.Task) store.SessionOwnerWrite {
+	return store.SessionOwnerWrite{
+		Namespace: task.Namespace, Name: task.Spec.SessionRef.Name,
+		OwnerName: task.Name, OwnerUID: string(task.UID), Now: time.Now().UTC(),
+	}
+}
+
+// taskSessionMessageID is the stable transcript message ID of one role of a
+// Task's turn.
+func taskSessionMessageID(taskUID, role string) string {
+	return "task:" + taskUID + ":" + role
 }
 
 // LoadTranscript loads the session transcript for a task.
@@ -295,7 +363,7 @@ func (m *SessionManager) GetSession(ctx context.Context, namespace, name string)
 // Kubernetes-authoritative controls before removing the SQLite transcript.
 func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name string) error {
 	if m.cleanupStore == nil {
-		return m.store.DeleteSession(ctx, namespace, name)
+		return m.store.DeleteSession(ctx, namespace, name, time.Now().UTC())
 	}
 	if m.epochs == nil {
 		return fmt.Errorf("ACP session cleanup requires a controller epoch manager")
@@ -306,7 +374,7 @@ func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name stri
 	}
 	operationID := store.CanonicalControlID("session-cleanup", namespace, name)
 	operationDigest, err := acpDomainDigest("session-cleanup", map[string]string{
-		"namespace": namespace, "sessionName": name, "operationID": operationID,
+		acpCancelLogKeyNamespace: namespace, "sessionName": name, "operationID": operationID,
 	})
 	if err != nil {
 		return err
@@ -320,4 +388,9 @@ func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name stri
 // ListSessions lists all sessions in a namespace.
 func (m *SessionManager) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	return m.store.ListSessions(ctx, namespace)
+}
+
+// ListSessionsPage lists one newest-first page of sessions in a namespace.
+func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	return m.store.ListSessionsPage(ctx, namespace, after, limit, excludeType)
 }

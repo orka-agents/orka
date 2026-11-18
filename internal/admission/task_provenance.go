@@ -9,6 +9,7 @@ package admission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -17,11 +18,15 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -34,6 +39,12 @@ const (
 	fieldSpecTransaction     = "spec.transaction"
 	fieldMetadataLabels      = "metadata.labels"
 	fieldMetadataAnnotations = "metadata.annotations"
+
+	// managedWorkspaceMetadataPrefix protects the controller-owned ACP
+	// workspace settlement metadata (the settled marker, the workspace link
+	// label, and the incarnation pin): forging them through direct Kubernetes
+	// writes would skip controller-owned revocation and detach actions.
+	managedWorkspaceMetadataPrefix = "acp.workspace.orka.ai/"
 )
 
 var (
@@ -63,19 +74,67 @@ var (
 		labels.AnnotationTraceState,
 		labels.AnnotationTraceBaggage,
 	}
+
+	controllerManagedTaskAnnotationKeys = []string{
+		labels.AnnotationCancelRequested,
+		labels.AnnotationParentTaskUID,
+		labels.AnnotationParentTaskNamespace,
+		labels.AnnotationRequestedBySource,
+		labels.AnnotationRequestedByStamp,
+		// Continuation lineage lets a resumed turn act for its parked
+		// predecessor, so only the controller may write it.
+		labels.AnnotationContinuationOfName,
+		labels.AnnotationContinuationOfUID,
+		labels.AnnotationContinuationIndex,
+		labels.AnnotationContinuationChainDeadline,
+	}
 )
 
 // TaskProvenanceConfig configures direct Kubernetes admission protection for
 // Orka-managed Task provenance fields.
 type TaskProvenanceConfig struct {
-	Enabled                    bool
+	Enabled bool
+	// ControllerUsernames are the controller identities allowed to write
+	// EVERY Orka-managed field, including the reserved
+	// acp.workspace.orka.ai/ settlement metadata. An explicit
+	// --execution-mode-controller-usernames list is exclusive; the
+	// namespace-derived default ServiceAccount usernames are used only when
+	// no explicit controller identities were configured. The trusted-users
+	// flag never extends this set.
+	ControllerUsernames []string
+	// TrustedUsernames (the --task-provenance-admission-trusted-users flag)
+	// grants only the provenance-field allowance; workspace settlement
+	// metadata stays reserved to ControllerUsernames.
 	TrustedUsernames           []string
 	TrustedServiceAccountNames []string
+	// WorkerServiceAccountNames are the ServiceAccounts worker Pods run as,
+	// trusted or not. They hold Agent use broadly, so the identity-bound
+	// Agent rule applies to them however TrustedServiceAccountNames is set.
+	WorkerServiceAccountNames []string
 }
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
-func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccountNames, controllerNamespace string) TaskProvenanceConfig {
+// controllerUsernames carries the deployment's exact controller identities
+// (the --execution-mode-controller-usernames value); when supplied, ONLY that
+// list receives full controller trust, and the namespace-derived
+// ServiceAccount defaults apply solely to installations that configured no
+// explicit identities.
+func NewTaskProvenanceConfig(
+	enabled bool,
+	controllerUsernames, trustedUsernames, trustedServiceAccountNames, controllerNamespace string,
+) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
+	cfg.ControllerUsernames = workerenv.SplitCSV(controllerUsernames)
+	if len(cfg.ControllerUsernames) == 0 {
+		// The namespace-derived ServiceAccount identities are a FALLBACK for
+		// installations that configured no explicit controller identities.
+		// When the operator supplied an exact list, only that list receives
+		// controller-only settlement trust - appending the defaults would
+		// silently widen authorization to any same-named ServiceAccount in
+		// the namespace (for example a release-specific Helm identity
+		// coexisting with a generic controller-manager account).
+		cfg.ControllerUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
+	}
 	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
 		cfg.TrustedUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
@@ -84,17 +143,18 @@ func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccou
 	if len(cfg.TrustedServiceAccountNames) == 0 {
 		cfg.TrustedServiceAccountNames = append([]string{}, defaultTrustedWorkerServiceAccounts...)
 	}
+	cfg.WorkerServiceAccountNames = WorkerServiceAccountNames(cfg.TrustedServiceAccountNames)
 	return cfg
 }
 
 // RegisterTaskProvenanceWebhook registers the Task provenance validating webhook
 // when enabled by configuration.
-func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme, cfg TaskProvenanceConfig) {
+func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme, cfg TaskProvenanceConfig, reader client.Reader) {
 	if !cfg.Enabled {
 		return
 	}
 	server.Register(TaskProvenanceWebhookPath, &ctrladmission.Webhook{
-		Handler: NewTaskProvenanceValidator(scheme, cfg),
+		Handler: NewTaskProvenanceValidator(scheme, cfg, reader),
 	})
 }
 
@@ -103,41 +163,85 @@ func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme
 type TaskProvenanceValidator struct {
 	decoder ctrladmission.Decoder
 	config  TaskProvenanceConfig
+	reader  client.Reader
 }
 
 // NewTaskProvenanceValidator creates a Task provenance admission handler.
-func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig) *TaskProvenanceValidator {
+func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig, reader client.Reader) *TaskProvenanceValidator {
 	return &TaskProvenanceValidator{
 		decoder: ctrladmission.NewDecoder(scheme),
 		config:  cfg,
+		reader:  reader,
 	}
 }
 
 // Handle implements admission.Handler.
-func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
+func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
+	if (req.SubResource != "" && req.SubResource != statusSubresource) ||
+		(req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
 	}
-	if isTrustedTaskProvenanceUser(v.config, req.UserInfo, req.Namespace) {
-		return ctrladmission.Allowed("trusted Task provenance writer")
-	}
-
 	task := &corev1alpha1.Task{}
 	if err := v.decoder.Decode(req, task); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode Task: %w", err))
 	}
-
-	switch req.Operation {
-	case admissionv1.Create:
-		if fields := presentTaskProvenanceFields(task); len(fields) > 0 {
-			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
-		}
-	case admissionv1.Update:
-		oldTask := &corev1alpha1.Task{}
+	var oldTask *corev1alpha1.Task
+	if req.Operation == admissionv1.Update {
+		oldTask = &corev1alpha1.Task{}
 		if err := v.decoder.DecodeRaw(req.OldObject, oldTask); err != nil {
 			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task: %w", err))
 		}
-		if fields := changedTaskProvenanceFields(oldTask, task); len(fields) > 0 {
+		fields := changedTaskCoordinationFields(oldTask, task, isKubernetesCleanupController(req.UserInfo.Username))
+		if len(fields) > 0 {
+			return ctrladmission.Denied("Task coordination ancestry is immutable: " + strings.Join(fields, ", "))
+		}
+		// The link finalizer keeps a continuation visible until its parked
+		// predecessor records it. Removing it early lets a deleted
+		// continuation look as if it was never created, so recovery would
+		// start the same work again.
+		if slices.Contains(oldTask.Finalizers, labels.ContinuationLinkFinalizer) &&
+			!slices.Contains(task.Finalizers, labels.ContinuationLinkFinalizer) &&
+			!isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
+			return ctrladmission.Denied("only the Orka controller may remove the " + labels.ContinuationLinkFinalizer + " finalizer")
+		}
+	}
+	if isTrustedControllerProvenanceUser(v.config, req.UserInfo) {
+		return ctrladmission.Allowed("trusted Task provenance writer")
+	}
+	workerTrusted := isTrustedWorkerProvenanceUser(v.config, req.UserInfo, req.Namespace)
+
+	switch req.Operation {
+	case admissionv1.Create:
+		fields := presentTaskProvenanceFields(task, workerTrusted)
+		if len(fields) > 0 {
+			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
+		}
+		if workerTrusted && task.Spec.SessionRef != nil && taskCoordinationOwner(task) == nil {
+			return ctrladmission.Denied("worker session references require an authorized coordination parent")
+		}
+		if (workerTrusted || isWorkerServiceAccountUser(v.config, req.UserInfo, req.Namespace)) && taskCoordinationOwner(task) == nil {
+			// Workers hold Agent use broadly, so a parentless Task from a
+			// worker would bind an identity-bound Agent as a root Task that
+			// no use check covered. A worker reaches such an Agent only as a
+			// delegated child, where its parent must already hold it.
+			identityBound, err := v.namesIdentityBoundAgent(ctx, req.Namespace, task)
+			if err != nil {
+				return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("read the Task's Agent: %w", err))
+			}
+			if identityBound {
+				return ctrladmission.Denied("a worker may name an identity-bound Agent only in a Task delegated from its own Task")
+			}
+		}
+		allowed, err := v.authorizedTaskCoordinationParent(ctx, req, task)
+		if err != nil {
+			return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("verify Task coordination parent: %w", err))
+		}
+		if !allowed {
+			return ctrladmission.Denied("Task coordination parent must be the caller's active Task and any session reference must be inherited unchanged")
+		}
+	case admissionv1.Update:
+		fields := changedTaskProvenanceFields(oldTask, task, workerTrusted)
+		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task update cannot modify Orka-managed provenance fields: " + strings.Join(fields, ", "))
 		}
 	}
@@ -145,29 +249,157 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 	return ctrladmission.Allowed("Task provenance fields unchanged")
 }
 
-func presentTaskProvenanceFields(task *corev1alpha1.Task) []string {
-	fields := []string{}
-	if task.Spec.RequestedBy != nil {
-		fields = append(fields, fieldSpecRequestedBy)
+// namesIdentityBoundAgent reports whether the Task names an Agent that
+// declares an external identity or still holds a claim to one. A missing Agent declares none; any other
+// read failure is returned so admission fails closed.
+func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, namespace string, task *corev1alpha1.Task) (bool, error) {
+	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
+		return false, nil
 	}
-	if task.Spec.Transaction != nil {
-		fields = append(fields, fieldSpecTransaction)
+	if v.reader == nil {
+		return false, errors.New("no reader is configured for Agents")
 	}
-	fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, managedTransactionLabelKeys)...)
-	fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
+	agent := &corev1alpha1.Agent{}
+	if task.Namespace != "" {
+		namespace = task.Namespace
+	}
+	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return agent.HoldsIdentity(), nil
+}
+
+// A Task's creator establishes its coordination ancestry and, for a chat
+// Task, the chat Session incarnation it belongs to. Later metadata updates
+// must not move an existing worker into another Task's scope, nor detach a
+// Task from the chat whose deletion stops its delegated calls.
+func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
+	// The markers of the scan, monitor, or GatewayBinding that created a
+	// Task are held too: they keep it from binding an identity as a root
+	// Task, also after the garbage collector orphans it. A GatewayBinding's
+	// Task has no owner reference, so its markers are all that say so.
+	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
+			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
+	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
+		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation})...)
+	// Kubernetes can orphan dependents during deletion. The unchanged parent
+	// metadata then has no matching owner UID, so coordination access fails
+	// closed. Cleanup controllers cannot attach the Task to a different owner.
+	// The RepositoryScan or RepositoryMonitor that created a Task is held the
+	// same way: removing it would let the Task pass as a root Task when it
+	// binds to an identity-bound Agent.
+	changed := func(oldOwner, newOwner *metav1.OwnerReference) bool {
+		return !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil)
+	}
+	if changed(taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)) ||
+		changed(taskAutomationOwner(oldTask), taskAutomationOwner(newTask)) {
+		fields = append(fields, "metadata.ownerReferences")
+	}
 	return fields
 }
 
-func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task) []string {
+// taskAutomationOwner returns the RepositoryScan or RepositoryMonitor that
+// controls a Task, or nil.
+func taskAutomationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		(owner.Kind != "RepositoryScan" && owner.Kind != "RepositoryMonitor") {
+		return nil
+	}
+	owner.BlockOwnerDeletion = nil
+	return owner
+}
+
+func taskCoordinationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != "Task" {
+		return nil
+	}
+	// Deletion blocking is garbage collection state, not Task identity.
+	owner.BlockOwnerDeletion = nil
+	return owner
+}
+
+// presentTaskProvenanceFields lists Orka-managed fields present on a created
+// Task. A trusted worker keeps its provenance-field allowance, but
+// controller-authenticated lineage and workspace settlement metadata stay
+// reserved to controller identities.
+func presentTaskProvenanceFields(task *corev1alpha1.Task, workerTrusted bool) []string {
 	fields := []string{}
-	if !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
+	if !workerTrusted {
+		if task.Spec.RequestedBy != nil {
+			fields = append(fields, fieldSpecRequestedBy)
+		}
+		if task.Spec.Transaction != nil {
+			fields = append(fields, fieldSpecTransaction)
+		}
+		fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, managedTransactionLabelKeys)...)
+		fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
+	}
+	fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, controllerManagedTaskAnnotationKeys)...)
+	fields = append(fields, presentManagedPrefixFields(fieldMetadataLabels, task.Labels)...)
+	fields = append(fields, presentManagedPrefixFields(fieldMetadataAnnotations, task.Annotations)...)
+	return fields
+}
+
+func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task, workerTrusted bool) []string {
+	fields := []string{}
+	// A requester the API server stamped from a verified sign-in is bound to
+	// that identity: no worker, trusted or not, may rewrite it, or a forged
+	// lineage could inherit another person's connector authority.
+	stamped := oldTask.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI
+	if (!workerTrusted || stamped) && !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
 		fields = append(fields, fieldSpecRequestedBy)
 	}
-	if !reflect.DeepEqual(oldTask.Spec.Transaction, newTask.Spec.Transaction) {
-		fields = append(fields, fieldSpecTransaction)
+	if !workerTrusted {
+		if !reflect.DeepEqual(oldTask.Spec.Transaction, newTask.Spec.Transaction) {
+			fields = append(fields, fieldSpecTransaction)
+		}
+		fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, managedTransactionLabelKeys)...)
+		fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
 	}
-	fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, managedTransactionLabelKeys)...)
-	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
+	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, controllerManagedTaskAnnotationKeys)...)
+	fields = append(fields, changedManagedPrefixFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels)...)
+	fields = append(fields, changedManagedPrefixFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations)...)
+	return fields
+}
+
+func presentManagedPrefixFields(prefix string, values map[string]string) []string {
+	fields := []string{}
+	for key := range values {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			fields = append(fields, prefix+"["+key+"]")
+		}
+	}
+	slices.Sort(fields)
+	return fields
+}
+
+func changedManagedPrefixFields(prefix string, oldValues, newValues map[string]string) []string {
+	fields := []string{}
+	keys := map[string]struct{}{}
+	for key := range oldValues {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range newValues {
+		if strings.HasPrefix(key, managedWorkspaceMetadataPrefix) {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range keys {
+		oldValue, oldOK := oldValues[key]
+		newValue, newOK := newValues[key]
+		if oldOK != newOK || oldValue != newValue {
+			fields = append(fields, prefix+"["+key+"]")
+		}
+	}
+	slices.Sort(fields)
 	return fields
 }
 
@@ -193,7 +425,46 @@ func changedManagedMapFields(prefix string, oldValues, newValues map[string]stri
 	return fields
 }
 
-func isTrustedTaskProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
+// isTrustedControllerProvenanceUser reports a controller identity: the only
+// writers allowed to touch every Orka-managed field, including the reserved
+// workspace settlement metadata. Flag-supplied trusted users deliberately do
+// NOT qualify — they keep only the provenance-field allowance.
+func isTrustedControllerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo) bool {
+	username := strings.TrimSpace(user.Username)
+	return username != "" && slices.Contains(cfg.ControllerUsernames, username)
+}
+
+// isTrustedWorkerProvenanceUser reports a provenance-trusted principal — a
+// trusted worker ServiceAccount or a flag-listed trusted user: it keeps the
+// provenance-field allowance but never the workspace settlement metadata
+// reservation.
+// WorkerServiceAccountNames returns the default worker ServiceAccount names
+// joined with extra, without duplicates or blanks.
+func WorkerServiceAccountNames(extra ...[]string) []string {
+	names := append([]string{}, defaultTrustedWorkerServiceAccounts...)
+	for _, list := range extra {
+		for _, name := range list {
+			if name = strings.TrimSpace(name); name != "" && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// isWorkerServiceAccountUser reports a worker Pod's ServiceAccount in the
+// request namespace, whether or not provenance admission trusts it.
+func isWorkerServiceAccountUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
+	username := strings.TrimSpace(user.Username)
+	for _, name := range cfg.WorkerServiceAccountNames {
+		if username != "" && username == serviceAccountUsername(namespace, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTrustedWorkerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
 	username := strings.TrimSpace(user.Username)
 	if username == "" {
 		return false

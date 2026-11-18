@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
@@ -26,12 +28,16 @@ const (
 	TaskWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-task-workspace-class-use"
 	// ToolWorkspaceClassUseWebhookPath validates Tool workspace class selection.
 	ToolWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-tool-workspace-class-use"
+	CheckpointSourceUseWebhookPath   = "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use"
 )
 
 // WorkspaceClassUseAuthorizer checks the live admission caller's permission to
-// use one namespaced ExecutionWorkspaceClass.
+// use one namespaced ExecutionWorkspaceClass, to consume retained checkpoint
+// data, and to export a workspace's data as a checkpoint source.
 type WorkspaceClassUseAuthorizer interface {
 	Authorize(context.Context, string, string, authenticationv1.UserInfo) error
+	AuthorizeCheckpoint(context.Context, string, string, authenticationv1.UserInfo) error
+	AuthorizeCheckpointSource(context.Context, string, string, authenticationv1.UserInfo) error
 }
 
 type workspaceClassResource int
@@ -39,6 +45,7 @@ type workspaceClassResource int
 const (
 	workspaceClassTask workspaceClassResource = iota
 	workspaceClassTool
+	workspaceCheckpointSource
 )
 
 // RegisterWorkspaceClassUseWebhooks registers fail-closed Task and Tool class
@@ -54,6 +61,9 @@ func RegisterWorkspaceClassUseWebhooks(
 	})
 	server.Register(ToolWorkspaceClassUseWebhookPath, &ctrladmission.Webhook{
 		Handler: newWorkspaceClassUseValidator(scheme, authorizer, workspaceClassTool),
+	})
+	server.Register(CheckpointSourceUseWebhookPath, &ctrladmission.Webhook{
+		Handler: newWorkspaceClassUseValidator(scheme, authorizer, workspaceCheckpointSource),
 	})
 }
 
@@ -85,10 +95,33 @@ func (v *WorkspaceClassUseValidator) Handle(
 	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a workspace class selection write")
 	}
+	if v.resource == workspaceCheckpointSource {
+		// The CRD makes the source immutable. Only creation introduces access;
+		// controller finalizer updates must remain possible after revocation.
+		if req.Operation != admissionv1.Create {
+			return ctrladmission.Allowed("checkpoint source is immutable")
+		}
+		checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}
+		if err := v.decoder.Decode(req, checkpoint); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, err)
+		}
+		if v.authorizer == nil {
+			return ctrladmission.Denied("workspace checkpoint source authorizer is unavailable")
+		}
+		if err := v.authorizer.AuthorizeCheckpointSource(ctx, requestNamespace(req.Namespace, checkpoint.Namespace), checkpoint.Spec.WorkspaceRef.Name, req.UserInfo); err != nil {
+			return ctrladmission.Denied("workspace checkpoint source use authorization failed")
+		}
+		return ctrladmission.Allowed("workspace checkpoint source use authorized")
+	}
 
 	className, namespace, err := v.decodeSelection(req)
 	if err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, err)
+	}
+	if v.resource == workspaceClassTool {
+		if response, denied := v.authorizeToolEgressCredentials(ctx, req, namespace); denied {
+			return response
+		}
 	}
 	if className == "" {
 		return ctrladmission.Allowed("no workspace class selected")
@@ -101,6 +134,17 @@ func (v *WorkspaceClassUseValidator) Handle(
 	}
 	if err := v.authorizer.Authorize(ctx, namespace, className, req.UserInfo); err != nil {
 		return ctrladmission.Denied("workspace class use authorization failed: " + err.Error())
+	}
+	if v.resource == workspaceClassTask {
+		task := &corev1alpha1.Task{}
+		if err := v.decoder.Decode(req, task); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, err)
+		}
+		if task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil && task.Spec.Execution.Workspace.RestoreFrom != nil {
+			if err := v.authorizer.AuthorizeCheckpoint(ctx, namespace, task.Spec.Execution.Workspace.RestoreFrom.Name, req.UserInfo); err != nil {
+				return ctrladmission.Denied("workspace checkpoint use authorization failed")
+			}
+		}
 	}
 	return ctrladmission.Allowed("workspace class use authorized")
 }
@@ -115,8 +159,13 @@ func (v *WorkspaceClassUseValidator) decodeSelection(
 			return "", "", fmt.Errorf("decode Task workspace class selection: %w", err)
 		}
 		className := ""
-		if value.Spec.Execution != nil && value.Spec.Execution.Workspace != nil &&
-			value.Spec.Execution.Workspace.ClassRef != nil {
+		if value.Spec.Execution != nil && value.Spec.Execution.Workspace != nil {
+			if value.Spec.Execution.Workspace.ClassRef == nil || strings.TrimSpace(value.Spec.Execution.Workspace.ClassRef.Name) == "" {
+				return "", "", fmt.Errorf("execution workspace classRef.name is required")
+			}
+			if value.Spec.Type != corev1alpha1.TaskTypeAgent {
+				return "", "", fmt.Errorf("execution workspace is only supported for type: agent tasks")
+			}
 			className = value.Spec.Execution.Workspace.ClassRef.Name
 		}
 		return strings.TrimSpace(className), requestNamespace(req.Namespace, value.Namespace), nil
@@ -140,4 +189,51 @@ func requestNamespace(requestNamespace, objectNamespace string) string {
 		return namespace
 	}
 	return strings.TrimSpace(objectNamespace)
+}
+
+// SecretUseAuthorizer checks the live admission caller's permission to read
+// one namespaced Secret.
+type SecretUseAuthorizer interface {
+	AuthorizeSecret(context.Context, string, string, authenticationv1.UserInfo) error
+}
+
+// authorizeToolEgressCredentials requires the caller to be allowed to get
+// every Secret a Substrate MCP actor egress credential references, so a Tool
+// author cannot have the egress gateway inject a Secret they cannot read.
+// Like class selection, every create and spec update is reauthorized.
+func (v *WorkspaceClassUseValidator) authorizeToolEgressCredentials(ctx context.Context, req ctrladmission.Request, namespace string) (ctrladmission.Response, bool) {
+	tool := &corev1alpha1.Tool{}
+	if err := v.decoder.Decode(req, tool); err != nil {
+		return ctrladmission.Errored(http.StatusBadRequest, err), true
+	}
+	names := toolEgressCredentialSecrets(tool)
+	if len(names) == 0 {
+		return ctrladmission.Response{}, false
+	}
+	authorizer, ok := v.authorizer.(SecretUseAuthorizer)
+	if !ok {
+		return ctrladmission.Denied("egress credential Secret authorizer is unavailable"), true
+	}
+	for _, name := range names {
+		if err := authorizer.AuthorizeSecret(ctx, namespace, name, req.UserInfo); err != nil {
+			return ctrladmission.Denied("egress credential Secret use authorization failed: " + err.Error()), true
+		}
+	}
+	return ctrladmission.Response{}, false
+}
+
+func toolEgressCredentialSecrets(tool *corev1alpha1.Tool) []string {
+	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil
+	}
+	var names []string
+	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
+		if rule.Credential == nil {
+			continue
+		}
+		if name := strings.TrimSpace(rule.Credential.SecretRef.Name); !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
 }

@@ -22,8 +22,10 @@ const (
 )
 
 // SubstrateActorPoolSpec defines an operator-owned oversubscription pool.
+// +kubebuilder:validation:XValidation:rule="self.templateRef == oldSelf.templateRef",message="templateRef is immutable; create another pool to change the template or Atespace"
 type SubstrateActorPoolSpec struct {
-	// TemplateRef is the ActorTemplate used for pool members.
+	// TemplateRef is the immutable ActorTemplate reference used for pool members.
+	// Its namespace selects the native Atespace. Create another pool to change it.
 	// +kubebuilder:validation:Required
 	TemplateRef WorkspaceTemplateReference `json:"templateRef"`
 
@@ -32,16 +34,11 @@ type SubstrateActorPoolSpec struct {
 	WorkerPoolRef *WorkspaceTemplateReference `json:"workerPoolRef,omitempty"`
 
 	// TargetActors is the desired number of stateful actors tracked for this
-	// pool. It may exceed TargetWorkers to express oversubscription.
+	// pool. It may exceed the physical worker budget to express oversubscription.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
 	// +optional
 	TargetActors int32 `json:"targetActors,omitempty"`
-
-	// TargetWorkers is the intended physical worker budget for this pool.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	TargetWorkers int32 `json:"targetWorkers,omitempty"`
 
 	// PrecreateActors asks the controller to create deterministic warm actors up
 	// to TargetActors. Substrate may suspend them when the WorkerPool is full.
@@ -58,6 +55,11 @@ type SubstrateActorPoolStatus struct {
 	// ObservedGeneration is the latest generation reconciled by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// TemplateUID pins the first admitted native ActorTemplate lifetime.
+	// A same-name replacement requires a new pool.
+	// +optional
+	TemplateUID string `json:"templateUID,omitempty"`
 
 	// WorkerCount is the number of workers reported by Substrate for this pool.
 	// +optional
@@ -103,7 +105,7 @@ type SubstrateActorPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SubstrateActorPoolSpec   `json:"spec,omitempty"`
+	Spec   SubstrateActorPoolSpec   `json:"spec"`
 	Status SubstrateActorPoolStatus `json:"status,omitempty"`
 }
 

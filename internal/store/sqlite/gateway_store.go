@@ -13,12 +13,23 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+)
+
+const (
+	gatewayEventIDField      = "eventId"
+	gatewayNamespaceField    = "namespace"
+	gatewayNamespaceUIDField = "namespaceUid"
+	gatewayUIDField          = "gatewayUid"
+	gatewayNameField         = "gatewayName"
+	gatewayAccountIDField    = "accountId"
+	gatewayContextIDField    = "contextId"
 )
 
 const gatewaySessionOwnerType = store.SessionTypeGateway
@@ -31,7 +42,7 @@ const (
 
 const gatewayEventColumns = `id, namespace, namespace_uid, gateway_uid, gateway_generation, gateway_name, binding_name, binding_uid, binding_generation, agent_name, agent_uid, external_event_id,
 	protocol_version, event_type, state, state_message, account_id, context_id, thread_id, sender_id,
-	sender_display_name, text, reply_target, metadata_json, session_name, task_name, task_uid, delivery_id, provider_message_id, trace_parent, trace_state, transcript_order, attempt_count,
+	sender_display_name, text, reply_target, metadata_json, session_name, task_name, task_uid, task_runtime_allowed_tools_json, delivery_id, provider_message_id, trace_parent, trace_state, transcript_order, attempt_count,
 	claim_owner, claim_until, next_attempt_at, occurred_at, received_at, expires_at, created_at, updated_at, completed_at`
 
 const gatewayListOrder = ` ORDER BY created_at DESC, id DESC`
@@ -49,11 +60,19 @@ var (
 // AdmitGatewayEvent atomically deduplicates a normalized event and, for accepted events,
 // creates/upserts the Session and appends one stable user message.
 func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEventAdmission) (*store.GatewayEvent, bool, error) {
+	result, err := writeOperation(ctx, s, "AdmitGatewayEvent", nil, func(ctx context.Context) (resultPair[*store.GatewayEvent, bool], error) {
+		first, second, err := s.admitGatewayEventWrite(ctx, admission)
+		return resultPair[*store.GatewayEvent, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) admitGatewayEventWrite(ctx context.Context, admission store.GatewayEventAdmission) (*store.GatewayEvent, bool, error) {
 	event, appendUserMessage, metadataJSON, now, err := prepareGatewayEventAdmission(admission)
 	if err != nil {
 		return nil, false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -82,7 +101,7 @@ func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEv
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
-	retainedSession, retainedOrder, retained, err := retainedGatewayMessage(ctx, tx, &event)
+	retainedSession, retainedOrder, retained, err := retainedGatewayMessage(ctx, tx.Tx, &event)
 	if err != nil {
 		return nil, false, err
 	}
@@ -92,6 +111,20 @@ func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEv
 		event.SessionName = retainedSession
 		event.TranscriptOrder = retainedOrder
 		return &event, false, nil
+	}
+	if existing, err := getGatewayEventByExternalIDQuery(ctx, tx, event.Namespace, event.GatewayUID, event.ExternalEventID); err == nil {
+		if !gatewayEventsHaveSameEnvelope(existing, &event) {
+			return nil, false, store.ErrDuplicateMismatch
+		}
+		return existing, false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, false, err
+	}
+	if appendUserMessage {
+		event.SessionName, err = resolveGatewaySessionNameTx(ctx, tx.Tx, &event)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	limit := admission.GatewayRecordLimit
 	statePredicate := `state <> ?`
@@ -111,18 +144,18 @@ func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEv
 		}
 	}
 	appendUserMessage, err = applyGatewayPendingLimit(
-		ctx, tx, &event, appendUserMessage, admission.PendingLimit,
+		ctx, tx.Tx, &event, appendUserMessage, admission.PendingLimit,
 	)
 	if err != nil {
 		return nil, false, err
 	}
 	if appendUserMessage {
-		event.TranscriptOrder, err = prepareGatewaySessionOrderTx(ctx, tx, &event, now)
+		event.TranscriptOrder, err = prepareGatewaySessionOrderTx(ctx, tx.Tx, &event, now)
 		if err != nil {
 			return nil, false, err
 		}
 	}
-	created, existing, err := insertGatewayEventTx(ctx, tx, &event, metadataJSON)
+	created, existing, err := insertGatewayEventTx(ctx, tx.Tx, &event, metadataJSON)
 	if err != nil {
 		return nil, false, err
 	}
@@ -130,7 +163,7 @@ func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEv
 		return existing, false, nil
 	}
 	if appendUserMessage {
-		if err := appendGatewayUserMessageTx(ctx, tx, &event, now); err != nil {
+		if err := appendGatewayUserMessageTx(ctx, tx.Tx, &event, now); err != nil {
 			return nil, false, err
 		}
 	}
@@ -162,6 +195,10 @@ func prepareGatewayEventAdmission(admission store.GatewayEventAdmission) (store.
 	if event.ExpiresAt.IsZero() {
 		return store.GatewayEvent{}, false, "", time.Time{}, store.ValidationErrorf("gateway event expiresAt is required")
 	}
+	// SQL compares these times as text, so every stored time shares one zone.
+	event.UpdatedAt, event.ReceivedAt = event.UpdatedAt.UTC(), event.ReceivedAt.UTC()
+	event.NextAttemptAt, event.ExpiresAt = event.NextAttemptAt.UTC(), event.ExpiresAt.UTC()
+	event.OccurredAt, event.CompletedAt = utcTimePtr(event.OccurredAt), utcTimePtr(event.CompletedAt)
 	appendUserMessage := admission.AppendUserMessage
 	if appendUserMessage {
 		event.State = store.GatewayEventQueued
@@ -176,25 +213,11 @@ func prepareGatewayEventAdmission(admission store.GatewayEventAdmission) (store.
 	if !store.IsValidGatewayEventState(event.State) {
 		return store.GatewayEvent{}, false, "", time.Time{}, store.ValidationErrorf("unsupported gateway event state %q", event.State)
 	}
-	event.StateMessage = sanitizeGatewayStoreText(event.StateMessage, 1024)
-	event.SenderDisplayName = sanitizeGatewayStoreText(event.SenderDisplayName, 256)
-	event.Metadata = normalizeGatewayStoreMetadata(event.Metadata)
 	metadataJSON, err := marshalStringMap(event.Metadata)
 	if err != nil {
 		return store.GatewayEvent{}, false, "", time.Time{}, err
 	}
 	return event, appendUserMessage, metadataJSON, now, nil
-}
-
-func normalizeGatewayStoreMetadata(metadata map[string]string) map[string]string {
-	if len(metadata) == 0 {
-		return nil
-	}
-	normalized := make(map[string]string, len(metadata))
-	for key, value := range metadata {
-		normalized[key] = sanitizeGatewayStoreText(value, 256)
-	}
-	return normalized
 }
 
 func applyGatewayPendingLimit(
@@ -335,8 +358,8 @@ func appendGatewayUserMessageTx(
 	messageMetadata["gateway"] = event.GatewayName
 	messageMetadata["binding"] = event.BindingName
 	messageMetadata["externalEventId"] = event.ExternalEventID
-	messageMetadata["accountId"] = event.AccountID
-	messageMetadata["contextId"] = event.ContextID
+	messageMetadata[gatewayAccountIDField] = event.AccountID
+	messageMetadata[gatewayContextIDField] = event.ContextID
 	messageMetadata["senderId"] = event.SenderID
 	messageMetadata[gatewayEnvelopeDigestMetadataKey] = store.GatewayEventEnvelopeDigest(event)
 	if event.ThreadID != "" {
@@ -373,7 +396,7 @@ func appendGatewayUserMessageTx(
 
 // GetGatewayEvent returns one event by stable Orka event ID.
 func (s *Store) GetGatewayEvent(ctx context.Context, namespace, id string) (*store.GatewayEvent, error) {
-	return getGatewayEventQuery(ctx, s.db, namespace, id)
+	return getGatewayEventQuery(ctx, s.taskDataExecutor(ctx), namespace, id)
 }
 
 // GetGatewayEventDuplicate resolves a durable duplicate before mutable readiness checks.
@@ -383,10 +406,6 @@ func (s *Store) GetGatewayEventDuplicate(
 	if candidate == nil {
 		return nil, store.ValidationErrorf("gateway event is required")
 	}
-	normalized := *candidate
-	normalized.SenderDisplayName = sanitizeGatewayStoreText(normalized.SenderDisplayName, 256)
-	normalized.Metadata = normalizeGatewayStoreMetadata(normalized.Metadata)
-	candidate = &normalized
 	if err := validateGatewayEvent(candidate); err != nil {
 		return nil, err
 	}
@@ -438,10 +457,20 @@ func (s *Store) GetGatewayEventDuplicate(
 
 // GetGatewayEventForTask resolves durable gateway ownership for one linked Task identity.
 func (s *Store) GetGatewayEventForTask(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
+	var event *store.GatewayEvent
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		event, err = s.getGatewayEventForTaskUnfenced(ctx, namespace, taskName, taskUID)
+		return err
+	})
+	return event, err
+}
+
+func (s *Store) getGatewayEventForTaskUnfenced(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskName) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("namespace, taskName, and taskUID are required")
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
+	row := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
 		WHERE namespace = ? AND task_name = ? AND task_uid = ?
 		ORDER BY created_at DESC, id DESC LIMIT 1`,
 		namespace, taskName, taskUID,
@@ -459,7 +488,7 @@ func (s *Store) HasGatewayTaskTombstone(ctx context.Context, namespace, taskName
 		return false, store.ValidationErrorf("namespace, taskName, and taskUID are required")
 	}
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_event_tombstones
+	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_event_tombstones
 		WHERE namespace = ? AND task_name = ? AND task_uid = ?`, namespace, taskName, taskUID).Scan(&count); err != nil {
 		return false, err
 	}
@@ -548,11 +577,17 @@ func (s *Store) ListGatewayEvents(ctx context.Context, filter store.GatewayEvent
 
 // ClaimNextGatewayEvent leases the oldest runnable event and reserves its Session.
 func (s *Store) ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayEvent, error) {
+	return writeOperation(ctx, s, "ClaimNextGatewayEvent", nil, func(ctx context.Context) (*store.GatewayEvent, error) {
+		return s.claimNextGatewayEventWrite(ctx, namespace, owner, now, lease)
+	})
+}
+
+func (s *Store) claimNextGatewayEventWrite(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayEvent, error) {
 	if strings.TrimSpace(owner) == "" || lease <= 0 {
 		return nil, store.ValidationErrorf("claim owner and positive lease are required")
 	}
 	now = now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -638,34 +673,126 @@ func (s *Store) RenewGatewayEventClaim(
 	now time.Time,
 	lease time.Duration,
 ) (*store.GatewayEvent, error) {
+	return writeOperation(ctx, s, "RenewGatewayEventClaim", nil, func(ctx context.Context) (*store.GatewayEvent, error) {
+		return s.renewGatewayEventClaimWrite(ctx, namespace, id, owner, now, lease)
+	})
+}
+
+func (s *Store) renewGatewayEventClaimWrite(
+	ctx context.Context,
+	namespace, id, owner string,
+	now time.Time,
+	lease time.Duration,
+) (*store.GatewayEvent, error) {
 	if strings.TrimSpace(owner) == "" || lease <= 0 {
 		return nil, store.ValidationErrorf("claim owner and positive lease are required")
 	}
 	now = now.UTC()
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET claim_until = ?, updated_at = ?
+	var event *store.GatewayEvent
+	// The renewal and the returned event share one transaction, so a retry
+	// committed in between cannot be returned as the renewed claim.
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_events SET claim_until = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?
 		  AND claim_until > ? AND expires_at > ?`,
-		now.Add(lease), now, namespace, id, store.GatewayEventDispatching, owner, now, now)
-	if err != nil {
+			now.Add(lease), now, namespace, id, store.GatewayEventDispatching, owner, now, now)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 0 {
+			return store.ErrConflict
+		}
+		event, err = getGatewayEventQuery(ctx, q, namespace, id)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	updated, err := result.RowsAffected()
+	return event, nil
+}
+
+// FreezeGatewayEventTaskRuntimeAllowedTools records the external runtime policy
+// that will be written to the deterministic Task. The first value wins so
+// crash recovery never rebuilds the Task from mutable live policy.
+func (s *Store) FreezeGatewayEventTaskRuntimeAllowedTools(
+	ctx context.Context,
+	namespace, id, owner string,
+	allowedTools []string,
+	now time.Time,
+) (*store.GatewayEvent, error) {
+	return writeOperation(ctx, s, "FreezeGatewayEventTaskRuntimeAllowedTools", nil, func(ctx context.Context) (*store.GatewayEvent, error) {
+		return s.freezeGatewayEventTaskRuntimeAllowedToolsWrite(ctx, namespace, id, owner, allowedTools, now)
+	})
+}
+
+func (s *Store) freezeGatewayEventTaskRuntimeAllowedToolsWrite(
+	ctx context.Context,
+	namespace, id, owner string,
+	allowedTools []string,
+	now time.Time,
+) (*store.GatewayEvent, error) {
+	if strings.TrimSpace(owner) == "" || allowedTools == nil {
+		return nil, store.ValidationErrorf("claim owner and explicit allowedTools are required")
+	}
+	encoded, err := json.Marshal(allowedTools)
 	if err != nil {
+		return nil, fmt.Errorf("encode Gateway Task runtime allowedTools: %w", err)
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		// The claim is a lease, which is judged only at the request's time.
+		return nil, store.ValidationErrorf("the request time is required to check the claim")
+	}
+	var event *store.GatewayEvent
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_events
+		SET task_runtime_allowed_tools_json = ?, updated_at = ?
+		WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?
+		  AND claim_until > ? AND expires_at > ?
+		  AND (task_runtime_allowed_tools_json IS NULL OR task_runtime_allowed_tools_json = ?)`,
+			string(encoded), now, namespace, id, store.GatewayEventDispatching, owner,
+			now, now, string(encoded),
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 0 {
+			return store.ErrConflict
+		}
+		event, err = getGatewayEventQuery(ctx, q, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !event.TaskPolicyFrozen || !slices.Equal(event.TaskAllowedTools, allowedTools) {
+			return store.ErrConflict
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	if updated == 0 {
-		return nil, store.ErrConflict
-	}
-	return s.GetGatewayEvent(ctx, namespace, id)
+	return event, nil
 }
 
 // MarkGatewayEventTaskCreated links a claimed event to its deterministic Task.
 func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error {
+	return writeOperationErr(ctx, s, "MarkGatewayEventTaskCreated", func(ctx context.Context) error {
+		return s.markGatewayEventTaskCreatedWrite(ctx, namespace, id, taskName, taskUID, owner, now)
+	})
+}
+
+func (s *Store) markGatewayEventTaskCreatedWrite(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error {
 	if strings.TrimSpace(taskName) == "" || strings.TrimSpace(taskUID) == "" || strings.TrimSpace(owner) == "" {
 		return store.ValidationErrorf("taskName, taskUID, and owner are required")
 	}
 	now = now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -728,8 +855,13 @@ func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, 
 
 // RetryGatewayEvent returns a failed dispatch to the FIFO queue and releases its reservation.
 func (s *Store) RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "RetryGatewayEvent", func(ctx context.Context) error {
+		return s.retryGatewayEventWrite(ctx, namespace, id, owner, reason, nextAttemptAt)
+	})
+}
+
+func (s *Store) retryGatewayEventWrite(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -770,7 +902,17 @@ func (s *Store) DeferGatewayEventProjection(
 	namespace, id string,
 	nextAttemptAt time.Time,
 ) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET next_attempt_at = ?, updated_at = ?
+	return writeOperationErr(ctx, s, "DeferGatewayEventProjection", func(ctx context.Context) error {
+		return s.deferGatewayEventProjectionWrite(ctx, namespace, id, nextAttemptAt)
+	})
+}
+
+func (s *Store) deferGatewayEventProjectionWrite(
+	ctx context.Context,
+	namespace, id string,
+	nextAttemptAt time.Time,
+) error {
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `UPDATE gateway_events SET next_attempt_at = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ?`,
 		nextAttemptAt.UTC(), time.Now().UTC(), namespace, id, store.GatewayEventTaskCreated)
 	if err != nil {
@@ -792,9 +934,18 @@ func (s *Store) ExpireGatewayEvent(
 	namespace, id, owner, reason string,
 	now time.Time,
 ) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
+	return writeOperationErr(ctx, s, "ExpireGatewayEvent", func(ctx context.Context) error {
+		return s.expireGatewayEventWrite(ctx, namespace, id, owner, reason, now)
+	})
+}
+
+func (s *Store) expireGatewayEventWrite(
+	ctx context.Context,
+	namespace, id, owner, reason string,
+	now time.Time,
+) error {
 	now = now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -803,7 +954,7 @@ func (s *Store) ExpireGatewayEvent(
 	if err != nil {
 		return err
 	}
-	if err := expireGatewayEventTx(ctx, tx, event, owner, reason, now); err != nil {
+	if err := expireGatewayEventTx(ctx, tx.Tx, event, owner, reason, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -815,18 +966,29 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 	ctx context.Context,
 	projection store.GatewayExpiryProjection,
 ) (*store.GatewayDelivery, bool, error) {
+	result, err := writeOperation(ctx, s, "ExpireGatewayEventWithDelivery", nil, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
+		first, second, err := s.expireGatewayEventWithDeliveryWrite(ctx, projection)
+		return resultPair[*store.GatewayDelivery, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) expireGatewayEventWithDeliveryWrite(
+	ctx context.Context,
+	projection store.GatewayExpiryProjection,
+) (*store.GatewayDelivery, bool, error) {
 	if projection.EventID == "" || projection.Delivery.EventID != projection.EventID {
 		return nil, false, store.ValidationErrorf("event ID and delivery event ID must match")
 	}
 	if err := validateGatewayDelivery(&projection.Delivery); err != nil {
 		return nil, false, err
 	}
-	reason := sanitizeGatewayStoreText(projection.Reason, 1024)
+	reason := projection.Reason
 	now := projection.CompletedAt.UTC()
 	if now.IsZero() {
 		return nil, false, store.ValidationErrorf("completion time is required")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -838,7 +1000,7 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 	if event.State == store.GatewayEventExpired {
 		existing, getErr := getGatewayDeliveryByEventQuery(ctx, tx, event.Namespace, event.ID)
 		if errors.Is(getErr, store.ErrNotFound) {
-			delivery, created, createErr := createGatewayDeliveryTx(ctx, tx, &projection.Delivery)
+			delivery, created, createErr := createGatewayDeliveryTx(ctx, tx.Tx, &projection.Delivery)
 			if createErr != nil {
 				return nil, false, createErr
 			}
@@ -864,10 +1026,10 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 		}
 		return existing, false, nil
 	}
-	if err := expireGatewayEventTx(ctx, tx, event, projection.Owner, reason, now); err != nil {
+	if err := expireGatewayEventTx(ctx, tx.Tx, event, projection.Owner, reason, now); err != nil {
 		return nil, false, err
 	}
-	delivery, created, err := createGatewayDeliveryTx(ctx, tx, &projection.Delivery)
+	delivery, created, err := createGatewayDeliveryTx(ctx, tx.Tx, &projection.Delivery)
 	if err != nil {
 		return nil, false, err
 	}
@@ -882,8 +1044,15 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 func (s *Store) MarkExpiredGatewayEventDeadLettered(
 	ctx context.Context, namespace, id, reason string, now time.Time,
 ) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET state = ?, state_message = ?, updated_at = ?
+	return writeOperationErr(ctx, s, "MarkExpiredGatewayEventDeadLettered", func(ctx context.Context) error {
+		return s.markExpiredGatewayEventDeadLetteredWrite(ctx, namespace, id, reason, now)
+	})
+}
+
+func (s *Store) markExpiredGatewayEventDeadLetteredWrite(
+	ctx context.Context, namespace, id, reason string, now time.Time,
+) error {
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `UPDATE gateway_events SET state = ?, state_message = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND delivery_id = ''`,
 		store.GatewayEventDeadLettered, reason, now.UTC(), namespace, id, store.GatewayEventExpired)
 	if err != nil {
@@ -920,7 +1089,7 @@ func expireGatewayEventTx(
 	}
 	if event.SessionName != "" && event.TranscriptOrder > 0 {
 		metadataJSON, err := marshalStringMap(map[string]string{
-			"gateway": event.GatewayName, "binding": event.BindingName, "eventId": event.ID,
+			"gateway": event.GatewayName, "binding": event.BindingName, gatewayEventIDField: event.ID,
 		})
 		if err != nil {
 			return err
@@ -973,13 +1142,21 @@ func expireGatewayEventTx(
 // ProjectGatewayTerminal atomically appends one terminal message, creates one outbox row,
 // completes the event, and releases the Session for the next queued event.
 func (s *Store) ProjectGatewayTerminal(ctx context.Context, projection store.GatewayTerminalProjection) (*store.GatewayDelivery, bool, error) {
+	result, err := writeOperation(ctx, s, "ProjectGatewayTerminal", nil, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
+		first, second, err := s.projectGatewayTerminalWrite(ctx, projection)
+		return resultPair[*store.GatewayDelivery, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) projectGatewayTerminalWrite(ctx context.Context, projection store.GatewayTerminalProjection) (*store.GatewayDelivery, bool, error) {
 	if projection.EventID == "" || projection.Message.ID == "" {
 		return nil, false, store.ValidationErrorf("event ID and stable message ID are required")
 	}
 	if err := validateGatewayDelivery(&projection.Delivery); err != nil {
 		return nil, false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1032,7 +1209,7 @@ func (s *Store) ProjectGatewayTerminal(ctx context.Context, projection store.Gat
 		}
 	}
 
-	delivery, created, err := createGatewayDeliveryTx(ctx, tx, &projection.Delivery)
+	delivery, created, err := createGatewayDeliveryTx(ctx, tx.Tx, &projection.Delivery)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1060,18 +1237,18 @@ func validateGatewayTerminalProjection(event *store.GatewayEvent, projection *st
 	}
 	delivery := &projection.Delivery
 	for name, matched := range map[string]bool{
-		"eventId":           projection.EventID == event.ID && delivery.EventID == event.ID,
-		"namespace":         delivery.Namespace == event.Namespace,
-		"namespaceUid":      delivery.NamespaceUID == event.NamespaceUID,
-		"gatewayUid":        delivery.GatewayUID == event.GatewayUID,
-		"gatewayGeneration": delivery.GatewayGeneration == event.GatewayGeneration,
-		"gatewayName":       delivery.GatewayName == event.GatewayName,
-		"bindingName":       delivery.BindingName == event.BindingName,
-		"taskName":          event.TaskName != "" && delivery.TaskName == event.TaskName,
-		"sessionName":       delivery.SessionName == event.SessionName,
-		"accountId":         delivery.AccountID == event.AccountID,
-		"contextId":         delivery.ContextID == event.ContextID,
-		"threadId":          delivery.ThreadID == event.ThreadID,
+		gatewayEventIDField:      projection.EventID == event.ID && delivery.EventID == event.ID,
+		gatewayNamespaceField:    delivery.Namespace == event.Namespace,
+		gatewayNamespaceUIDField: delivery.NamespaceUID == event.NamespaceUID,
+		gatewayUIDField:          delivery.GatewayUID == event.GatewayUID,
+		"gatewayGeneration":      delivery.GatewayGeneration == event.GatewayGeneration,
+		gatewayNameField:         delivery.GatewayName == event.GatewayName,
+		"bindingName":            delivery.BindingName == event.BindingName,
+		"taskName":               event.TaskName != "" && delivery.TaskName == event.TaskName,
+		"sessionName":            delivery.SessionName == event.SessionName,
+		gatewayAccountIDField:    delivery.AccountID == event.AccountID,
+		gatewayContextIDField:    delivery.ContextID == event.ContextID,
+		"threadId":               delivery.ThreadID == event.ThreadID,
 	} {
 		if !matched {
 			return store.ValidationErrorf("gateway terminal projection %s does not match admitted event", name)
@@ -1106,15 +1283,23 @@ func validateGatewayTerminalProjection(event *store.GatewayEvent, projection *st
 
 // CreateGatewayDelivery idempotently inserts one outbox row.
 func (s *Store) CreateGatewayDelivery(ctx context.Context, delivery *store.GatewayDelivery) (*store.GatewayDelivery, bool, error) {
+	result, err := writeOperationInto(ctx, s, "CreateGatewayDelivery", nil, delivery, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
+		first, second, err := s.createGatewayDeliveryWrite(ctx, delivery)
+		return resultPair[*store.GatewayDelivery, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) createGatewayDeliveryWrite(ctx context.Context, delivery *store.GatewayDelivery) (*store.GatewayDelivery, bool, error) {
 	if err := validateGatewayDelivery(delivery); err != nil {
 		return nil, false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	got, created, err := createGatewayDeliveryTx(ctx, tx, delivery)
+	got, created, err := createGatewayDeliveryTx(ctx, tx.Tx, delivery)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1126,7 +1311,7 @@ func (s *Store) CreateGatewayDelivery(ctx context.Context, delivery *store.Gatew
 
 // GetGatewayDelivery returns one delivery by stable ID.
 func (s *Store) GetGatewayDelivery(ctx context.Context, namespace, id string) (*store.GatewayDelivery, error) {
-	return getGatewayDeliveryQuery(ctx, s.db, namespace, id)
+	return getGatewayDeliveryQuery(ctx, s.taskDataExecutor(ctx), namespace, id)
 }
 
 // ListGatewayDeliveries lists newest-first delivery records.
@@ -1181,11 +1366,17 @@ func (s *Store) ListGatewayDeliveries(ctx context.Context, filter store.GatewayD
 
 // ClaimNextGatewayDelivery leases the oldest due outbox row.
 func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayDelivery, error) {
+	return writeOperation(ctx, s, "ClaimNextGatewayDelivery", nil, func(ctx context.Context) (*store.GatewayDelivery, error) {
+		return s.claimNextGatewayDeliveryWrite(ctx, namespace, owner, now, lease)
+	})
+}
+
+func (s *Store) claimNextGatewayDeliveryWrite(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayDelivery, error) {
 	if strings.TrimSpace(owner) == "" || lease <= 0 {
 		return nil, store.ValidationErrorf("claim owner and positive lease are required")
 	}
 	now = now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,6 +1388,17 @@ func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner s
 		store.GatewayDeliveryDeadLettered, "delivery attempts exhausted", now, namespace, namespace,
 		store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending, now,
 	); err != nil {
+		return nil, err
+	}
+	// An expired interim is abandoned before evaluating FIFO, without waiting
+	// for maintenance. An active send lease blocks abandonment; after lease
+	// expiry, the send outcome can still be unknown.
+	if _, err := tx.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = 'delivery expired',
+		claim_owner = '', claim_until = NULL, updated_at = ?
+		WHERE (? = '' OR namespace = ?) AND kind = ? AND expires_at <= ? AND (state IN (?, ?) OR
+		  (state = ? AND (claim_until IS NULL OR claim_until <= ?)))`,
+		store.GatewayDeliveryExpired, now, namespace, namespace, gatewayDeliveryKindMessage, now,
+		store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending, now); err != nil {
 		return nil, err
 	}
 	row := tx.QueryRowContext(ctx, `SELECT `+prefixedColumns("delivery", gatewayDeliveryColumns)+` FROM gateway_deliveries delivery
@@ -1271,11 +1473,22 @@ func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner s
 
 // MarkGatewayDeliveryDelivered records one successful provider send.
 func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
-	providerMessageID = sanitizeGatewayStoreText(providerMessageID, 256)
+	return writeOperationErr(ctx, s, "MarkGatewayDeliveryDelivered", func(ctx context.Context) error {
+		return s.markGatewayDeliveryDeliveredWrite(ctx, namespace, id, owner, providerMessageID, now)
+	})
+}
+
+func (s *Store) markGatewayDeliveryDeliveredWrite(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
 	now = now.UTC()
-	s.executionEventMu.Lock()
-	defer s.executionEventMu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	// A transaction ctx carries already holds SQLite's only connection, which
+	// serializes this delivery with event appends. Taking the append mutex
+	// then would deadlock with an ordinary append that holds it while waiting
+	// for the connection.
+	if s.taskDataTx(ctx) == nil {
+		s.executionEventMu.Lock()
+		defer s.executionEventMu.Unlock()
+	}
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -1312,6 +1525,11 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 	}
 	if rows == 0 {
 		return store.ErrConflict
+	}
+	if delivery.Kind == gatewayDeliveryKindMessage {
+		// Interim receipts belong only to their outbox row, never the terminal
+		// event correlation, Session transcript or Task completion event stream.
+		return tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, provider_message_id = ?, updated_at = ?
 		WHERE namespace = ? AND id = ?`, delivery.ID, providerMessageID, now, namespace, delivery.EventID); err != nil {
@@ -1392,8 +1610,13 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 
 // ScheduleGatewayDeliveryRetry records a retryable adapter result.
 func (s *Store) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = ?, next_attempt_at = ?,
+	return writeOperationErr(ctx, s, "ScheduleGatewayDeliveryRetry", func(ctx context.Context) error {
+		return s.scheduleGatewayDeliveryRetryWrite(ctx, namespace, id, owner, reason, nextAttemptAt)
+	})
+}
+
+func (s *Store) scheduleGatewayDeliveryRetryWrite(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = ?, next_attempt_at = ?,
 		claim_owner = '', claim_until = NULL, updated_at = ? WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?`,
 		store.GatewayDeliveryRetryScheduled, reason, nextAttemptAt.UTC(), time.Now().UTC(), namespace, id,
 		store.GatewayDeliverySending, owner,
@@ -1413,13 +1636,18 @@ func (s *Store) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id,
 
 // MarkGatewayDeliveryTerminal records a permanent, dead-lettered, or expired result.
 func (s *Store) MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time) error {
-	reason = sanitizeGatewayStoreText(reason, 1024)
+	return writeOperationErr(ctx, s, "MarkGatewayDeliveryTerminal", func(ctx context.Context) error {
+		return s.markGatewayDeliveryTerminalWrite(ctx, namespace, id, owner, state, reason, now)
+	})
+}
+
+func (s *Store) markGatewayDeliveryTerminalWrite(ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time) error {
 	switch state {
 	case store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired:
 	default:
 		return store.ValidationErrorf("unsupported terminal delivery state %q", state)
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = ?, claim_owner = '',
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = ?, claim_owner = '',
 		claim_until = NULL, updated_at = ? WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?`,
 		state, reason, now.UTC(), namespace, id, store.GatewayDeliverySending, owner)
 	if err != nil {
@@ -1437,41 +1665,70 @@ func (s *Store) MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, 
 
 // RetryGatewayDelivery manually requeues one dead-lettered or failed delivery.
 func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*store.GatewayDelivery, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, attempt_count = 0,
-		manual_retry_count = manual_retry_count + 1, next_attempt_at = ?, expires_at = ?, last_error = '',
-		claim_owner = '', claim_until = NULL, updated_at = ?
-		WHERE namespace = ? AND id = ? AND state IN (?, ?)`,
-		store.GatewayDeliveryPending, now.UTC(), expiresAt.UTC(), now.UTC(), namespace, id,
-		store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed,
-	)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if rows == 0 {
-		if _, err := s.GetGatewayDelivery(ctx, namespace, id); err != nil {
-			return nil, err
+	return writeOperation(ctx, s, "RetryGatewayDelivery", nil, func(ctx context.Context) (*store.GatewayDelivery, error) {
+		return s.retryGatewayDeliveryWrite(ctx, namespace, id, now, expiresAt)
+	})
+}
+
+func (s *Store) retryGatewayDeliveryWrite(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*store.GatewayDelivery, error) {
+	// Starting any successor closes the interim retry window permanently.
+	// A terminal abandoned without a send also closes it: subsequent Session
+	// turns can then proceed and their rows may be retained independently.
+	var delivery *store.GatewayDelivery
+	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx, `UPDATE gateway_deliveries AS delivery SET state = ?, attempt_count = 0,
+			manual_retry_count = manual_retry_count + 1, next_attempt_at = ?, expires_at = ?, last_error = '',
+			claim_owner = '', claim_until = NULL, updated_at = ?
+			WHERE namespace = ? AND id = ? AND state IN (?, ?)
+			AND (kind <> ? OR NOT EXISTS (
+				SELECT 1 FROM gateway_deliveries later
+				WHERE later.namespace = delivery.namespace AND later.event_id = delivery.event_id
+				  AND (later.created_at > delivery.created_at OR (later.created_at = delivery.created_at AND later.id > delivery.id))
+				  AND (later.attempt_count > 0 OR later.manual_retry_count > 0 OR
+				    (later.kind IN ('final', 'error') AND later.state IN ('Delivered', 'Failed', 'DeadLettered', 'Expired')))
+			))`,
+			store.GatewayDeliveryPending, now.UTC(), expiresAt.UTC(), now.UTC(), namespace, id,
+			store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed, gatewayDeliveryKindMessage,
+		)
+		if err != nil {
+			return err
 		}
-		return nil, store.ErrConflict
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			if _, err := getGatewayDeliveryQuery(ctx, q, namespace, id); err != nil {
+				return err
+			}
+			return store.ErrConflict
+		}
+		delivery, err = getGatewayDeliveryQuery(ctx, q, namespace, id)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	return s.GetGatewayDelivery(ctx, namespace, id)
+	return delivery, nil
 }
 
 // GetGatewayQueueStats returns exact queue depth and oldest-age inputs without identity labels.
 func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (store.GatewayQueueStats, error) {
 	var stats store.GatewayQueueStats
 	var oldestEvent, oldestDelivery sqliteNullableTime
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(received_at) FROM gateway_events
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return stats, err
+	}
+	// One snapshot keeps the event and delivery counts consistent.
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), MIN(received_at) FROM gateway_events
 		WHERE (? = '' OR namespace = ?) AND state IN (?, ?, ?, ?)`,
 		namespace, namespace, store.GatewayEventAccepted, store.GatewayEventQueued,
 		store.GatewayEventDispatching, store.GatewayEventTaskCreated,
 	).Scan(&stats.PendingEvents, &oldestEvent); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(next_attempt_at) FROM gateway_deliveries
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), MIN(next_attempt_at) FROM gateway_deliveries
 		WHERE (? = '' OR namespace = ?) AND state IN (?, ?, ?)`,
 		namespace, namespace, store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending,
 	).Scan(&stats.PendingDeliveries, &oldestDelivery); err != nil {
@@ -1483,13 +1740,21 @@ func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (sto
 }
 
 // MaintainGatewayRecords expires pending deliveries, compacts terminal event identities into
-// bounded tombstones, prunes their transcript messages, and removes empty gateway Sessions.
+// bounded tombstones, and prunes their transcript messages. Transcripts without ACP
+// records are reclaimed atomically with a cleanup completion. Sessions with ACP
+// identity or records remain for coordinated runtime and Kubernetes cleanup.
 // Event expiry stays in the gateway service so it can atomically create a visible error delivery.
 func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (store.GatewayMaintenanceResult, error) {
+	return writeOperation(ctx, s, "MaintainGatewayRecords", nil, func(ctx context.Context) (store.GatewayMaintenanceResult, error) {
+		return s.maintainGatewayRecordsWrite(ctx, namespace, now, terminalCutoff)
+	})
+}
+
+func (s *Store) maintainGatewayRecordsWrite(ctx context.Context, namespace string, now, terminalCutoff time.Time) (store.GatewayMaintenanceResult, error) {
 	var result store.GatewayMaintenanceResult
 	now = now.UTC()
 	terminalCutoff = terminalCutoff.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -1517,9 +1782,15 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		result.ExpiredDeliveries = int(count)
 	}
 
-	deliveryDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries WHERE (? = '' OR namespace = ?)
-		AND updated_at < ? AND state IN (?, ?, ?, ?)`, namespace, namespace, terminalCutoff,
-		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired)
+	// Keep every row of an event with messages until the whole event can be
+	// removed. This preserves lifetime quota, replay identity, admission order
+	// and evidence of later sends (even after attempt_count is manually reset).
+	deliveryDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries AS delivery WHERE (? = '' OR namespace = ?)
+		AND updated_at < ? AND state IN (?, ?, ?, ?)
+		AND NOT EXISTS (SELECT 1 FROM gateway_deliveries message
+			WHERE message.namespace = delivery.namespace AND message.event_id = delivery.event_id AND message.kind = ?)`, namespace, namespace, terminalCutoff,
+		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired,
+		gatewayDeliveryKindMessage)
 	if err != nil {
 		return result, err
 	}
@@ -1527,7 +1798,25 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		result.DeletedDeliveries = int(count)
 	}
 
-	terminalEvents, err := listGatewayEventsForMaintenance(ctx, tx, namespace, terminalCutoff)
+	messageDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries WHERE (namespace, event_id) IN (
+		SELECT event.namespace, event.id FROM gateway_events event
+		WHERE (? = '' OR event.namespace = ?) AND event.updated_at < ?
+		  AND event.state IN (?, ?, ?, ?) AND (event.state <> ? OR event.delivery_id <> '')
+		  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries live
+			WHERE live.namespace = event.namespace AND live.event_id = event.id
+			  AND (live.updated_at >= ? OR live.state NOT IN (?, ?, ?, ?)))
+	)`, namespace, namespace, terminalCutoff,
+		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired,
+		store.GatewayEventExpired, terminalCutoff,
+		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired)
+	if err != nil {
+		return result, err
+	}
+	if count, rowsErr := messageDelete.RowsAffected(); rowsErr == nil {
+		result.DeletedDeliveries += int(count)
+	}
+
+	terminalEvents, err := listGatewayEventsForMaintenance(ctx, tx.Tx, namespace, terminalCutoff)
 	if err != nil {
 		return result, err
 	}
@@ -1536,6 +1825,9 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 	affectedSessions := map[gatewaySessionKey]struct{}{}
 	for i := range terminalEvents {
 		event := &terminalEvents[i]
+		if err := archiveGatewayTaskCleanupReceiptTx(ctx, tx.Tx, event, now); err != nil {
+			return result, err
+		}
 		upsert, upsertErr := tx.ExecContext(ctx, `INSERT INTO gateway_event_tombstones (
 			namespace, gateway_uid, external_event_id, event_id, task_name, task_uid, envelope_digest, session_name, transcript_order, expires_at, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1555,6 +1847,13 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		if event.SessionName == "" {
 			continue
 		}
+		retained, retainErr := retainGatewaySoulAnchorTx(ctx, tx.Tx, event)
+		if retainErr != nil {
+			return result, retainErr
+		}
+		if retained {
+			result.DeletedSessionMessages++
+		} // The original message content was removed.
 		messageDelete, deleteErr := tx.ExecContext(ctx, `DELETE FROM session_messages
 			WHERE namespace = ? AND session_name = ?
 			  AND (message_id IN (?, ?, ?) OR (source_type = 'gateway-event' AND source_ref = ?))`,
@@ -1587,39 +1886,17 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 
 	for session := range affectedSessions {
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count = (
-			SELECT COUNT(*) FROM session_messages WHERE namespace = ? AND session_name = ?
+			SELECT COUNT(*) FROM session_messages WHERE namespace = ? AND session_name = ? AND source_type <> 'soul-context'
 		) WHERE namespace = ? AND name = ? AND session_type = ?`,
 			session.Namespace, session.Name, session.Namespace, session.Name, store.SessionTypeGateway); err != nil {
 			return result, err
 		}
-		sessionDelete, err := tx.ExecContext(ctx, `DELETE FROM sessions AS session
-			WHERE session.namespace = ? AND session.name = ? AND session.session_type = ?
-			  AND session.active_task = '' AND session.updated_at < ?
-			  AND NOT EXISTS (SELECT 1 FROM session_messages message
-				WHERE message.namespace = session.namespace AND message.session_name = session.name)
-			  AND NOT EXISTS (SELECT 1 FROM gateway_events event
-				WHERE event.namespace = session.namespace AND event.session_name = session.name)
-			  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery
-				WHERE delivery.namespace = session.namespace AND delivery.session_name = session.name)`,
-			session.Namespace, session.Name, store.SessionTypeGateway, terminalCutoff)
+		deleted, err := reclaimGatewayTranscriptTx(ctx, tx.Tx, session.Namespace, session.Name, now, terminalCutoff)
 		if err != nil {
 			return result, err
 		}
-		deleted, rowsErr := sessionDelete.RowsAffected()
-		if rowsErr != nil {
-			return result, rowsErr
-		}
-		if deleted == 0 {
-			continue
-		}
-		result.DeletedSessions += int(deleted)
-		if _, err := tx.ExecContext(ctx, `UPDATE execution_events SET session_name = '', session_seq = 0
-			WHERE namespace = ? AND session_name = ?`, session.Namespace, session.Name); err != nil {
-			return result, err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM execution_event_session_sequences
-			WHERE namespace = ? AND session_name = ?`, session.Namespace, session.Name); err != nil {
-			return result, err
+		if deleted {
+			result.DeletedSessions++
 		}
 	}
 
@@ -1670,6 +1947,9 @@ func createGatewayDeliveryTx(ctx context.Context, tx *sql.Tx, delivery *store.Ga
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
+	if err := advanceGatewayDeliveryOrderTx(ctx, tx, delivery); err != nil {
+		return nil, false, err
+	}
 	metadataJSON, err := marshalStringMap(delivery.Metadata)
 	if err != nil {
 		return nil, false, err
@@ -1704,9 +1984,11 @@ func createGatewayDeliveryTx(ctx context.Context, tx *sql.Tx, delivery *store.Ga
 		}
 		return existing, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, updated_at = ?
-		WHERE namespace = ? AND id = ?`, delivery.ID, delivery.UpdatedAt.UTC(), delivery.Namespace, delivery.EventID); err != nil {
-		return nil, false, err
+	if delivery.Kind != gatewayDeliveryKindMessage {
+		if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, updated_at = ?
+			WHERE namespace = ? AND id = ?`, delivery.ID, delivery.UpdatedAt.UTC(), delivery.Namespace, delivery.EventID); err != nil {
+			return nil, false, err
+		}
 	}
 	copy := *delivery
 	return &copy, true, nil
@@ -1794,7 +2076,8 @@ func getGatewayDeliveryByIdempotencyQuery(
 
 func getGatewayDeliveryByEventQuery(ctx context.Context, q queryRower, namespace, eventID string) (*store.GatewayDelivery, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+gatewayDeliveryColumns+` FROM gateway_deliveries
-		WHERE namespace = ? AND event_id = ? ORDER BY created_at, id LIMIT 1`, namespace, eventID)
+		WHERE namespace = ? AND event_id = ? AND kind IN (?, ?) ORDER BY created_at, id LIMIT 1`,
+		namespace, eventID, gatewayDeliveryKindFinal, gatewayDeliveryKindError)
 	delivery, err := scanGatewayDelivery(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -1813,12 +2096,13 @@ type gatewayRowScanner interface {
 func scanGatewayEvent(row gatewayRowScanner) (*store.GatewayEvent, error) {
 	var event store.GatewayEvent
 	var metadataJSON string
+	var taskRuntimeAllowedToolsJSON sql.NullString
 	var claimUntil, occurredAt, completedAt sql.NullTime
 	if err := row.Scan(
 		&event.ID, &event.Namespace, &event.NamespaceUID, &event.GatewayUID, &event.GatewayGeneration, &event.GatewayName, &event.BindingName,
 		&event.BindingUID, &event.BindingGeneration, &event.AgentName, &event.AgentUID, &event.ExternalEventID, &event.ProtocolVersion, &event.EventType, &event.State, &event.StateMessage,
 		&event.AccountID, &event.ContextID, &event.ThreadID, &event.SenderID, &event.SenderDisplayName,
-		&event.Text, &event.ReplyTarget, &metadataJSON, &event.SessionName, &event.TaskName, &event.TaskUID,
+		&event.Text, &event.ReplyTarget, &metadataJSON, &event.SessionName, &event.TaskName, &event.TaskUID, &taskRuntimeAllowedToolsJSON,
 		&event.DeliveryID, &event.ProviderMessageID, &event.TraceParent, &event.TraceState,
 		&event.TranscriptOrder, &event.AttemptCount, &event.ClaimOwner, &claimUntil, &event.NextAttemptAt, &occurredAt,
 		&event.ReceivedAt, &event.ExpiresAt, &event.CreatedAt, &event.UpdatedAt, &completedAt,
@@ -1827,6 +2111,15 @@ func scanGatewayEvent(row gatewayRowScanner) (*store.GatewayEvent, error) {
 	}
 	if err := unmarshalStringMap(metadataJSON, &event.Metadata); err != nil {
 		return nil, err
+	}
+	if taskRuntimeAllowedToolsJSON.Valid {
+		if err := json.Unmarshal([]byte(taskRuntimeAllowedToolsJSON.String), &event.TaskAllowedTools); err != nil {
+			return nil, fmt.Errorf("decode Gateway Task runtime allowedTools: %w", err)
+		}
+		if event.TaskAllowedTools == nil {
+			return nil, fmt.Errorf("decode Gateway Task runtime allowedTools: frozen value must be an explicit list")
+		}
+		event.TaskPolicyFrozen = true
 	}
 	event.ClaimUntil = timePtr(claimUntil)
 	event.OccurredAt = timePtr(occurredAt)
@@ -1862,17 +2155,17 @@ func validateGatewayEvent(event *store.GatewayEvent) error {
 		return store.ValidationErrorf("gateway event is required")
 	}
 	for name, value := range map[string]string{
-		"id":              event.ID,
-		"namespace":       event.Namespace,
-		"namespaceUid":    event.NamespaceUID,
-		"gatewayUid":      event.GatewayUID,
-		"gatewayName":     event.GatewayName,
-		"externalEventId": event.ExternalEventID,
-		"protocolVersion": event.ProtocolVersion,
-		"eventType":       event.EventType,
-		"accountId":       event.AccountID,
-		"contextId":       event.ContextID,
-		"senderId":        event.SenderID,
+		"id":                     event.ID,
+		gatewayNamespaceField:    event.Namespace,
+		gatewayNamespaceUIDField: event.NamespaceUID,
+		gatewayUIDField:          event.GatewayUID,
+		gatewayNameField:         event.GatewayName,
+		"externalEventId":        event.ExternalEventID,
+		"protocolVersion":        event.ProtocolVersion,
+		"eventType":              event.EventType,
+		gatewayAccountIDField:    event.AccountID,
+		gatewayContextIDField:    event.ContextID,
+		"senderId":               event.SenderID,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return store.ValidationErrorf("gateway event %s is required", name)
@@ -1889,18 +2182,18 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 		return store.ValidationErrorf("gateway delivery is required")
 	}
 	for name, value := range map[string]string{
-		"id":            delivery.ID,
-		"idempotencyId": delivery.IdempotencyID,
-		"namespace":     delivery.Namespace,
-		"namespaceUid":  delivery.NamespaceUID,
-		"gatewayUid":    delivery.GatewayUID,
-		"gatewayName":   delivery.GatewayName,
-		"eventId":       delivery.EventID,
-		"kind":          delivery.Kind,
-		"accountId":     delivery.AccountID,
-		"contextId":     delivery.ContextID,
-		"replyTarget":   delivery.ReplyTarget,
-		"text":          delivery.Text,
+		"id":                     delivery.ID,
+		"idempotencyId":          delivery.IdempotencyID,
+		gatewayNamespaceField:    delivery.Namespace,
+		gatewayNamespaceUIDField: delivery.NamespaceUID,
+		gatewayUIDField:          delivery.GatewayUID,
+		gatewayNameField:         delivery.GatewayName,
+		gatewayEventIDField:      delivery.EventID,
+		"kind":                   delivery.Kind,
+		gatewayAccountIDField:    delivery.AccountID,
+		gatewayContextIDField:    delivery.ContextID,
+		"replyTarget":            delivery.ReplyTarget,
+		"text":                   delivery.Text,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return store.ValidationErrorf("gateway delivery %s is required", name)
@@ -1909,18 +2202,17 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 	if delivery.GatewayGeneration <= 0 {
 		return store.ValidationErrorf("gateway delivery gatewayGeneration must be positive")
 	}
-	delivery.LastError = sanitizeGatewayStoreText(delivery.LastError, 1024)
-	delivery.ProviderMessageID = sanitizeGatewayStoreText(delivery.ProviderMessageID, 256)
 	if delivery.State == "" {
 		delivery.State = store.GatewayDeliveryPending
 	}
 	if !store.IsValidGatewayDeliveryState(delivery.State) {
 		return store.ValidationErrorf("unsupported gateway delivery state %q", delivery.State)
 	}
+	// Generic creation, terminal projection and expiry must never admit a
+	// message: only EnqueueGatewayMessage owns its quota and lifecycle checks.
 	if delivery.Kind != gatewayDeliveryKindFinal && delivery.Kind != gatewayDeliveryKindError {
 		return store.ValidationErrorf("unsupported gateway delivery kind %q", delivery.Kind)
 	}
-	delivery.Metadata = normalizeGatewayStoreMetadata(delivery.Metadata)
 	if delivery.MaxAttempts <= 0 {
 		delivery.MaxAttempts = 10
 	}
@@ -1945,11 +2237,7 @@ func marshalStringMap(value map[string]string) (string, error) {
 	if len(value) == 0 {
 		return "{}", nil
 	}
-	safe := make(map[string]string, len(value))
-	for key, item := range value {
-		safe[key] = sanitizeGatewayStoreText(item, 256)
-	}
-	data, err := json.Marshal(safe)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}

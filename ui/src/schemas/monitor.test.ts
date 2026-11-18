@@ -28,30 +28,38 @@ describe('repositoryMonitorSpecSchema', () => {
           enabled: true,
           consumeCommandLabels: true,
           requireActorPermission: 'maintain',
-          issues: {
-            triage: 'orka:triage',
-            research: 'orka:research',
-            plan: 'orka:plan',
-            approvePlan: 'orka:approve-plan',
-            implement: 'orka:implement',
-            decompose: 'orka:to-issues',
-            stop: 'orka:stop',
-            resume: 'orka:resume',
-          },
-          pullRequests: {
-            review: 'orka:review',
-            fix: 'orka:fix',
-            fixCI: 'orka:fix-ci',
-            updateBranch: 'orka:update-branch',
-            automerge: 'orka:automerge',
-            stop: 'orka:stop',
-            resume: 'orka:resume',
-          },
+          issues: { implement: 'orka:implement' },
         },
       },
     }
     const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', triggers })
     expect(parsed.triggers).toEqual(triggers)
+  })
+
+  it('preserves the repository validation image', () => {
+    const validation = {
+      image: 'ghcr.io/orka-agents/go-ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    }
+    const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', validation })
+    expect(parsed.validation).toEqual(validation)
+  })
+
+  it('preserves legacy validation fields for upgrade diagnostics', () => {
+    const validation = {
+      mode: 'full',
+      commands: ['go test ./...'],
+    }
+    const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', validation })
+    expect(parsed.validation).toEqual(validation)
+  })
+})
+
+describe('repository workflow merge ownership', () => {
+  it('does not expose an independent auto-merge or plan-approval setting', () => {
+    const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/example/repo', automerge: { enabled: true }, issueWorkflow: { planning: { requireHumanApprovalFor: ['high'] }, implementation: { requirePlan: true } } })
+    expect(parsed).not.toHaveProperty('automerge')
+    expect(parsed.issueWorkflow?.planning).not.toHaveProperty('requireHumanApprovalFor')
+    expect(parsed.issueWorkflow?.implementation?.requirePlan).toBe(true)
   })
 })
 

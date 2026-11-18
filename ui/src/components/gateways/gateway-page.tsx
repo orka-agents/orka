@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useGatewayBindings, useGatewayDeliveries, useGatewayEvents, useGatewayLedgerPagination, useGateways } from '@/hooks/use-gateways'
 import { GatewayLedgerPagination } from './gateway-pagination'
-import { GatewayQueryError } from './gateway-query-error'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewaySessionQueue } from './gateway-session-queue'
 import { GatewayBindingsTable, GatewayDeliveriesTable, GatewayEventsTable, GatewayStatusBadge } from './gateway-tables'
@@ -42,16 +42,19 @@ export function GatewayPage() {
       />
 
       <Tabs defaultValue="gateways" className="gap-4">
-        <TabsList variant="line" aria-label="Gateway operator views">
-          <TabsTrigger value="gateways">Gateways</TabsTrigger>
-          <TabsTrigger value="bindings">Bindings</TabsTrigger>
-          <TabsTrigger value="queues">Session queues</TabsTrigger>
-          <TabsTrigger value="events">Event ledger</TabsTrigger>
-          <TabsTrigger value="deliveries">Delivery outbox</TabsTrigger>
-        </TabsList>
+        {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
+        <div className="overflow-x-auto pb-1">
+          <TabsList variant="line" aria-label="Gateway operator views" onFocusCapture={(event) => (event.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' })}>
+            <TabsTrigger value="gateways">Gateways</TabsTrigger>
+            <TabsTrigger value="bindings">Bindings</TabsTrigger>
+            <TabsTrigger value="queues">Session queues</TabsTrigger>
+            <TabsTrigger value="events">Event ledger</TabsTrigger>
+            <TabsTrigger value="deliveries">Delivery outbox</TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="gateways">
           {gateways.error ? (
-            <GatewayQueryError label="Gateways" error={gateways.error} />
+            <ListAccessError resource="Gateways" error={gateways.error} />
           ) : gateways.isLoading ? (
             <div className="grid gap-4 lg:grid-cols-2">
               {Array.from({ length: 2 }).map((_, index) => <Skeleton key={index} className="h-52 rounded-xl" />)}
@@ -116,12 +119,12 @@ export function GatewayPage() {
         </TabsContent>
         <TabsContent value="bindings">
           {bindings.error
-            ? <GatewayQueryError label="GatewayBindings" error={bindings.error} />
+            ? <ListAccessError resource="GatewayBindings" error={bindings.error} />
             : <GatewayBindingsTable bindings={bindings.data?.items ?? []} loading={bindings.isLoading} />}
         </TabsContent>
         <TabsContent value="queues" className="space-y-3">
           {events.error ? (
-            <GatewayQueryError label="gateway Session queues" error={events.error} />
+            <ListAccessError resource="gateway Session queues" error={events.error} />
           ) : (
             <>
               <GatewaySessionQueue events={eventItems} loading={events.isLoading} />
@@ -138,7 +141,7 @@ export function GatewayPage() {
         </TabsContent>
         <TabsContent value="events" className="space-y-3">
           {events.error ? (
-            <GatewayQueryError label="gateway events" error={events.error} />
+            <ListAccessError resource="gateway events" error={events.error} />
           ) : (
             <>
               <GatewayEventsTable events={eventItems} loading={events.isLoading} />
@@ -155,7 +158,7 @@ export function GatewayPage() {
         </TabsContent>
         <TabsContent value="deliveries" className="space-y-3">
           {deliveries.error ? (
-            <GatewayQueryError label="gateway deliveries" error={deliveries.error} />
+            <ListAccessError resource="gateway deliveries" error={deliveries.error} />
           ) : (
             <>
               <GatewayDeliveriesTable deliveries={deliveryItems} loading={deliveries.isLoading} />

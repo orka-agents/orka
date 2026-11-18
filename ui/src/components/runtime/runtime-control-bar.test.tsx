@@ -6,7 +6,11 @@ vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 const navigate = vi.fn()
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
-  return { ...actual, useNavigate: () => navigate }
+  return {
+    ...actual,
+    useNavigate: () => navigate,
+    Link: ({ children, to, params, ...props }: any) => <a href={params?.taskId ? to.replace('$taskId', params.taskId) : to} {...props}>{children}</a>,
+  }
 })
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
@@ -24,25 +28,14 @@ describe('RuntimeControlBar', () => {
     navigate.mockClear()
   })
 
-  it('shows follow/refresh/open/fork/delete', () => {
+  it('shows follow/refresh/fork and leaves delete to the task header', () => {
     render(<RuntimeControlBar task={task} following onToggleFollow={() => {}} />)
     expect(screen.getByRole('button', { name: /following/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /open/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /fork/i })).toBeInTheDocument()
-  })
-
-  it('requires confirmation before delete', async () => {
-    render(<RuntimeControlBar task={task} following onToggleFollow={() => {}} />)
-    await userEvent.click(screen.getByRole('button', { name: /^delete/i }))
-    expect(screen.getByRole('button', { name: /confirm delete/i })).toBeInTheDocument()
-  })
-
-  it('navigates to /tasks after confirming delete', async () => {
-    render(<RuntimeControlBar task={task} following onToggleFollow={() => {}} />)
-    await userEvent.click(screen.getByRole('button', { name: /^delete/i }))
-    await userEvent.click(screen.getByRole('button', { name: /confirm delete/i }))
-    expect(navigate).toHaveBeenCalledWith({ to: '/tasks' })
+    // The header Delete is visible on every tab; Open only reloaded this page.
+    expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /open/i })).not.toBeInTheDocument()
   })
 
   it('refresh invalidates the task-specific query keys, not just the list', async () => {
@@ -62,21 +55,44 @@ describe('RuntimeControlBar', () => {
     expect(keys).toContain('taskArtifacts')
   })
 
-  it('fork pins afterSeq and sends an Idempotency-Key header', async () => {
+  it('fork opens the confirm dialog at the latest seq and only forks on confirm', async () => {
     let idem: string | null = 'missing'
-    let body: { afterSeq?: number } = {}
+    let body: { afterSeq?: number; newTaskName?: string } = {}
+    let posts = 0
     const { http, HttpResponse } = await import('msw')
     const { server } = await import('@/test/mocks/server')
     server.use(http.post('/api/v1/tasks/:id/fork', async ({ request }) => {
+      posts += 1
       idem = request.headers.get('idempotency-key')
-      body = await request.json() as { afterSeq?: number }
-      return HttpResponse.json({ namespace: 'default', sourceTaskName: 't1', newTaskName: 't1-fork', afterSeq: 0, forkContext: { sourceNamespace: 'default', sourceTask: 't1', afterSeq: 0, events: [], truncated: false } })
+      body = await request.json() as { afterSeq?: number; newTaskName?: string }
+      return HttpResponse.json({ namespace: 'default', sourceTaskName: 't1', newTaskName: 't1-branch', afterSeq: 42, forkContext: { sourceNamespace: 'default', sourceTask: 't1', afterSeq: 42, events: [], truncated: false } }, { status: 201 })
     }))
     render(<RuntimeControlBar task={task} following onToggleFollow={() => {}} latestSeq={42} />)
     await userEvent.click(screen.getByRole('button', { name: /fork/i }))
-    await new Promise((r) => setTimeout(r, 50))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('#42')
+    expect(posts).toBe(0)
+
+    await userEvent.type(screen.getByLabelText(/New task name/), 't1-branch')
+    await userEvent.click(screen.getByRole('button', { name: /create fork/i }))
+    expect(await screen.findByRole('link', { name: /t1-branch/ })).toBeInTheDocument()
+    expect(posts).toBe(1)
     expect(idem).toBeTruthy()
-    expect(body.afterSeq).toBe(42)
+    expect(body).toMatchObject({ afterSeq: 42, newTaskName: 't1-branch' })
+    // The new task is offered as a link, not opened behind the user's back.
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it('shows the server reason when the fork fails', async () => {
+    const { http, HttpResponse } = await import('msw')
+    const { server } = await import('@/test/mocks/server')
+    server.use(http.post('/api/v1/tasks/:id/fork', () =>
+      HttpResponse.json({ error: { code: 409, message: 'forked task already exists' } }, { status: 409 }),
+    ))
+    render(<RuntimeControlBar task={task} following onToggleFollow={() => {}} latestSeq={3} />)
+    await userEvent.click(screen.getByRole('button', { name: /fork/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /create fork/i }))
+    expect(await screen.findByText('forked task already exists')).toBeInTheDocument()
   })
 
   it('hides Fork when execution-event storage is unsupported', () => {

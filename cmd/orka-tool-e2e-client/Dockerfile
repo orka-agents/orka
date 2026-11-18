@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 
 ARG TARGETARCH
 
@@ -9,6 +9,7 @@ RUN go mod download
 
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 COPY cmd/orka-tool-e2e-client/ cmd/orka-tool-e2e-client/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \

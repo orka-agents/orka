@@ -36,7 +36,7 @@ func NewACPIndependentBranchReceipt(operationID, repositoryID, ref, sha string, 
 	}
 	digest, err := acpDomainDigest("independent-branch-verification", map[string]any{
 		"operationID": receipt.OperationID, "repositoryID": receipt.RepositoryID,
-		"ref": receipt.Ref, "sha": receipt.SHA, "verifiedAt": receipt.VerifiedAt,
+		refField: receipt.Ref, "sha": receipt.SHA, "verifiedAt": receipt.VerifiedAt,
 	})
 	if err != nil {
 		return ACPIndependentBranchReceipt{}, fmt.Errorf("digest independent branch receipt: %w", err)
@@ -125,7 +125,7 @@ func (c *ACPSessionContinuity) RecoverBlockedSession(ctx context.Context, reques
 		return nil, fmt.Errorf("%w: independent branch receipt does not match the blocked publication target", store.ErrConflict)
 	}
 	operationDigest, err := acpDomainDigest("session-reconciliation", map[string]any{
-		"sessionUID": control.SessionUID, "publicationID": publication.ID,
+		"sessionUID": control.SessionUID, publicationIDField: publication.ID,
 		"branchClaimID": claim.ID, "receiptDigest": request.Receipt.Digest,
 	})
 	if err != nil {

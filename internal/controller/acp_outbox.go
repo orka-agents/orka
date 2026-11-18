@@ -3,8 +3,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +10,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -21,6 +20,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskterminal"
+)
+
+const (
+	stateField = "state"
 )
 
 func standaloneTaskTerminalProjectionID(task *corev1alpha1.Task, attempt int32) string {
@@ -92,7 +95,6 @@ func enqueueDurableTaskTerminalProjectionForUID(
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(encoded)
 	projectionTime := task.CreationTimestamp.UTC()
 	if payload.Execution.LastTransitionTime != nil && !payload.Execution.LastTransitionTime.IsZero() {
 		projectionTime = payload.Execution.LastTransitionTime.UTC()
@@ -104,8 +106,8 @@ func enqueueDurableTaskTerminalProjectionForUID(
 	}
 	projection := &store.OutboxProjection{
 		ID:            standaloneTaskTerminalProjectionIDForUID(task.Namespace, projectionTaskUID, payload.Attempt),
-		AggregateKind: "Task", AggregateID: string(projectionTaskUID), ProjectionKind: "TaskTerminalStatus",
-		PayloadDigest: "sha256:" + hex.EncodeToString(sum[:]), Payload: encoded,
+		AggregateKind: "Task", AggregateID: string(projectionTaskUID), ProjectionKind: taskTerminalProjectionKind,
+		PayloadDigest: store.CanonicalBytesDigest(encoded), Payload: encoded,
 		AvailableAt: projectionTime, CreatedAt: time.Now().UTC(),
 	}
 	if existing, getErr := projectionStore.GetOutboxProjection(ctx, projection.ID); getErr == nil {
@@ -215,7 +217,7 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			deliveryDigest = ""
 		}
 		digest, err := acpDomainDigest("outbox-completion", map[string]any{
-			"id": projection.ID, "version": projection.Version, "state": state,
+			"id": projection.ID, versionField: projection.Version, stateField: state,
 			"deliveryDigest": deliveryDigest, "lastError": lastError, "availableAt": availableAt,
 		})
 		if err != nil {
@@ -278,8 +280,9 @@ func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, pr
 	return merged
 }
 
+//nolint:gocyclo // Projection delivery handles the finite set of durable sink and stale-record outcomes.
 func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.OutboxProjection) (string, error) {
-	if projection.ProjectionKind != "TaskTerminalStatus" {
+	if projection.ProjectionKind != taskTerminalProjectionKind {
 		return "", permanentOutboxDelivery(fmt.Errorf("unsupported projection kind %q", projection.ProjectionKind))
 	}
 	var payload taskTerminalProjection
@@ -301,7 +304,7 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			return err
 		}
 		if string(task.UID) != payload.TaskUID {
-			binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+			binding := executionBinding(task)
 			if binding == nil || string(binding.Task.UID) != payload.TaskUID || !acpTaskUsesRestoredSourceIdentity(task) ||
 				task.Status.Execution == nil || task.Status.Execution.Attempt != payload.Attempt {
 				// Permanent so MaxAttempts applies: the bounded retries cover an
@@ -316,42 +319,6 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			deliveredResourceVersion = task.ResourceVersion
 			return nil
 		}
-		if payload.HarnessRuntime != nil {
-			binding := task.Status.AgentExecutionBinding
-			if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
-				payload.BindingDigest == "" || binding.BindingDigest != payload.BindingDigest {
-				// Permanent for the same reason as the UID mismatch above: an
-				// incompatible binding cannot become deliverable, so it must
-				// dead-letter after MaxAttempts instead of retrying forever.
-				return permanentOutboxDelivery(fmt.Errorf("harness v1 task binding does not match outbox projection"))
-			}
-			if task.Status.HarnessRuntime != nil && task.Status.HarnessRuntime.Attempt > payload.Attempt {
-				deliveredResourceVersion = task.ResourceVersion
-				return nil
-			}
-			base := task.DeepCopy()
-			now := metav1.Now()
-			task.Status.Phase = payload.Phase
-			task.Status.Message = payload.Message
-			task.Status.Attempts = payload.Attempt
-			if payload.ResultRef != nil {
-				task.Status.ResultRef = payload.ResultRef.DeepCopy()
-			}
-			harnessRuntime := payload.HarnessRuntime.DeepCopy()
-			harnessRuntime.LastTransitionTime = &now
-			task.Status.HarnessRuntime = harnessRuntime
-			switch payload.Phase {
-			case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-				task.Status.CompletionTime = &now
-			default:
-				task.Status.CompletionTime = nil
-			}
-			if err := p.Client.Status().Patch(ctx, task, client.MergeFrom(base)); err != nil {
-				return err
-			}
-			deliveredResourceVersion = task.ResourceVersion
-			return nil
-		}
 		if task.Status.Execution != nil && task.Status.Execution.Attempt > payload.Attempt {
 			return fmt.Errorf("task has advanced beyond projected attempt")
 		}
@@ -359,7 +326,9 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 		now := metav1.Now()
 		task.Status.Phase = payload.Phase
 		task.Status.Message = payload.Message
-		task.Status.CompletionTime = &now
+		if task.Status.CompletionTime == nil {
+			task.Status.CompletionTime = &now
+		}
 		execution := mergeTerminalExecutionStatus(task.Status.Execution, payload.Execution)
 		execution.LastTransitionTime = &now
 		task.Status.Execution = &execution
@@ -368,7 +337,15 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			delivery.LastTransitionTime = &now
 			task.Status.Delivery = &delivery
 		}
-		if err := p.Client.Status().Patch(ctx, task, client.MergeFrom(base)); err != nil {
+		// A terminal Task no longer waits on any approval it was parked on.
+		if waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval); waiting != nil &&
+			waiting.Status == metav1.ConditionTrue && payload.Phase.IsTerminal() {
+			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+				Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
+				Reason: "Task" + string(payload.Phase), Message: taskTerminalMessage,
+			})
+		}
+		if err := p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		deliveredResourceVersion = task.ResourceVersion

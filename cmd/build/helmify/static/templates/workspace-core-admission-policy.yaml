@@ -11,26 +11,140 @@ spec:
       - apiGroups: ["workspace.orka.ai"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["executionworkspaces"]
+        resources: ["executionworkspaces", "executionworkspaces/status"]
+  variables:
+    - name: newControllerLabel
+      expression: >-
+        has(object.metadata.labels) && 'workspace.orka.ai/controller-name' in object.metadata.labels
+        ? object.metadata.labels['workspace.orka.ai/controller-name'] : ''
+    - name: oldControllerLabel
+      expression: >-
+        oldObject != null && has(oldObject.metadata.labels) && 'workspace.orka.ai/controller-name' in oldObject.metadata.labels
+        ? oldObject.metadata.labels['workspace.orka.ai/controller-name'] : ''
+    - name: newCoreAnnotationKeys
+      expression: >-
+        has(object.metadata.annotations)
+        ? object.metadata.annotations.filter(k,
+          k.startsWith('workspace.orka.ai/') || k.startsWith('acp.workspace.orka.ai/')) : []
+    - name: oldCoreAnnotationKeys
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations)
+        ? oldObject.metadata.annotations.filter(k,
+          k.startsWith('workspace.orka.ai/') || k.startsWith('acp.workspace.orka.ai/')) : []
+    - name: coreMarkersUnchanged
+      expression: >-
+        variables.newControllerLabel == variables.oldControllerLabel &&
+        size(variables.newCoreAnnotationKeys) == size(variables.oldCoreAnnotationKeys) &&
+        variables.newCoreAnnotationKeys.all(k, k in variables.oldCoreAnnotationKeys) &&
+        variables.newCoreAnnotationKeys.all(k,
+          object.metadata.annotations[k] == oldObject.metadata.annotations[k])
+    - name: newProviderAnnotationKeys
+      expression: >-
+        has(object.metadata.annotations) && variables.newControllerLabel != ''
+        ? object.metadata.annotations.filter(k, k.startsWith(variables.newControllerLabel + '/')) : []
+    - name: oldProviderAnnotationKeys
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) && variables.oldControllerLabel != ''
+        ? oldObject.metadata.annotations.filter(k, k.startsWith(variables.oldControllerLabel + '/')) : []
+    - name: providerMarkersUnchanged
+      expression: >-
+        size(variables.newProviderAnnotationKeys) == size(variables.oldProviderAnnotationKeys) &&
+        variables.newProviderAnnotationKeys.all(k, k in variables.oldProviderAnnotationKeys) &&
+        variables.newProviderAnnotationKeys.all(k,
+          object.metadata.annotations[k] == oldObject.metadata.annotations[k])
+    - name: workloadIntentUnchanged
+      expression: >-
+        (oldObject == null && !has(object.spec.workload) && !has(object.spec.retirement)) ||
+        (oldObject != null &&
+         has(object.spec.workload) == has(oldObject.spec.workload) &&
+         (!has(object.spec.workload) || object.spec.workload == oldObject.spec.workload) &&
+         has(object.spec.retirement) == has(oldObject.spec.retirement) &&
+         (!has(object.spec.retirement) || object.spec.retirement == oldObject.spec.retirement))
+    - name: attachmentIntentUnchanged
+      expression: >-
+        (oldObject == null &&
+         !has(object.spec.attachmentEpoch) && !has(object.spec.attachment)) ||
+        (oldObject != null &&
+         has(object.spec.attachmentEpoch) == has(oldObject.spec.attachmentEpoch) &&
+         (!has(object.spec.attachmentEpoch) ||
+          object.spec.attachmentEpoch == oldObject.spec.attachmentEpoch) &&
+         has(object.spec.attachment) == has(oldObject.spec.attachment) &&
+         (!has(object.spec.attachment) ||
+          object.spec.attachment == oldObject.spec.attachment))
   validations:
     - expression: >-
         !has(object.spec.coreAdmission) ||
         (oldObject != null && has(oldObject.spec.coreAdmission) &&
-             object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
-             has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
-             (!has(object.spec.coreAdmission.poolBinding) ||
-              (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
-               object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
-               object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
-               has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
-               (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
-                object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
+         object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
+         has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
+         (!has(object.spec.coreAdmission.poolBinding) ||
+          (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
+           object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
+           object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
+           has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
+           (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
+            object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
         authorizer.group('workspace.orka.ai')
           .resource('executionworkspaces')
           .namespace(request.namespace)
           .name(object.metadata.name)
           .check('admit').allowed()
       message: only the Orka core controller may establish or advance ExecutionWorkspace core admission
+      reason: Forbidden
+    - expression: >-
+        variables.coreMarkersUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: >-
+        only the Orka core controller may set or change workspace routing and
+        core materialization markers
+      reason: Forbidden
+    - expression: >-
+        variables.providerMarkersUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaceproviders')
+          .name(object.spec.providerBinding.name)
+          .check('provider-status').allowed() ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: only an approved provider may change its workspace observations
+      reason: Forbidden
+    - expression: >-
+        variables.workloadIntentUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: only Orka core may write workload and exact-instance retirement intent
+      reason: Forbidden
+    - expression: >-
+        variables.attachmentIntentUnchanged ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: >-
+        only the Orka core controller may set or change ExecutionWorkspace
+        attachment intent (attachment and attachmentEpoch)
+      reason: Forbidden
+    - expression: >-
+        oldObject == null || !has(oldObject.metadata.annotations) ||
+        !('acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations) ||
+        (has(object.metadata.annotations) &&
+         'acp.workspace.orka.ai/operator-tainted' in object.metadata.annotations &&
+         object.metadata.annotations['acp.workspace.orka.ai/operator-tainted'] ==
+           oldObject.metadata.annotations['acp.workspace.orka.ai/operator-tainted'])
+      message: >-
+        the operator access taint of an ExecutionWorkspace is permanent; no
+        identity may remove or change it
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

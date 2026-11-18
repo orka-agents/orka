@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/agentcontext"
+
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -35,14 +37,15 @@ type CreateAgentTool struct {
 
 // CreateAgentArgs are the arguments for the create_agent tool
 type CreateAgentArgs struct {
-	Role         string            `json:"role"`
-	SystemPrompt string            `json:"systemPrompt"`
-	Model        *ModelArgs        `json:"model,omitempty"`
-	ProviderRef  string            `json:"providerRef,omitempty"`
-	Tools        []string          `json:"tools,omitempty"`
-	Skills       []string          `json:"skills,omitempty"`
-	Coordination *CoordinationArgs `json:"coordination,omitempty"`
-	Runtime      *RuntimeArgs      `json:"runtime,omitempty"`
+	Role         string                   `json:"role"`
+	SystemPrompt string                   `json:"systemPrompt"`
+	Soul         *corev1alpha1.SoulSource `json:"soul,omitempty"`
+	Model        *ModelArgs               `json:"model,omitempty"`
+	ProviderRef  string                   `json:"providerRef,omitempty"`
+	Tools        []string                 `json:"tools,omitempty"`
+	Skills       []string                 `json:"skills,omitempty"`
+	Coordination *CoordinationArgs        `json:"coordination,omitempty"`
+	Runtime      *RuntimeArgs             `json:"runtime,omitempty"`
 }
 
 // ModelArgs specifies LLM model configuration
@@ -55,10 +58,31 @@ type ModelArgs struct {
 
 // RuntimeArgs specifies agent CLI runtime configuration
 type RuntimeArgs struct {
-	Type                string   `json:"type"`
-	SecretRef           string   `json:"secretRef,omitempty"`
-	DefaultAllowedTools []string `json:"defaultAllowedTools,omitempty"`
-	DefaultAllowBash    *bool    `json:"defaultAllowBash,omitempty"`
+	Type                string                                    `json:"type"`
+	ContractVersion     *corev1alpha1.AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
+	DefaultAllowedTools []string                                  `json:"defaultAllowedTools,omitempty"`
+	DefaultAllowBash    *bool                                     `json:"defaultAllowBash,omitempty"`
+}
+
+// UnmarshalJSON rejects removed runtime credentials before argument decoding
+// can discard them and preserves explicit contract requests for validation.
+func (in *RuntimeArgs) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		if strings.EqualFold(name, "secretRef") {
+			return fmt.Errorf("runtime.secretRef is no longer supported; provider access is controller-proxied")
+		}
+	}
+	type plain RuntimeArgs
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*in = RuntimeArgs(value)
+	return nil
 }
 
 func applyOpencodeRuntimeDefaults(runtime *corev1alpha1.AgentCLIRuntime, allowedToolsSupplied, allowBashSupplied bool) {
@@ -115,7 +139,7 @@ func (t *CreateAgentTool) Description() string {
 
 // Parameters returns the JSON Schema for parameters
 func (t *CreateAgentTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	return withSoulParameter(json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"role": {
@@ -124,7 +148,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 			},
 			"systemPrompt": {
 				"type": "string",
-				"description": "System prompt for the agent. Required unless runtime.type is opencode; OpenCode cannot enforce Agent system prompts, so omit this field and use task prompts instead."
+				"description": "Role instructions for the agent; persona defaults may be supplied separately through soul. Built-in harness v2 Copilot instructions cannot contain @ characters."
 			},
 			"model": {
 				"type": "object",
@@ -185,7 +209,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"items": {
 							"type": "object",
 							"properties": {
-								"name": {"type": "string"},
+								"name": {"type": "string", "minLength": 1, "pattern": "\\S"},
 								"namespace": {"type": "string"}
 							},
 							"required": ["name"]
@@ -202,9 +226,10 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"type": "string",
 							"description": "Runtime type: copilot, claude, codex, or opencode"
 					},
-					"secretRef": {
+					"contractVersion": {
 						"type": "string",
-						"description": "Deprecated legacy field. Built-in ACP runtimes are credential-free at the Agent boundary; OpenCode rejects it."
+						"enum": ["orka.harness.v2"],
+						"description": "Orka runtime protocol. Defaults to orka.harness.v2."
 					},
 					"defaultAllowedTools": {
 						"type": "array",
@@ -219,7 +244,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 			}
 		},
 		"required": ["role"]
-	}`)
+	}`))
 }
 
 func isBuiltInACPRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
@@ -249,6 +274,13 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string,
 		}
 	}
 	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
+		// Admission rejects a harness-v2 built-in runtime Agent without
+		// spec.model.name (the ACP session has no default model); failing
+		// here keeps the tool's contract aligned with what the cluster
+		// will actually accept.
+		if isBuiltInACPRuntime(runtimeType) && requested == "" {
+			return "", fmt.Errorf("model.name is required for %s runtime Agents: the ACP runtime session has no default model", runtimeType)
+		}
 		return requested, nil
 	}
 	var spec *corev1alpha1.ModelConfig
@@ -267,12 +299,12 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string,
 	return providerID + "/" + modelID, nil
 }
 
-func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *RuntimeArgs) error {
+func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *RuntimeArgs) {
 	if runtimeArgs == nil {
-		return nil
+		return
 	}
 	runtimeType := corev1alpha1.AgentRuntimeType(strings.TrimSpace(runtimeArgs.Type))
-	runtime := &corev1alpha1.AgentCLIRuntime{Type: runtimeType}
+	runtime := &corev1alpha1.AgentCLIRuntime{Type: runtimeType, ContractVersion: runtimeArgs.ContractVersion}
 	if runtimeArgs.DefaultAllowedTools != nil {
 		runtime.DefaultAllowedTools = append([]string{}, runtimeArgs.DefaultAllowedTools...)
 	}
@@ -281,9 +313,6 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 		runtime.DefaultAllowBash = &allowBash
 	}
 	if runtimeType == corev1alpha1.AgentRuntimeOpencode {
-		if strings.TrimSpace(runtimeArgs.SecretRef) != "" {
-			return fmt.Errorf("opencode runtime does not accept runtime.secretRef; provider access is controller-proxied")
-		}
 		applyOpencodeRuntimeDefaults(runtime, runtimeArgs.DefaultAllowedTools != nil, runtimeArgs.DefaultAllowBash != nil)
 		if agent.Spec.Model != nil {
 			agent.Spec.Model.Provider = ""
@@ -292,10 +321,11 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 	agent.Spec.Runtime = runtime
 	agent.Spec.ProviderRef = nil
 	agent.Spec.SecretRef = nil
-	return nil
 }
 
 // Execute creates an Agent CRD dynamically
+//
+//nolint:gocyclo // Keep Agent construction and coordination-policy validation in one flow.
 func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CreateAgentArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -315,14 +345,33 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			return "", fmt.Errorf("unsupported runtime type %q; supported built-in runtimes are copilot, claude, codex, and opencode", runtimeType)
 		}
 	}
-	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) {
-		if strings.TrimSpace(a.SystemPrompt) != "" {
-			return "", fmt.Errorf("opencode runtime does not support systemPrompt; omit it and use task prompts for instructions")
-		}
-	} else if strings.TrimSpace(a.SystemPrompt) == "" {
+	if err := agentcontext.ValidateSource(a.Soul); err != nil {
+		return "", err
+	}
+	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) && strings.TrimSpace(a.SystemPrompt) == "" && a.Soul == nil {
 		return "", fmt.Errorf("systemPrompt is required")
 	}
-	requestedModel, err := normalizedCreateAgentModel(a.Runtime, a.Model)
+	if a.Model != nil {
+		if a.Model.ContextWindow != nil && *a.Model.ContextWindow < 1 {
+			return "", fmt.Errorf("model.contextWindow must be at least 1")
+		}
+		if a.Model.MaxTokens != nil && *a.Model.MaxTokens < 1 {
+			return "", fmt.Errorf("model.maxTokens must be at least 1")
+		}
+	}
+	effectiveModel := a.Model
+	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) &&
+		(effectiveModel == nil || strings.TrimSpace(effectiveModel.Name) == "") {
+		if inheritedModel := strings.TrimSpace(os.Getenv(workerenv.AIModel)); inheritedModel != "" {
+			modelCopy := ModelArgs{Name: inheritedModel}
+			if effectiveModel != nil {
+				modelCopy = *effectiveModel
+				modelCopy.Name = inheritedModel
+			}
+			effectiveModel = &modelCopy
+		}
+	}
+	requestedModel, err := normalizedCreateAgentModel(a.Runtime, effectiveModel)
 	if err != nil {
 		return "", err
 	}
@@ -348,10 +397,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
-	if a.Model != nil {
+	if effectiveModel != nil {
 		model.Name = requestedModel
-		model.ContextWindow = a.Model.ContextWindow
-		model.MaxTokens = a.Model.MaxTokens
+		model.ContextWindow = effectiveModel.ContextWindow
+		model.MaxTokens = effectiveModel.MaxTokens
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv(workerenv.AIModel)
@@ -416,6 +465,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			Skills:      skillRefs,
 		},
 	}
+	agent.Spec.Soul = a.Soul
 	if strings.TrimSpace(a.SystemPrompt) != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: a.SystemPrompt}
 	}
@@ -427,7 +477,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			MaxDepth:              a.Coordination.MaxDepth,
 			MaxConcurrentChildren: a.Coordination.MaxConcurrentChildren,
 		}
-		for _, aa := range a.Coordination.AllowedAgents {
+		for i, aa := range a.Coordination.AllowedAgents {
+			if strings.TrimSpace(aa.Name) == "" {
+				return "", fmt.Errorf("coordination.allowedAgents[%d].name is required", i)
+			}
 			coord.AllowedAgents = append(coord.AllowedAgents, corev1alpha1.AllowedAgent{
 				Name:      aa.Name,
 				Namespace: aa.Namespace,
@@ -437,10 +490,14 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	// Set the normalized built-in runtime when provided.
-	if err := configureCreatedAgentRuntime(agent, a.Runtime); err != nil {
+	configureCreatedAgentRuntime(agent, a.Runtime)
+	if err := executionmode.DefaultBuiltInAgentContract(agent, t.executionMode); err != nil {
 		return "", err
 	}
-	if err := executionmode.DefaultBuiltInAgentContract(agent, t.executionMode); err != nil {
+	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+		return "", err
+	}
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
 		return "", err
 	}
 

@@ -7,10 +7,15 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useGateway, useGatewayBindings, useGatewayDeliveries, useGatewayEvents, useGatewayLedgerPagination } from '@/hooks/use-gateways'
 import { GatewayLedgerPagination } from './gateway-pagination'
-import { GatewayQueryError } from './gateway-query-error'
+import { ListAccessError } from '@/components/ui/list-access-error'
+import { Button } from '@/components/ui/button'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewaySessionQueue } from './gateway-session-queue'
 import { GatewayBindingsTable, GatewayDeliveriesTable, GatewayEventsTable, GatewayStatusBadge } from './gateway-tables'
+import { formatTimestamp } from '@/lib/time'
+import { humanizeCamelCase } from '@/lib/utils'
 
 export function GatewayDetail({ name }: { name: string }) {
   const eventPage = useGatewayLedgerPagination(`${name}:events`)
@@ -21,8 +26,20 @@ export function GatewayDetail({ name }: { name: string }) {
   const deliveries = useGatewayDeliveries({ gateway: name, continue: deliveryPage.cursor })
 
   if (gateway.isLoading) return <Skeleton className="h-96 rounded-xl" />
-  if (gateway.error) return <GatewayQueryError label="Gateway" error={gateway.error} />
-  if (!gateway.data) return <Card><CardContent className="py-12 text-center text-muted-foreground">Gateway not found.</CardContent></Card>
+  const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
+  if (gateway.error && !isNotFoundError(gateway.error) && (isForbiddenError(gateway.error) || !gateway.data)) {
+    return <AccessErrorView title="Could not load Gateway" resource={`Gateway ${name}`} error={gateway.error} action={backToGateways} />
+  }
+  if (isNotFoundError(gateway.error) || !gateway.data) {
+    return (
+      <NotFoundView
+        title="Gateway not found"
+        headline={`No Gateway named "${name}"`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={backToGateways}
+      />
+    )
+  }
 
   const item = gateway.data
   const observed = item.status?.observedCapabilities
@@ -53,7 +70,7 @@ export function GatewayDetail({ name }: { name: string }) {
               <KeyValue label="Adapter" value={observed?.adapterName || 'Not observed'} />
               <KeyValue label="Version" value={observed?.adapterVersion || '—'} />
               <KeyValue label="Contract" value={observed?.contractVersion || '—'} />
-              <KeyValue label="Last probe" value={formatDate(item.status?.lastSuccessfulProbe)} />
+              <KeyValue label="Last probe" value={formatTimestamp(item.status?.lastSuccessfulProbe)} />
             </div>
             {item.status?.message && <p className="text-sm text-muted-foreground">{item.status.message}</p>}
           </CardContent>
@@ -61,21 +78,24 @@ export function GatewayDetail({ name }: { name: string }) {
         <Card>
           <CardHeader><CardTitle>Observed capabilities</CardTitle></CardHeader>
           <CardContent className="flex flex-wrap gap-2">
-            {Object.entries(capabilities ?? {}).filter(([, enabled]) => enabled).map(([name]) => <Badge key={name} variant="outline">{humanize(name)}</Badge>)}
+            {Object.entries(capabilities ?? {}).filter(([, enabled]) => enabled).map(([name]) => <Badge key={name} variant="outline">{humanizeCamelCase(name)}</Badge>)}
             {!capabilities && <p className="text-sm text-muted-foreground">Capabilities have not been observed.</p>}
           </CardContent>
         </Card>
       </div>
 
       <Tabs defaultValue="events" className="gap-4">
-        <TabsList variant="line">
-          <TabsTrigger value="queues">Session queues</TabsTrigger>
-          <TabsTrigger value="events">Event timeline</TabsTrigger>
-          <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
-          <TabsTrigger value="bindings">Bindings</TabsTrigger>
-        </TabsList>
+        {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
+        <div className="overflow-x-auto pb-1">
+          <TabsList variant="line" onFocusCapture={(event) => (event.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' })}>
+            <TabsTrigger value="queues">Session queues</TabsTrigger>
+            <TabsTrigger value="events">Event timeline</TabsTrigger>
+            <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
+            <TabsTrigger value="bindings">Bindings</TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="queues" className="space-y-3">
-          {events.error ? <GatewayQueryError label="gateway Session queues" error={events.error} /> : <>
+          {events.error ? <ListAccessError resource="gateway Session queues" error={events.error} /> : <>
             <GatewaySessionQueue events={events.data?.items ?? []} loading={events.isLoading} />
             <GatewayLedgerPagination
               label="queue event records"
@@ -88,7 +108,7 @@ export function GatewayDetail({ name }: { name: string }) {
           </>}
         </TabsContent>
         <TabsContent value="events" className="space-y-3">
-          {events.error ? <GatewayQueryError label="gateway events" error={events.error} /> : <>
+          {events.error ? <ListAccessError resource="gateway events" error={events.error} /> : <>
             <GatewayEventsTable events={events.data?.items ?? []} loading={events.isLoading} />
             <GatewayLedgerPagination
               label="events"
@@ -101,7 +121,7 @@ export function GatewayDetail({ name }: { name: string }) {
           </>}
         </TabsContent>
         <TabsContent value="deliveries" className="space-y-3">
-          {deliveries.error ? <GatewayQueryError label="gateway deliveries" error={deliveries.error} /> : <>
+          {deliveries.error ? <ListAccessError resource="gateway deliveries" error={deliveries.error} /> : <>
             <GatewayDeliveriesTable deliveries={deliveries.data?.items ?? []} loading={deliveries.isLoading} />
             <GatewayLedgerPagination
               label="deliveries"
@@ -115,7 +135,7 @@ export function GatewayDetail({ name }: { name: string }) {
         </TabsContent>
         <TabsContent value="bindings">
           {bindings.error
-            ? <GatewayQueryError label="GatewayBindings" error={bindings.error} />
+            ? <ListAccessError resource="GatewayBindings" error={bindings.error} />
             : <GatewayBindingsTable bindings={bindings.data?.items ?? []} loading={bindings.isLoading} />}
         </TabsContent>
       </Tabs>
@@ -127,11 +147,3 @@ function KeyValue({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p><p className="mt-1 flex items-center gap-1.5 font-medium"><Clock3 className="h-3.5 w-3.5 text-muted-foreground" />{value}</p></div>
 }
 
-function humanize(value: string) {
-  return value.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
-}
-
-function formatDate(value?: string) {
-  if (!value) return 'Never'
-  return new Date(value).toLocaleString()
-}

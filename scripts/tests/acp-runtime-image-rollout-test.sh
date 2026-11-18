@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 renderer="${root}/scripts/render-acp-runtime-images.sh"
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
@@ -146,6 +154,9 @@ jq -e '
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--watch-namespace=orka-system")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--task-provenance-admission-external=true")] | length) == 0 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--task-provenance-admission-enabled=true" or
@@ -338,7 +349,8 @@ manifest_json() {
     cat "${source}"
     return
   fi
-  yaml_to_json <"${source}" | jq -sc --arg mode "${FAKE_STATIC_MODE:-valid}" '
+  yaml_to_json <"${source}" | jq -sc --arg mode "${FAKE_STATIC_MODE:-valid}" \
+    --arg grace "${FAKE_CONTROLLER_GRACE:-}" '
     def controller:
       .kind == "Deployment" and .metadata.name == "orka-controller-manager";
     def rewrite_args($f):
@@ -370,8 +382,18 @@ manifest_json() {
       rewrite_args(map(if startswith("--watch-namespace=") then "--watch-namespace=other" else . end))
     elif $mode == "legacy-controller-flag" then
       rewrite_args(. + ["--harness-v1-endpoint=https://legacy.invalid"])
+    elif $mode == "controller-selector-expressions" then
+      map(if controller then .spec.selector = {matchExpressions: [
+        .spec.selector.matchLabels | to_entries[] | {key, operator: "In", values: [.value]}
+      ]} else . end)
     else error("unknown FAKE_STATIC_MODE: " + $mode)
     end
+    | if $grace == "" then .
+      elif $grace == "unset" then
+        map(if controller then del(.spec.template.spec.terminationGracePeriodSeconds) else . end)
+      else
+        map(if controller then .spec.template.spec.terminationGracePeriodSeconds = ($grace | fromjson) else . end)
+      end
     | .[]
   '
 }
@@ -454,11 +476,35 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "deploym
       exit 2
       ;;
   esac
-  jq -n --argjson args "${controller_args}" '{
+  jq -n --argjson args "${controller_args}" --arg grace "${FAKE_EXISTING_CONTROLLER_GRACE:-}" '{
     apiVersion:"apps/v1",
     kind:"Deployment",
     metadata:{name:"orka-controller-manager",namespace:"orka-system"},
-    spec:{template:{spec:{containers:[{name:"manager",args:$args}]}}}
+    spec:{template:{spec:({containers:[{name:"manager",args:$args}]} +
+      (if $grace == "" then {} else {terminationGracePeriodSeconds:($grace | fromjson)} end))}}
+  }'
+  exit 0
+fi
+
+if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "pods" ]]; then
+  [[ $# -eq 8 && "$5" == "-l" && "$7" == "-o" && "$8" == "json" ]] || {
+    echo "unexpected controller Pod query: $*" >&2
+    exit 2
+  }
+  [[ "$(tr ',' '\n' <<<"$6" | sort | paste -sd, -)" == "app.kubernetes.io/name=orka,control-plane=controller-manager" ]] || {
+    echo "controller Pod query used selector $6" >&2
+    exit 2
+  }
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "controller-pods" && ! -e "${FAKE_KUBE_STATE}/failed-controller-pods" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-controller-pods"
+    printf 'fail-controller-pods\n' >>"${FAKE_KUBE_LOG}"
+    exit 62
+  fi
+  jq -n --arg graces "${FAKE_EXISTING_CONTROLLER_POD_GRACES:-}" '{
+    apiVersion:"v1",
+    kind:"List",
+    items:[$graces | select(length > 0) | split(",")[] |
+      {apiVersion:"v1", kind:"Pod", spec:{terminationGracePeriodSeconds:tonumber}}]
   }'
   exit 0
 fi
@@ -647,6 +693,11 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "sta
     printf 'fail-rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
     exit 49
   fi
+  [[ $# -eq 6 && "$6" == --timeout=* ]] || {
+    echo "controller rollout must pass exactly one timeout: $*" >&2
+    exit 2
+  }
+  printf '%s\n' "${6#--timeout=}" >"${FAKE_KUBE_STATE}/controller-rollout-timeout"
   : >"${FAKE_KUBE_STATE}/controller-ready"
   printf 'rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
   exit 0
@@ -692,15 +743,32 @@ fi
   exit 2
 }
 
+if jq -e '
+  if .kind == "List" then
+    ([.items[] | "\(.kind)/\(.metadata.name)"] | sort) == [
+      "ValidatingAdmissionPolicy/orka-acp-workspace-lease-protection",
+      "ValidatingAdmissionPolicyBinding/orka-acp-workspace-lease-protection"
+    ]
+  else false end
+' "$3" >/dev/null; then
+  : >"${FAKE_KUBE_STATE}/lease-policy"
+  printf 'lease-policy:orka-acp-workspace-lease-protection\n' >>"${FAKE_KUBE_LOG}"
+  exit 0
+fi
+
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
+  [[ -e "${FAKE_KUBE_STATE}/lease-policy" ]] || {
+    echo 'admission webhooks applied before the ACP workspace Lease policy' >&2
+    exit 61
+  }
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 7 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and .sideEffects == "None" and
        .clientConfig.service.name == "orka-admission" and
@@ -710,6 +778,10 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
       .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
     and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "checkpointsourceuse.workspace.orka.ai" and
+             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
+             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "taskexecutionauthority.core.orka.ai") | .matchConditions[] |
       select(.name == "route-unless-controller-cleanup-safe") | .expression |
       select(contains("orka.ai/cleanup") and
@@ -717,8 +789,12 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
         contains("object.spec == oldObject.spec") and
         contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "namespaceexecutionmode.core.orka.ai") |
-      select(.clientConfig.service.path == "/validate-v1-namespace-execution-mode")] | length) == 1 and
+      select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "workspaceattachmentsecret.core.orka.ai" and
+             .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "sessionresolution.core.orka.ai" or
              .name == "agentexecutionadjudication.core.orka.ai" or
@@ -927,6 +1003,8 @@ export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
+  # The shipped controller grace period is 360s; the rollout waits 3m longer.
+  local want_rollout_timeout="${2:-540s}"
   local admission_line admission_rollout_line smoke_line webhooks_line dependency_line
   local dependency_first_rollout_line dependency_last_rollout_line
   local dependency_first_endpoint_line dependency_last_endpoint_line
@@ -938,6 +1016,7 @@ assert_converged() {
   [[ -s "${state_dir}/snapshot-key" ]]
   [[ -e "${state_dir}/admission-runtime" ]]
   [[ -e "${state_dir}/admission-endpoints" ]]
+  [[ -e "${state_dir}/lease-policy" ]]
   [[ -e "${state_dir}/admission-webhooks" ]]
   [[ -e "${state_dir}/dependency-workload" ]]
   for dependency in orka-provider-auth-proxy orka-scm-egress-proxy orka-workspace-publisher; do
@@ -946,10 +1025,15 @@ assert_converged() {
   done
   [[ -e "${state_dir}/controller-workload" ]]
   [[ -e "${state_dir}/controller-ready" ]]
+  [[ "$(<"${state_dir}/controller-rollout-timeout")" == "${want_rollout_timeout}" ]] || {
+    echo "controller rollout timeout was $(<"${state_dir}/controller-rollout-timeout"), want ${want_rollout_timeout}" >&2
+    return 1
+  }
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "7" ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
+  grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so
   # phase ordering is asserted on the final converged invocation, which always
@@ -1009,6 +1093,7 @@ run_apply_scenario dependency-endpoints
 run_apply_scenario full
 run_apply_scenario rollout
 run_apply_scenario controller-rollout
+run_apply_scenario controller-pods
 run_apply_scenario endpoints
 run_apply_scenario smoke
 run_apply_scenario webhooks
@@ -1076,6 +1161,67 @@ FAKE_KUBE_STATE="${deleted_controller_state}" FAKE_KUBE_LOG="${deleted_controlle
   FAKE_EXISTING_CONTROLLER_MODE="none" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 assert_converged "${deleted_controller_state}"
+
+# The Recreate controller rollout waits for every old Pod's preStop drain, so
+# the wait covers the longest termination grace period among the applied and
+# live Deployments and the existing controller Pods, plus a 3m startup margin,
+# and is never less than 5m. An unset grace period is the Kubernetes default
+# of 30s.
+run_rollout_timeout_scenario() {
+  local name="$1" live_grace="$2" applied_grace="$3" want="$4" pod_graces="${5:-}"
+  local state_dir="${test_root}/state-rollout-timeout-${name}"
+  mkdir -p "${state_dir}"
+  : >"${state_dir}/apply.log"
+  FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${state_dir}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+    FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" \
+    FAKE_EXISTING_CONTROLLER_GRACE="${live_grace}" FAKE_CONTROLLER_GRACE="${applied_grace}" \
+    FAKE_EXISTING_CONTROLLER_POD_GRACES="${pod_graces}" \
+    "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
+  assert_converged "${state_dir}" "${want}"
+}
+
+run_rollout_timeout_scenario applied-longer 60 "" 540s
+run_rollout_timeout_scenario live-longer 900 "" 1080s
+run_rollout_timeout_scenario applied-shortened 360 60 540s 360
+# A retry after a redeploy that lowered the grace period, while the earlier
+# controller Pod is still terminating under its original grace period.
+run_rollout_timeout_scenario terminating-pod-longer 60 60 540s 360
+run_rollout_timeout_scenario above-floor "" 121 301s
+run_rollout_timeout_scenario floor "" 120 300s
+run_rollout_timeout_scenario default-grace "" unset 300s
+
+expect_rollout_preflight_failure() {
+  local name="$1" message="$2"
+  shift 2
+  local state_dir="${test_root}/state-rollout-timeout-invalid-${name}"
+  local output
+  mkdir -p "${state_dir}"
+  : >"${state_dir}/apply.log"
+  if output="$(
+    env FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${state_dir}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+      FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" "$@" \
+      "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1
+  )"; then
+    echo "${name} unexpectedly passed the controller rollout preflight" >&2
+    exit 1
+  fi
+  grep -F "${message}" <<<"${output}" >/dev/null || {
+    echo "${name} failed without '${message}': ${output}" >&2
+    exit 1
+  }
+  if [[ -s "${state_dir}/apply.log" ]]; then
+    echo "${name} caused writes before the controller rollout preflight failed" >&2
+    exit 1
+  fi
+}
+
+invalid_grace_message='terminationGracePeriodSeconds must be a non-negative integer'
+expect_rollout_preflight_failure grace-string "${invalid_grace_message}" FAKE_CONTROLLER_GRACE='"6m"'
+expect_rollout_preflight_failure grace-negative "${invalid_grace_message}" FAKE_CONTROLLER_GRACE=-1
+expect_rollout_preflight_failure grace-fraction "${invalid_grace_message}" FAKE_CONTROLLER_GRACE=1.5
+expect_rollout_preflight_failure pod-grace-negative "${invalid_grace_message}" FAKE_EXISTING_CONTROLLER_POD_GRACES=-1
+expect_rollout_preflight_failure selector-expressions 'must select its Pods with matchLabels' \
+  FAKE_STATIC_MODE=controller-selector-expressions
 
 newline_key_state="${test_root}/state-base64-newline-key"
 mkdir -p "${newline_key_state}"
@@ -1156,4 +1302,4 @@ done
 
 grep -F 'scripts/apply-acp-production.sh' "${root}/Makefile" >/dev/null
 
-printf '%s\n' 'ok - ACP deployment activates admission, waits for publisher/proxy readiness, and only then rolls one static harness-v2 controller'
+printf '%s\n' 'ok - ACP deployment activates admission, waits for publisher/proxy readiness, and only then rolls one static harness-v2 controller, allowing for its termination grace period'

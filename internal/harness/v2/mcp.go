@@ -44,6 +44,10 @@ const (
 	MCPToolEffectConsequential MCPToolEffect = "consequential"
 )
 
+// MCPToolErrorCodeConnectionRequired marks an error result the requester
+// fixes by linking or re-linking their account; its message says how.
+const MCPToolErrorCodeConnectionRequired = "connection_required"
+
 type MCPToolDescriptor struct {
 	Name             string          `json:"name"`
 	Description      string          `json:"description,omitempty"`
@@ -51,6 +55,9 @@ type MCPToolDescriptor struct {
 	Source           MCPToolSource   `json:"source"`
 	Effect           MCPToolEffect   `json:"effect"`
 	DefinitionDigest string          `json:"definitionDigest,omitempty"`
+	// Forward marks a forwarding Tool, which the runtime serves to a
+	// command-line client and never lists to the model.
+	Forward *MCPToolForward `json:"forward,omitempty"`
 }
 
 func (d MCPToolDescriptor) Validate() error {
@@ -93,6 +100,28 @@ func (d MCPToolDescriptor) Validate() error {
 		}
 	} else if len(bytes.TrimSpace(d.InputSchema)) != 0 {
 		return fmt.Errorf("provider-native tool %q must not carry an MCP input schema", d.Name)
+	}
+	if d.Forward != nil {
+		// Reads are read-only; the derived write tool is consequential and
+		// named after its Tool.
+		effect := MCPToolEffectReadOnly
+		if d.Forward.Write {
+			effect = MCPToolEffectConsequential
+		}
+		if d.Source != MCPToolSourceBrokeredCustom || d.Effect != effect {
+			return fmt.Errorf("forwarding tool %q must be a custom tool whose effect matches its methods", d.Name)
+		}
+		if d.Forward.Write != strings.HasSuffix(d.Name, MCPForwardWriteSuffix) {
+			return fmt.Errorf("forwarding tool %q: only a write tool is named with %q", d.Name, MCPForwardWriteSuffix)
+		}
+		if err := d.Forward.Validate(); err != nil {
+			return fmt.Errorf("forwarding tool %q: %w", d.Name, err)
+		}
+		got, gotErr := CanonicalJSON(d.InputSchema)
+		want, wantErr := CanonicalJSON(d.Forward.InputSchema())
+		if gotErr != nil || wantErr != nil || !bytes.Equal(got, want) {
+			return fmt.Errorf("forwarding tool %q must carry the fixed forwarding input schema", d.Name)
+		}
 	}
 	return nil
 }
@@ -171,6 +200,11 @@ func (p MCPToolPolicy) Allows(name string) bool {
 	if strings.TrimSpace(name) == "" || !slices.Contains(p.AllowedToolNames, name) || slices.Contains(p.DisallowedToolNames, name) {
 		return false
 	}
+	// Denying a forwarding Tool denies the write tool derived from it,
+	// whichever path built the lists.
+	if base := MCPForwardToolResource(name); base != name && slices.Contains(p.DisallowedToolNames, base) {
+		return false
+	}
 	return p.AllowBash || !strings.EqualFold(name, "bash")
 }
 
@@ -190,6 +224,14 @@ func (p MCPToolPolicy) Descriptor(name string) (MCPToolDescriptor, bool) {
 type MCPApprovalPolicy struct {
 	RequiredTools []string `json:"requiredTools,omitempty"`
 }
+
+// Approval waiting does not consume the tool execution budget. The enclosing
+// MCP call remains subject to cancellation and the renewable prompt lease.
+const (
+	MCPApprovalWaitTimeout      = 10 * time.Minute
+	MCPApprovalExecutionTimeout = 4 * time.Minute
+	MCPApprovalCallTimeout      = 15 * time.Minute
+)
 
 func (p MCPApprovalPolicy) Validate(toolPolicy MCPToolPolicy) error {
 	if len(p.RequiredTools) > MaxMCPTools {
@@ -211,12 +253,36 @@ func (p MCPApprovalPolicy) Requires(toolName string) bool {
 	return slices.Contains(p.RequiredTools, toolName)
 }
 
+// NeedsRuntimeApprovals reports whether some approval-required tool is one
+// the runtime's own MCP client calls, and so needs a runtime that waits for
+// brokered approvals. A forwarding write tool is not: only a client
+// forwarder in the supervisor calls it, and that forwarder holds the
+// client's request while the broker waits.
+func (p MCPApprovalPolicy) NeedsRuntimeApprovals(toolPolicy MCPToolPolicy) bool {
+	for _, name := range p.RequiredTools {
+		index := slices.IndexFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool { return tool.Name == name })
+		if index < 0 || toolPolicy.Tools[index].Forward == nil || !toolPolicy.Tools[index].Forward.Write {
+			return true
+		}
+	}
+	return false
+}
+
 type MCPPolicyConfiguration struct {
 	ToolPolicyDigest       string            `json:"toolPolicyDigest"`
 	ApprovalPolicyDigest   string            `json:"approvalPolicyDigest"`
 	MCPConfigurationDigest string            `json:"mcpConfigurationDigest"`
 	ToolPolicy             MCPToolPolicy     `json:"toolPolicy"`
 	ApprovalPolicy         MCPApprovalPolicy `json:"approvalPolicy"`
+}
+
+// MCPPolicyRequiresPermissionCapability reports whether enforcing one policy
+// requires the runtime to emit ACP permission requests for provider-native
+// tools. Orka decides brokered tool approvals through the MCP call itself.
+func MCPPolicyRequiresPermissionCapability(toolPolicy MCPToolPolicy, _ MCPApprovalPolicy) bool {
+	return slices.ContainsFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool {
+		return tool.Source == MCPToolSourceProviderNative
+	})
 }
 
 func (c MCPPolicyConfiguration) validate() error {
@@ -273,6 +339,9 @@ func (c MCPPolicyConfiguration) Matches(other MCPPolicyConfiguration) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
+// MCPApprovalEvidence is retained so legacy runtime-supplied grants receive an
+// explicit rejection. Only the controller's persisted decision authorizes a
+// brokered tool; an ACP permission response is not approval evidence.
 type MCPApprovalEvidence struct {
 	PermissionRequestID PermissionRequestID `json:"permissionRequestID"`
 	ToolCallID          string              `json:"toolCallID"`
@@ -280,31 +349,6 @@ type MCPApprovalEvidence struct {
 	GrantedAt           time.Time           `json:"grantedAt"`
 	ExpiresAt           time.Time           `json:"expiresAt"`
 	Reusable            bool                `json:"reusable,omitempty"`
-}
-
-func (e MCPApprovalEvidence) ValidateFor(toolName string, now time.Time) error {
-	if err := requireIdentifier("MCP approval permission request ID", string(e.PermissionRequestID)); err != nil {
-		return err
-	}
-	if err := requireIdentifier("MCP approval tool call ID", e.ToolCallID); err != nil {
-		return err
-	}
-	if e.ToolName != toolName {
-		return fmt.Errorf("MCP approval evidence tool %q does not match call tool %q", e.ToolName, toolName)
-	}
-	if err := validateTimestamp("MCP approval grant timestamp", e.GrantedAt); err != nil {
-		return err
-	}
-	if err := validateTimestamp("MCP approval expiry", e.ExpiresAt); err != nil {
-		return err
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	if !e.ExpiresAt.After(now) || e.ExpiresAt.Before(e.GrantedAt) {
-		return fmt.Errorf("MCP approval evidence is expired or invalid")
-	}
-	return nil
 }
 
 func CanonicalRuntimeToolPolicyDigest(allowed, disallowed []string, allowBash bool) (string, error) {
@@ -358,7 +402,7 @@ type MCPToolCall struct {
 	Approval  *MCPApprovalEvidence `json:"approval,omitempty"`
 }
 
-func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, now time.Time) (MCPToolDescriptor, error) {
+func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, _ time.Time) (MCPToolDescriptor, error) {
 	if err := requireIdentifier("MCP call ID", c.CallID); err != nil {
 		return MCPToolDescriptor{}, err
 	}
@@ -376,15 +420,17 @@ func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, now time.Time) (MCP
 	if !ok || !descriptor.Source.Brokered() {
 		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q is not an allowed brokered tool", c.ToolName)
 	}
-	if auth.ApprovalPolicy.Requires(c.ToolName) {
-		if c.Approval == nil {
-			return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q requires approval", c.ToolName)
+	if c.Approval != nil {
+		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q must not carry runtime-supplied approval evidence", c.ToolName)
+	}
+	if descriptor.Forward != nil {
+		request, err := DecodeMCPForwardRequest(c.Arguments)
+		if err == nil {
+			err = request.ValidateFor(*descriptor.Forward)
 		}
-		if err := c.Approval.ValidateFor(c.ToolName, now); err != nil {
-			return MCPToolDescriptor{}, err
+		if err != nil {
+			return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q: %w", c.ToolName, err)
 		}
-	} else if c.Approval != nil {
-		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q must not carry unexpected approval evidence", c.ToolName)
 	}
 	return descriptor, nil
 }

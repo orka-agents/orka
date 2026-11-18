@@ -1,37 +1,51 @@
 import React from 'react';
-import CodeBlock from '@theme/CodeBlock';
+import Link from '@docusaurus/Link';
+import {ArrowRight} from 'lucide-react';
+
+const STEPS = [
+  {
+    title: 'Install with Helm',
+    body: 'One Helm command. The chart creates its namespaces, its encryption key, and its webhook certificate. Works on kind or minikube. No model API key needed yet.',
+    link: {to: '/docs/installation', label: 'Install Orka'},
+  },
+  {
+    title: 'Run your first AI task',
+    body: 'Connect to the API, add your Anthropic, OpenAI, or Azure OpenAI key as a Provider, and submit a Task.',
+    link: {to: '/docs/getting-started#your-first-task', label: 'Run your first task'},
+  },
+  {
+    title: 'Run a coding agent',
+    body: 'Connect your model gateway and let Codex or Claude Code review a repository from a warm pool.',
+    link: {to: '/docs/getting-started#running-a-coding-agent', label: 'Run a coding agent'},
+  },
+];
 
 export default function QuickStartSection() {
   return (
-    <section className="landing-section quickstart-section">
-      <h2 className="section-title">Quick Start</h2>
-      <p className="section-subtitle">
-        One Helm install, one LLM secret, and you're chatting with an
-        orchestrator that handles the rest.
-      </p>
-      <div className="quickstart-grid">
-        <div className="quickstart-card">
-          <h3>Install the controller</h3>
-          <p>
-            Deploy Orka into your cluster with Helm — CRDs, controller, and the
-            built-in dashboard included.
-          </p>
-          <CodeBlock language="bash">{`helm install orka charts/orka \\
-  --namespace orka-system \\
-  --create-namespace`}</CodeBlock>
-        </div>
-        <div className="quickstart-card">
-          <h3>Add a provider &amp; chat</h3>
-          <p>
-            Store an LLM key as a Kubernetes Secret, register a Provider, then
-            open the dashboard or any OpenAI-compatible client.
-          </p>
-          <CodeBlock language="bash">{`kubectl create secret generic anthropic-secret \\
-  --from-literal=api-key=your-api-key
-
-kubectl port-forward -n orka-system svc/orka 8080:8080
-# open http://localhost:8080`}</CodeBlock>
-        </div>
+    <section className="orka-section">
+      <div className="orka-container">
+        <header className="orka-section__head">
+          <p className="orka-kicker">Quick start</p>
+          <h2>From an empty cluster to a coding agent reviewing a real repository.</h2>
+        </header>
+        <ol className="orka-steps">
+          {STEPS.map((step, i) => (
+            <li key={step.title} className="orka-step">
+              <span className="orka-step__n" aria-hidden="true">
+                {i + 1}
+              </span>
+              <h3>{step.title}</h3>
+              <p>{step.body}</p>
+              <Link className="orka-text-link" to={step.link.to}>
+                {step.link.label} <ArrowRight size={16} aria-hidden="true" />
+              </Link>
+            </li>
+          ))}
+        </ol>
+        <p className="orka-section__note">
+          New here? Read <Link to="/docs">What is Orka?</Link> For development,{' '}
+          <Link to="/docs/build-from-source">build from source</Link>.
+        </p>
       </div>
     </section>
   );

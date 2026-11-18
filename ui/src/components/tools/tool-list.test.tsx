@@ -40,6 +40,65 @@ describe('ToolList', () => {
     })
   })
 
+  it('permission-denied (403) shows an authorization error, not "No tools found."', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view tools')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/read permission for tools \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.queryByText('No tools found.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/"code":403/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Name' })).not.toBeInTheDocument()
+  })
+
+  it('server-error (500) shows a load-failure error, not "No tools found."', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({ error: { code: 500, message: 'internal server error' } }, { status: 500 }),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Could not load tools')).toBeInTheDocument()
+    })
+    expect(screen.getByText('internal server error')).toBeInTheDocument()
+    expect(screen.queryByText('No tools found.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('keeps a long error message inside the page instead of overflowing the table', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 403,
+              message: 'namespace "orka-system" not allowed, restricted to "default"',
+            },
+          },
+          { status: 403 },
+        ),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view tools')).toBeInTheDocument()
+    })
+    // The error replaces the table entirely, so no horizontally scrolling
+    // table container can clip the message.
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-slot="table-container"]')).toBeNull()
+  })
+
   it('populated table shows tools with correct data', async () => {
     server.use(
       http.get('/api/v1/tools', () =>
@@ -78,6 +137,47 @@ describe('ToolList', () => {
     await waitFor(() => {
       expect(screen.getByText('Built-in')).toBeInTheDocument()
     })
+  })
+
+  it('built-in tools report no availability status instead of a fixed "Available"', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({
+          items: [
+            { name: 'web_search', builtin: true, description: 'Search the web' },
+          ],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('web_search')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Available')).not.toBeInTheDocument()
+    expect(screen.getByTitle('Built-in tools have no availability check')).toBeInTheDocument()
+  })
+
+  it('exposes the full description of a truncated cell as a tooltip', async () => {
+    const description = 'A very long description that the table truncates to a single line of text'
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({
+          items: [{ name: 'long-tool', namespace: 'default', builtin: false, description, available: true }],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText(description)).toBeInTheDocument()
+    })
+    expect(screen.getByText(description)).toHaveAttribute('title', description)
+    // The cap only widens from xl, so every column fits beside the sidebar at 1024px.
+    expect(screen.getByText(description)).toHaveClass('truncate', 'max-w-48', 'xl:max-w-xs')
+    expect(screen.getByText(description)).not.toHaveClass('max-w-xs')
   })
 
   it('custom tools show "Custom" badge', async () => {

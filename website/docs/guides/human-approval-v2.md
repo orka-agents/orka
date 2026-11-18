@@ -1,0 +1,264 @@
+---
+description: "Hold a consequential tool call for a person's decision, then run exactly the action they approved."
+---
+
+# Human approval
+
+Some actions should not happen unattended: creating a work order, deploying, spending money,
+writing to someone's account. Orka can hold such a call until a person approves or declines
+it, then run exactly the stored action — never a regenerated one — and return the real result
+to the agent.
+
+Approvals appear in three places:
+
+| Where | What gets approved | Set up |
+| --- | --- | --- |
+| Native autonomous coordinators (`type: ai`) | Custom Tools listed in `coordination.approvalRequiredTools`, and requests the agent makes with `request_approval`. The Task parks until a decision arrives. | [Autonomous tasks](autonomous-tasks.md#human-approvals) |
+| External runtimes, such as AgentKit and Foundry agents | Orka-executed tools in the runtime's `approvalRequiredTools`. The tool call stays open while it waits. | This page |
+| Linked accounts | Every write tool that acts through a person's [connector](connectors.md) | Automatic |
+
+People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
+`orka task decline`, or through the API. To alert reviewers instead of having them poll, see
+[Alerting reviewers](#alerting-reviewers). The rest of this page covers the external-runtime
+path.
+
+## Alerting reviewers
+
+A Task can send a signed webhook when an approval is requested and when it is approved,
+declined, expired, or cancelled. Select the events next to the Task's `webhookURL`:
+
+```yaml
+spec:
+  webhookURL: https://hooks.example.com/orka
+  webhookEvents:
+    - task.approval_requested
+    - task.approval_resolved
+```
+
+This works for all three approval paths and for [parked sign-offs](parking-agent-turns.md),
+whose decision can arrive after the parked turn `Succeeded`. A notice carries the approval ID,
+the gated tool's name, severity, the deadline when the approval has one, and the resolution.
+It never carries the proposed arguments, the action text, the reviewer's reason, or who
+decided. Open the approval in the dashboard or the API to review it. A brokered review that
+times out is sent as `expired` a few seconds after its deadline. Approval notices are retried
+for about three minutes, since review lasts at most ten.
+
+Treat the notice as an alert. Decide through the dashboard, the CLI, or the API, which check
+the approval again. See [Approval events](task-webhooks.md#approval-events) for the body,
+deduplication, ordering, and how to verify the signature.
+
+## Approvals for external runtimes
+
+Orka can let an agent look up inventory automatically and require a person to approve a
+proposed work order. The controller saves the exact action before showing it for review.
+The tool has not run at that point. Approval lets Orka execute that stored action and return
+its real result to the waiting agent.
+
+This applies to tools executed by Orka for qualified AgentKit and Foundry
+`orka.harness.v2` runtimes. Runtime-native shell and file permissions are a
+separate capability.
+
+:::tip[Video demo]
+Watch [Human approval before an agent takes action](https://www.youtube.com/watch?v=KgzcvW1WznE).
+:::
+
+## Configure the policy
+
+An external `AgentRuntime` declares an explicit, sorted MCP policy and a
+runtime profile whose policy digests match it:
+
+```yaml
+spec:
+  capabilities:
+    mcpPolicy:
+      allowedTools: [create-work-order, read-inventory]
+      disallowedTools: []
+      allowBash: false
+      approvalRequiredTools: [create-work-order]
+```
+
+The registered adapter must advertise `supportsBrokeredToolApprovals` and
+pass conformance. Task `agentRuntime.allowedTools` must exactly match the
+registered policy. Per-Task settings cannot override that frozen profile.
+Brokered approval support is off by default. After qualifying the exact
+adapter and hosted configuration, set the supervisor's
+`ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST` to its complete runtime-profile
+digest. A mismatched opt-in fails startup. Requalify after changing that profile.
+Use the profile renderer and manifests in
+[`examples/human-approval-v2`](https://github.com/orka-agents/orka/tree/main/examples/human-approval-v2)
+for complete configuration, including immutable adapter and image digests.
+
+The example tools run against a disposable HTTP counter. One lookup returns
+inventory without review. One simulated action increments the counter only
+after approval. It does not create equipment orders or make purchases.
+
+## Review the action
+
+Open the Task's Approvals tab. It shows the proposed operation, a sanitized
+input preview, and the review deadline. A `call-tool` wrapper also names its
+inner operation when that name is present in the inputs. Sensitive values are
+redacted and oversized previews are bounded. The original executable inputs
+remain private; the preview is never used as execution input.
+
+The same records and decisions are available through the existing API:
+
+```http
+GET /api/v1/tasks/:id/approvals?namespace=<ns>
+
+POST /api/v1/tasks/:id/approvals/:approvalID/decision?namespace=<ns>
+Content-Type: application/json
+
+{"decision":"approve","reason":"Reviewed the asset and quantity"}
+```
+
+The list response names the Task it was filtered against (`taskUID`), its
+phase at that same read (`taskPhase`), and whether it is being deleted
+(`taskDeleting`), so a poller such as `orka task approvals --watch` can tell
+whether a pending request can still be decided without a second lookup by
+name. Decisions are refused for finished and deleting Tasks.
+
+Use `decline` to reject the action. Reviewers need `update` on
+`core.orka.ai/tasks/approvals` and `patch` on the parent Task. Gateway-owned
+Tasks also enforce their existing operate permission. See the
+[authorization reference](../reference/api-authorization.md#route-permissions).
+The first terminal decision wins. While the bound Task run remains active,
+repeating that decision returns its saved state. A competing decision receives
+a conflict. Once the run settles or its binding becomes stale, even an identical
+decision retry receives HTTP 409.
+
+The panel separates the review decision from execution. An approved action
+can still fail, become stale before starting, or have an unknown outcome.
+History records the reviewer and decision, then `not_started`, `running`,
+`succeeded`, `failed`, or `unknown` as execution evidence becomes available.
+When the tool sent nothing or the remote system refused the request, the
+outcome is `failed` and its reason says why, for example the HTTP status and
+message GitHub refused a missing permission with; nothing changed. An unknown
+outcome means the action may have run. Check the target system before
+choosing whether to make a new request. The controller logs the redacted
+cause of both.
+
+## Find pending approvals across Tasks
+
+The per-Task list answers one Task. To find every request waiting on a person
+in a namespace, read the approvals inbox or the wider attention view:
+
+```http
+GET /api/v1/approvals?namespace=<ns>&status=pending
+GET /api/v1/attention?namespace=<ns>&since=24h
+```
+
+Both are computed on each read and need only `list` on `core.orka.ai/tasks`.
+Every Task then passes the same context-token and Gateway read filters as
+`GET /api/v1/tasks`, and only Tasks that report a pending approval (a
+`WaitingForApproval` condition, or a parked approval wait that still takes a
+decision) have their approval history read. The inbox lists brokered, worker
+and parked approvals that can still be decided, soonest deadline first;
+expired and already decided requests drop out. The attention view adds Tasks
+with an unknown outcome, failed Tasks and Tasks whose Pod cannot start inside
+the `since` window (default 24 hours, at most 7 days), and blocked
+RepositoryMonitor work actions when the caller may also list
+`repositorymonitors` and `monitorworkactions`.
+
+Each item is a short safe summary: Task identity, the tool name of a brokered
+approval (recorded by the controller from the resolved tool), a fixed label for
+parked sign-offs, severity and deadline. It never includes action labels built
+from call arguments, fields of approvals the AI worker records, the input
+preview, risk
+summary, wait reason or decision reasons; open the Task's Approvals tab or the
+per-Task list for those before deciding. Each approval item carries
+`canApprove` and `canDecline`. They are hints from the same checks the
+decision endpoint runs, including the rule that only the requester may
+approve a call on a Task that acts on their behalf. `null` means the hint
+could not be settled cheaply, for example past the first 20 Tasks of a page
+for a ServiceAccount caller. The decision endpoint remains the only
+enforcement point.
+
+Results are ranked and paged with an opaque `continue` token that also fixes
+the `since` window. Scans are bounded; when a bound is hit the response sets
+`incomplete: true` and names it in `incompleteReasons`, and the ranking must
+not be read as complete. `sources.approvals` and `sources.monitors` report
+whether approval history and monitor items were included, unavailable, or
+forbidden to the caller. `sources.approvals` is `partial` when the caller may
+list a Task that reports a pending approval but may not read that Task's
+approvals, for example a context token with `orka:tasks:list` but not
+`orka:tasks:get`. Those approvals are left out without detail, so an empty
+inbox does not mean nothing is pending. `unavailable` takes precedence over
+`partial`; scan bounds are reported in `incompleteReasons` instead. See the
+[authorization reference](../reference/api-authorization.md#route-permissions).
+
+## Waiting and cancellation
+
+Review has a maximum of ten minutes. Approved execution has a maximum of
+four minutes. Approval-required HTTP Tool timeouts must be shorter than
+four minutes. The MCP call allows fifteen minutes to cover both phases and
+transport overhead. The Task deadline can shorten either phase and the
+runtime must keep renewing its normal prompt lease. Configure a Task timeout
+that leaves room for initial agent work as well as the review.
+
+Decline, expiry, and cancellation prevent an unstarted action from running.
+Before execution, Orka rechecks the Task identity and active attempt, runtime
+and controller fences, tool definition, and frozen policy. A late decision
+cannot revive an ended run. Waiting holds no global execution lock, so other
+Tasks in separate RuntimeSessions can progress when capacity is available.
+
+If the agent receives the cancellation result and finishes before prompt
+cancellation reaches it, Orka retains that completed result. The approval
+stays cancelled and the action does not run.
+
+Direct AgentKit receives the longer MCP timeout from the supervisor. Hosted
+AgentKit also needs persistent continuation state with a TTL of 1800 seconds
+and a pinned Foundry agent version whose idle timeout is at least 1800 seconds.
+See the [adapter contract](../development/agent-runtime-adapter-contract.md#brokered-tool-approvals)
+for exact settings and final error codes.
+
+## Recovery and evidence
+
+Orka stores the original request in an immutable Secret owned by the Task.
+It binds the review to the Task UID, attempt, prompt, tool call and operation,
+runtime identity, arguments, tool descriptor, and policy. Events expose safe
+metadata and fingerprints. They do not contain the executable request,
+downstream credentials, or raw tool results.
+
+An interrupted broker connection preserves a pending review. Exact redelivery
+can resume it only while the original authority remains valid. A new
+controller epoch or supervisor boot invalidates the old run. Those cases keep
+their evidence and do not replay the prompt or transfer approval to a new run.
+A pending review whose runtime has disappeared becomes non-actionable when
+the Task ends or its review deadline expires.
+
+Execution reserves a durable external-effect record before review and claims
+it once after approval. A committed result can be returned again without
+calling the tool. After a controller restart, Orka repairs missing approval
+execution events from those durable records. A committed result restores its
+outcome; a started action without a committed result becomes `unknown`.
+Orka never takes over an expired execution lease to try the action again.
+Task ownership removes the private request Secret when the Task is deleted;
+retain the Task and its durable stores while investigating an unknown outcome.
+
+Enroll external Kubernetes runtimes with `deployment.kubernetesRecovery` before
+submitting Tasks if cleanup must survive supervisor loss. Enrollment binds the
+exact Deployment, Pod, container, and authentication identity. Use a stable
+runtime instance ID and a newly generated boot ID at each supervisor start.
+The supported topology has one AgentKit supervisor, or a Foundry supervisor
+and broker. Init and ephemeral containers invalidate recovery enrollment.
+
+For Foundry recovery, first upgrade the controller and qualify the broker, then
+set the supervisor's `ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST` to the exact
+runtime profile digest. Recovery is default-off and independent of approval
+qualification. It records the broker's durable ledger identity before
+admission. After supervisor loss, Orka requires proof that the original
+container terminated and that the same broker permanently sealed and retired
+every remote session under that boot. Keep its ledger intact through recovery.
+Missing historical enrollment cannot be recreated after the original compute
+is gone. Cleanup remains blocked when that evidence is absent.
+
+Crash validation checks normal Task deletion after those receipts are recorded,
+including product finalizer release, private request reclamation, and eventual
+release of retained boot credentials when the registration is deleted.
+
+The example acceptance runner uses the real Task and approval APIs. It checks
+the counter before approval, after repeated decisions, after decline and
+cancellation, and after expiry. Run it for both a direct AgentKit registration
+and an AgentKit agent hosted behind the Foundry bridge. Local deterministic
+model or hosted-process runs prove those transports; Azure-hosted acceptance
+also requires the deployed Foundry gateway and the configured hosted version.

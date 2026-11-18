@@ -26,13 +26,13 @@ func TestCompatProxyToolContextOpenAIProfile(t *testing.T) {
 	generated := 0
 	ctx := newCompatProxyToolContext(compatProxyToolContextConfig{
 		Namespace:        compatToolContextNamespace,
-		Provider:         ProviderResolutionInfo{Name: "provider-a", Type: compatToolOpenAIProviderType},
+		Provider:         ProviderResolutionInfo{Name: "provider-a", Namespace: "provider-ns", Type: compatToolOpenAIProviderType},
 		WatchNamespace:   "watch-ns",
 		GenerateTaskName: func() string { generated++; return compatToolContextGeneratedName },
 		Profile:          openAICompatProxyToolContextProfile,
 	})
 
-	if ctx.Namespace != compatToolContextNamespace || ctx.Tenant != compatToolContextNamespace || ctx.Provider != "provider-a" || ctx.ProviderType != compatToolOpenAIProviderType || ctx.WatchNamespace != "watch-ns" {
+	if ctx.Namespace != compatToolContextNamespace || ctx.Tenant != compatToolContextNamespace || ctx.Provider != "provider-a" || ctx.ProviderNamespace != "provider-ns" || ctx.ProviderType != compatToolOpenAIProviderType || ctx.WatchNamespace != "watch-ns" {
 		t.Fatalf("tool context fields = %#v", ctx)
 	}
 	if got := ctx.TaskLabels()["orka.ai/source"]; got != "openai-proxy" {
@@ -41,7 +41,7 @@ func TestCompatProxyToolContextOpenAIProfile(t *testing.T) {
 	if got := ctx.GenerateTaskName(); got != compatToolContextGeneratedName || generated != 1 {
 		t.Fatalf("GenerateTaskName = %q generated=%d", got, generated)
 	}
-	if ctx.AuthorizeTaskCreate == nil || ctx.AuthorizeTaskDelete == nil || ctx.AuthorizeAgentCreate == nil || ctx.AuthorizeAgentUpdate == nil || ctx.AuthorizeAgentDelete == nil || ctx.AuthorizeSecretRead == nil {
+	if ctx.AuthorizeAgentReference == nil || ctx.AuthorizeTaskCreate == nil || ctx.AuthorizeTaskDelete == nil || ctx.AuthorizeAgentCreate == nil || ctx.AuthorizeAgentUpdate == nil || ctx.AuthorizeAgentDelete == nil || ctx.AuthorizeSecretRead == nil {
 		t.Fatalf("OpenAI authorizers not fully installed: %#v", ctx)
 	}
 	if !ctx.RequireSecretReadAuthorization {
@@ -60,7 +60,7 @@ func TestCompatProxyToolContextAnthropicProfilePreservesAuthorizerSurface(t *tes
 	if got := ctx.TaskLabels()["orka.ai/source"]; got != "anthropic-proxy" {
 		t.Fatalf("source label = %q, want anthropic-proxy", got)
 	}
-	if ctx.AuthorizeTaskCreate == nil || ctx.AuthorizeAgentCreate == nil || ctx.AuthorizeSecretRead == nil {
+	if ctx.AuthorizeAgentReference == nil || ctx.AuthorizeTaskCreate == nil || ctx.AuthorizeAgentCreate == nil || ctx.AuthorizeSecretRead == nil {
 		t.Fatalf("Anthropic required authorizers missing: %#v", ctx)
 	}
 	if ctx.AuthorizeTaskDelete != nil || ctx.AuthorizeAgentUpdate != nil || ctx.AuthorizeAgentDelete != nil {

@@ -1,0 +1,25 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: human-approval-example
+  labels:
+    app.kubernetes.io/part-of: human-approval-v2
+spec:
+  type: agent
+  agentRef:
+    name: human-approval-agentkit
+  timeout: 20m
+  workspace:
+    intent: read
+  agentRuntime:
+    allowedTools: [create-work-order, read-inventory]
+  prompt: |
+    Use the two simulated tools for runID __RUN_ID__ and asset pump-1.
+    First call read-inventory exactly once. If inventory is available, call
+    create-work-order exactly once with the same runID and asset, and summary
+    "Inspect the pressure transmitter." The controller will wait for a human
+    decision. Wait for the tool's final result. Report the returned workOrderID
+    on success, or explain the returned decline, expiry, cancellation, or error
+    and include its error code.
+    Never retry a declined, failed, cancelled, or uncertain action. Do not claim
+    a work order exists before the tool result confirms it.

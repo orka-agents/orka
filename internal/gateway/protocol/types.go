@@ -13,13 +13,18 @@ const (
 	// Version is the frozen gateway adapter contract version.
 	Version = "orka.gateway.v1"
 
-	// EventTypeText is the only inbound event type supported by V1.
+	// EventTypeText carries no delegated tool authority.
 	EventTypeText = "text"
+	// EventTypeDelegatedText requires a generation-bound nonsecret grant reference.
+	EventTypeDelegatedText = "delegatedText"
+	GatewayGrantRefKey     = "gatewayGrantRef"
 
 	// DeliveryKindFinal is a successful terminal assistant reply.
 	DeliveryKindFinal = "final"
 	// DeliveryKindError is a sanitized terminal or denial reply.
 	DeliveryKindError = "error"
+	// DeliveryKindMessage is a capability-gated nonterminal assistant message.
+	DeliveryKindMessage = "message"
 
 	// DeliveryStatusDelivered indicates that the provider accepted a delivery.
 	DeliveryStatusDelivered = "delivered"
@@ -30,6 +35,7 @@ const (
 
 	MaxHTTPBodyBytes        = 256 << 10
 	MaxTextBytes            = 64 << 10
+	MaxInterimTextBytes     = 16 << 10
 	MaxIdentityBytes        = 256
 	MaxMetadataEntries      = 32
 	MaxMetadataKeyBytes     = 256
@@ -83,6 +89,7 @@ type Capabilities struct {
 	SenderIdentity     bool `json:"senderIdentity,omitempty"`
 	ExplicitSessions   bool `json:"explicitSessions,omitempty"`
 	IdempotentDelivery bool `json:"idempotentDelivery"`
+	InterimDelivery    bool `json:"interimDelivery,omitempty"`
 }
 
 // HealthResponse is returned by GET /v1/health.

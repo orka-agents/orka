@@ -1,0 +1,6 @@
+# pip constraints for the pinned AgentKit Microsoft Agent Framework adapter image.
+# agent-framework-core 1.23.0 imports MCP SDK v2 names (mcp.MCPError, mcp.Client),
+# but the adapter at agentkit_revision declares mcp>=1.24,<2, so every MCP tool
+# session fails. Remove this pin when agentkit_revision moves to an adapter that
+# supports MCP SDK v2 or bounds agent-framework-core itself.
+agent-framework-core<1.23

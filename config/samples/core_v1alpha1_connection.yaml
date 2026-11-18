@@ -1,0 +1,15 @@
+# Connections are created by the API server from a signed-in person's
+# verified identity; this sample only illustrates the shape and is not part
+# of the applied samples kustomization.
+apiVersion: core.orka.ai/v1alpha1
+kind: Connection
+metadata:
+  name: github-alice
+  namespace: default
+spec:
+  subject:
+    issuer: https://issuer.example.test
+    subject: alice
+  providerRef:
+    name: github
+  mode: readOnly

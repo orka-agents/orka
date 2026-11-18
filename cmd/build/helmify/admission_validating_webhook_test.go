@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -19,64 +20,293 @@ const (
 	canonicalProductionControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
 	staticChartTestNamespace              = "orka-test"
 	webhookPortName                       = "webhook"
+	sharedAdmissionVariant                = "shared"
+	releaseLocalAdmissionVariant          = "release local"
 )
 
 func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	for _, mode := range []string{"harness-v1", "harness-v2"} {
-		t.Run(mode, func(t *testing.T) {
-			args := []string{
-				"--set-string", "controller.mode=" + mode,
-				"--show-only", "templates/controller-validating-webhook.yaml",
-			}
-			if mode == "harness-v1" {
-				args = append(args,
-					"--set-string", "harnessV1.image.digest="+digest,
-					"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-					"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-				)
-			}
+	const mode = "harness-v2"
+	args := []string{
+		"--set-string", "controller.mode=" + mode,
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	}
 
-			rendered := requireHelmRender(t, args...)
-			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
-			if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
-				t.Fatalf("decode controller validating webhook configuration: %v", err)
-			}
-			if configuration.Name != "test-orka-controller" {
-				t.Fatalf("controller webhook name = %q, want test-orka-controller", configuration.Name)
-			}
+	rendered := requireHelmRender(t, args...)
+	configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+	if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
+		t.Fatalf("decode controller validating webhook configuration: %v", err)
+	}
+	if configuration.Name != "test-orka-controller" {
+		t.Fatalf("controller webhook name = %q, want test-orka-controller", configuration.Name)
+	}
 
-			webhooks := make(map[string]admissionregistrationv1.ValidatingWebhook, len(configuration.Webhooks))
+	webhooks := make(map[string]admissionregistrationv1.ValidatingWebhook, len(configuration.Webhooks))
+	for _, webhook := range configuration.Webhooks {
+		webhooks[webhook.Name] = webhook
+		if !strings.HasSuffix(webhook.Name, "."+mode+".orka.ai") {
+			t.Errorf("webhook name %q is not scoped to mode %q", webhook.Name, mode)
+		}
+		if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionregistrationv1.Fail {
+			t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+		}
+		service := webhook.ClientConfig.Service
+		if service == nil || service.Name != "test-orka-webhook" || service.Namespace != staticChartTestNamespace ||
+			service.Port == nil || *service.Port != 443 {
+			t.Errorf("%s service = %#v, want test-orka-webhook:443 in orka-test", webhook.Name, service)
+		}
+		selector := webhook.NamespaceSelector
+		if strings.HasPrefix(webhook.Name, "namespace-mode.") {
+			selector = webhook.ObjectSelector
+		}
+		if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
+			t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
+		}
+		if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != staticChartTestNamespace {
+			t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
+		}
+	}
+
+	_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
+	_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
+	_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
+	_, hasCheckpointSource := webhooks["checkpoint-source-use."+mode+".orka.ai"]
+	wantWorkspace := mode == "harness-v2"
+	if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace ||
+		hasAttachmentSecret != wantWorkspace || hasCheckpointSource != wantWorkspace {
+		t.Fatalf("workspace webhooks = task:%t tool:%t attachment:%t checkpoint source:%t, want %t",
+			hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasCheckpointSource, wantWorkspace)
+	}
+	for _, webhook := range configuration.Webhooks {
+		for _, rule := range webhook.Rules {
+			if slices.Contains(rule.Resources, "leases") {
+				t.Errorf("%s intercepts Leases; Lease guards must be admission policies", webhook.Name)
+			}
+		}
+	}
+}
+
+func TestAgentRuntimeContractWebhooksValidateStatusUpdates(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	shared, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, manifest := range map[string][]byte{
+		sharedAdmissionVariant: shared,
+		releaseLocalAdmissionVariant: []byte(requireHelmRender(t,
+			"--show-only", "templates/controller-validating-webhook.yaml")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var configuration admissionregistrationv1.ValidatingWebhookConfiguration
+			if err := yaml.Unmarshal(manifest, &configuration); err != nil {
+				t.Fatal(err)
+			}
 			for _, webhook := range configuration.Webhooks {
-				webhooks[webhook.Name] = webhook
-				if !strings.HasSuffix(webhook.Name, "."+mode+".orka.ai") {
-					t.Errorf("webhook name %q is not scoped to mode %q", webhook.Name, mode)
+				if webhook.ClientConfig.Service == nil || webhook.ClientConfig.Service.Path == nil ||
+					*webhook.ClientConfig.Service.Path != "/validate-core-orka-ai-v1alpha1-agentruntime-contract" {
+					continue
 				}
-				if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionregistrationv1.Fail {
-					t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+				if len(webhook.Rules) != 1 ||
+					!slices.Contains(webhook.Rules[0].Operations, admissionregistrationv1.Update) ||
+					!slices.Contains(webhook.Rules[0].Resources, "agentruntimes/status") {
+					t.Fatalf("runtime contract webhook does not validate status updates: %#v", webhook.Rules)
 				}
-				service := webhook.ClientConfig.Service
-				if service == nil || service.Name != "test-orka-webhook" || service.Namespace != staticChartTestNamespace ||
-					service.Port == nil || *service.Port != 443 {
-					t.Errorf("%s service = %#v, want test-orka-webhook:443 in orka-test", webhook.Name, service)
-				}
-				selector := webhook.NamespaceSelector
-				if strings.HasPrefix(webhook.Name, "namespace-mode.") {
-					selector = webhook.ObjectSelector
-				}
-				if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
-					t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
-				}
-				if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != staticChartTestNamespace {
-					t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
+				return
+			}
+			t.Fatal("runtime contract webhook is missing")
+		})
+	}
+}
+
+func TestAttachmentSecretWebhooksRouteProtectedIntegrityWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v2",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	))
+
+	for _, test := range []struct {
+		name        string
+		manifest    []byte
+		webhookName string
+	}{
+		{name: sharedAdmissionVariant, manifest: sharedManifest, webhookName: "workspaceattachmentsecret.core.orka.ai"},
+		{
+			name: releaseLocalAdmissionVariant, manifest: chartManifest,
+			webhookName: "workspace-attachment-secret.harness-v2.orka.ai",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal(test.manifest, &configuration); err != nil {
+				t.Fatalf("decode validating webhook configuration: %v", err)
+			}
+			var attachmentWebhook *admissionregistrationv1.ValidatingWebhook
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == test.webhookName {
+					attachmentWebhook = &configuration.Webhooks[i]
+					break
 				}
 			}
+			if attachmentWebhook == nil {
+				t.Fatalf("%s is missing", test.webhookName)
+			}
+			if attachmentWebhook.FailurePolicy == nil || *attachmentWebhook.FailurePolicy != admissionregistrationv1.Fail {
+				t.Fatalf("failurePolicy = %v, want Fail", attachmentWebhook.FailurePolicy)
+			}
+			if attachmentWebhook.ClientConfig.Service == nil || attachmentWebhook.ClientConfig.Service.Path == nil ||
+				*attachmentWebhook.ClientConfig.Service.Path != "/validate-v1-secret-workspace-attachment" {
+				t.Fatalf("client service = %#v, want workspace attachment Secret handler", attachmentWebhook.ClientConfig.Service)
+			}
+			if len(attachmentWebhook.Rules) != 1 {
+				t.Fatalf("rules = %#v, want one Secret rule", attachmentWebhook.Rules)
+			}
+			rule := attachmentWebhook.Rules[0]
+			wantOperations := []admissionregistrationv1.OperationType{
+				admissionregistrationv1.Create, admissionregistrationv1.Update, admissionregistrationv1.Delete,
+			}
+			if !slices.Equal(rule.Operations, wantOperations) {
+				t.Errorf("operations = %#v, want %#v", rule.Operations, wantOperations)
+			}
+			if !slices.Equal(rule.APIGroups, []string{""}) ||
+				!slices.Equal(rule.APIVersions, []string{"v1"}) ||
+				!slices.Equal(rule.Resources, []string{"secrets"}) {
+				t.Errorf("rule = %#v, want core/v1 Secrets", rule.Rule)
+			}
+			selector := attachmentWebhook.ObjectSelector
+			if selector == nil || len(selector.MatchExpressions) != 1 ||
+				selector.MatchExpressions[0].Key != "workspace.orka.ai/attachment-for" ||
+				selector.MatchExpressions[0].Operator != metav1.LabelSelectorOpExists {
+				t.Fatalf("objectSelector = %#v, want attachment label Exists", selector)
+			}
+		})
+	}
+}
 
-			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
-			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
-			wantWorkspace := mode == "harness-v2"
-			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace {
-				t.Fatalf("workspace webhooks present = task:%t tool:%t, want %t", hasTaskWorkspace, hasToolWorkspace, wantWorkspace)
+func TestTaskProvenanceWebhooksRouteStatusMetadataWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v2",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	))
+
+	for _, test := range []struct {
+		name        string
+		manifest    []byte
+		webhookName string
+	}{
+		{name: sharedAdmissionVariant, manifest: sharedManifest, webhookName: "taskprovenance.core.orka.ai"},
+		{name: releaseLocalAdmissionVariant, manifest: chartManifest, webhookName: "task-provenance.harness-v2.orka.ai"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal(test.manifest, &configuration); err != nil {
+				t.Fatalf("decode validating webhook configuration: %v", err)
+			}
+			var provenanceWebhook *admissionregistrationv1.ValidatingWebhook
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == test.webhookName {
+					provenanceWebhook = &configuration.Webhooks[i]
+					break
+				}
+			}
+			if provenanceWebhook == nil {
+				t.Fatalf("%s is missing", test.webhookName)
+			}
+			if len(provenanceWebhook.Rules) != 1 {
+				t.Fatalf("rules = %#v, want one Task rule", provenanceWebhook.Rules)
+			}
+			if !slices.Equal(provenanceWebhook.Rules[0].Resources, []string{"tasks", "tasks/status"}) {
+				t.Fatalf("resources = %#v, want Task writes and status metadata writes", provenanceWebhook.Rules[0].Resources)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCoreAdmissionPolicyRoutesStatusMetadataWrites(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "policy", "workspace_core_admission_policy.yaml")
+	sharedManifest, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatalf("read standalone workspace core admission policy: %v", err)
+	}
+	chartManifest := []byte(requireHelmRender(t, "--show-only", "templates/workspace-core-admission-policy.yaml"))
+
+	for _, test := range []struct {
+		name     string
+		manifest []byte
+	}{
+		{name: sharedAdmissionVariant, manifest: sharedManifest},
+		{name: releaseLocalAdmissionVariant, manifest: chartManifest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := admissionregistrationv1.ValidatingAdmissionPolicy{}
+			if err := yaml.Unmarshal(test.manifest, &policy); err != nil {
+				t.Fatalf("decode workspace core admission policy: %v", err)
+			}
+			if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) != 1 {
+				t.Fatalf("match constraints = %#v, want one ExecutionWorkspace rule", policy.Spec.MatchConstraints)
+			}
+			resources := policy.Spec.MatchConstraints.ResourceRules[0].Resources
+			if !slices.Equal(resources, []string{"executionworkspaces", "executionworkspaces/status"}) {
+				t.Fatalf("resources = %#v, want workspace writes and status metadata writes", resources)
+			}
+			foundAttachmentVariable := false
+			for _, variable := range policy.Spec.Variables {
+				if variable.Name == "attachmentIntentUnchanged" &&
+					strings.Contains(variable.Expression, "object.spec.attachment") &&
+					strings.Contains(variable.Expression, "object.spec.attachmentEpoch") {
+					foundAttachmentVariable = true
+					break
+				}
+			}
+			if !foundAttachmentVariable {
+				t.Fatal("policy does not compare both controller-owned attachment intent fields")
+			}
+			foundMarkerFence := false
+			foundAttachmentFence := false
+			foundProviderFence := false
+			foundWorkloadFence := false
+			foundPermanentTaint := false
+			for _, validation := range policy.Spec.Validations {
+				permanentTaint := "'acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations"
+				if strings.Contains(validation.Expression, permanentTaint) &&
+					!strings.Contains(validation.Expression, "authorizer") {
+					foundPermanentTaint = true
+				}
+				if strings.Contains(validation.Expression, "variables.providerMarkersUnchanged") &&
+					strings.Contains(validation.Expression, ".check('provider-status').allowed()") {
+					foundProviderFence = true
+				}
+				if strings.Contains(validation.Expression, "variables.workloadIntentUnchanged") &&
+					strings.Contains(validation.Expression, ".check('admit').allowed()") {
+					foundWorkloadFence = true
+				}
+				if strings.Contains(validation.Expression, "variables.coreMarkersUnchanged") {
+					foundMarkerFence = true
+				}
+				if strings.Contains(validation.Expression, "variables.attachmentIntentUnchanged") {
+					foundAttachmentFence = true
+				}
+			}
+			if !foundMarkerFence {
+				t.Fatal("status-routed policy does not enforce unchanged workspace routing and core materialization markers")
+			}
+			if !foundAttachmentFence {
+				t.Fatal("policy does not reserve attachment intent for the Orka core controller")
+			}
+			if !foundProviderFence || !foundWorkloadFence {
+				t.Fatal("policy does not reserve provider observations and workload intent for their approved writers")
+			}
+			if !foundPermanentTaint {
+				t.Fatal("policy does not make the operator access taint permanent for every identity")
 			}
 		})
 	}
@@ -134,6 +364,9 @@ func TestControllerWebhookServiceIsIsolatedFromExternalService(t *testing.T) {
 	if controllerService.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		t.Fatalf("controller Service type = %q, want LoadBalancer", controllerService.Spec.Type)
 	}
+	if controllerService.Spec.PublishNotReadyAddresses {
+		t.Fatal("external controller Service must retain readiness gating during drain")
+	}
 	for _, port := range controllerService.Spec.Ports {
 		if port.Name == webhookPortName || port.TargetPort.String() == webhookPortName || port.Port == 443 {
 			t.Fatalf("external controller Service exposes webhook port: %#v", port)
@@ -153,6 +386,9 @@ func TestControllerWebhookServiceIsIsolatedFromExternalService(t *testing.T) {
 	}
 	if webhookService.Spec.Type != corev1.ServiceTypeClusterIP {
 		t.Fatalf("controller webhook Service type = %q, want ClusterIP", webhookService.Spec.Type)
+	}
+	if !webhookService.Spec.PublishNotReadyAddresses {
+		t.Fatal("controller webhook Service must publish unready addresses so draining controllers can settle Task status")
 	}
 	if len(webhookService.Spec.Ports) != 1 {
 		t.Fatalf("controller webhook Service ports = %#v, want one", webhookService.Spec.Ports)

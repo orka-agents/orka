@@ -34,13 +34,23 @@ import (
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
+const (
+	rbacRoleKind = "Role"
+)
+
 // OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
-	APIReader                  client.Reader
+	APIReader client.Reader
+	// ReservedServiceAccount is the controller's own ServiceAccount, which
+	// no policy may request tokens for.
+	ReservedServiceAccount     outboundaccess.ReservedServiceAccount
 	Scheme                     *runtime.Scheme
 	Trust                      outboundaccess.TrustConfig
 	AIWorkerServiceAccountName string
+	// MaxDelegationAge is the controller's cap on delegated agentIdentity
+	// policies (--agent-identity-max-delegation-age); zero means the default.
+	MaxDelegationAge time.Duration
 }
 
 const (
@@ -61,6 +71,7 @@ const (
 // +kubebuilder:rbac:groups=core.orka.ai,resources=outboundaccesspolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=outboundaccesspolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets;services;serviceaccounts,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;delete
 
@@ -95,7 +106,11 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		LastTransitionTime: now,
 	}
 
-	if issue := outboundaccess.ValidateSpec(policy); issue != nil {
+	issue := outboundaccess.ValidateSpec(policy)
+	if issue == nil {
+		issue = outboundaccess.ValidateReservedServiceAccount(policy, r.ReservedServiceAccount)
+	}
+	if issue != nil {
 		accepted.Status = metav1.ConditionFalse
 		accepted.Reason = issue.Reason
 		accepted.Message = issue.Message
@@ -103,6 +118,12 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		resolved.Reason = outboundaccess.ReasonInvalidPolicy
 		resolved.Message = "References were not resolved because the policy is invalid"
 		return r.finishWithoutOutboundTokenRequestGrant(ctx, policy, accepted, resolved, nil)
+	}
+	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil {
+		if effective, requested := outboundaccess.EffectiveMaxDelegationAge(policy, r.MaxDelegationAge); effective < requested {
+			accepted.Message = fmt.Sprintf("Policy structure is valid; maxDelegationAge %s exceeds the controller's cap, so %s applies",
+				requested, effective)
+		}
 	}
 
 	issue, err := outboundaccess.ResolveReferences(ctx, r.referenceReader(), policy, r.Trust)
@@ -292,16 +313,22 @@ func outboundTokenRequestControlledBy(policy *corev1alpha1.OutboundAccessPolicy,
 	return policy != nil && object != nil && metav1.IsControlledBy(object, policy)
 }
 
+// outboundTokenRequestMetadataEqual reports whether current is controlled by
+// policy and carries the desired labels, annotations, and owner references.
+func outboundTokenRequestMetadataEqual(policy *corev1alpha1.OutboundAccessPolicy, current, desired metav1.Object) bool {
+	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
+		reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) &&
+		reflect.DeepEqual(current.GetAnnotations(), desired.GetAnnotations()) &&
+		reflect.DeepEqual(current.GetOwnerReferences(), desired.GetOwnerReferences())
+}
+
 func outboundTokenRequestRoleEqual(
 	policy *corev1alpha1.OutboundAccessPolicy,
 	current *rbacv1.Role,
 	desired *rbacv1.Role,
 ) bool {
-	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
-		reflect.DeepEqual(current.Rules, desired.Rules) &&
-		reflect.DeepEqual(current.Labels, desired.Labels) &&
-		reflect.DeepEqual(current.Annotations, desired.Annotations) &&
-		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+	return current != nil && desired != nil && outboundTokenRequestMetadataEqual(policy, current, desired) &&
+		reflect.DeepEqual(current.Rules, desired.Rules)
 }
 
 func outboundTokenRequestRoleBindingEqual(
@@ -309,12 +336,9 @@ func outboundTokenRequestRoleBindingEqual(
 	current *rbacv1.RoleBinding,
 	desired *rbacv1.RoleBinding,
 ) bool {
-	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
+	return current != nil && desired != nil && outboundTokenRequestMetadataEqual(policy, current, desired) &&
 		current.RoleRef == desired.RoleRef &&
-		reflect.DeepEqual(current.Subjects, desired.Subjects) &&
-		reflect.DeepEqual(current.Labels, desired.Labels) &&
-		reflect.DeepEqual(current.Annotations, desired.Annotations) &&
-		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+		reflect.DeepEqual(current.Subjects, desired.Subjects)
 }
 
 func (r *OutboundAccessPolicyReconciler) desiredOutboundTokenRequestGrant(
@@ -355,7 +379,7 @@ func (r *OutboundAccessPolicyReconciler) desiredOutboundTokenRequestGrant(
 			Labels:      bindingLabels,
 			Annotations: bindingAnnotations,
 		},
-		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: name},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
 			Name:      workerServiceAccountName(r.AIWorkerServiceAccountName, AIWorkerServiceAccount),
@@ -502,21 +526,7 @@ func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestBindings
 	desired *rbacv1.RoleBinding,
 	desiredReady bool,
 ) (bool, error) {
-	deleted := false
-	for i := range bindings {
-		binding := &bindings[i]
-		if !outboundTokenRequestControlledBy(policy, binding) {
-			continue
-		}
-		if desired != nil && binding.Name == desired.Name && desiredReady {
-			continue
-		}
-		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("revoke TokenRequest RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
-		}
-		deleted = true
-	}
-	return deleted, nil
+	return revokeStaleOutboundTokenRequestObjects[rbacv1.RoleBinding](ctx, r.Client, policy, bindings, desired, desiredReady, "revoke TokenRequest RoleBinding")
 }
 
 func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestRoles(
@@ -526,17 +536,35 @@ func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestRoles(
 	desired *rbacv1.Role,
 	desiredReady bool,
 ) (bool, error) {
+	return revokeStaleOutboundTokenRequestObjects[rbacv1.Role](ctx, r.Client, policy, roles, desired, desiredReady, "delete TokenRequest Role")
+}
+
+// revokeStaleOutboundTokenRequestObjects deletes every policy-controlled object
+// except the desired one once it is ready. Objects the policy does not control
+// are never touched.
+func revokeStaleOutboundTokenRequestObjects[T any, PT interface {
+	*T
+	client.Object
+}](
+	ctx context.Context,
+	writer client.Writer,
+	policy *corev1alpha1.OutboundAccessPolicy,
+	objects []T,
+	desired PT,
+	desiredReady bool,
+	errPrefix string,
+) (bool, error) {
 	deleted := false
-	for i := range roles {
-		role := &roles[i]
-		if !outboundTokenRequestControlledBy(policy, role) {
+	for i := range objects {
+		object := PT(&objects[i])
+		if !outboundTokenRequestControlledBy(policy, object) {
 			continue
 		}
-		if desired != nil && role.Name == desired.Name && desiredReady {
+		if desired != nil && object.GetName() == desired.GetName() && desiredReady {
 			continue
 		}
-		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete TokenRequest Role %s/%s: %w", role.Namespace, role.Name, err)
+		if err := writer.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("%s %s/%s: %w", errPrefix, object.GetNamespace(), object.GetName(), err)
 		}
 		deleted = true
 	}
@@ -605,6 +633,9 @@ func outboundPolicyReferencesObject(policy *corev1alpha1.OutboundAccessPolicy, o
 		if policy.Spec.Gateway != nil {
 			return matchService(&policy.Spec.Gateway.ServiceRef)
 		}
+	case *corev1alpha1.ConnectorProvider:
+		provider, ok := outboundaccess.ConnectionProviderName(policy)
+		return ok && namespace == policy.Namespace && provider == name
 	case *corev1.ServiceAccount:
 		if namespace != policy.Namespace {
 			return false
@@ -632,6 +663,7 @@ func (r *OutboundAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		Watches(&corev1.Secret{}, mapReferenced).
 		Watches(&corev1.Service{}, mapReferenced).
 		Watches(&corev1.ServiceAccount{}, mapReferenced).
+		Watches(&corev1alpha1.ConnectorProvider{}, mapReferenced).
 		Named("outboundaccesspolicy").
 		Complete(r)
 }

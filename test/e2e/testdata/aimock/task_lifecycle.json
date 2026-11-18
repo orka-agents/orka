@@ -1,0 +1,14 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "[e2e:lifecycle-serial-first]" },
+      "response": {
+        "content": "E2E_SERIAL_FIRST_ANSWER: the abacus, Babbage's Analytical Engine, ENIAC, the transistor, and the microprocessor."
+      }
+    },
+    {
+      "match": { "userMessage": "[e2e:lifecycle-serial-second]" },
+      "response": { "content": "E2E_SERIAL_SECOND_ANSWER: hello." }
+    }
+  ]
+}

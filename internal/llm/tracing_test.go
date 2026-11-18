@@ -219,6 +219,11 @@ func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan 
 			done.InputTokens = 13
 			done.OutputTokens = 8
 		}
+		if p.name == "stream-cached-usage" {
+			read, write := int64(100), int64(20)
+			done.InputTokens, done.OutputTokens = 5, 8
+			done.CachedInputTokens, done.CacheWriteInputTokens, done.InputExcludesCache = &read, &write, true
+		}
 		ch <- done
 	}
 	close(ch)
@@ -292,6 +297,57 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 	}
 	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 2 {
 		t.Fatalf("token usage datapoints = %d, want 2", got)
+	}
+}
+
+func TestTracingProviderTemperaturePresence(t *testing.T) {
+	for _, mode := range []string{"complete", "stream"} {
+		for _, tt := range []struct {
+			name           string
+			temperature    float64
+			temperatureSet bool
+			wantPresent    bool
+		}{
+			{name: "unset"},
+			{name: "explicit_zero", temperatureSet: true, wantPresent: true},
+			{name: "legacy_positive", temperature: 0.7, wantPresent: true},
+			{name: "legacy_negative", temperature: -1},
+		} {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				h := testutil.NewSpanHarness(t)
+				tp := NewTracingProvider(&telemetryProvider{
+					name: "openai", telemetryName: "openai",
+					resp: &CompletionResponse{Content: "ok", Model: "gpt-4o", StopReason: "stop"},
+				})
+				req := &CompletionRequest{Model: "gpt-4o", Temperature: tt.temperature, TemperatureSet: tt.temperatureSet, MaxTokens: 256}
+				if mode == "stream" {
+					chunks, err := tp.Stream(context.Background(), req)
+					if err != nil {
+						t.Fatalf("Stream(): %v", err)
+					}
+					for chunk := range chunks {
+						if chunk.Error != nil {
+							t.Errorf("stream chunk: %v", chunk.Error)
+						}
+					}
+				} else if _, err := tp.Complete(context.Background(), req); err != nil {
+					t.Fatalf("Complete(): %v", err)
+				}
+				span := testutil.SpanNamed(h.Recorder.Ended(), "chat gpt-4o")
+				if span == nil {
+					t.Fatal("missing chat span")
+				}
+				attrs := spanAttrs(span)
+				_, present := attrs[genai.AttrRequestTemperature]
+				if present != tt.wantPresent {
+					t.Errorf("temperature attribute present=%t, want %t", present, tt.wantPresent)
+				}
+				if tt.wantPresent {
+					assertFloatAttr(t, attrs, genai.AttrRequestTemperature, tt.temperature)
+				}
+				assertIntAttr(t, attrs, genai.AttrRequestMaxTokens, 256)
+			})
+		}
 	}
 }
 
@@ -473,7 +529,7 @@ func TestTracingProviderCompleteFailureStopReasonSetsError(t *testing.T) {
 }
 
 func TestStopReasonErrorType(t *testing.T) {
-	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled", "unexpected"} {
+	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled", "model_context_window_exceeded", "in_progress", "queued"} {
 		t.Run(reason, func(t *testing.T) {
 			if got := stopReasonErrorType(reason); got != reason {
 				t.Fatalf("stopReasonErrorType(%q) = %q, want %q", reason, got, reason)
@@ -481,8 +537,10 @@ func TestStopReasonErrorType(t *testing.T) {
 		})
 	}
 
-	if got := stopReasonErrorType(""); got != unknownStopReasonErrorType {
-		t.Fatalf("stopReasonErrorType(empty) = %q, want unknown_stop_reason", got)
+	for _, reason := range []string{"", "unexpected", "SYNTHETIC_TOKEN error body"} {
+		if got := stopReasonErrorType(reason); got != unknownStopReasonErrorType {
+			t.Fatalf("stopReasonErrorType(%q) = %q, want unknown_stop_reason", reason, got)
+		}
 	}
 
 	for _, reason := range []string{"stop", "end_turn", "tool_use", "tool_calls"} {
@@ -502,7 +560,8 @@ func TestCompletionResponseErrorType(t *testing.T) {
 	}{
 		{name: "nil response", want: unknownStopReasonErrorType},
 		{name: "missing reason", resp: &CompletionResponse{}, want: unknownStopReasonErrorType},
-		{name: "unknown reason", resp: &CompletionResponse{StopReason: "unexpected"}, want: "unexpected"},
+		{name: "unknown reason", resp: &CompletionResponse{StopReason: "unexpected"}, want: unknownStopReasonErrorType},
+		{name: "unclassified provider reason", resp: &CompletionResponse{StopReason: "model_context_window_exceeded"}, want: "model_context_window_exceeded"},
 		{name: "tool reason without calls", resp: &CompletionResponse{StopReason: "tool_calls"}, want: "tool_calls"},
 		{name: "completed", resp: &CompletionResponse{StopReason: "stop", Content: "done"}},
 	}
@@ -545,7 +604,9 @@ func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *te
 		telemetryName: "azure-openai",
 		err:           &ProviderError{Provider: "azure-openai", Message: "rate limited", StatusCode: 401},
 	}
-	tp := NewTracingProvider(NewRetryProvider(inner, 1))
+	rp := NewRetryProvider(inner)
+	rp.maxRetries = 1
+	tp := NewTracingProvider(rp)
 
 	_, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
 	if err == nil {
@@ -606,6 +667,45 @@ func TestTracingProviderStreamRecordsTokenUsage(t *testing.T) {
 	rm := mh.Collect(t)
 	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 2 {
 		t.Fatalf("token usage datapoints = %d, want 2", got)
+	}
+}
+
+// Anthropic's input count leaves out its cache reads and writes; telemetry
+// reports the whole prompt and the cache breakdown beside it.
+func TestTracingProviderReportsCachedPromptTokens(t *testing.T) {
+	read, write := int64(100), int64(20)
+	for _, mode := range []string{"complete", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			h := testutil.NewSpanHarness(t)
+			mh := testutil.NewMetricHarness(t)
+			tp := NewTracingProvider(&telemetryProvider{name: "stream-cached-usage", telemetryName: "anthropic", resp: &CompletionResponse{
+				Content: "ok", InputTokens: 5, OutputTokens: 8, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
+			}})
+			req := &CompletionRequest{Model: "claude"}
+			if mode == "complete" {
+				if _, err := tp.Complete(context.Background(), req); err != nil {
+					t.Fatalf("Complete() error = %v", err)
+				}
+			} else {
+				ch, err := tp.Stream(context.Background(), req)
+				if err != nil {
+					t.Fatalf("Stream() error = %v", err)
+				}
+				for range ch {
+				}
+			}
+			spans := h.Recorder.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("ended spans = %d, want 1", len(spans))
+			}
+			attrs := spanAttrs(spans[0])
+			assertIntAttr(t, attrs, genai.AttrUsageInputTokens, 125)
+			assertIntAttr(t, attrs, genai.AttrUsageCacheReadInputTokens, 100)
+			assertIntAttr(t, attrs, genai.AttrUsageCacheCreateInputTokens, 20)
+			if got := histogramPointCount(mh.Collect(t), genai.MetricClientTokenUsage); got != 2 {
+				t.Fatalf("token usage datapoints = %d, want 2", got)
+			}
+		})
 	}
 }
 
@@ -786,11 +886,11 @@ func TestTracingProviderStreamCancellationPreservesContextError(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
 	}
-	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != context.Canceled.Error() {
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != "context.canceled" {
 		t.Fatalf("status = %#v, want context cancellation", spans[0].Status())
 	}
 	attrs := spanAttrs(spans[0])
-	assertStringAttr(t, attrs, genai.AttrErrorType, errorType(context.Canceled))
+	assertStringAttr(t, attrs, genai.AttrErrorType, "context.canceled")
 }
 
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {

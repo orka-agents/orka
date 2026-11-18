@@ -12,6 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -38,6 +40,9 @@ func resolveACPAgentSessionConfiguration(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) (harnessv2.AgentSessionConfiguration, error) {
+	if err := validateSoulRuntime(agent); err != nil {
+		return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
+	}
 	if err := validateACPAgentSkills(agent); err != nil {
 		return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
 	}
@@ -51,7 +56,14 @@ func resolveACPAgentSessionConfiguration(
 	if err != nil {
 		return harnessv2.AgentSessionConfiguration{}, err
 	}
-	return buildACPAgentSessionConfiguration(task, agent, systemPrompt)
+	soul, err := agentcontext.ResolveSoul(ctx, reader, agent)
+	if err != nil {
+		if agentcontext.IsInvalidSource(err) {
+			return harnessv2.AgentSessionConfiguration{}, permanentACPAgentConfiguration(err)
+		}
+		return harnessv2.AgentSessionConfiguration{}, err
+	}
+	return buildACPAgentSessionConfiguration(task, agent, agentcontext.Compose(systemPrompt, soul))
 }
 
 func buildACPAgentSessionConfiguration(
@@ -194,19 +206,21 @@ func effectiveACPReasoningEffort(agent *corev1alpha1.Agent) string {
 }
 
 func validateACPProviderNativePolicy(provider string, intent corev1alpha1.WorkspaceIntent, allowed, disallowed []string, allowBash bool) error {
-	unrestricted := allowed == nil && len(disallowed) == 0 && allowBash
 	switch provider {
 	case string(corev1alpha1.AgentRuntimeClaude):
 		return nil
 	case string(corev1alpha1.AgentRuntimeCodex):
-		if unrestricted {
+		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
 			return nil
 		}
-		if intent == corev1alpha1.WorkspaceIntentRead && codexReadOnlyNativePolicy(allowed) {
+		if intent == corev1alpha1.WorkspaceIntentRead && codexReadOnlyNativePolicy(acp.BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed, allowBash)) {
 			return nil
 		}
 		return fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	case string(corev1alpha1.AgentRuntimeCopilot):
+		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
+			return nil
+		}
 		for _, name := range allowed {
 			if strings.EqualFold(strings.TrimSpace(name), "WebSearch") {
 				return fmt.Errorf("copilot ACP runtime cannot exactly enforce the WebSearch provider-native tool")
@@ -264,9 +278,10 @@ func validateACPProviderSystemPrompt(provider string, configuration harnessv2.Ag
 			return fmt.Errorf("codex session configuration exceeds the safe environment limit")
 		}
 	case string(corev1alpha1.AgentRuntimeCopilot):
-		return fmt.Errorf("copilot ACP runtime cannot enforce Agent systemPrompt")
+		return acp.ValidateCopilotInstructions(configuration.SystemPrompt)
 	case string(corev1alpha1.AgentRuntimeOpencode):
-		return fmt.Errorf("opencode ACP runtime cannot enforce Agent systemPrompt")
+		// The supervisor delivers literal, protected additive instructions.
+		return nil
 	}
 	return nil
 }

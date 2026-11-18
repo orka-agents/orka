@@ -19,13 +19,13 @@ import (
 )
 
 const (
-	agentSessionRefImmutabilityRule   = "self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))"
-	agentSessionRefImmutabilityMarker = "// +kubebuilder:validation:XValidation:rule=\"" + agentSessionRefImmutabilityRule + "\",message=\"sessionRef is immutable for agent Tasks\""
+	sessionRefImmutabilityRule   = "has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)"
+	sessionRefImmutabilityMarker = "// +kubebuilder:validation:XValidation:rule=\"" + sessionRefImmutabilityRule + "\",message=\"sessionRef is immutable\""
 )
 
-func TestAgentSessionRefImmutabilityMarkerAdmission(t *testing.T) {
-	if source := string(readTaskTypesSource(t)); !strings.Contains(source, agentSessionRefImmutabilityMarker) {
-		t.Fatalf("TaskSpec is missing the complete agent sessionRef immutability marker: want %q", agentSessionRefImmutabilityMarker)
+func TestTaskSessionRefImmutabilityMarkerAdmission(t *testing.T) {
+	if source := string(readTaskTypesSource(t)); !strings.Contains(source, sessionRefImmutabilityMarker) {
+		t.Fatalf("TaskSpec is missing the complete sessionRef immutability marker: want %q", sessionRefImmutabilityMarker)
 	}
 
 	schema := apiextensions.JSONSchemaProps{
@@ -45,8 +45,8 @@ func TestAgentSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 			},
 		},
 		XValidations: apiextensions.ValidationRules{{
-			Rule:    agentSessionRefImmutabilityRule,
-			Message: "sessionRef is immutable for agent Tasks",
+			Rule:    sessionRefImmutabilityRule,
+			Message: "sessionRef is immutable",
 		}},
 	}
 	structural, err := structuralschema.NewStructural(&schema)
@@ -55,7 +55,7 @@ func TestAgentSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 	}
 	validator := cel.NewValidator(structural, false, celconfig.PerCallLimit)
 	if validator == nil {
-		t.Fatal("compile agent sessionRef immutability admission rule: validator is nil")
+		t.Fatal("compile sessionRef immutability admission rule: validator is nil")
 	}
 
 	fullSessionRef := map[string]any{
@@ -66,7 +66,7 @@ func TestAgentSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 		"throughMessageId": "message-42",
 		"promptIncluded":   true,
 	}
-	oldAgent := taskSpecForSessionRefAdmission("agent", fullSessionRef)
+	oldTask := taskSpecForSessionRefAdmission(fullSessionRef)
 
 	tests := []struct {
 		name    string
@@ -75,93 +75,105 @@ func TestAgentSessionRefImmutabilityMarkerAdmission(t *testing.T) {
 		wantErr bool
 	}{
 		{
+			name:    "create with reference",
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
+		},
+		{
+			name:    "unchanged absent reference",
+			oldSpec: taskSpecForSessionRefAdmission(nil),
+			newSpec: taskSpecForSessionRefAdmission(nil),
+		},
+		{
 			name:    "unchanged complete reference",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", fullSessionRef),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
 		},
 		{
 			name:    "add reference",
-			oldSpec: taskSpecForSessionRefAdmission("agent", nil),
-			newSpec: taskSpecForSessionRefAdmission("agent", fullSessionRef),
+			oldSpec: taskSpecForSessionRefAdmission(nil),
+			newSpec: taskSpecForSessionRefAdmission(fullSessionRef),
 			wantErr: true,
 		},
 		{
 			name:    "remove reference",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", nil),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(nil),
 			wantErr: true,
 		},
 		{
 			name:    "change name",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "name", "session-b")),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "name", "session-b")),
 			wantErr: true,
 		},
 		{
 			name:    "change create",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "create", false)),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "create", false)),
 			wantErr: true,
 		},
 		{
 			name:    "change append",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "append", false)),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "append", false)),
 			wantErr: true,
 		},
 		{
 			name:    "change max messages",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "maxMessages", int64(10))),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "maxMessages", int64(10))),
 			wantErr: true,
 		},
 		{
 			name:    "change transcript cutoff",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "throughMessageId", "message-41")),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "throughMessageId", "message-41")),
 			wantErr: true,
 		},
 		{
 			name:    "change prompt included",
-			oldSpec: oldAgent,
-			newSpec: taskSpecForSessionRefAdmission("agent", changedSessionRef(fullSessionRef, "promptIncluded", false)),
+			oldSpec: oldTask,
+			newSpec: taskSpecForSessionRefAdmission(changedSessionRef(fullSessionRef, "promptIncluded", false)),
 			wantErr: true,
-		},
-		{
-			name:    "container reference remains mutable",
-			oldSpec: taskSpecForSessionRefAdmission("container", fullSessionRef),
-			newSpec: taskSpecForSessionRefAdmission("container", changedSessionRef(fullSessionRef, "name", "session-b")),
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs, _ := validator.Validate(
-				context.Background(),
-				nil,
-				structural,
-				tt.newSpec,
-				tt.oldSpec,
-				celconfig.RuntimeCELCostBudget,
-			)
-			if tt.wantErr {
-				if len(errs) == 0 {
-					t.Fatal("agent sessionRef mutation unexpectedly passed admission")
+	for _, taskType := range []string{"agent", "ai", "container"} {
+		for _, tt := range tests {
+			t.Run(taskType+"/"+tt.name, func(t *testing.T) {
+				oldSpec := maps.Clone(tt.oldSpec)
+				newSpec := maps.Clone(tt.newSpec)
+				if oldSpec != nil {
+					oldSpec["type"] = taskType
 				}
-				if got := errs.ToAggregate().Error(); !strings.Contains(got, "sessionRef is immutable for agent Tasks") {
-					t.Fatalf("admission error = %q, want sessionRef immutability message", got)
+				newSpec["type"] = taskType
+				errs, _ := validator.Validate(
+					context.Background(),
+					nil,
+					structural,
+					newSpec,
+					oldSpec,
+					celconfig.RuntimeCELCostBudget,
+				)
+				if tt.wantErr {
+					if len(errs) == 0 {
+						t.Fatal("sessionRef mutation unexpectedly passed admission")
+					}
+					if got := errs.ToAggregate().Error(); !strings.Contains(got, "sessionRef is immutable") {
+						t.Fatalf("admission error = %q, want sessionRef immutability message", got)
+					}
+					return
 				}
-				return
-			}
-			if len(errs) != 0 {
-				t.Fatalf("admission unexpectedly rejected update: %v", errs.ToAggregate())
-			}
-		})
+				if len(errs) != 0 {
+					t.Fatalf("admission unexpectedly rejected update: %v", errs.ToAggregate())
+				}
+			})
+		}
 	}
 }
 
-func taskSpecForSessionRefAdmission(taskType string, sessionRef map[string]any) map[string]any {
-	spec := map[string]any{"type": taskType}
+func taskSpecForSessionRefAdmission(sessionRef map[string]any) map[string]any {
+	spec := map[string]any{"type": "agent"}
 	if sessionRef != nil {
 		spec["sessionRef"] = changedSessionRef(sessionRef, "", nil)
 	}

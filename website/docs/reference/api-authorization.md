@@ -1,0 +1,533 @@
+---
+slug: /api-authorization
+description: "External API permissions, namespace resolution, and Kubernetes RBAC grant examples."
+---
+
+# API authorization
+
+Kubernetes TokenReview authenticates a caller. Orka then submits a
+SubjectAccessReview for each permission listed below using that caller's username,
+UID, groups, and extra attributes. The permission must cover the final namespace,
+resource, verb, and name. Missing clients, review errors, denied decisions, and
+ambiguous results return `403` before the requested operation runs.
+
+The table covers all 160 authenticated external route registrations, including 64
+non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
+routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
+report the authenticated identity. They do not access tenant resources and require
+no resource grant. Native chat routes are registered only when chat is enabled.
+`POST /mcp` is registered only with `--mcp-server-enabled`; it also only
+authenticates, and each MCP tool is authorized by the REST route it replays (see
+[MCP tools](#mcp-tools)).
+
+OIDC callers retain the trusted-subject allowlist and namespace policy. Transaction
+tokens retain their `off`, `audit`, and `enforce` scope and `tctx` policies. Neither
+identity is converted into a TokenReview identity for these checks. Existing
+route-specific restrictions still apply. See [Security](../concepts/security.md)
+and [Transaction Token integration](../concepts/transaction-tokens.md).
+
+Health probes, static UI files, Gateway adapter ingress, GitHub webhooks, and
+internal worker/ACP routes are outside this inventory. Their existing probe,
+Gateway-bound Secret, HMAC, or internal credential policies are unchanged.
+
+## Resources and compound operations
+
+CRD operations use the actual Kubernetes resource and CRUD verb. Stored records
+use namespaced virtual resources in SubjectAccessReview requests. They need RBAC
+rules, but no new CRDs. `resource/subresource` notation maps to separate SAR
+resource and subresource fields and to the same slash-separated string in RBAC.
+
+- `sessions`, `memories`, and `memoryproposals` authorize their stored records.
+  Proposal `review` and `apply` are distinct custom verbs on `memoryproposals`,
+  not CRUD updates. Applying also requires `create` on `memories`. Returning an
+  already-applied memory requires `get` on its final referenced memory ID.
+- `chats` with `create` authorizes provider invocation and chat-session work.
+  `chats/config` with `get` authorizes configuration reads. Nested tools require
+  their own permissions for actual Task, Agent, Secret, and other resource
+  operations, plus any applicable Gateway checks. A chat grant alone does not
+  grant those tool operations.
+  Supplying `sessionId` to native chat also requires `get` and `update` on that
+  `sessions` name before reading history or writing the session. Supplying
+  `agentRef` requires `get` on that `agents` name. Both use the resolved chat
+  namespace. A newly generated chat session is covered by `create chats`.
+- `repositoryscans/threatmodel`, `repositoryscans/scans`,
+  `repositoryscans/slices`, `repositoryscans/droppedfindings`, and
+  `repositoryscans/findings` authorize stored data or actions for one named
+  RepositoryScan. `securityfindings` and its subresources use the finding ID.
+  Validation and patch action grants include their fixed pending/proposal state
+  transitions. General finding mutations, such as dismiss and reopen, require
+  `update` on `securityfindings`.
+- `repositorymonitors/runs`, `repositorymonitors/items`, and
+  `repositorymonitors/commands` use the parent monitor name. `monitorcommands`,
+  `monitoractions`, `monitorworkactions`, `monitorimplementationjobs`,
+  `monitormutations`, and `monitorevents` authorize the corresponding stored
+  ledgers. Their collection filters do not narrow a namespace-wide `list` grant.
+- `gatewayevents` and `gatewaydeliveries` are virtual resources in
+  `gateway.orka.ai`. Their permissions are additional to the current Gateway
+  identity and access checks.
+
+The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
+the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
+`update` on `tasks/approvals` and `patch` on the parent Task. Cancelling a Task
+requires `update` on `tasks/cancel`, not `patch` or `delete` on `tasks`, so an
+on-call role can stop Tasks without editing or deleting them; cancelling keeps
+everything the Task produced. Stopping a Session's turn requires `get` on the
+Session and `update` on `tasks/cancel`. A monitor run or
+command also needs `patch` on its RepositoryMonitor. Commands also require named
+`create` on `repositorymonitors/runs` before the command or its derived run is
+stored. A scan, validation, or patch request that creates a Task also needs
+`create` on `tasks` before any work is queued. Starting a scan also requires
+`list` on Tasks to check for active scan work.
+`POST /api/v1/security/findings/:id/pull-request` only returns a stored PR
+receipt, so its permission is `get`, despite the HTTP method.
+
+The `create_agent` tool with `initialPrompt` requires Agent and Task creation
+plus named `delete` on the new Agent before creating it. Deletion permits rollback
+if the subsequent Task authorization fails. Creating an Agent without an initial
+Task requires only Agent creation.
+
+Creating or updating a RepositoryMonitor also requires named `get` on the Agents
+used by its enabled workflows and on each credential Secret read during
+validation. Agent references use their explicit namespace or the monitor
+namespace. Credential Secrets use the monitor namespace; `readCredentialRef`
+takes precedence over the legacy `gitSecretRef`.
+
+Scanner policies selected by `customScanInstructionsRef` and
+`falsePositivePolicyRef` require named `get` on core `configmaps` in the
+RepositoryScan namespace. Configuration create/update, scan start, and finding
+validation check these grants before loading the policies. The policy opt-in
+label or annotation remains required.
+
+Reading an Agent's system prompt from its `systemPrompt.configMapRef` also
+requires named `get` on that core `configmaps` object in the Agent namespace.
+Transaction tokens need a ConfigMap read scope as well. The response holds only
+the referenced key.
+
+Workspace-class `use` remains a separate check for every authenticated identity,
+including OIDC and transaction-token callers. When a Task or workspace-backed Tool
+references a class, grant `use` on `executionworkspaceclasses` in
+`workspace.orka.ai`, with the selected class name and the Task or Tool namespace.
+
+A Task with `spec.execution.workspace.restoreFrom` also requires `use` on
+`executionworkspacecheckpoints` in `workspace.orka.ai`, with the referenced
+checkpoint name and the Task namespace. This includes forks that supply
+`executionCheckpoint`. The workspace-class grant is still required; permission
+to read a checkpoint or create Tasks does not grant checkpoint use.
+
+Agent `use` is an opt-in check, enabled with `--agent-use-authorization-enabled`
+(Helm: `controller.agentUseAuthorization.enabled`). When it is on, every
+authenticated identity, including OIDC and transaction-token callers, needs `use`
+on `agents` in `core.orka.ai`, with the Agent name and the Agent's namespace, to
+create a Task that names the Agent, or to create or edit a RepositoryScan or
+RepositoryMonitor so that it names the Agent. Agents an edited object already
+named are not checked again. Kubernetes-authenticated callers are checked exactly
+as the API server authenticated them. OIDC and transaction-token callers are
+checked as the user `<issuer>#<sub>`, using the token's `iss` and `sub` claims,
+with each OIDC group prefixed the same way, so bind Roles to, for example,
+`https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main`.
+Display claims such as `preferred_username`, `email`, and `name` are not used.
+Permission to read, create, or edit an Agent does not grant `use`.
+
+Provider `use` is a separate opt-in check, enabled with
+`--provider-use-authorization-enabled` (Helm:
+`controller.providerUseAuthorization.enabled`). When it is on, the same
+identities need `use` on `providers` in `core.orka.ai`, with the Provider name
+and the Provider's namespace, to:
+
+- create a Task whose `spec.ai.providerRef` names the Provider;
+- create or edit an Agent so that its `spec.providerRef` or a
+  `spec.model.fallbacks[].providerRef` names the Provider. Fallbacks are checked
+  in the Agent's namespace, and Providers the Agent already named are not
+  checked again;
+- send a request through `POST /api/v1/chat`, `/openai/v1/chat/completions`,
+  `/openai/v1/responses`, or `/anthropic/v1/messages`. Every Provider the request
+  resolves is checked before its credential is read: one it names, its Agent's,
+  a fallback, or the configured default.
+
+A Task that runs its Agent's own Provider needs only Agent `use`. An Agent from
+another namespace is the exception: it may be in a namespace no policy checked,
+its fallbacks and a `providerRef` without a namespace resolve in the Task's
+namespace, and it can change after the Task is created. So while the check is
+on, an `ai` Task that would take a Provider from an Agent in another namespace,
+its `providerRef` when the Task sets none or any of its fallbacks, is refused: by
+the API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Set the Task's own `spec.ai.providerRef` and use
+an Agent without fallbacks, or use an Agent from the Task's namespace. Permission to read, create, or edit a Provider, or `create`
+on `chats`, does not grant `use`.
+
+Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
+`agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
+`agentidentities/entra`), the lowercased identity ID as the name, and the Agent
+namespace. This applies to every authenticated identity, through the API and through
+the always-installed `agent-identity-bind` admission policy for direct writes.
+Removing an identity, or an edit that keeps it, needs no grant. Chat and worker
+tools cannot set an identity.
+
+Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
+checks. General session APIs continue to exclude Gateway-owned sessions.
+
+## Namespace and name sources
+
+The namespace column identifies the explicit request field. The first non-empty
+field wins where two fields are listed. Other request fields do not override it.
+
+| Code | Explicit namespace source |
+| --- | --- |
+| `Q` | `namespace` query parameter |
+| `C` | JSON `namespace`, then JSON `metadata.namespace`; query ignored |
+| `M` | JSON `metadata.namespace`; top-level namespace and query ignored |
+| `B` | JSON `namespace`; query and metadata ignored |
+| `QB` | `namespace` query parameter, then JSON `namespace` |
+| `BQ` | JSON `namespace`, then `namespace` query parameter |
+| `cluster` | Empty SAR namespace; GatewayClass is cluster-scoped |
+
+A configured `--watch-namespace` is the only allowed target. An explicit mismatch
+returns `403`; omitting an explicit namespace selects the watched namespace.
+Without a watch namespace, resolution is explicit namespace, then the identity's
+namespace, then `default`. With `--enforce-namespace-isolation`, the identity must
+carry a namespace and it must match the resolved namespace. Resolving a namespace
+does not itself grant access to it.
+
+The name column is the SAR name, taken from the indicated URL parameter. `empty`
+means no name, including Kubernetes collection creates. A named virtual action
+uses the parent name or record ID even when its verb is `create` or `list`.
+Proposal review, apply, and archive trim the proposal ID to match store lookup;
+noncanonical namespaces for these actions are rejected.
+
+## Route permissions
+
+All additional permissions use the row's resolved namespace unless specified
+otherwise. In the additional-checks column:
+
+- `Gateway read` means `get` on `gateway.orka.ai/gateways`, using the Gateway's
+  bound namespace and name, when the Task is Gateway-owned. Task collection
+  responses filter out Gateway-owned records the caller cannot read.
+- `Gateway operate` requires that same `get` plus `update` on the bound Gateway.
+- `Operator access` means the
+  [operator workspace access](../guides/operator-workspace-access.md) rules:
+  - `--operator-workspace-access-enabled` is set.
+  - The Task's ExecutionWorkspaceClass carries the
+    `acp.workspace.orka.ai/operator-access` opt-in (`read` for `GET .../files`,
+    `exec` for exec and `PUT .../files`).
+  - The RuntimeSession is owned by the Task.
+  - Context-token callers need `orka:tasks:exec`, `orka:tasks:files:read`, or
+    `orka:tasks:files:write` and a namespace-bound transaction context, in every
+    authorization mode.
+  - Identities without a Kubernetes identity, such as direct OIDC, are refused.
+  - No built-in role grants `tasks/exec` or `tasks/files`.
+- `Class use` means the conditional workspace-class check described above, using
+  the final Task or Tool configuration.
+- `Checkpoint use` means the additional named checkpoint check described above
+  when the final Task configuration includes `execution.workspace.restoreFrom`.
+
+| Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories` and `memoryproposals`, and in `Propose` mode `create` on `memoryproposals` |
+| `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
+| `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
+| `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
+| `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |
+| `POST` | `/api/v1/tasks/:id/cancel` | `core.orka.ai` | `tasks/cancel` | `update` | `:id` | `Q` | Gateway operate |
+| `GET` | `/api/v1/tasks/:id/logs` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/events` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/attention` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history; monitor items need `list` on `repositorymonitors` and `monitorworkactions` |
+| `GET` | `/api/v1/approvals` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history |
+| `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
+| `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
+| `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories` and `memoryproposals`; a transaction token also needs the session-read and memory-read scopes |
+| `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
+| `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/artifacts/:filename` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/exec` | `core.orka.ai` | `tasks/exec` | `create` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
+| `GET` | `/api/v1/tasks/:id/files` | `core.orka.ai` | `tasks/files` | `get` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
+| `PUT` | `/api/v1/tasks/:id/files` | `core.orka.ai` | `tasks/files` | `update` | `:id` | `Q` | `get` on `core.orka.ai/tasks`, `:id`; Operator access |
+| `GET` | `/api/v1/sessions` | `core.orka.ai` | `sessions` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/sessions/:id/stream` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | Private native bundle export; excludes Gateway Sessions |
+| `POST` | `/api/v1/sessions/:id/native` | `core.orka.ai` | `sessions` | `create` | empty | `Q` | `get` on `core.orka.ai/sessions`, `:id`; creates a fresh non-Gateway Session only |
+| `DELETE` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `delete` | `:id` | `Q` | none |
+| `POST` | `/api/v1/sessions/:id/cancel` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | `update` on `core.orka.ai/tasks/cancel`; Gateway operate per Task |
+| `GET` | `/api/v1/gatewayclasses` | `gateway.orka.ai` | `gatewayclasses` | `list` | empty | `cluster` | none |
+| `GET` | `/api/v1/gatewayclasses/:name` | `gateway.orka.ai` | `gatewayclasses` | `get` | `:name` | `cluster` | none |
+| `GET` | `/api/v1/gateways` | `gateway.orka.ai` | `gateways` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/gateways/:name` | `gateway.orka.ai` | `gateways` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/gatewaybindings` | `gateway.orka.ai` | `gatewaybindings` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/gatewaybindings/:name` | `gateway.orka.ai` | `gatewaybindings` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/gateway-events` | `gateway.orka.ai` | `gatewayevents` | `list` | empty | `Q` | `get gateway.orka.ai/gateways` with `gateway` query name, or unnamed `list gateways` without it |
+| `GET` | `/api/v1/gateway-events/:id` | `gateway.orka.ai` | `gatewayevents` | `get` | `:id` | `Q` | `get gateway.orka.ai/gateways` with record Gateway name |
+| `GET` | `/api/v1/gateway-deliveries` | `gateway.orka.ai` | `gatewaydeliveries` | `list` | empty | `Q` | `get gateway.orka.ai/gateways` with `gateway` query name, or unnamed `list gateways` without it |
+| `GET` | `/api/v1/gateway-deliveries/:id` | `gateway.orka.ai` | `gatewaydeliveries` | `get` | `:id` | `Q` | `get gateway.orka.ai/gateways` with record Gateway name |
+| `POST` | `/api/v1/gateway-deliveries/:id/retry` | `gateway.orka.ai` | `gatewaydeliveries` | `update` | `:id` | `Q` | `get` and `update` on `gateway.orka.ai/gateways` with record Gateway name |
+| `GET` | `/api/v1/memories` | `core.orka.ai` | `memories` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/memories` | `core.orka.ai` | `memories` | `create` | empty | `B` | none |
+| `GET` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `get` | `:id` | `Q` | none |
+| `PUT` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `update` | `:id` | `QB` | none |
+| `DELETE` | `/api/v1/memories/:id` | `core.orka.ai` | `memories` | `delete` | `:id` | `Q` | none |
+| `POST` | `/api/v1/memories/:id/disable` | `core.orka.ai` | `memories` | `update` | `:id` | `Q` | none |
+| `POST` | `/api/v1/memories/:id/enable` | `core.orka.ai` | `memories` | `update` | `:id` | `Q` | none |
+| `GET` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `create` | empty | `B` | none |
+| `GET` | `/api/v1/memory-proposals/:id` | `core.orka.ai` | `memoryproposals` | `get` | `:id` | `Q` | none |
+| `POST` | `/api/v1/memory-proposals/:id/review` | `core.orka.ai` | `memoryproposals` | `review` | `:id`, trimmed | `BQ` | none |
+| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID; for a `memory_merge`, `memory_supersede` or `memory_retire` proposal not yet applied, also `update core.orka.ai/memories` on every target memory ID, and for a retire `get` on its first target |
+| `POST` | `/api/v1/memory-proposals/:id/archive` | `core.orka.ai` | `memoryproposals` | `update` | `:id`, trimmed | `Q` | none |
+| `GET` | `/api/v1/providers` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/providers` | `core.orka.ai` | `providers` | `create` | empty | `C` | none |
+| `GET` | `/api/v1/providers/:name` | `core.orka.ai` | `providers` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/providers/:name` | `core.orka.ai` | `providers` | `update` | `:name` | `Q` | none |
+| `DELETE` | `/api/v1/providers/:name` | `core.orka.ai` | `providers` | `delete` | `:name` | `Q` | none |
+| `GET` | `/api/v1/tools` | `core.orka.ai` | `tools` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/tools` | `core.orka.ai` | `tools` | `create` | empty | `C` | Class use |
+| `GET` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `update` | `:name` | `Q` | Class use |
+| `DELETE` | `/api/v1/tools/:name` | `core.orka.ai` | `tools` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/tools/:name/mcp` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | Substrate MCP actor Tools only. TokenReview callers need named `get` on core `secrets` for the Tool's auth Secret and each Substrate egress credential Secret. Transaction tokens need enforced authorization and a tool-use scope covering the Tool; when the Tool uses credential Secrets, they also need a credential-read scope, and any token `secret` context must match each of those Secrets. Other identities are refused |
+| `DELETE` | `/api/v1/tools/:name/mcp` | `core.orka.ai` | `tools` | `get` | `:name` | `Q` | Same checks as `POST /api/v1/tools/:name/mcp` |
+| `GET` | `/api/v1/runtime-pools` | `core.orka.ai` | `runtimepools` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/runtime-pools/:name` | `core.orka.ai` | `runtimepools` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/agent-runtimes` | `core.orka.ai` | `agentruntimes` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/agent-runtimes` | `core.orka.ai` | `agentruntimes` | `create` | empty | `M` | none |
+| `GET` | `/api/v1/agent-runtimes/:name` | `core.orka.ai` | `agentruntimes` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/agent-runtimes/:name` | `core.orka.ai` | `agentruntimes` | `update` | `:name` | `Q` | none |
+| `DELETE` | `/api/v1/agent-runtimes/:name` | `core.orka.ai` | `agentruntimes` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/agents` | `core.orka.ai` | `agents` | `create` | empty | `C` | none |
+| `GET` | `/api/v1/agents` | `core.orka.ai` | `agents` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/agents/:name/system-prompt` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | Named `get` on core `configmaps` for the Agent's `systemPrompt.configMapRef` |
+| `PUT` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/agents/:name/spec` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
+| `DELETE` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/skills` | `core.orka.ai` | `skills` | `create` | empty | `C` | none |
+| `GET` | `/api/v1/skills` | `core.orka.ai` | `skills` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/skills/:name` | `core.orka.ai` | `skills` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/skills/:name/content` | `core.orka.ai` | `skills` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/skills/:name` | `core.orka.ai` | `skills` | `update` | `:name` | `Q` | none |
+| `DELETE` | `/api/v1/skills/:name` | `core.orka.ai` | `skills` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/security/repositories` | `core.orka.ai` | `repositoryscans` | `create` | empty | `C` | Named `get` on core `configmaps` for configured scanner-policy references |
+| `GET` | `/api/v1/security/repositories` | `core.orka.ai` | `repositoryscans` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name` | `core.orka.ai` | `repositoryscans` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/security/repositories/:name` | `core.orka.ai` | `repositoryscans` | `update` | `:name` | `Q` | Named `get` on core `configmaps` for configured scanner-policy references |
+| `DELETE` | `/api/v1/security/repositories/:name` | `core.orka.ai` | `repositoryscans` | `delete` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `update` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
+| `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list`, `create`, and `delete` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans` and `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
+| `GET` | `/api/v1/security/repositories/:name/scans/:scanID/progress` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/slices` | `core.orka.ai` | `repositoryscans/slices` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/slices/:sliceID` | `core.orka.ai` | `repositoryscans/slices` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/dropped-findings` | `core.orka.ai` | `repositoryscans/droppedfindings` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/repositories/:name/findings` | `core.orka.ai` | `repositoryscans/findings` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/security/findings/:id` | `core.orka.ai` | `securityfindings` | `get` | `:id` | `Q` | none |
+| `POST` | `/api/v1/security/findings/:id/dismiss` | `core.orka.ai` | `securityfindings` | `update` | `:id` | `Q` | none |
+| `POST` | `/api/v1/security/findings/:id/reopen` | `core.orka.ai` | `securityfindings` | `update` | `:id` | `Q` | none |
+| `POST` | `/api/v1/security/findings/:id/validate` | `core.orka.ai` | `securityfindings/validation` | `create` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Class use; named `get` on core `configmaps` for configured scanner-policy references |
+| `POST` | `/api/v1/security/findings/:id/patch` | `core.orka.ai` | `securityfindings/patches` | `create` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Class use |
+| `GET` | `/api/v1/security/findings/:id/patches` | `core.orka.ai` | `securityfindings/patches` | `list` | `:id` | `Q` | none |
+| `POST` | `/api/v1/security/findings/:id/pull-request` | `core.orka.ai` | `securityfindings/pullrequest` | `get` | `:id` | `Q` | Stored PR receipt read only |
+| `POST` | `/api/v1/monitors/repositories` | `core.orka.ai` | `repositorymonitors` | `create` | empty | `C` | Named `get` on the `core.orka.ai/agents` and core `secrets` references read during validation |
+| `GET` | `/api/v1/monitors/repositories` | `core.orka.ai` | `repositorymonitors` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/repositories/:name` | `core.orka.ai` | `repositorymonitors` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/monitors/repositories/:name` | `core.orka.ai` | `repositorymonitors` | `update` | `:name` | `Q` | Named `get` on the `core.orka.ai/agents` and core `secrets` references read during validation |
+| `DELETE` | `/api/v1/monitors/repositories/:name` | `core.orka.ai` | `repositorymonitors` | `delete` | `:name` | `Q` | none |
+| `POST` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `create` | `:name` | `Q` | `patch` on `core.orka.ai/repositorymonitors`, `:name` |
+| `GET` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/monitors/repositories/:name/items` | `core.orka.ai` | `repositorymonitors/items` | `list` | `:name` | `Q` | none |
+| `POST` | `/api/v1/monitors/repositories/:name/commands` | `core.orka.ai` | `repositorymonitors/commands` | `create` | `:name` | `Q` | `create` on `core.orka.ai/repositorymonitors/runs`, `:name`; `patch` on `core.orka.ai/repositorymonitors`, `:name` |
+| `GET` | `/api/v1/monitors/commands` | `core.orka.ai` | `monitorcommands` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/commands/:id` | `core.orka.ai` | `monitorcommands` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/actions` | `core.orka.ai` | `monitoractions` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/actions/:id` | `core.orka.ai` | `monitoractions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/work-actions` | `core.orka.ai` | `monitorworkactions` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/work-actions/:id` | `core.orka.ai` | `monitorworkactions` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/implementation-jobs` | `core.orka.ai` | `monitorimplementationjobs` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/implementation-jobs/:id` | `core.orka.ai` | `monitorimplementationjobs` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/implementation-jobs/:id/patch-preview` | `core.orka.ai` | `monitorimplementationjobs` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/mutations` | `core.orka.ai` | `monitormutations` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/monitors/mutations/:id` | `core.orka.ai` | `monitormutations` | `get` | `:id` | `Q` | none |
+| `GET` | `/api/v1/monitors/events` | `core.orka.ai` | `monitorevents` | `list` | empty | `Q` | none |
+| `GET` | `/api/v1/substrate-actor-pools` | `core.orka.ai` | `substrateactorpools` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/substrate-actor-pools` | `core.orka.ai` | `substrateactorpools` | `create` | empty | `C` | none |
+| `GET` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `get` | `:name` | `Q` | none |
+| `PUT` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `update` | `:name` | `Q` | none |
+| `DELETE` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `delete` | `:name` | `Q` | none |
+| `GET` | `/api/v1/auth/validate` | none | none | identity only | empty | not applicable | Authenticated identity only |
+| `GET` | `/api/v1/auth/whoami` | none | none | identity only | empty | not applicable | Authenticated identity only |
+| `GET` | `/api/v1/connectors` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `GET` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `GET` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `PUT` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
+| `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
+| `GET` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; returns only the caller's own agent host, found through their own Connections; context-token callers need a connector read scope |
+| `POST` | `/api/v1/agent-hosts/me/wake` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope; an operator-suspended host is not woken |
+| `DELETE` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope |
+| `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
+| `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
+| `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |
+| `DELETE` | `/api/v1/chat/:sessionId` | `core.orka.ai` | `sessions` | `delete` | `:sessionId` | `Q` | none |
+| `POST` | `/openai/v1/chat/completions` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
+| `POST` | `/openai/v1/responses` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Stateless only; each nested coordinator tool requires its own resource permissions |
+| `GET` | `/openai/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
+| `POST` | `/anthropic/v1/messages` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
+| `GET` | `/anthropic/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
+| `POST` | `/mcp` | none | none | identity only | empty | not applicable | Authenticated identity only; every tool call replays a REST route below with the caller's credentials and is authorized by that route |
+
+## MCP tools
+
+The [MCP server](../guides/mcp-server.md) adds no permissions of its own. Each tool
+call replays the listed REST request in the API server with the caller's original
+credentials, so the full middleware chain runs again: authentication, the route
+policy and its SubjectAccessReviews, OIDC and transaction-token policy, namespace
+resolution and isolation, and every handler check. A denial stops the tool before
+any effect and is returned as a tool error carrying the REST status.
+
+| Tool | REST requests | Permissions (ServiceAccount callers) |
+| --- | --- | --- |
+| `list_agents` | `GET /api/v1/agents` | `list` `agents` |
+| `get_agent` | `GET /api/v1/agents/:name` | `get` `agents`, named |
+| `create_task` | `POST /api/v1/tasks`; `GET /api/v1/agents/:name` when `taskType` is omitted | `create` `tasks` plus its additional checks; `get` on the Agent when looked up |
+| `get_task`, `wait_for_task` | `GET /api/v1/tasks/:id`; `GET /api/v1/tasks/:id/approvals` while the Task runs | `get` `tasks`, named; Gateway read |
+| `list_tasks` | `GET /api/v1/tasks` | `list` `tasks`; Gateway read |
+| `cancel_task` | `POST /api/v1/tasks/:id/cancel` | `update` `tasks/cancel`, named; Gateway operate |
+| `list_pending_approvals` | `GET /api/v1/tasks/:id/approvals` | `get` `tasks`, named; Gateway read |
+| `decide_approval` | `POST /api/v1/tasks/:id/approvals/:approvalID/decision` | `update` `tasks/approvals` and `patch` `tasks`, named; Gateway operate |
+| `get_task_result` | `GET /api/v1/tasks/:id/result` | `get` `tasks`, named; Gateway read |
+| `list_task_artifacts` | `GET /api/v1/tasks/:id/artifacts` | `get` `tasks`, named; Gateway read |
+| `get_task_artifact` | `GET /api/v1/tasks/:id/artifacts/:filename` | `get` `tasks`, named; Gateway read |
+
+MCP Tasks methods use the same routes: `tasks/get` and `tasks/result` read the Task
+and its approvals, `tasks/update` records decisions through the decision route, and
+`tasks/cancel` uses `POST /api/v1/tasks/:id/cancel`. Transaction-token callers need the
+scopes those routes require, such as `orka:tasks:create` for `create_task`.
+
+## Grant access
+
+Use a RoleBinding in the installation namespace. A ClusterRoleBinding would grant
+namespaced permissions across the cluster. The Kustomize bundle includes
+`orka-api-viewer-role` and `orka-api-editor-role`. The viewer covers the read
+permissions above. The editor adds the listed Orka mutations. Nested tools that
+run Kubernetes workloads need separate
+workload grants, including `get` on `pods/log` when reading Pod logs. Neither
+helper grants Secrets, ConfigMaps, or workspace-class use.
+Kubernetes `code_exec` preflights `create` and `delete` on its temporary Secrets,
+ServiceAccounts, Jobs, and optional NetworkPolicies before creating any of them.
+The delete permissions cover cleanup after completion or failed setup.
+ConfigMap caching is optional. A denied cache lookup behaves as a cache miss;
+without ConfigMap `create`, execution returns its result without storing it.
+The source files in `config/rbac` have unprefixed names when applied directly.
+
+TokenReview calls to GitHub tools require a Task repository scope and a referenced
+credential. Grant named `get` on the Task and Secret. `check_pull_request_ci` uses
+the selected repository's read credential; `create_pull_request` uses
+`forgeCredentialRef`. These calls use only the Task's repository and credentials.
+
+Optional Git credential discovery skips Secret names that the caller cannot
+read. Other lookup errors still stop discovery, and explicit Secret reads
+remain subject to authorization.
+
+Existing Task helper roles retain session access; Task editor/admin roles also
+grant `update` on `tasks/approvals` and `tasks/cancel`. Gateway helper roles include ledger reads;
+Gateway editor/admin roles also grant delivery retry. GatewayClass reads require
+a cluster-scoped binding, such as the existing `orka-gatewayclass-viewer-role`.
+A namespaced RoleBinding cannot grant those cluster-scoped reads.
+
+The Helm client Role includes virtual reads, chat creation and continuation,
+approval decisions, and monitor actions alongside its existing resource grants.
+Memory review/apply, security mutations, and Gateway retry require separate
+operator grants. Its read-only Agent, Tool, and Provider permissions do not
+authorize nested chat tools to mutate those resources.
+
+For example, bind the installed API viewer to an existing ServiceAccount:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-reader
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-api-viewer-role
+subjects:
+- kind: ServiceAccount
+  name: api-client
+  namespace: team-a
+```
+
+For a narrower grant, this Role allows an existing ServiceAccount to read, review,
+and apply one proposal. The separate unnamed `create memories` grant is required
+for apply. Reading an already-applied memory also needs `get memories` with that
+memory's ID; add that grant only for records the caller may read.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: apply-selected-proposal
+  namespace: team-a
+rules:
+- apiGroups: [core.orka.ai]
+  resources: [memoryproposals]
+  resourceNames: [proposal-123]
+  verbs: [get, review, apply]
+- apiGroups: [core.orka.ai]
+  resources: [memories]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: apply-selected-proposal
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: apply-selected-proposal
+subjects:
+- kind: ServiceAccount
+  name: memory-reviewer
+  namespace: team-a
+```
+
+`GET /api/v1/secrets` returns names only, but it requires actual core Kubernetes
+`list` access on `secrets`. That same grant permits listing Secret objects through
+the Kubernetes API, including their data. Keep it separate from general viewer
+roles. The API group is the empty string, not `core.orka.ai`.
+
+Grant workspace-class use with an explicit `resourceNames` entry on a Role in the
+Task or Tool namespace. Broader API edit permission does not substitute for it.
+For restores, add a rule for the selected checkpoint. This example grants both
+class use and use of the `before-refactor` checkpoint:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: use-reviewed-workspace
+  namespace: team-a
+rules:
+- apiGroups: [workspace.orka.ai]
+  resources: [executionworkspaceclasses]
+  resourceNames: [reviewed-workspace]
+  verbs: [use]
+- apiGroups: [workspace.orka.ai]
+  resources: [executionworkspacecheckpoints]
+  resourceNames: [before-refactor]
+  verbs: [use]
+```
+
+Bind this Role to the caller with a RoleBinding in `team-a`, as above. Check
+permissions using the same resource, namespace, verb, and name as the route. A
+successful `/auth/validate` or `/auth/whoami` response proves authentication only.

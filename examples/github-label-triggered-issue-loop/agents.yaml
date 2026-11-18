@@ -2,20 +2,13 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: issue-implementer
-  namespace: default
 spec:
-  secretRef:
-    name: codex-runtime-credentials
+  model:
+    name: gpt-5.4
   runtime:
     type: codex
     defaultMaxTurns: 100
-    defaultAllowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
+    # Codex write sessions do not support a provider-native tool allowlist.
   systemPrompt:
     inline: |
       You work on GitHub issues selected by Orka RepositoryMonitor.
@@ -25,10 +18,9 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: issue-researcher
-  namespace: default
 spec:
-  secretRef:
-    name: claude-runtime-credentials
+  model:
+    name: claude-sonnet-4.6
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -36,7 +28,6 @@ spec:
       - Read
       - Glob
       - Grep
-      - LS
   systemPrompt:
     inline: |
       Research and plan GitHub issues for Orka RepositoryMonitor. Do not mutate GitHub.
@@ -45,10 +36,9 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: pr-reviewer
-  namespace: default
 spec:
-  secretRef:
-    name: claude-runtime-credentials
+  model:
+    name: claude-sonnet-4.6
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -56,7 +46,6 @@ spec:
       - Read
       - Glob
       - Grep
-      - LS
   systemPrompt:
     inline: |
       Review exact pull request heads and return only Orka's structured review JSON.

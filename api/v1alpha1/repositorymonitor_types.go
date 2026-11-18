@@ -104,15 +104,11 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Repair RepositoryMonitorRepairSpec `json:"repair,omitempty"`
 
-	// Automerge controls deterministic merge behavior.
-	// +optional
-	Automerge RepositoryMonitorAutomergeSpec `json:"automerge,omitempty"`
-
 	// Policy contains authorization and safety policy for monitor operations.
 	// +optional
 	Policy RepositoryMonitorPolicySpec `json:"policy,omitempty"`
 
-	// Validation configures deterministic validation commands for repair.
+	// Validation configures isolated validation for pull request reviews.
 	// +optional
 	Validation RepositoryMonitorValidationSpec `json:"validation,omitempty"`
 }
@@ -149,6 +145,16 @@ type RepositoryMonitorPullRequestTarget struct {
 	// +kubebuilder:default=20
 	// +optional
 	MaxPerRun *int32 `json:"maxPerRun,omitempty"`
+
+	// IncludeLabels optionally restricts pull request inventory to pull requests
+	// with any of these labels. Other pull requests get no review, repair, or
+	// readiness status. It cannot be combined with issue implementation, whose
+	// pull requests would not carry the label. Pull requests with a
+	// spec.repair.includeLabels or spec.repair.ciOnlyLabels label are also
+	// included.
+	// +listType=set
+	// +optional
+	IncludeLabels []string `json:"includeLabels,omitempty"`
 }
 
 // RepositoryMonitorIssueTarget configures issue monitoring.
@@ -221,48 +227,13 @@ type RepositoryMonitorGitHubLabelTriggers struct {
 	// Issues maps issue command intents to label names. Empty fields use the default orka:* labels.
 	// +optional
 	Issues RepositoryMonitorIssueCommandLabels `json:"issues,omitempty"`
-
-	// PullRequests maps pull-request command intents to label names. Empty fields use the default orka:* labels.
-	// +optional
-	PullRequests RepositoryMonitorPullRequestCommandLabels `json:"pullRequests,omitempty"`
 }
 
-// RepositoryMonitorIssueCommandLabels configures issue command label names.
+// RepositoryMonitorIssueCommandLabels configures the issue workflow entrypoint.
 type RepositoryMonitorIssueCommandLabels struct {
-	// +optional
-	Triage string `json:"triage,omitempty"`
-	// +optional
-	Research string `json:"research,omitempty"`
-	// +optional
-	Plan string `json:"plan,omitempty"`
-	// +optional
-	ApprovePlan string `json:"approvePlan,omitempty"`
+	// Implement starts the complete issue workflow. Defaults to orka:implement.
 	// +optional
 	Implement string `json:"implement,omitempty"`
-	// +optional
-	Decompose string `json:"decompose,omitempty"`
-	// +optional
-	Stop string `json:"stop,omitempty"`
-	// +optional
-	Resume string `json:"resume,omitempty"`
-}
-
-// RepositoryMonitorPullRequestCommandLabels configures pull-request command label names.
-type RepositoryMonitorPullRequestCommandLabels struct {
-	// +optional
-	Review string `json:"review,omitempty"`
-	// +optional
-	Fix string `json:"fix,omitempty"`
-	// +optional
-	FixCI string `json:"fixCI,omitempty"`
-	// +optional
-	UpdateBranch string `json:"updateBranch,omitempty"`
-	// +optional
-	Automerge string `json:"automerge,omitempty"`
-	// +optional
-	Stop string `json:"stop,omitempty"`
-	// +optional
-	Resume string `json:"resume,omitempty"`
 }
 
 // RepositoryMonitorAgents configures task agents for monitor workflows.
@@ -323,11 +294,6 @@ type RepositoryMonitorIssuePlanningSpec struct {
 	// Enabled enables planning. Defaults to true when a planner agent is configured and a command requests it.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
-
-	// RequireHumanApprovalFor names risk levels or plan categories that require explicit approval.
-	// +listType=set
-	// +optional
-	RequireHumanApprovalFor []string `json:"requireHumanApprovalFor,omitempty"`
 }
 
 // RepositoryMonitorIssueImplementationSpec configures implementation behavior.
@@ -336,9 +302,9 @@ type RepositoryMonitorIssueImplementationSpec struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// RequireApprovedPlan blocks implementation unless the latest plan was approved.
+	// RequirePlan requires a current ready plan before implementation. Defaults to true.
 	// +optional
-	RequireApprovedPlan *bool `json:"requireApprovedPlan,omitempty"`
+	RequirePlan *bool `json:"requirePlan,omitempty"`
 
 	// BranchPrefix is the branch prefix for implementation push branches. Defaults to orka/issue.
 	// +optional
@@ -359,7 +325,9 @@ type RepositoryMonitorIssueImplementationSpec struct {
 	// +optional
 	MaxChangedFiles *int32 `json:"maxChangedFiles,omitempty"`
 
-	// AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+	// AllowedPaths optionally restricts implementation and pull request repair
+	// patch files to these path globs/prefixes. Repository control paths are
+	// always denied.
 	// Examples: api/**, internal/**, docs/**.
 	// +listType=set
 	// +optional
@@ -378,6 +346,46 @@ type RepositoryMonitorReviewSpec struct {
 	// RequireGreenCI requires acceptable CI before background review selection.
 	// +optional
 	RequireGreenCI bool `json:"requireGreenCI,omitempty"`
+
+	// Trigger controls which pull request heads are reviewed automatically.
+	// push reviews every new head: after a pull request's first review, a head
+	// that builds on the last reviewed head gets a follow-up review of the new
+	// changes and the open findings, and any other head a full review. open
+	// reviews each pull request once and later heads only on a review command;
+	// pull requests that automatic repair may fix are still reviewed on every
+	// push. Defaults to push.
+	// +kubebuilder:validation:Enum=open;push
+	// +kubebuilder:default=push
+	// +optional
+	Trigger string `json:"trigger,omitempty"`
+
+	// BlockingPriority is the lowest finding priority that keeps a pull
+	// request at needs_changes while the finding is open. Orka derives the
+	// verdict from the open findings, so the reviewer's own passed or
+	// needs_changes verdict does not decide it. A follow-up finding outside the
+	// changes it reviewed blocks only at P1 or above. Defaults to P1.
+	// +kubebuilder:validation:Enum=P0;P1;P2;P3
+	// +kubebuilder:default=P1
+	// +optional
+	BlockingPriority string `json:"blockingPriority,omitempty"`
+
+	// Exhaustive repeats the full review of a pull request head until a pass
+	// finds nothing new, at most three passes, so later follow-up reviews
+	// start from every finding. Only full reviews (a pull request's first
+	// review, or a head that rewrote history) repeat; intermediate passes are
+	// not published.
+	// +optional
+	Exhaustive bool `json:"exhaustive,omitempty"`
+
+	// MaxRounds bounds how many pull request heads in a row may be reviewed
+	// without a passed review. When the review of the MaxRounds-th such head
+	// would be needs_changes, Orka records needs_human instead and asks the
+	// author to reconsider the approach, which stops automatic repair of
+	// review findings. Reviews of the same head count once. Unset means no
+	// limit.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxRounds *int32 `json:"maxRounds,omitempty"`
 
 	// StaleReviewTTL bounds how long an unchanged head review remains fresh.
 	// +optional
@@ -428,9 +436,11 @@ type RepositoryMonitorReviewPublishSpec struct {
 	// +optional
 	PostSecuritySensitive bool `json:"postSecuritySensitive,omitempty"`
 
-	// SameHeadPolicy controls duplicate handling for one monitor, PR, and exact head SHA.
-	// V1 only supports skip.
-	// +kubebuilder:validation:Enum=skip
+	// SameHeadPolicy controls a later review of a pull request head that Orka
+	// already published a review for. skip leaves the published review as it
+	// is. update rewrites the published review's summary when the later review
+	// reaches a different verdict; its inline comments stay as first published.
+	// +kubebuilder:validation:Enum=skip;update
 	// +kubebuilder:default=skip
 	// +optional
 	SameHeadPolicy string `json:"sameHeadPolicy,omitempty"`
@@ -457,10 +467,6 @@ type RepositoryMonitorReviewPublishInlineSpec struct {
 	// +kubebuilder:validation:Maximum=50
 	// +optional
 	MaxComments *int32 `json:"maxComments,omitempty"`
-
-	// OnlyChangedLines restricts inline comments to RIGHT-side changed lines. V1 treats this as true.
-	// +optional
-	OnlyChangedLines *bool `json:"onlyChangedLines,omitempty"`
 }
 
 // RepositoryMonitorRepairSpec configures bounded repair behavior.
@@ -469,53 +475,68 @@ type RepositoryMonitorRepairSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
-	// RequireMaintainerOptIn requires an explicit maintainer command or label.
-	// +kubebuilder:default=true
-	// +optional
-	RequireMaintainerOptIn *bool `json:"requireMaintainerOptIn,omitempty"`
-
 	// MaxRepairsPerPR bounds total automated repairs per PR.
+	// +kubebuilder:default=5
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxRepairsPerPR *int32 `json:"maxRepairsPerPR,omitempty"`
 
 	// MaxRepairsPerHead bounds automated repairs per PR head SHA.
+	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxRepairsPerHead *int32 `json:"maxRepairsPerHead,omitempty"`
 
 	// MaxValidationRetries bounds validation retries for one repair job.
+	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxValidationRetries *int32 `json:"maxValidationRetries,omitempty"`
 
-	// MaxReviewFixRetries bounds review-fix loop retries.
-	// +kubebuilder:validation:Minimum=0
+	// AllowForkPullRequests lets repairs push to the head branch of a pull
+	// request opened from a fork when its author allows edits from maintainers.
+	// GitHub reports that permission only when one pull request is read, so a
+	// pull request seen only in an inventory list is never repaired as a fork.
 	// +optional
-	MaxReviewFixRetries *int32 `json:"maxReviewFixRetries,omitempty"`
-}
-
-// RepositoryMonitorAutomergeSpec configures automerge behavior.
-type RepositoryMonitorAutomergeSpec struct {
-	// Enabled enables automerge jobs.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// RequireMaintainerOptIn requires explicit maintainer opt-in.
-	// +kubebuilder:default=true
-	// +optional
-	RequireMaintainerOptIn *bool `json:"requireMaintainerOptIn,omitempty"`
-
-	// RequireGlobalMergeGate requires the controller-wide merge gate.
-	// +kubebuilder:default=true
-	// +optional
-	RequireGlobalMergeGate *bool `json:"requireGlobalMergeGate,omitempty"`
-
-	// AllowedMergeMethods lists merge methods allowed by policy.
-	// +kubebuilder:validation:items:Enum=merge;squash;rebase
+	AllowForkPullRequests bool `json:"allowForkPullRequests,omitempty"`
+	// IncludeLabels limits automatic repair to pull requests with any of these
+	// labels. Such a pull request is also reviewed, and each head is reviewed
+	// before it is repaired: findings are fixed first, then CI checks the pull
+	// request broke. The account that added the label must have the permission
+	// spec.triggers.github.labels.requireActorPermission requires. It cannot
+	// be combined with issue implementation.
 	// +listType=set
 	// +optional
-	AllowedMergeMethods []string `json:"allowedMergeMethods,omitempty"`
+	IncludeLabels []string `json:"includeLabels,omitempty"`
+	// CIOnlyLabels marks pull requests whose CI is repaired without a review:
+	// only checks the pull request broke are fixed, and no review or readiness
+	// status is published unless the pull request is also selected for review.
+	// The same label permission check applies. It cannot be combined with
+	// issue implementation.
+	// +listType=set
+	// +optional
+	CIOnlyLabels []string `json:"ciOnlyLabels,omitempty"`
+	// CIEvidence configures the CI evidence fix_ci repair prompts carry.
+	// +optional
+	CIEvidence RepositoryMonitorRepairCIEvidenceSpec `json:"ciEvidence,omitempty"`
+}
+
+// RepositoryMonitorRepairCIEvidenceSpec configures the CI evidence fix_ci
+// repair prompts carry. By default, evidence is structured only: check
+// names, apps, statuses, conclusions, and IDs; annotation paths, lines, and
+// levels; commit status contexts and states; and links to the monitored
+// repository's GitHub check runs and Actions jobs.
+type RepositoryMonitorRepairCIEvidenceSpec struct {
+	// Text adds the free text of failing checks to fix_ci repair prompts:
+	// check run output titles and summaries, annotation titles and messages,
+	// and commit status descriptions. Orka redacts credential-shaped text,
+	// but redaction cannot recognize every credential, and CI tools may print
+	// values GitHub does not mask. The text is stored in the repair Task's
+	// spec.prompt, which anyone who can read Tasks in the monitor namespace
+	// can see, and is sent to the model provider, so it is off by default.
+	// +kubebuilder:default=false
+	// +optional
+	Text bool `json:"text,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.
@@ -525,18 +546,11 @@ type RepositoryMonitorPolicySpec struct {
 	// +optional
 	ProtectedLabels []string `json:"protectedLabels,omitempty"`
 
-	// PauseLabels block further automation while present.
+	// PauseLabels block further automation while present. Removing them permits fresh reconciliation.
+	// +kubebuilder:default={"orka:pause"}
 	// +listType=set
 	// +optional
 	PauseLabels []string `json:"pauseLabels,omitempty"`
-
-	// OptInLabels names labels that opt a PR into repair or automerge.
-	// +optional
-	OptInLabels RepositoryMonitorOptInLabels `json:"optInLabels,omitempty"`
-
-	// AdvisoryLabels controls advisory label synchronization.
-	// +optional
-	AdvisoryLabels RepositoryMonitorAdvisoryLabels `json:"advisoryLabels,omitempty"`
 
 	// AllowedRepositoryPermissions lists GitHub permissions allowed to issue write commands.
 	// +kubebuilder:validation:items:Enum=admin;maintain;write
@@ -545,33 +559,26 @@ type RepositoryMonitorPolicySpec struct {
 	AllowedRepositoryPermissions []string `json:"allowedRepositoryPermissions,omitempty"`
 }
 
-// RepositoryMonitorOptInLabels configures opt-in label names.
-type RepositoryMonitorOptInLabels struct {
-	// Autofix opts a PR into autofix.
-	// +optional
-	Autofix string `json:"autofix,omitempty"`
-
-	// Automerge opts a PR into automerge.
-	// +optional
-	Automerge string `json:"automerge,omitempty"`
-}
-
-// RepositoryMonitorAdvisoryLabels controls advisory label sync.
-type RepositoryMonitorAdvisoryLabels struct {
-	// Enabled enables advisory label sync.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-}
-
-// RepositoryMonitorValidationSpec configures deterministic validation.
+// RepositoryMonitorValidationSpec configures isolated validation.
 type RepositoryMonitorValidationSpec struct {
-	// Mode selects validation scope.
+	// Image is the digest-pinned repository-specific container image used for validation.
+	// The reviewer chooses the validation command from the checked-out code.
+	// The image must contain /bin/sh and every tool the repository expects the
+	// reviewer to run.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Mode is retained only so upgraded clusters preserve the legacy field.
+	// Deprecated: validation scope is selected by the reviewer from repository evidence.
 	// +kubebuilder:validation:Enum=off;changed;full
-	// +kubebuilder:default=changed
 	// +optional
 	Mode string `json:"mode,omitempty"`
 
-	// Commands are validation commands repair jobs must run.
+	// Commands is retained only so upgraded clusters can detect and reject legacy
+	// validation policies instead of silently treating them as disabled.
+	// Deprecated: configure a digest-pinned image and let the reviewer select one command.
 	// +optional
 	Commands []string `json:"commands,omitempty"`
 }

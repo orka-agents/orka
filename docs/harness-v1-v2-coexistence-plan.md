@@ -1,6 +1,8 @@
 # Orka Harness v1/v2 Isolated Coexistence Plan
 
-**Status:** Accepted — Revision 8
+**Status:** Historical, superseded by [#568](https://github.com/orka-agents/orka/issues/568).
+Orka supports harness v2 only. This plan no longer describes supported installation
+or release requirements; the original Revision 8 is retained below.
 **Prepared:** August 7, 2026
 **Supersedes:** Revision 7
 
@@ -52,7 +54,7 @@ not a per-Task routing decision. Consequently, this plan does not introduce:
 - cross-protocol Task binding, classification, quarantine, or adjudication;
 - transcript-bootstrap migration or cross-protocol Session lineage.
 
-Harness-specific safety remains within each path. In particular, ACP v2 keeps
+Harness-specific safety remains within each path. In particular, Orka harness v2 keeps
 its RuntimeSession fencing, prompt-attempt, publication, external-effect, and
 `OutcomeUnknown` rules. Harness v1 must not replay an ambiguously accepted
 turn.

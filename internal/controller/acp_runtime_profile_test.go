@@ -85,6 +85,35 @@ func TestEffectiveACPAllowedToolsPreservesOpenCodeExplicitEmptyChildPolicy(t *te
 	}
 }
 
+func TestEffectiveACPAllowedToolsUsesMaterializedRuntimeRefPolicyForDelegatedChild(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+	}}}
+	for _, tt := range []struct {
+		name    string
+		allowed []string
+	}{
+		{name: "registered messaging tools", allowed: []string{"check_messages", "send_message"}},
+		{name: "registered deny all", allowed: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelParentTask: "parent"}},
+				Spec: corev1alpha1.TaskSpec{AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+					AllowedTools: append([]string{}, tt.allowed...),
+				}},
+			}
+			got := effectiveACPAllowedTools(task, agent)
+			if !slices.Equal(got, tt.allowed) {
+				t.Fatalf("effectiveACPAllowedTools() = %#v, want %#v", got, tt.allowed)
+			}
+			if got == nil {
+				t.Fatal("effectiveACPAllowedTools() = nil, want explicit list")
+			}
+		})
+	}
+}
+
 func TestPlanACPRuntimeHashesNormalizedDenyOnlyProviderNativePolicy(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -526,6 +555,91 @@ func harnessProfileForTest() harnessv2.RuntimeProfile {
 		ToolPolicyDigest: digest, ApprovalPolicyDigest: digest, MCPConfigurationDigest: digest,
 		WorkspaceIntent: harnessv2.WorkspaceIntentRead, ProxyCredentialRole: "provider",
 		ProxyCredentialScope: "model:gpt-test", ResourceClass: "standard",
+	}
+}
+
+func TestCurrentACPRuntimeDeliveryPlanRequiresCompatibleAdapters(t *testing.T) {
+	oldImage := "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)
+	newImage := "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)
+	buildPlan := func(profile harnessv2.RuntimeProfile) ACPRuntimePlan {
+		t.Helper()
+		digest, err := harnessv2.CanonicalProfileDigest(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+			"profileDigest": string(digest), "runtimeImage": oldImage,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ACPRuntimePlan{
+			PoolName: acpRuntimePoolName(profile.ProviderKind, harnessv2.ProfileDigest(identity)),
+			Image:    oldImage, Profile: profile, Digest: digest,
+		}
+	}
+
+	compatibleProfile := harnessProfileForTest()
+	compatibleProfile.AdapterDigests = acp.BuiltInRuntimeAdapterDigests(compatibleProfile.ProviderKind)
+	compatible := buildPlan(compatibleProfile)
+	rotatedSelection, err := currentACPRuntimeDeliveryPlan(compatible, ACPRuntimeImages{Codex: newImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := rotatedSelection.plan
+	if !rotatedSelection.allowPoolCreation {
+		t.Fatal("compatible plain-pool image rotation unexpectedly forbids pool creation")
+	}
+	if rotated.Image != newImage || rotated.PoolName == compatible.PoolName || rotated.Digest != compatible.Digest {
+		t.Fatalf("compatible image rotation = %#v, want new image/pool with frozen profile digest %q", rotated, compatible.Digest)
+	}
+
+	incompatibleProfile := compatibleProfile
+	incompatibleProfile.AdapterDigests = cloneMap(compatibleProfile.AdapterDigests)
+	incompatibleProfile.AdapterDigests["codex-acp"] = "sha256:" + strings.Repeat("9", 64)
+	incompatible := buildPlan(incompatibleProfile)
+	if _, err := currentACPRuntimeDeliveryPlan(incompatible, ACPRuntimeImages{Codex: newImage}); err == nil ||
+		!strings.Contains(err.Error(), "do not match the frozen runtime profile") {
+		t.Fatalf("incompatible adapter rotation error = %v, want frozen-profile rejection", err)
+	}
+	if _, err := currentACPRuntimeDeliveryPlan(compatible, ACPRuntimeImages{}); err == nil ||
+		!strings.Contains(err.Error(), "configured digest-pinned image") {
+		t.Fatalf("missing approved image error = %v, want configured-image rejection", err)
+	}
+
+	workspace := compatible
+	workspace.PoolName = "acp-ws-codex-0123456789abcdef"
+	workspace.Workspace = &ACPRuntimeWorkspaceBinding{
+		Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+		BindingDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+	currentWorkspace, err := currentACPRuntimeDeliveryPlan(workspace, ACPRuntimeImages{Codex: oldImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !currentWorkspace.allowPoolCreation || !reflect.DeepEqual(currentWorkspace.plan, workspace) {
+		t.Fatalf("current workspace delivery = %#v, want frozen plan with creation allowed", currentWorkspace)
+	}
+	retiredWorkspace, err := currentACPRuntimeDeliveryPlan(workspace, ACPRuntimeImages{Codex: newImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retiredWorkspace.allowPoolCreation || !reflect.DeepEqual(retiredWorkspace.plan, workspace) {
+		t.Fatalf("retired workspace delivery = %#v, want frozen plan with creation forbidden", retiredWorkspace)
+	}
+	removedWorkspace, err := currentACPRuntimeDeliveryPlan(workspace, ACPRuntimeImages{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removedWorkspace.allowPoolCreation || !reflect.DeepEqual(removedWorkspace.plan, workspace) {
+		t.Fatalf("removed workspace delivery = %#v, want exact-pool-only frozen plan", removedWorkspace)
+	}
+	incompatibleWorkspace := incompatible
+	incompatibleWorkspace.PoolName = workspace.PoolName
+	incompatibleWorkspace.Workspace = workspace.Workspace
+	if _, err := currentACPRuntimeDeliveryPlan(incompatibleWorkspace, ACPRuntimeImages{Codex: newImage}); err == nil ||
+		!strings.Contains(err.Error(), "do not match the frozen runtime profile") {
+		t.Fatalf("incompatible workspace adapter error = %v, want frozen-profile rejection", err)
 	}
 }
 

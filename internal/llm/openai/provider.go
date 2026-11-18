@@ -8,8 +8,11 @@ package openai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +28,10 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	messageRoleUser = "user"
+)
+
 // apiMode tracks which API surface to use.
 type apiMode int32
 
@@ -35,15 +42,31 @@ const (
 )
 
 const (
-	eventTypeFunctionCall   = "function_call"
-	providerTypeOpenAI      = "openai"
-	providerTypeAzureOpenAI = "azure-openai"
-	stopReasonCompleted     = "completed"
-	stopReasonFunctionCall  = "function_call"
-	stopReasonIncomplete    = "incomplete"
-	stopReasonRefusal       = "refusal"
-	stopReasonStop          = "stop"
-	stopReasonToolCalls     = "tool_calls"
+	messageRoleAssistant                        = "assistant"
+	eventTypeResponseOutputTextDelta            = "response.output_text.delta"
+	eventTypeResponseOutputTextDone             = "response.output_text.done"
+	eventTypeResponseContentPartAdded           = "response.content_part.added"
+	eventTypeResponseContentPartDone            = "response.content_part.done"
+	eventTypeResponseFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
+	eventTypeResponseFunctionCallArgumentsDone  = "response.function_call_arguments.done"
+	responseFunctionArgumentsChanged            = "response function arguments changed after completion"
+	responseContentTypeOutputText               = "output_text"
+	eventTypeResponseOutputItemAdded            = "response.output_item.added"
+	eventTypeResponseOutputItemDone             = "response.output_item.done"
+	eventTypeResponseCompleted                  = "response.completed"
+	eventTypeFunctionCall                       = "function_call"
+	responseOutputTypeMessage                   = "message"
+	providerTypeOpenAI                          = "openai"
+	providerTypeAzureOpenAI                     = "azure-openai"
+	eventTypeResponseIncomplete                 = "response.incomplete"
+	incompleteReasonMaxOutputTokens             = "max_output_tokens"
+	stopReasonCompleted                         = "completed"
+	stopReasonFunctionCall                      = "function_call"
+	stopReasonIncomplete                        = "incomplete"
+	stopReasonLength                            = "length"
+	stopReasonRefusal                           = "refusal"
+	stopReasonStop                              = "stop"
+	stopReasonToolCalls                         = "tool_calls"
 )
 
 func init() {
@@ -62,8 +85,10 @@ type Provider struct {
 	client                              openai.Client
 	baseURL                             string
 	providerType                        string
+	azureDeploymentName                 string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
+	sendPromptCacheKey                  bool
 }
 
 // NewProvider creates a new OpenAI provider
@@ -72,7 +97,10 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
-	var opts []option.RequestOption
+	opts := []option.RequestOption{
+		option.WithMiddleware(llm.UsageHTTPMiddleware),
+		option.WithHTTPClient(llm.SharedHTTPClient()),
+	}
 	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
 		if apiVersion == "" {
@@ -98,8 +126,45 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		client:                              client,
 		baseURL:                             config.BaseURL,
 		providerType:                        providerType,
+		azureDeploymentName:                 config.AzureDeploymentName,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
+		sendPromptCacheKey:                  providerType == providerTypeOpenAI && !isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
+}
+
+// promptCacheKey names the conversation a request belongs to, so OpenAI routes
+// the steps of one conversation to the machine that holds its cached prefix.
+// OpenAI caches without a key, but spreads requests across machines. The key
+// hashes what every step repeats from the start: the model, the stable part of
+// the instructions and the first message, which truncation always keeps. Only OpenAI's own API
+// gets it: compatible servers and Azure API versions may refuse a field they
+// do not know.
+func (p *Provider) promptCacheKey(req *llm.CompletionRequest) string {
+	if !p.sendPromptCacheKey {
+		return ""
+	}
+	system := req.SystemPrompt
+	if stable := req.SystemPromptStable; stable > 0 && stable < len(system) {
+		system = system[:stable] // a changed catalog after it keeps the conversation's key
+	}
+	h := sha256.New()
+	for _, part := range []string{req.Model, system} {
+		_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
+	}
+	if len(req.Messages) > 0 {
+		first := req.Messages[0]
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(first.Role), first.Role, len(first.Content), first.Content)
+	}
+	return "orka-" + hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// requestModel resolves only the upstream routing identity, leaving the
+// caller's logical model intact for authorization, fallback, and telemetry.
+func (p *Provider) requestModel(model string) string {
+	if p.providerType == providerTypeAzureOpenAI && p.azureDeploymentName != "" {
+		return p.azureDeploymentName
+	}
+	return model
 }
 
 // Name returns the provider name. It remains "openai" for Azure because
@@ -291,32 +356,29 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	items := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
 		switch msg.Role {
-		case "user":
+		case messageRoleUser:
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfMessage: &responses.EasyInputMessageParam{
 					Role:    responses.EasyInputMessageRoleUser,
 					Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
 				},
 			})
-		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					items = append(items, responses.ResponseInputItemUnionParam{
-						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-							CallID:    tc.ID,
-							Name:      tc.Name,
-							Arguments: string(tc.Arguments),
-						},
-					})
+		case messageRoleAssistant:
+			if msg.OutputItems != nil {
+				for _, item := range msg.OutputItems {
+					if item.ToolCall != nil {
+						items = appendResponsesInputCall(items, *item.ToolCall)
+					} else if item.Content != "" {
+						items = appendResponsesInputText(items, item.Content)
+					}
 				}
+				continue
+			}
+			for _, tc := range msg.ToolCalls {
+				items = appendResponsesInputCall(items, tc)
 			}
 			if msg.Content != "" {
-				items = append(items, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleAssistant,
-						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
-					},
-				})
+				items = appendResponsesInputText(items, msg.Content)
 			}
 		case "tool":
 			items = append(items, responses.ResponseInputItemUnionParam{
@@ -339,18 +401,49 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	return items
 }
 
+// rawToolParameters avoids both float64 rounding and the SDK's treatment of
+// json.Number as a string. Each complete schema field is marshaled as raw JSON.
+func rawToolParameters(parameters json.RawMessage) map[string]any {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(parameters, &fields)
+	if fields == nil {
+		return nil
+	}
+	params := make(map[string]any, len(fields))
+	for name, value := range fields {
+		params[name] = value
+	}
+	return params
+}
+
+func appendResponsesInputCall(items responses.ResponseInputParam, call llm.ToolCall) responses.ResponseInputParam {
+	return append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+		CallID: call.ID, Name: call.Name, Arguments: string(call.Arguments),
+	}})
+}
+
+func appendResponsesInputText(items responses.ResponseInputParam, content string) responses.ResponseInputParam {
+	return append(items, responses.ResponseInputItemUnionParam{OfMessage: &responses.EasyInputMessageParam{
+		Role:    responses.EasyInputMessageRoleAssistant,
+		Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(content)},
+	}})
+}
+
 func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 	rTools := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		var params map[string]any
-		_ = json.Unmarshal(tool.Parameters, &params)
+		params := rawToolParameters(tool.Parameters)
 
+		strict := false
+		if tool.Strict != nil {
+			strict = *tool.Strict
+		}
 		rTools = append(rTools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
 				Name:        tool.Name,
 				Description: openai.String(tool.Description),
 				Parameters:  params,
-				Strict:      openai.Bool(false),
+				Strict:      openai.Bool(strict),
 			},
 		})
 	}
@@ -359,32 +452,70 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 
 func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildResponsesParams(req)
+	params.Model = p.requestModel(req.Model)
+	if key := p.promptCacheKey(req); key != "" {
+		params.PromptCacheKey = openai.String(key)
+	}
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, toProviderError(err)
 	}
 
+	if req.ResponsesInput {
+		if err := validateResponsesOutput(resp.Output); err != nil {
+			return nil, err
+		}
+	}
+
 	result := &llm.CompletionResponse{
-		Provider:     p.TelemetryProviderName(),
-		ID:           resp.ID,
-		Content:      resp.OutputText(),
-		StopReason:   string(resp.Status),
-		InputTokens:  int(resp.Usage.InputTokens),
-		OutputTokens: int(resp.Usage.OutputTokens),
-		Model:        resp.Model,
+		Provider:              p.TelemetryProviderName(),
+		ID:                    resp.ID,
+		Content:               resp.OutputText(),
+		StopReason:            string(resp.Status),
+		InputTokens:           int(resp.Usage.InputTokens),
+		OutputTokens:          int(resp.Usage.OutputTokens),
+		UsageReported:         resp.Usage.JSON.InputTokens.Valid() && resp.Usage.JSON.OutputTokens.Valid(),
+		CachedInputTokens:     llm.ReportedTokenCount(resp.Usage.InputTokensDetails.CachedTokens, resp.Usage.InputTokensDetails.JSON.CachedTokens.Valid()),
+		CacheWriteInputTokens: llm.ReportedTokenCount(resp.Usage.InputTokensDetails.CacheWriteTokens, resp.Usage.InputTokensDetails.JSON.CacheWriteTokens.Valid()),
+		Model:                 resp.Model,
+	}
+	if req.ResponsesInput {
+		result.OutputItems = make([]llm.AssistantOutputItem, 0, len(resp.Output))
 	}
 	for _, item := range resp.Output {
 		if item.Type == eventTypeFunctionCall {
-			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
-				ID:        item.CallID,
-				Name:      item.Name,
-				Arguments: json.RawMessage(responseOutputArguments(item.Arguments)),
-			})
+			call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(responseOutputArguments(item.Arguments))}
+			result.ToolCalls = append(result.ToolCalls, call)
+			if req.ResponsesInput {
+				result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+			}
+		} else if req.ResponsesInput && item.Type == responseOutputTypeMessage {
+			var content strings.Builder
+			for _, part := range item.Content {
+				if part.Type == responseContentTypeOutputText {
+					content.WriteString(part.Text)
+				}
+			}
+			result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{Content: content.String(), Status: item.Status})
 		}
 	}
 	result.StopReason = normalizeResponsesStopReason(result.StopReason, resp.Output, false)
+	result.StopReason = normalizeResponsesIncompleteStopReason(result.StopReason, resp.IncompleteDetails.Reason)
+	if req.ResponsesInput && responsesHaveRefusal(resp.Output) {
+		result.StopReason = stopReasonRefusal
+	}
 	return result, nil
+}
+
+// normalizeResponsesIncompleteStopReason maps output-budget exhaustion to the
+// provider-neutral token-limit reason while preserving other incomplete states.
+func normalizeResponsesIncompleteStopReason(stopReason, incompleteReason string) string {
+	if incompleteReason == incompleteReasonMaxOutputTokens &&
+		(stopReason == stopReasonIncomplete || stopReason == eventTypeResponseIncomplete) {
+		return stopReasonLength
+	}
+	return stopReason
 }
 
 func normalizeResponsesStopReason(
@@ -402,7 +533,7 @@ func normalizeResponsesStopReason(
 		if item.Status != "" && item.Status != stopReasonCompleted {
 			return item.Status
 		}
-		if item.Type == "message" {
+		if item.Type == responseOutputTypeMessage {
 			for _, content := range item.Content {
 				if content.Type == stopReasonRefusal {
 					return stopReasonRefusal
@@ -446,13 +577,16 @@ func buildResponsesParams(req *llm.CompletionRequest) responses.ResponseNewParam
 			OfInputItemList: convertInputItems(req.Messages),
 		},
 	}
+	if req.Store != nil {
+		params.Store = openai.Bool(*req.Store)
+	}
 	if req.SystemPrompt != "" {
 		params.Instructions = openai.String(req.SystemPrompt)
 	}
 	if req.MaxTokens > 0 {
 		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
 	}
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = openai.Float(req.Temperature)
 	}
 	if len(req.Tools) > 0 {
@@ -479,11 +613,14 @@ type responseFuncCallState struct {
 	name           string
 	arguments      string
 	argumentsDone  bool
+	itemDone       bool
 	args           strings.Builder
 	emitted        bool
 }
 
 type responseFuncCallTracker struct {
+	ordered       bool
+	outputOrder   responseOutputOrder
 	byItemID      map[string]*responseFuncCallState
 	byOutputIndex map[int64]*responseFuncCallState
 	byCallID      map[string]*responseFuncCallState
@@ -535,7 +672,11 @@ func (t *responseFuncCallTracker) merge(dst, src *responseFuncCallState) {
 	if !dst.argumentsDone {
 		dst.argumentsDone = src.argumentsDone
 	}
-	if dst.args.Len() == 0 && src.args.Len() > 0 {
+	dst.itemDone = dst.itemDone || src.itemDone
+	if src.args.Len() > 0 && (dst.args.Len() == 0 || (t.ordered && src.args.Len() > dst.args.Len())) {
+		// In ordered mode, getChecked verified compatible prefixes. Retain
+		// the longest observed prefix, including when item metadata is late.
+		dst.args.Reset()
 		dst.args.WriteString(src.args.String())
 	}
 	dst.emitted = dst.emitted || src.emitted
@@ -592,9 +733,21 @@ func responseOutputArguments(arguments responses.ResponseOutputItemUnionArgument
 	return ""
 }
 
-func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, argumentsDone bool) {
+func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, itemDone bool) error {
 	if fc == nil {
-		return
+		return nil
+	}
+	arguments := responseOutputArguments(item.Arguments)
+	hasArguments := arguments != "" || item.JSON.Arguments.Raw() != ""
+	prefixOnly := t.ordered && !itemDone && item.Status != stopReasonCompleted
+	if prefixOnly {
+		partial := &responseFuncCallState{name: item.Name}
+		partial.args.WriteString(arguments)
+		if err := validateResponseFunctionMerge(fc, partial); err != nil {
+			return err
+		}
+	} else if err := t.validateSnapshot(fc, item.Name, arguments, hasArguments); err != nil {
+		return err
 	}
 	if item.ID != "" {
 		fc.itemID = item.ID
@@ -605,43 +758,117 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 	if item.Name != "" {
 		fc.name = item.Name
 	}
-	if arguments := responseOutputArguments(item.Arguments); arguments != "" {
-		fc.arguments = arguments
-		fc.argumentsDone = true
-	} else if argumentsDone {
+	if arguments != "" || (t.ordered && hasArguments && !prefixOnly) {
+		if prefixOnly {
+			if len(arguments) > fc.args.Len() {
+				fc.args.Reset()
+				fc.args.WriteString(arguments)
+			}
+		} else {
+			fc.arguments = arguments
+			fc.argumentsDone = true
+		}
+	} else if itemDone || (t.ordered && item.Status == stopReasonCompleted) {
 		if fc.arguments == "" {
 			fc.arguments = fc.args.String()
 		}
 		fc.argumentsDone = true
 	}
+	fc.itemDone = fc.itemDone || itemDone || item.Status == stopReasonCompleted
 	t.register(fc)
+	return nil
 }
 
 func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSender) bool {
-	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone {
+	// Finalized arguments do not establish that a call finished successfully.
+	// Responses callers may execute as soon as we publish the completed item.
+	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone || (t.ordered && (!fc.itemDone || !fc.hasOutputIndex || fc.callID == "")) {
 		return true
 	}
 	args := fc.arguments
 	if args == "" {
 		args = fc.args.String()
 	}
+	if t.ordered {
+		// Recovered calls must satisfy the same argument contract as calls
+		// supplied in a complete response, before coordinator processing.
+		var arguments map[string]any
+		if json.Unmarshal([]byte(args), &arguments) != nil || arguments == nil {
+			return failResponsesStream(send, errors.New("provider returned an invalid Responses function call"))
+		}
+	}
 	callID := fc.callID
 	if callID == "" {
 		callID = fc.itemID
 	}
-	if !send(llm.StreamChunk{
-		ToolCall: &llm.ToolCall{ID: callID, Name: fc.name, Arguments: json.RawMessage(args)},
-	}) {
+	chunk := llm.StreamChunk{ToolCall: &llm.ToolCall{ID: callID, Name: fc.name, Arguments: json.RawMessage(args)}}
+	if t.ordered {
+		index := fc.outputIndex
+		chunk.OutputIndex = &index
+	}
+	if !send(chunk) {
 		return false
 	}
 	fc.emitted = true
 	return true
 }
 
-func streamResponsesEvents(stream responseStream, providerName string, send streamSender) {
+func (t *responseFuncCallTracker) hasUnemittedFunctionCall(output []responses.ResponseOutputItemUnion) bool {
+	seen := make(map[*responseFuncCallState]struct{})
+	pending := func(fc *responseFuncCallState) bool {
+		if fc == nil {
+			return false
+		}
+		if _, ok := seen[fc]; ok {
+			return false
+		}
+		seen[fc] = struct{}{}
+		return !fc.emitted
+	}
+	for _, fc := range t.byItemID {
+		if pending(fc) {
+			return true
+		}
+	}
+	for _, fc := range t.byCallID {
+		if pending(fc) {
+			return true
+		}
+	}
+	for _, fc := range t.byOutputIndex {
+		if pending(fc) {
+			return true
+		}
+	}
+	for i, item := range output {
+		if item.Type != eventTypeFunctionCall {
+			continue
+		}
+		fc := t.get(item.ID, int64(i), true, item.CallID)
+		if !fc.emitted {
+			return true
+		}
+	}
+	return false
+}
+
+func streamResponsesEvents(stream responseStream, providerName string, send streamSender, ordered ...bool) {
 	tracker := newResponseFuncCallTracker()
+	tracker.ordered = len(ordered) > 0 && ordered[0]
+	var queue *orderedResponseSender
+	if tracker.ordered {
+		queue = &orderedResponseSender{send: send, order: &tracker.outputOrder, pending: map[int64][]llm.StreamChunk{}}
+		send = queue.chunk
+	}
 	for stream.Next() {
-		if !handleResponsesStreamEvent(stream.Current(), tracker, providerName, send) {
+		evt := stream.Current()
+		if queue != nil && (evt.Type == eventTypeResponseCompleted || evt.Type == eventTypeResponseIncomplete) {
+			queue.terminal(func(send streamSender) {
+				handleResponsesStreamEvent(evt, tracker, providerName, send)
+			})
+			return
+		}
+		if !handleResponsesStreamEvent(evt, tracker, providerName, send) {
 			return
 		}
 	}
@@ -653,21 +880,58 @@ func streamResponsesEvents(stream responseStream, providerName string, send stre
 }
 
 func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
+	var outputIndex *int64
+	if tracker.ordered {
+		if responsesEventHasRefusal(evt) {
+			send(llm.StreamChunk{Done: true, StopReason: stopReasonRefusal})
+			return false
+		}
+		if err := tracker.prepareEvent(&evt); err != nil {
+			return failResponsesStream(send, err)
+		}
+		var err error
+		outputIndex, err = tracker.outputOrder.eventIndex(evt)
+		if err != nil {
+			send(llm.StreamChunk{Error: err, Done: true})
+			return false
+		}
+		if isResponseTextEvent(evt) {
+			return tracker.outputOrder.textEvent(evt, outputIndex, send)
+		}
+	}
 	switch evt.Type {
-	case "response.output_text.delta":
-		return handleResponseTextDelta(evt, send)
-	case "response.function_call_arguments.delta":
+	case eventTypeResponseOutputTextDelta:
+		return handleResponseTextDelta(evt, send, outputIndex)
+	case eventTypeResponseFunctionCallArgumentsDelta:
 		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
-	case "response.function_call_arguments.done":
+	case eventTypeResponseFunctionCallArgumentsDone:
 		return handleResponseFunctionCallArgumentsDone(evt, tracker, send)
-	case "response.output_item.added":
-		return handleResponseOutputItem(evt, tracker, send, false)
-	case "response.output_item.done":
-		return handleResponseOutputItem(evt, tracker, send, true)
-	case "response.completed":
+	case eventTypeResponseOutputItemAdded:
+		return handleResponseOutputItem(evt, tracker, send, false, outputIndex)
+	case eventTypeResponseOutputItemDone:
+		return handleResponseOutputItem(evt, tracker, send, true, outputIndex)
+	case eventTypeResponseCompleted:
 		return handleResponseCompleted(evt, tracker, providerName, send)
-	case "response.failed", "response.incomplete":
-		send(llm.StreamChunk{Done: true, StopReason: evt.Type})
+	case "response.failed":
+		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
+		send(responseTerminalChunk(evt, stopReason, providerName))
+		return false
+	case eventTypeResponseIncomplete:
+		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
+		if tracker.hasUnemittedFunctionCall(evt.Response.Output) {
+			stopReason = eventTypeResponseIncomplete
+		}
+		if tracker.ordered {
+			// Only token-budget text outcomes are supported. Decide this
+			// before message snapshots can release queued function calls.
+			hasCalls := len(tracker.byItemID) > 0 || len(tracker.byCallID) > 0 || len(tracker.byOutputIndex) > 0
+			if stopReason != stopReasonLength || hasCalls {
+				stopReason = eventTypeResponseIncomplete
+			} else if !tracker.outputOrder.completeMessages(evt, send) {
+				return false
+			}
+		}
+		send(responseTerminalChunk(evt, stopReason, providerName))
 		return false
 	case "error":
 		send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
@@ -677,15 +941,25 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 	}
 }
 
-func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send streamSender) bool {
+func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send streamSender, outputIndex *int64) bool {
 	if evt.Delta == "" {
 		return true
 	}
-	return send(llm.StreamChunk{Content: evt.Delta})
+	chunk := llm.StreamChunk{Content: evt.Delta, OutputIndex: outputIndex}
+	return send(chunk)
 }
 
 func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
-	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	fc, err := tracker.getChecked(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if err != nil {
+		return failResponsesStream(send, err)
+	}
+	if err := tracker.validateSnapshot(fc, evt.Name, "", false); err != nil {
+		return failResponsesStream(send, err)
+	}
+	if tracker.ordered && fc.argumentsDone && evt.Delta != "" {
+		return failResponsesStream(send, errors.New(responseFunctionArgumentsChanged))
+	}
 	if evt.Name != "" {
 		fc.name = evt.Name
 	}
@@ -694,55 +968,123 @@ func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventU
 }
 
 func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
-	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	fc, err := tracker.getChecked(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if err != nil {
+		return failResponsesStream(send, err)
+	}
+	arguments := evt.Arguments
+	// An omitted final field may recover prior data; an explicit empty
+	// snapshot must still agree with every observed argument fragment.
+	if arguments == "" && (!tracker.ordered || evt.JSON.Arguments.Raw() == "") {
+		if tracker.ordered && fc.argumentsDone {
+			arguments = fc.arguments
+		} else {
+			arguments = fc.args.String()
+		}
+	}
+	if err := tracker.validateSnapshot(fc, evt.Name, arguments, true); err != nil {
+		return failResponsesStream(send, err)
+	}
 	if evt.Name != "" {
 		fc.name = evt.Name
 	}
-	if evt.Arguments != "" {
-		fc.arguments = evt.Arguments
-	} else {
-		fc.arguments = fc.args.String()
-	}
+	fc.arguments = arguments
 	fc.argumentsDone = true
 	return tracker.emit(fc, send)
 }
 
-func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, argumentsDone bool) bool {
-	if evt.Item.Type != eventTypeFunctionCall {
-		return true
+func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, itemDone bool, outputIndex *int64) bool {
+	if itemDone && tracker.ordered && evt.Item.Type == responseOutputTypeMessage {
+		if evt.Item.Status == "" {
+			evt.Item.Status = tracker.outputOrder.messageStatus(outputIndex)
+		}
+		if err := tracker.outputOrder.observeStatus(evt.Item.ID, outputIndex, evt.Item.Status); err != nil {
+			return failResponsesStream(send, err)
+		}
 	}
-	fc := tracker.get(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
-	tracker.mergeItem(fc, evt.Item, argumentsDone)
-	return tracker.emit(fc, send)
+	if evt.Item.Type == eventTypeFunctionCall {
+		fc, err := tracker.getChecked(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
+		if err != nil {
+			return failResponsesStream(send, err)
+		}
+		if err := tracker.mergeItem(fc, evt.Item, itemDone); err != nil {
+			return failResponsesStream(send, err)
+		}
+		if !tracker.emit(fc, send) {
+			return false
+		}
+		// A compatible upstream may supply the call ID or name only in its
+		// terminal snapshot. Keep this position open until the call is ready.
+		if tracker.ordered && !fc.emitted {
+			return true
+		}
+	}
+	if tracker.ordered && evt.Item.Type == responseOutputTypeMessage && (itemDone || len(evt.Item.Content) > 0) {
+		if !tracker.outputOrder.messageSnapshot(evt.Item, outputIndex, itemDone, send) {
+			return false
+		}
+		// The content is final, but an omitted status remains unresolved
+		// until the terminal outcome can supply it without rewriting SSE.
+		if itemDone && evt.Item.Status == "" {
+			return true
+		}
+	}
+	if itemDone && (outputIndex != nil || (tracker.ordered && evt.Item.Type == responseOutputTypeMessage)) {
+		return send(llm.StreamChunk{OutputIndex: outputIndex, OutputItemDone: true, OutputItemStatus: evt.Item.Status})
+	}
+	return true
 }
 
 func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	stopReason := normalizeResponsesStopReason(
 		string(evt.Response.Status),
 		evt.Response.Output,
-		strings.TrimSpace(evt.Response.OutputText()) == "",
+		!tracker.ordered && strings.TrimSpace(evt.Response.OutputText()) == "",
 	)
+	terminal := responseTerminalChunk(evt, stopReason, providerName)
+	if tracker.ordered && !responsesTerminalAllowsOutput(stopReason) {
+		send(terminal)
+		return false
+	}
+	if tracker.ordered && !tracker.outputOrder.completeMessages(evt, send) {
+		return false
+	}
 	if stopReason == stopReasonToolCalls {
 		for i, item := range evt.Response.Output {
 			if item.Type != eventTypeFunctionCall {
 				continue
 			}
-			fc := tracker.get(item.ID, int64(i), true, item.CallID)
-			tracker.mergeItem(fc, item, true)
+			fc, err := tracker.getChecked(item.ID, int64(i), true, item.CallID)
+			if err != nil {
+				return failResponsesStream(send, err)
+			}
+			if err := tracker.mergeItem(fc, item, true); err != nil {
+				return failResponsesStream(send, err)
+			}
 			if !tracker.emit(fc, send) {
 				return false
 			}
 		}
 	}
-	send(llm.StreamChunk{
-		Done:         true,
-		StopReason:   stopReason,
-		InputTokens:  int(evt.Response.Usage.InputTokens),
-		OutputTokens: int(evt.Response.Usage.OutputTokens),
-		Model:        evt.Response.Model,
-		Provider:     providerName,
-	})
+	if tracker.ordered && tracker.hasUnemittedFunctionCall(evt.Response.Output) {
+		return failResponsesStream(send, errors.New("response completed with an unfinished function call"))
+	}
+	send(terminal)
 	return false
+}
+
+func responseTerminalChunk(evt responses.ResponseStreamEventUnion, stopReason, providerName string) llm.StreamChunk {
+	return llm.StreamChunk{
+		Done:                  true,
+		StopReason:            stopReason,
+		InputTokens:           int(evt.Response.Usage.InputTokens),
+		OutputTokens:          int(evt.Response.Usage.OutputTokens),
+		UsageReported:         evt.Response.Usage.JSON.InputTokens.Valid() && evt.Response.Usage.JSON.OutputTokens.Valid(),
+		CachedInputTokens:     llm.ReportedTokenCount(evt.Response.Usage.InputTokensDetails.CachedTokens, evt.Response.Usage.InputTokensDetails.JSON.CachedTokens.Valid()),
+		CacheWriteInputTokens: llm.ReportedTokenCount(evt.Response.Usage.InputTokensDetails.CacheWriteTokens, evt.Response.Usage.InputTokensDetails.JSON.CacheWriteTokens.Valid()),
+		Model:                 evt.Response.Model,
+		Provider:              providerName,
+	}
 }
 
 func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {
@@ -751,7 +1093,12 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		defer close(ch)
 
 		send := newStreamSender(ctx, ch)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send)
+		params := buildResponsesParams(req)
+		params.Model = p.requestModel(req.Model)
+		if key := p.promptCacheKey(req); key != "" {
+			params.PromptCacheKey = openai.String(key)
+		}
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), send, req.ResponsesInput)
 	}()
 	return ch
 }
@@ -759,6 +1106,32 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 // -------------------------------------------------------------------------
 // Chat Completions API helpers (fallback)
 // -------------------------------------------------------------------------
+
+// groupAssistantTurns adapts ordered Responses history to Chat Completions,
+// which represents assistant text and function calls together in one turn.
+// Copy call slices so normalization never mutates the caller's history.
+func groupAssistantTurns(messages []llm.Message) []llm.Message {
+	grouped := make([]llm.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == messageRoleAssistant && len(grouped) > 0 && grouped[len(grouped)-1].Role == messageRoleAssistant {
+			last := &grouped[len(grouped)-1]
+			last.Content += msg.Content
+			last.ToolCalls = append(last.ToolCalls, msg.ToolCalls...)
+			continue
+		}
+		msg.ToolCalls = append([]llm.ToolCall(nil), msg.ToolCalls...)
+		grouped = append(grouped, msg)
+	}
+	return grouped
+}
+
+func convertChatRequestMessages(req *llm.CompletionRequest) []openai.ChatCompletionMessageParamUnion {
+	messages := req.Messages
+	if req.ResponsesInput {
+		messages = groupAssistantTurns(messages)
+	}
+	return convertMessages(messages, req.SystemPrompt)
+}
 
 func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatCompletionMessageParamUnion {
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
@@ -769,9 +1142,9 @@ func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatC
 		switch msg.Role {
 		case "system":
 			msgs = append(msgs, openai.SystemMessage(msg.Content))
-		case "user":
+		case messageRoleUser:
 			msgs = append(msgs, openai.UserMessage(msg.Content))
-		case "assistant":
+		case messageRoleAssistant:
 			m := openai.AssistantMessage(msg.Content)
 			if len(msg.ToolCalls) > 0 {
 				tcs := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(msg.ToolCalls))
@@ -799,13 +1172,16 @@ func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatC
 func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	cTools := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		var params map[string]any
-		_ = json.Unmarshal(tool.Parameters, &params)
+		params := rawToolParameters(tool.Parameters)
+		strict := false
+		if tool.Strict != nil {
+			strict = *tool.Strict
+		}
 		cTools = append(cTools, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
 			Name:        tool.Name,
 			Description: openai.String(tool.Description),
 			Parameters:  params,
-			Strict:      openai.Bool(false),
+			Strict:      openai.Bool(strict),
 		}))
 	}
 	return cTools
@@ -870,13 +1246,19 @@ func convertChatResponseFormat(rf *llm.ResponseFormat) openai.ChatCompletionNewP
 
 func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := openai.ChatCompletionNewParams{
-		Model:    req.Model,
-		Messages: convertMessages(req.Messages, req.SystemPrompt),
+		Model:    p.requestModel(req.Model),
+		Messages: convertChatRequestMessages(req),
+	}
+	if key := p.promptCacheKey(req); key != "" {
+		params.PromptCacheKey = openai.String(key)
+	}
+	if req.Store != nil {
+		params.Store = openai.Bool(*req.Store)
 	}
 	if req.MaxTokens > 0 {
 		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
 	}
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = openai.Float(req.Temperature)
 	}
 	if len(req.Tools) > 0 {
@@ -894,6 +1276,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 	result := &llm.CompletionResponse{Model: resp.Model, Provider: p.TelemetryProviderName(), ID: resp.ID}
 	result.InputTokens = int(resp.Usage.PromptTokens)
 	result.OutputTokens = int(resp.Usage.CompletionTokens)
+	result.UsageReported = resp.Usage.JSON.PromptTokens.Valid() && resp.Usage.JSON.CompletionTokens.Valid()
+	result.CachedInputTokens = llm.ReportedTokenCount(resp.Usage.PromptTokensDetails.CachedTokens, resp.Usage.PromptTokensDetails.JSON.CachedTokens.Valid())
+	result.CacheWriteInputTokens = llm.ReportedTokenCount(resp.Usage.PromptTokensDetails.CacheWriteTokens, resp.Usage.PromptTokensDetails.JSON.CacheWriteTokens.Valid())
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		result.Content = choice.Message.Content
@@ -941,8 +1326,14 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		}
 
 		params := openai.ChatCompletionNewParams{
-			Model:    req.Model,
-			Messages: convertMessages(req.Messages, req.SystemPrompt),
+			Model:    p.requestModel(req.Model),
+			Messages: convertChatRequestMessages(req),
+		}
+		if key := p.promptCacheKey(req); key != "" {
+			params.PromptCacheKey = openai.String(key)
+		}
+		if req.Store != nil {
+			params.Store = openai.Bool(*req.Store)
 		}
 		if includeUsage {
 			params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
@@ -958,11 +1349,12 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		if req.ResponseFormat != nil {
 			params.ResponseFormat = convertChatResponseFormat(req.ResponseFormat)
 		}
-		if req.Temperature > 0 {
+		if req.HasTemperature() {
 			params.Temperature = openai.Float(req.Temperature)
 		}
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+		defer func() { _ = stream.Close() }()
 		acc := openai.ChatCompletionAccumulator{}
 		finishReason := ""
 		hasContent := false
@@ -973,6 +1365,8 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		var legacyFunctionCallName strings.Builder
 		var legacyFunctionCallArgs strings.Builder
 		var inputTokens, outputTokens int
+		var cachedInputTokens, cacheWriteInputTokens *int64
+		var usageReported bool
 		streamModel := req.Model
 
 		for stream.Next() {
@@ -989,6 +1383,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				if strings.TrimSpace(delta.Refusal) != "" {
 					hasRefusal = true
 				}
+				if req.ResponsesInput && delta.JSON.FunctionCall.Valid() {
+					legacyFunctionCallSeen = true
+				}
 				legacyName, legacyArguments := legacyFunctionCallFromJSON(delta.RawJSON())
 				if legacyName != "" {
 					legacyFunctionCallSeen = true
@@ -1000,7 +1397,12 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				}
 			}
 
-			if acc.AddChunk(chunk) {
+			if accumulated := acc.AddChunk(chunk); req.ResponsesInput {
+				if !accumulated && len(chunk.Choices) > 0 {
+					send(llm.StreamChunk{Error: errors.New("inconsistent chat stream chunks"), Done: true})
+					return
+				}
+			} else if accumulated {
 				if tc, ok := acc.JustFinishedToolCall(); ok {
 					hasToolCalls = true
 					if !send(llm.StreamChunk{
@@ -1021,9 +1423,16 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			if strings.TrimSpace(chunk.ID) != "" {
 				legacyFunctionCallIDValue = chunk.ID
 			}
-			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+			if chunk.JSON.Usage.Valid() {
 				inputTokens = int(chunk.Usage.PromptTokens)
 				outputTokens = int(chunk.Usage.CompletionTokens)
+				usageReported = chunk.Usage.JSON.PromptTokens.Valid() && chunk.Usage.JSON.CompletionTokens.Valid()
+				cachedInputTokens = llm.ReportedTokenCount(chunk.Usage.PromptTokensDetails.CachedTokens, chunk.Usage.PromptTokensDetails.JSON.CachedTokens.Valid())
+				cacheWriteInputTokens = llm.ReportedTokenCount(chunk.Usage.PromptTokensDetails.CacheWriteTokens, chunk.Usage.PromptTokensDetails.JSON.CacheWriteTokens.Valid())
+				if !send(llm.StreamChunk{InputTokens: inputTokens, OutputTokens: outputTokens, CachedInputTokens: cachedInputTokens,
+					CacheWriteInputTokens: cacheWriteInputTokens, UsageReported: usageReported, Model: streamModel, Provider: p.TelemetryProviderName()}) {
+					return
+				}
 			}
 
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
@@ -1045,7 +1454,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			return
 		}
 		legacyName := legacyFunctionCallName.String()
-		if legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
+		if !req.ResponsesInput && legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
 			hasToolCalls = true
 			if !send(llm.StreamChunk{ToolCall: &llm.ToolCall{
 				ID:        legacyFunctionCallID(legacyFunctionCallIDValue),
@@ -1055,17 +1464,74 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				return
 			}
 		}
+		// Responses publishes executable function items immediately. The SDK's
+		// JustFinishedToolCall only detects delta transitions, not a successful
+		// terminal outcome, and cannot reliably represent parallel calls. Keep
+		// the whole accumulated call set private until the stream ends cleanly.
+		var pendingCalls []llm.ToolCall
+		if req.ResponsesInput {
+			if len(acc.Choices) > 0 {
+				for _, call := range acc.Choices[0].Message.ToolCalls {
+					pendingCalls = append(pendingCalls, llm.ToolCall{
+						ID: call.ID, Name: call.Function.Name, Arguments: json.RawMessage(call.Function.Arguments),
+					})
+				}
+			}
+			if len(pendingCalls) == 0 && legacyFunctionCallSeen {
+				pendingCalls = append(pendingCalls, llm.ToolCall{
+					ID: legacyFunctionCallID(legacyFunctionCallIDValue), Name: legacyName,
+					Arguments: json.RawMessage(legacyFunctionCallArgs.String()),
+				})
+			}
+			hasToolCalls = len(pendingCalls) > 0
+		}
 		finishReason = normalizeChatStreamStopReason(finishReason, hasContent, hasRefusal, hasToolCalls)
-		send(llm.StreamChunk{
-			Done:         true,
-			StopReason:   finishReason,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Model:        streamModel,
-			Provider:     p.TelemetryProviderName(),
-		})
+		terminal := llm.StreamChunk{
+			Done:                  true,
+			StopReason:            finishReason,
+			InputTokens:           inputTokens,
+			OutputTokens:          outputTokens,
+			CachedInputTokens:     cachedInputTokens,
+			CacheWriteInputTokens: cacheWriteInputTokens,
+			UsageReported:         usageReported,
+			Model:                 streamModel,
+			Provider:              p.TelemetryProviderName(),
+		}
+		if req.ResponsesInput && hasToolCalls {
+			outcome := llm.NormalizeCompletionOutcome(&llm.CompletionResponse{StopReason: finishReason, ToolCalls: pendingCalls})
+			if outcome != llm.CompletionOutcomeRefused {
+				if finishReason != stopReasonToolCalls {
+					terminal.Error = errors.New("chat stream ended without completed tool calls")
+				} else {
+					terminal.Error = validateResponsesChatToolCalls(pendingCalls)
+				}
+				if terminal.Error == nil {
+					for _, call := range pendingCalls {
+						if !send(llm.StreamChunk{ToolCall: &call}) {
+							return
+						}
+					}
+				}
+			}
+		}
+		send(terminal)
 	}()
 	return ch
+}
+
+// Validate every call before releasing any: a malformed later call must not
+// leave an earlier executable call in a failed public Responses stream.
+func validateResponsesChatToolCalls(calls []llm.ToolCall) error {
+	seen := make(map[string]bool, len(calls))
+	for _, call := range calls {
+		var arguments map[string]json.RawMessage
+		if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" || seen[call.ID] ||
+			json.Unmarshal(call.Arguments, &arguments) != nil || arguments == nil {
+			return errors.New("chat stream returned invalid tool calls")
+		}
+		seen[call.ID] = true
+	}
+	return nil
 }
 
 func legacyFunctionCallID(responseID string) string {
@@ -1202,11 +1668,15 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	// Unknown — probe with a lightweight non-streaming responses.create
 	probeReq := &llm.CompletionRequest{
 		Model:     req.Model,
-		Messages:  []llm.Message{{Role: "user", Content: "hi"}},
+		Messages:  []llm.Message{{Role: messageRoleUser, Content: "hi"}},
 		MaxTokens: 1,
+		Store:     req.Store,
 	}
-	_, err := p.completeResponses(ctx, probeReq)
+	probe, err := p.completeResponses(ctx, probeReq)
 	if err == nil {
+		if err := llm.RecordIntermediateUsage(ctx, probe); err != nil {
+			return nil, err
+		}
 		p.mode.Store(int32(apiModeResponses))
 		return p.streamResponses(ctx, req), nil
 	}

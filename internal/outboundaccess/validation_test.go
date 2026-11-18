@@ -17,6 +17,7 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -45,6 +46,23 @@ func TestValidateSpecDirectSecurityRules(t *testing.T) {
 		{name: "transaction output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
 			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Txn-Token", Prefix: &prefix}
 		}, want: "Txn-Token"},
+		{name: "trace propagation output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "traceparent", Prefix: &prefix}
+		}, want: "trace propagation"},
+		{name: "content type output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Content-Type", Prefix: &prefix}
+		}, want: "set by the request body"},
+		{name: "idempotency output header", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Header: "Idempotency-Key", Prefix: &prefix}
+		}, want: "approval operation key"},
+		{name: "prefix with a NUL byte", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			bad := "Bearer \x00"
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Prefix: &bad}
+		}, want: "valid HTTP header value"},
+		{name: "prefix with DEL", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			bad := "Bearer \x7f"
+			d.Output = &corev1alpha1.OutboundCredentialOutput{Prefix: &bad}
+		}, want: "valid HTTP header value"},
 		{name: "http public endpoint", mutate: func(d *corev1alpha1.DirectOutboundAccess) { d.TokenEndpoint.URL = "http://issuer.example.test/token" }, want: "HTTPS"},
 		{name: "private HTTPS endpoint", mutate: func(d *corev1alpha1.DirectOutboundAccess) { d.TokenEndpoint.URL = "https://127.0.0.1/token" }, want: "private"},
 		{name: "jwt actor", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
@@ -226,5 +244,90 @@ func TestValidateSpecRejectsFragmentBearingTokenEndpoint(t *testing.T) {
 	issue := ValidateSpec(&corev1alpha1.OutboundAccessPolicy{Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: direct}})
 	if issue == nil || !strings.Contains(issue.Message, "fragment") {
 		t.Fatalf("ValidateSpec() issue = %#v", issue)
+	}
+}
+
+func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
+		// A Helm nameOverride changes app.kubernetes.io/name; the platform
+		// marker, not the chart name, decides.
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "renamed", Namespace: "tenant",
+			Labels: map[string]string{"app.kubernetes.io/name": "custom", labels.LabelPlatformIdentity: "true"}}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant",
+			Labels: map[string]string{"app.kubernetes.io/name": "orka"}}},
+		// The AI worker may exchange its own identity, which grants it nothing
+		// new, but not another worker's.
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-vendor-worker", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
+	).Build()
+	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false, "orka-ai-worker": false, "orka-vendor-worker": true} {
+		direct := validDirect()
+		direct.Subject = corev1alpha1.OutboundTokenSource{
+			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+			TokenType:         tokenexchange.TokenTypeJWT,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: name},
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
+			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
+		}
+		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{TokenRequester: "tenant/orka-ai-worker"})
+		if err != nil {
+			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
+		}
+		if denied := issue != nil && issue.Reason == ReasonReferenceDenied; denied != wantDenied {
+			t.Fatalf("%s: ResolveReferences() issue = %#v, want denied=%v", name, issue, wantDenied)
+		}
+	}
+}
+
+// An externally managed platform account (for example the chart's
+// serviceAccount.create=false) carries no label; it is refused by name.
+func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "external-controller", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "custom-ai-worker", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "custom-vendor-worker", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}},
+	).Build()
+	trust := TrustConfig{PlatformServiceAccounts: PlatformServiceAccountSet(
+		[]string{"system:serviceaccount:tenant:external-controller", "system:admin", "not-a-username"},
+		"tenant", "custom-ai-worker", "custom-vendor-worker", ""),
+		TokenRequester: "tenant/custom-ai-worker"}
+	for name, wantDenied := range map[string]bool{
+		"external-controller": true, "custom-vendor-worker": true, "custom-ai-worker": false, "workload": false,
+	} {
+		direct := validDirect()
+		direct.Subject = corev1alpha1.OutboundTokenSource{
+			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+			TokenType:         tokenexchange.TokenTypeJWT,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: name},
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
+			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
+		}
+		issue, err := ResolveReferences(context.Background(), reader, policy, trust)
+		if err != nil {
+			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
+		}
+		if denied := issue != nil && issue.Reason == ReasonReferenceDenied; denied != wantDenied {
+			t.Fatalf("%s: ResolveReferences() issue = %#v, want denied=%v", name, issue, wantDenied)
+		}
+	}
+	if got := len(trust.PlatformServiceAccounts); got != 3 {
+		t.Fatalf("PlatformServiceAccountSet kept %d entries %v, want only the ServiceAccount username and the named workers", got, trust.PlatformServiceAccounts)
 	}
 }

@@ -1,7 +1,7 @@
-name: Agent Substrate E2E
+name: Agent Substrate MCP E2E
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   pull_request:
     paths:
       - ".dockerignore"
@@ -17,6 +17,9 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/lib/substrate-*.sh"
+      - "scripts/generate-substrate-proto.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
@@ -34,6 +37,9 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/lib/substrate-*.sh"
+      - "scripts/generate-substrate-proto.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 
@@ -47,12 +53,11 @@ concurrency:
 jobs:
   agent-substrate-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 170
     env:
       KIND_CLUSTER: orka-agent-substrate-e2e
       KO_VERSION: v0.18.1
-      SUBSTRATE_REF: b80031d260959b1fc5c6f61e3099fe2a6d368af1
-      SUBSTRATE_E2E_EXTENDED: "1"
+      # Native MCP tool routing and cleanup run on every change.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,10 +68,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # The upstream Substrate clone's go.mod requires a newer toolchain
-          # than this repository's go directive, and the E2E script runs with
-          # GOTOOLCHAIN=local, so this floor must track Substrate, not go.mod.
-          go-version: "1.26.3"
+          go-version: "1.27.2"
           cache: true
 
       - name: Install kind
@@ -75,7 +77,7 @@ jobs:
       - name: Install prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq ripgrep
           echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
           go install "github.com/google/ko@${KO_VERSION}"
 
@@ -85,5 +87,5 @@ jobs:
           kubectl version --client=true
           ko version
 
-      - name: Run Agent Substrate E2E
+      - name: Run Agent Substrate MCP E2E
         run: bash scripts/agent-substrate-e2e.sh

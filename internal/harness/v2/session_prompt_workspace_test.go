@@ -57,6 +57,11 @@ func TestAgentSessionConfigurationValidation(t *testing.T) {
 	if err := base.Validate(); err != nil {
 		t.Fatalf("AgentSessionConfiguration.Validate() error = %v", err)
 	}
+	codexNone := base
+	codexNone.ReasoningEffort = "none"
+	if err := codexNone.Validate(); err != nil {
+		t.Fatalf("Codex none reasoning effort validation error = %v", err)
+	}
 	claudeMax := base
 	claudeMax.ProviderKind = "claude"
 	claudeMax.ReasoningEffort = "max"
@@ -81,6 +86,10 @@ func TestAgentSessionConfigurationValidation(t *testing.T) {
 		{name: "zero max turns", mutate: func(configuration *AgentSessionConfiguration) { configuration.MaxTurns = 0 }, wantErr: "range 1..1000"},
 		{name: "excess max turns", mutate: func(configuration *AgentSessionConfiguration) { configuration.MaxTurns = MaxAgentMaxTurns + 1 }, wantErr: "range 1..1000"},
 		{name: "unsupported effort", mutate: func(configuration *AgentSessionConfiguration) { configuration.ReasoningEffort = "extreme" }, wantErr: "unsupported reasoning effort"},
+		{name: "claude none effort", mutate: func(configuration *AgentSessionConfiguration) {
+			configuration.ProviderKind = "claude"
+			configuration.ReasoningEffort = "none"
+		}, wantErr: "claude provider does not support"},
 		{name: "codex max effort", mutate: func(configuration *AgentSessionConfiguration) { configuration.ReasoningEffort = "max" }, wantErr: "codex provider does not support"},
 		{name: "copilot effort", mutate: func(configuration *AgentSessionConfiguration) {
 			configuration.ProviderKind = "copilot"
@@ -343,6 +352,28 @@ func TestPromptLeaseRenewalRejectsStaleAndUnboundedExtension(t *testing.T) {
 	}
 }
 
+func TestPromptLeaseRenewalIsBoundedByTheLeaseItRenews(t *testing.T) {
+	current := PromptLease{Generation: 4, IssuedAt: testNow, ExpiresAt: testNow.Add(30 * time.Second)}
+	issued := testNow.Add(10 * time.Second)
+	proposed := PromptLease{Generation: 5, IssuedAt: issued, ExpiresAt: issued.Add(45 * time.Second)}
+	// A replayed or slow renewal arrives seconds after it was issued.
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(15*time.Second), time.Minute); err != nil {
+		t.Fatalf("late renewal error = %v", err)
+	}
+	early := proposed
+	early.IssuedAt = testNow.Add(-time.Second)
+	if err := ValidatePromptLeaseRenewal(current, early, 4, issued, time.Minute); err == nil || !strings.Contains(err.Error(), "before the lease") {
+		t.Fatalf("renewal issued before the current lease error = %v", err)
+	}
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(-2*time.Second), time.Minute); err == nil || !strings.Contains(err.Error(), "clock skew") {
+		t.Fatalf("future-issued renewal error = %v", err)
+	}
+	// Arriving late never lengthens the lease beyond its own duration.
+	if err := ValidatePromptLeaseRenewal(current, proposed, 4, issued.Add(46*time.Second), time.Minute); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired renewal error = %v", err)
+	}
+}
+
 func TestPermissionDecisionAndLateCancellationSemantics(t *testing.T) {
 	if err := (PermissionDecision{Outcome: PermissionDecisionCancelled, OptionID: "allow"}).Validate(); err == nil {
 		t.Fatal("cancelled permission decision selected an option")
@@ -527,6 +558,17 @@ func TestCapabilitiesStatusAndDrainContracts(t *testing.T) {
 	if err := status.Validate(); err == nil || !strings.Contains(err.Error(), "active prompt count") {
 		t.Fatalf("inconsistent status count validation = %v", err)
 	}
+	status.Pressure.ActivePrompts = 0
+	status.Drain.WorkerEvictionAt = testNow
+	if err := status.Validate(); err == nil || !strings.Contains(err.Error(), "inactive drain") {
+		t.Fatalf("worker eviction without a requested drain validation = %v", err)
+	}
+	status.Lifecycle = SupervisorLifecycleDraining
+	status.Drain = DrainStatus{Requested: true, RequestedAt: testNow, Reason: DrainReasonWorkspaceSuspend, WorkerEvictionAt: testNow}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("worker eviction during another drain validation = %v", err)
+	}
+	status.Lifecycle, status.Drain = SupervisorLifecycleReady, DrainStatus{AcceptingNewSessions: true}
 
 	drain := DrainRequest{
 		Protocol: ProtocolVersion,
@@ -544,15 +586,19 @@ func TestCapabilitiesStatusAndDrainContracts(t *testing.T) {
 	}
 }
 
-func TestOutcomeUnknownErrorIsNeverRetryable(t *testing.T) {
-	response := ErrorResponse{
-		Protocol:  ProtocolVersion,
-		Code:      ErrorCodeOutcomeUnknown,
-		Message:   "provider settlement could not be proven",
-		Retryable: true,
-	}
-	if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "never") {
-		t.Fatalf("retryable outcome_unknown validation = %v", err)
+func TestTerminalErrorsAreNeverRetryable(t *testing.T) {
+	for _, code := range []ErrorCode{ErrorCodeOutcomeUnknown, ErrorCodeWorkspaceResumeLost, ErrorCodePromptNotAccepted} {
+		t.Run(string(code), func(t *testing.T) {
+			response := ErrorResponse{
+				Protocol:  ProtocolVersion,
+				Code:      code,
+				Message:   "terminal operation failure",
+				Retryable: true,
+			}
+			if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "never") {
+				t.Fatalf("retryable %s validation = %v", code, err)
+			}
+		})
 	}
 }
 

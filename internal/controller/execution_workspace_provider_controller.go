@@ -11,14 +11,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 )
 
 const (
@@ -62,7 +63,7 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 				Type:               string(workspacev1alpha1.ConditionProviderReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             "ReferencesRemain",
-				Message:            "provider deletion is blocked by bound pools or workspaces",
+				Message:            "provider deletion is blocked by bound pools, classes, workspaces or checkpoints",
 				ObservedGeneration: provider.Generation,
 			}); err != nil {
 				return ctrl.Result{}, err
@@ -83,7 +84,7 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		if err := r.Update(ctx, provider); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	now := time.Now().UTC()
@@ -114,24 +115,26 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	ready := heartbeatFresh && adapterObserved && adapterIdentified && contractsCompatible && parametersValid &&
-		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive && workspaceProviderNameSupportsRouting(provider.Name) &&
+		!workspaceProviderControllerReserved(provider.Spec.ControllerName)
 
-	conditions := []metav1.Condition{
-		{
+	conditions := make([]metav1.Condition, 0, 3)
+	conditions = append(conditions,
+		metav1.Condition{
 			Type:               string(workspacev1alpha1.ConditionProviderHeartbeat),
 			Status:             conditionStatus(heartbeatFresh),
 			Reason:             conditionReason(heartbeatFresh, string(workspacev1alpha1.ReasonHeartbeatExpired)),
 			Message:            chooseMessage(heartbeatFresh, "provider heartbeat is fresh", "provider heartbeat is missing or expired"),
 			ObservedGeneration: provider.Generation,
 		},
-		{
+		metav1.Condition{
 			Type:               string(workspacev1alpha1.ConditionProviderCompatible),
 			Status:             conditionStatus(contractsCompatible),
 			Reason:             conditionReason(contractsCompatible, string(workspacev1alpha1.ReasonIncompatibleContract)),
 			Message:            chooseMessage(contractsCompatible, "provider supports all required contracts", "provider does not support every required contract"),
 			ObservedGeneration: provider.Generation,
 		},
-	}
+	)
 	readyReason := string(workspacev1alpha1.ReasonReady)
 	readyMessage := "provider accepts new workspaces"
 	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining {
@@ -140,6 +143,12 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	} else if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled {
 		readyReason = string(workspacev1alpha1.ReasonProviderDisabled)
 		readyMessage = "provider is disabled and permits cleanup only"
+	} else if !workspaceProviderNameSupportsRouting(provider.Name) {
+		readyReason = reasonProviderNameUnsupported
+		readyMessage = messageProviderNameUnsupported
+	} else if workspaceProviderControllerReserved(provider.Spec.ControllerName) {
+		readyReason = reasonProviderControllerReserved
+		readyMessage = messageProviderControllerReserved
 	} else if !heartbeatFresh {
 		readyReason = string(workspacev1alpha1.ReasonHeartbeatExpired)
 		readyMessage = "provider heartbeat is missing or expired"
@@ -171,6 +180,20 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	return ctrl.Result{RequeueAfter: defaultProviderHeartbeatCheck}, nil
 }
 
+// The shared checkpoint policy authorizes the exact registration named by its
+// routing label. Core cannot replace that name with a hash or annotation.
+// Core treats workspaces and checkpoints labeled with the legacy ACP routing
+// identity as legacy-owned, and legacy registrations under the original route
+// must retire under the previous release, so no registration may claim either
+// form as controllerName.
+func workspaceProviderControllerReserved(controllerName string) bool {
+	return controllerName == acpWorkspaceControllerLabelValue || controllerName == acpWorkspaceProviderControllerName
+}
+
+func workspaceProviderNameSupportsRouting(name string) bool {
+	return len(validation.IsDNS1123Subdomain(name)) == 0 && len(validation.IsValidLabelValue(name)) == 0
+}
+
 func (r *ExecutionWorkspaceProviderReconciler) providerParametersClusterScoped(
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (bool, string, string, error) {
@@ -195,10 +218,7 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 	ctx context.Context,
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (bool, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	var pools workspacev1alpha1.ExecutionWorkspacePoolList
 	if err := reader.List(ctx, &pools); err != nil {
 		return false, fmt.Errorf("list workspace pools: %w", err)
@@ -226,6 +246,26 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 	for i := range workspaces.Items {
 		binding := workspaces.Items[i].Spec.ProviderBinding
 		if binding.Name == provider.Name && (binding.UID == "" || binding.UID == provider.UID) {
+			return true, nil
+		}
+	}
+	if r.RESTMapper != nil {
+		gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
+		if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			// Cleanup-only installations may have just the four base workspace
+			// APIs. Discovery must prove absence before omitting this scan.
+			if apimeta.IsNoMatchError(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("discover workspace checkpoints: %w", err)
+		}
+	}
+	var checkpoints workspacev1alpha1.ExecutionWorkspaceCheckpointList
+	if err := reader.List(ctx, &checkpoints); err != nil {
+		return false, fmt.Errorf("list workspace checkpoints: %w", err)
+	}
+	for _, checkpoint := range checkpoints.Items {
+		if checkpoint.Labels[workspaceCheckpointProviderNameLabel] == provider.Name {
 			return true, nil
 		}
 	}

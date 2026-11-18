@@ -20,11 +20,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/orka-agents/orka/internal/security"
 	securityslices "github.com/orka-agents/orka/internal/security/slices"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	"github.com/orka-agents/orka/workers/common"
@@ -38,16 +40,36 @@ var (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(generalWorkerExitCode(err))
 	}
 }
 
+func generalWorkerExitCode(err error) int {
+	if errors.Is(err, errValidationCommandUnavailable) {
+		return workerenv.RepositoryValidationUnavailableExitCode
+	}
+	return 1
+}
+
 func run() (err error) {
+	if len(os.Args) > 1 && os.Args[1] == "--run-validation-network-sandbox" {
+		return runValidationNetworkSandbox(os.Args[2:])
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--materialize-validation-command" {
+		return materializeValidationCommand(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-access" {
+		return waitForValidationNetworkAccess(ctx, os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--wait-for-validation-network-policy" {
+		return waitForValidationNetworkPolicy(ctx, os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--security-mapper" {
 		return runSecurityMapper(ctx)
@@ -58,14 +80,7 @@ func run() (err error) {
 	taskNamespace := baseEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
 	defer func() {
-		if err != nil {
-			recordGeneralWorkerFailed(eventRecorder, taskName, err)
-			return
-		}
-		common.RecordEventWithTimeout(eventRecorder, "WorkerCompleted", 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("General worker completed"),
-		)
+		err = finishGeneralWorkerRun(ctx, eventRecorder, taskName, err)
 	}()
 
 	transactionLogFields := workerenv.TransactionLogFields(
@@ -123,8 +138,11 @@ func run() (err error) {
 	output := stdout.String() + stderr.String()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if submitErr := submitResult(workDir, output); submitErr == nil {
-				recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+			if submitErr := submitResult(ctx, workDir, output); submitErr == nil {
+				recordGeneralResultSubmitted(ctx, eventRecorder, taskName, len(output))
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
 			}
 			recordGeneralWorkerFailed(
 				eventRecorder,
@@ -136,18 +154,43 @@ func run() (err error) {
 		return err
 	}
 
-	if err := submitResult(workDir, output); err != nil {
+	if err := submitResult(ctx, workDir, output); err != nil {
 		return err
 	}
-	recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+	recordGeneralResultSubmitted(ctx, eventRecorder, taskName, len(output))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		taskNamespace, taskName, transactionLogFields)
 	return nil
 }
 
-func recordGeneralResultSubmitted(recorder common.EventRecorder, taskName string, resultLength int) {
-	common.RecordEventWithTimeout(recorder, "ResultSubmitted", 0,
+func finishGeneralWorkerRun(
+	ctx context.Context, recorder common.EventRecorder, taskName string, runErr error,
+) error {
+	if runErr == nil {
+		runErr = ctx.Err()
+	}
+	// Settle the outcome before publishing; a lost response must not change it.
+	if runErr == nil {
+		common.RecordEventWithTimeout(recorder, "WorkerCompleted", 0,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("General worker completed"),
+		)
+	}
+	if runErr != nil {
+		recordGeneralWorkerFailed(recorder, taskName, runErr)
+		return runErr
+	}
+	return nil
+}
+
+func recordGeneralResultSubmitted(
+	ctx context.Context, recorder common.EventRecorder, taskName string, resultLength int,
+) {
+	common.RecordEvent(ctx, recorder, "ResultSubmitted",
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("General worker submitted result"),
 		common.WithEventContent(generalEventContent(map[string]any{"resultLength": resultLength})),
@@ -231,7 +274,7 @@ func workspaceRoot() string {
 	return workspaceDir
 }
 
-func submitResult(workDir, output string) error {
+func submitResult(ctx context.Context, workDir, output string) error {
 	if os.Getenv(workerenv.ResultEndpoint) == "" && os.Getenv(workerenv.ControllerURL) == "" {
 		return nil
 	}
@@ -246,10 +289,10 @@ func submitResult(workDir, output string) error {
 	if err != nil {
 		return err
 	}
-	if err := common.SubmitResult(resultBytes); err != nil {
+	if err := common.SubmitResultContext(ctx, resultBytes); err != nil {
 		return err
 	}
-	return common.UploadArtifacts()
+	return common.UploadArtifactsContext(ctx)
 }
 
 func configurePublicationRemote(workDir string) error {
@@ -273,10 +316,23 @@ func runSecurityMapper(ctx context.Context) error {
 		return fmt.Errorf("security mapper requires a git workspace")
 	}
 	repositoryScan := strings.TrimSpace(os.Getenv(security.EnvRepositoryScanName))
+	var investigations []security.SecurityInvestigation
+	if raw := strings.TrimSpace(os.Getenv(security.EnvInvestigations)); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &investigations); err != nil {
+			return fmt.Errorf("decode security investigations: %w", err)
+		}
+	}
+	baselineAudit, _ := strconv.ParseBool(os.Getenv(security.EnvBaselineAudit))
 	slices, err := securityslices.MapRepository(workDir, securityslices.MapperOptions{
 		RepositoryScan: repositoryScan,
 		SubPath:        os.Getenv(workerenv.WorkspaceSubpath),
+		Investigations: investigations,
+		BaselineAudit:  baselineAudit,
 	})
+	if err != nil {
+		return err
+	}
+	references, err := securityslices.ReferenceFiles(workDir, slices)
 	if err != nil {
 		return err
 	}
@@ -287,21 +343,13 @@ func runSecurityMapper(ctx context.Context) error {
 	if headCommit == "" {
 		headCommit = resolvedHeadCommit
 	}
+	contextSlices := make([]store.ReviewSlice, len(slices))
 	for i := range slices {
-		contextSlice := slices[i]
-		contextSlice.ChangedFiles = append([]string(nil), changedFiles...)
-		contextSlice.ChangedLineRanges = append([]security.ChangedLineRange(nil), changedLineRanges...)
-		_, manifest, err := security.BuildReviewContext(workDir, contextSlice, security.ReviewContextOptions{})
-		if err != nil {
-			return fmt.Errorf("build security review context for %s: %w", contextSlice.ID, err)
-		}
-		manifestData, err := json.Marshal(manifest)
-		if err != nil {
-			return fmt.Errorf("marshal security review context for %s: %w", contextSlice.ID, err)
-		}
-		if err := common.WriteArtifactFile(security.ReviewContextArtifactName(contextSlice.ID), manifestData); err != nil {
-			return err
-		}
+		contextSlices[i] = slices[i]
+		// BuildReviewContext only reads these; sharing keeps memory flat
+		// when many slices see a large diff.
+		contextSlices[i].ChangedFiles = changedFiles
+		contextSlices[i].ChangedLineRanges = changedLineRanges
 	}
 	artifact := security.ReviewSlicesArtifact{
 		SchemaVersion:        security.SchemaVersionReviewSlices,
@@ -318,12 +366,31 @@ func runSecurityMapper(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The uploader skips a file over its per-file limit, which would leave
+	// the run without its slices.
+	if len(data) > common.MaxArtifactFileBytes {
+		return fmt.Errorf("security slices artifact is %d bytes, above the %d byte artifact limit",
+			len(data), common.MaxArtifactFileBytes)
+	}
+	// The contexts share the upload limit with the slices artifact; keep
+	// headroom for the run's other artifacts.
+	const otherArtifactsBytes = 2 << 20
+	encoded, err := security.BuildReviewContexts(workDir, contextSlices, references,
+		min(security.MaxReviewContextsBytes, common.MaxArtifactTotalBytes-otherArtifactsBytes-len(data)))
+	if err != nil {
+		return fmt.Errorf("marshal security review contexts: %w", err)
+	}
+	for i := range slices {
+		if err := common.WriteArtifactFile(security.ReviewContextArtifactName(slices[i].ID), encoded[i]); err != nil {
+			return err
+		}
+	}
 	if err := common.WriteArtifactFile(security.ArtifactSlices, data); err != nil {
 		return err
 	}
 	output := fmt.Sprintf("security mapper wrote %d review slices\n", len(slices))
 	fmt.Print(output)
-	return submitResult(workDir, output)
+	return submitResult(ctx, workDir, output)
 }
 
 func changedFilesForSecurityScan(

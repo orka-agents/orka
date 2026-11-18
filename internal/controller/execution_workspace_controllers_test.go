@@ -20,11 +20,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
+
+const FakeWorkspaceControllerName = "fixture.workspace.orka.ai"
 
 func TestExecutionWorkspaceProviderReconcilerEvaluatesLifecycleAndHeartbeat(t *testing.T) {
 	t.Parallel()
@@ -221,6 +224,23 @@ func TestExecutionWorkspaceProviderDeletionBlockedByReferences(t *testing.T) {
 	}
 }
 
+func TestExecutionWorkspaceProviderDeletionWaitsForIndependentCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	provider := testGenericProvider("retained-provider")
+	checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "retained-data", Labels: map[string]string{workspaceCheckpointProviderNameLabel: provider.Name}}}
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).WithObjects(provider, checkpoint).Build()
+	r := &ExecutionWorkspaceProviderReconciler{Client: c, APIReader: c}
+	if blocked, err := r.providerHasReferences(ctx, provider); err != nil || !blocked {
+		t.Fatalf("retained checkpoint did not protect its provider: blocked %v, error %v", blocked, err)
+	}
+	if err := c.Delete(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := r.providerHasReferences(ctx, provider); err != nil || blocked {
+		t.Fatalf("provider remained protected after checkpoint deletion: blocked %v, error %v", blocked, err)
+	}
+}
+
 func TestExecutionWorkspaceClassReconcilerResolvesReadyProvider(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -271,6 +291,87 @@ func TestExecutionWorkspaceClassReconcilerResolvesReadyProvider(t *testing.T) {
 	}
 	if got.Status.ProfileHash != pinnedHash {
 		t.Fatalf("profile hash changed from %q to %q", pinnedHash, got.Status.ProfileHash)
+	}
+}
+
+// rejectClassSpecUpdates simulates the API server's functional-spec
+// immutability rule: any full-object class Update is rejected the way a
+// round-tripped spec (e.g. a "2m" duration re-serialized as "2m0s") is
+// rejected in a real cluster. Finalizer management must therefore go through
+// metadata-only patches.
+func rejectClassSpecUpdates() interceptor.Funcs {
+	return interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*workspacev1alpha1.ExecutionWorkspaceClass); ok {
+				return apierrors.NewInvalid(
+					workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceClass").GroupKind(),
+					obj.GetName(),
+					nil,
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	}
+}
+
+func TestExecutionWorkspaceClassFinalizerSurvivesImmutableSpecRule(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "workspace-class-imm"}}
+	provider := testGenericProvider("provider-class-imm")
+	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureSuspend,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	provider.Status.Conditions = []metav1.Condition{{
+		Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue, Reason: "Ready",
+	}}
+	class := testGenericClass(ns.Name, "class", provider.Name)
+	mapper, parameters := testParameterMapping(ns.Name, class.Spec.ParametersRef)
+	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(class).
+		WithInterceptorFuncs(rejectClassSpecUpdates()).
+		WithObjects(ns, provider, class, parameters).
+		Build()
+	reconciler := &ExecutionWorkspaceClassReconciler{Client: c, RESTMapper: mapper}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile class under the immutable-spec rule: %v", err)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := c.Get(ctx, request.NamespacedName, got); err != nil {
+		t.Fatalf("get class: %v", err)
+	}
+	if !workspaceprovider.ConditionIsTrue(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady)) {
+		t.Fatalf("class did not become Ready under the immutable-spec rule: %#v", got.Status.Conditions)
+	}
+	found := false
+	for _, finalizer := range got.Finalizers {
+		if finalizer == executionWorkspaceClassFinalizer {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("class finalizer missing after reconcile: %v", got.Finalizers)
+	}
+
+	now := metav1.Now()
+	got.DeletionTimestamp = &now
+	deleting := got.DeepCopy()
+	deleter := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(deleting).
+		WithInterceptorFuncs(rejectClassSpecUpdates()).
+		WithObjects(deleting).
+		Build()
+	deletionReconciler := &ExecutionWorkspaceClassReconciler{Client: deleter, RESTMapper: mapper}
+	if _, err := deletionReconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reconcile deleting class under the immutable-spec rule: %v", err)
+	}
+	final := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := deleter.Get(ctx, request.NamespacedName, final); !apierrors.IsNotFound(err) {
+		t.Fatalf("class was not released after finalizer removal: obj=%v err=%v", final.Finalizers, err)
 	}
 }
 
@@ -474,7 +575,7 @@ func TestWorkspaceAttachmentManagerRotatesAndRevokesCredentials(t *testing.T) {
 	manager := WorkspaceAttachmentManager{Client: c, LeaseTTL: time.Minute, Now: func() time.Time {
 		return time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	}}
-	result, err := manager.Attach(ctx, workspace, task)
+	result, err := manager.Attach(ctx, workspace, task, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -560,60 +661,23 @@ func TestWorkspaceClassAuthorizerUsesUseVerb(t *testing.T) {
 	}
 }
 
-func TestFakeWorkspaceProviderReconcilesProviderPoolAndWorkspace(t *testing.T) {
+func TestAgentHostAuthorizerReviewsEachResourceAtItsVersion(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	scheme := testWorkspaceScheme(t)
-	provider := testGenericProvider("fake-provider")
-	class := testGenericClass("default", "class", provider.Name)
-	pool := testGenericPool("default", "pool", provider.Name)
-	class.Spec.ProviderRef = nil
-	class.Spec.ParametersRef = nil
-	class.Spec.PoolRef = &corev1.LocalObjectReference{Name: pool.Name}
-	workspace := testBoundWorkspace(t, "default", "workspace", class.Name, provider.Name)
-	workspace.Spec.Attachment = workspaceAttachmentForTest(
-		"attachment", 3, metav1.NewTime(time.Now().Add(time.Minute)),
-	)
-	suspended := testBoundWorkspace(t, "default", "suspended-workspace", class.Name, provider.Name)
-	suspended.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
-	mapper, parameters := preparePooledClassProfileForTest(t, provider, pool, class, workspace, suspended)
-	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
-	workspace.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
-		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	base := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).Build()
+	capture := &subjectAccessReviewClient{Client: base, allowed: true}
+	authorizer := AgentHostTemplateAuthorizer{Client: capture}
+	caller := authenticationv1.UserInfo{Username: "alice"}
+	if err := authorizer.AuthorizeSecretRead(context.Background(), defaultNS, "alice-github", caller); err != nil {
+		t.Fatalf("AuthorizeSecretRead: %v", err)
 	}
-	markWorkspaceAdmittedForPolicyReview(suspended, suspended.Generation)
-	suspended.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
-		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	if attrs := capture.review.Spec.ResourceAttributes; attrs.Verb != "get" || attrs.Group != "" || attrs.Version != "v1" || attrs.Resource != "secrets" {
+		t.Fatalf("Secret review attributes = %#v", attrs)
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(provider, pool, workspace, suspended).
-		WithObjects(provider, class, pool, workspace, suspended, parameters).
-		Build()
-	providerReconciler := &FakeExecutionWorkspaceProviderReconciler{Client: c}
-	if _, err := providerReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
-		t.Fatalf("reconcile fake provider: %v", err)
+	if err := authorizer.AuthorizeAgentHostTemplate(context.Background(), defaultNS, "copilotd", caller); err != nil {
+		t.Fatalf("AuthorizeAgentHostTemplate: %v", err)
 	}
-	workspaceReconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
-	if _, err := workspaceReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}); err != nil {
-		t.Fatalf("reconcile fake workspace: %v", err)
-	}
-	poolReconciler := &FakeExecutionWorkspacePoolReconciler{Client: c}
-	if _, err := poolReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}); err != nil {
-		t.Fatalf("reconcile fake pool: %v", err)
-	}
-	gotWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, gotWorkspace); err != nil {
-		t.Fatalf("get fake workspace: %v", err)
-	}
-	if gotWorkspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached || gotWorkspace.Status.AttachedEpoch != 3 {
-		t.Fatalf("fake workspace status = %#v", gotWorkspace.Status)
-	}
-	gotPool := &workspacev1alpha1.ExecutionWorkspacePool{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, gotPool); err != nil {
-		t.Fatalf("get fake pool: %v", err)
-	}
-	if gotPool.Status.Allocated != 1 || gotPool.Status.Suspended != 1 || gotPool.Status.Total < 2 {
-		t.Fatalf("fake pool status = %#v", gotPool.Status)
+	if attrs := capture.review.Spec.ResourceAttributes; attrs.Verb != "use" || attrs.Group != "core.orka.ai" || attrs.Version != "v1alpha1" {
+		t.Fatalf("template review attributes = %#v", attrs)
 	}
 }
 
@@ -776,3 +840,67 @@ func preparePooledClassProfileForTest(
 	}
 	return mapper, parameters
 }
+
+// Cleanup-only recovery installs the core finalizer only on ACP-owned
+// workspaces: adapters registered solely under the enabled provider API (the
+// development fake provider) are not running in cleanup-only mode, and a
+// finalizer no adapter can settle with StateDeleted would make the object
+// undeletable.
+func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
+	t.Parallel()
+	const cleanupTestNamespace = "cleanup-ns"
+	ctx := context.Background()
+	scheme := testWorkspaceScheme(t)
+	acpOwned := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: cleanupTestNamespace, Name: "acp-owned", UID: types.UID("acp-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+		},
+	}
+	foreign := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: cleanupTestNamespace, Name: "fake-owned", UID: types.UID("fake-owned-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: FakeWorkspaceControllerName},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(acpOwned, foreign).Build()
+	reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, CleanupOnly: true}
+	for _, name := range []string{acpOwned.Name, foreign.Name} {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: cleanupTestNamespace, Name: name},
+		}); err != nil {
+			t.Fatalf("cleanup-only reconcile %s: %v", name, err)
+		}
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: acpOwned.Name}, got); err != nil {
+		t.Fatalf("read ACP workspace: %v", err)
+	}
+	if len(got.Finalizers) == 0 {
+		t.Fatal("an ACP-owned workspace must gain the cleanup finalizer so retention can reclaim it")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: cleanupTestNamespace, Name: foreign.Name}, got); err != nil {
+		t.Fatalf("read fake workspace: %v", err)
+	}
+	if len(got.Finalizers) != 0 {
+		t.Fatal("a non-ACP workspace must not gain a finalizer no running adapter can ever settle")
+	}
+}
+
+// A substrate-backend Suspend class must not advertise readiness when its
+// profile also carries agent-sandbox inputs: resolution rejects that profile,
+// so every Task selecting the class would fail after admission.
+
+// A StorageClass change re-enqueues every class so a created or corrected
+// storage class lifts a stale NotReady without an unrelated class edit.
+
+// The reserved ACP adapter advertises suspend per provider, but a class that
+// permits Suspend goes Ready only when it allows Session reuse and its
+// RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy;
+// otherwise every Task relying on the advertised lifecycle would fail later
+// at binding or detach-action resolution.
+
+// A sandbox-backend Suspend class goes Ready only when its profile passes the
+// SAME validators Task resolution runs: the frozen durable-volume shape and
+// the pinned Delete-reclaim storage class - and never while the profile also
+// carries substrate inputs.

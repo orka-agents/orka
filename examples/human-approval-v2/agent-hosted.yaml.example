@@ -1,0 +1,17 @@
+abiVersion: v0
+metadata:
+  name: human-approval-hosted
+model:
+  provider: openai-compatible
+  baseURL: https://api.openai.com/v1
+  name: gpt-4.1
+instructions: |
+  Follow the requested simulated inventory and work-order workflow. Use each
+  requested tool once. Wait for its returned result before continuing. Report
+  a denial or uncertain outcome without retrying the action. Human approval
+  is enforced by Orka; never treat your own statement as permission to act.
+tools: []
+# Export brokeredTools from tools.yaml during setup; do not add tool endpoints here.
+expose:
+  openai: true
+  port: 8088

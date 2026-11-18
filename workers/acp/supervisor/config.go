@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspacedelta"
@@ -29,17 +32,42 @@ type ProviderProfile struct {
 	AuthMethodID          string
 	AdapterName           string
 	AdapterDigest         string
-	PrepareSession        func(acp.SessionPaths) error
+	// ValidateWorkspace rejects a materialized workspace the provider cannot
+	// run safely, before any provider state or child process exists. Its
+	// error fails the create permanently with a caller-visible reason.
+	ValidateWorkspace func(acp.SessionPaths) error
+	PrepareSession    func(acp.SessionPaths) error
 }
 
 type ProviderSessionProjection struct {
+	Instructions   *acp.InstructionProjection
 	AdditionalArgs []string
 	Environment    map[string]string
 	NewSessionMeta acp.Meta
+	// AgentDiagnosticFilter recognizes provider CLI diagnostics the adapter
+	// wrote into the ACP agent message stream instead of its own log. Nil
+	// forwards every chunk.
+	AgentDiagnosticFilter *AgentDiagnosticFilter
 }
 
-type ArtifactUploader interface {
-	UploadWorkspaceDelta(context.Context, harnessv2.CreateWorkspaceDeltaRequest, []byte, string) (harnessv2.ArtifactReference, error)
+// AgentDiagnosticFilter recognizes assistant text chunks that are provider
+// CLI diagnostics rather than model output. Recognized chunks are withheld
+// from the harness event stream and the terminal assistant text and logged by
+// the supervisor instead. The recognizer sees only the chunk text; the
+// supervisor anchors it on prompt state it can prove, so a model chunk that
+// merely repeats a diagnostic sentence is forwarded: Startup diagnostics are
+// withheld only when the session received them from the child
+// (acp.PromptEvent.ReceivedAt, stamped before any buffering) before the
+// provider proxy began relaying the prompt's first non-error inference
+// response. Model output can only be derived from those bytes, while the CLI
+// emits its startup diagnostics ahead of its first inference request.
+//
+// The recognizer returns a summary the supervisor may log. Chunk text is
+// child-controlled and the child holds session credentials, so the summary
+// must be built only from values the supervisor already knows (such as the
+// session's own exclusion list), never from the chunk itself.
+type AgentDiagnosticFilter struct {
+	Startup func(text string) (summary string, ok bool)
 }
 
 type WorkspaceMaterializer interface {
@@ -53,6 +81,14 @@ func (f WorkspaceMaterializerFunc) Materialize(ctx context.Context, request harn
 }
 
 type Config struct {
+	// Tracer belongs to this supervisor. Nil disables instrumentation. It never
+	// enters the provider process configuration or environment.
+	Tracer trace.Tracer
+	// GenAITracer and Meter record GenAI invoke_agent, chat and execute_tool
+	// telemetry derived from the ACP session stream and provider proxy. Nil
+	// disables each. They never capture prompt, completion or tool content.
+	GenAITracer   trace.Tracer
+	Meter         metric.Meter
 	ListenAddress string
 	Fence         harnessv2.Fence
 	Capabilities  harnessv2.CapabilitiesResponse
@@ -62,17 +98,53 @@ type Config struct {
 	CapabilitySecret      []byte
 	RequireCapabilities   bool
 
-	SessionBaseDir        string
+	SessionBaseDir string
+	// DurableWorkspaceDir, when set, hosts each logical session's repository
+	// workspace on the provider's durable data volume so a data-only cold
+	// suspension preserves exactly that directory. The session root, home,
+	// temporary files, XDG state, and every credential stay under the
+	// ephemeral SessionBaseDir tree - EXCEPT the non-secret session identity
+	// allocator state (high-water mark, range, lock), which moves to
+	// <DurableWorkspaceDir>/.session-identity so a cold boot can never reuse
+	// a pre-suspension child UID/GID; snapshots must preserve it.
+	DurableWorkspaceDir string
+	// DurableWorkspaceKey gives a dedicated single-session pool one stable
+	// data directory across checkpoint restores into new RuntimeSession IDs.
+	// Empty keeps the default directory per RuntimeSession.
+	DurableWorkspaceKey   string
 	UIDAllocator          *acp.UIDAllocator
 	ProviderProxy         ProviderProxyConfig
 	MCPBroker             MCPBroker
 	WorkspaceMaterializer WorkspaceMaterializer
-	ArtifactUploader      ArtifactUploader
+	ArtifactUploader      *RemoteArtifactUploader
 	DeltaOptions          workspacedelta.Options
+	// E2EPromptWriteFaultRecorder persists direct-pool fault consumption
+	// outside the runtime Pod so replacement cannot re-arm the test fault.
+	E2EPromptWriteFaultRecorder E2EPromptWriteFaultRecorder
 
 	InitializeTimeout time.Duration
 	PermissionTimeout time.Duration
 	CancelGrace       time.Duration
+
+	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
+	// exact prompt marker. The supervisor aborts the first authenticated request
+	// for each operation after fully decoding and validating it, but before
+	// recording the operation. The one-shot record survives runtime and
+	// supervisor recreation so live conformance exposes an accidental retry.
+	E2EPromptWriteAmbiguityMarker string
+
+	// Toolboxes are the frozen profile toolboxes bound into this Pod, in
+	// declared order. Their PATH folders are appended after the default child
+	// PATH. The supervisor never opens or runs anything inside them.
+	Toolboxes []harnessv2.RuntimeToolbox
+	// ToolboxMountMethod is how the controller bound the toolboxes. With
+	// imageVolume the files were never sanitized, so startup runs the
+	// unprivileged architecture check.
+	ToolboxMountMethod string
+	// Skills are the frozen profile skills bound read-only into this Pod at
+	// harnessv2.RuntimeSkillMountRoot/<name>. Each session receives a
+	// validated private copy in its runtime's native skills folder.
+	Skills []harnessv2.RuntimeSkill
 }
 
 func (c Config) Validate() error {
@@ -94,20 +166,11 @@ func (c Config) Validate() error {
 	if c.Capabilities.ProfileDigestSchemaVersion != c.Fence.ProfileDigestSchemaVersion {
 		return fmt.Errorf("capabilities and fence profile digest schema versions differ")
 	}
-	if strings.TrimSpace(c.Provider.Kind) == "" || strings.TrimSpace(c.Provider.Model) == "" {
-		return fmt.Errorf("provider kind and model are required")
+	if err := c.validateProvider(); err != nil {
+		return err
 	}
-	if len(c.Capabilities.Provider.ProviderKinds) != 1 || c.Capabilities.Provider.ProviderKinds[0] != c.Provider.Kind {
-		return fmt.Errorf("provider capability kind does not match configured provider")
-	}
-	if c.Provider.Command == "" || !filepath.IsAbs(c.Provider.Command) {
-		return fmt.Errorf("provider adapter command must be absolute")
-	}
-	if strings.TrimSpace(c.Provider.AdapterName) == "" {
-		return fmt.Errorf("provider adapter name is required")
-	}
-	if got := c.Capabilities.AdapterDigests[c.Provider.AdapterName]; got == "" || got != c.Provider.AdapterDigest {
-		return fmt.Errorf("provider adapter digest does not match advertised capability")
+	if c.Capabilities.SupportsFoundryRecovery && (c.Provider.Kind != providerKindFoundry || !c.RequireCapabilities) {
+		return fmt.Errorf("foundry recovery requires a Foundry provider and operation capabilities")
 	}
 	if len(c.ControllerBearerToken) < 32 {
 		return fmt.Errorf("controller bearer token must be at least 32 bytes")
@@ -115,8 +178,8 @@ func (c Config) Validate() error {
 	if c.RequireCapabilities && len(c.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes {
 		return fmt.Errorf("operation capability secret must be at least %d bytes", harnessv2.MinCapabilitySecretBytes)
 	}
-	if c.SessionBaseDir == "" || !filepath.IsAbs(c.SessionBaseDir) {
-		return fmt.Errorf("session base directory must be absolute")
+	if err := c.validateWorkspaceDirectories(); err != nil {
+		return err
 	}
 	if c.UIDAllocator == nil {
 		return fmt.Errorf("UID allocator is required")
@@ -136,6 +199,74 @@ func (c Config) Validate() error {
 	}
 	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
 		return fmt.Errorf("runtime timeouts must be non-negative")
+	}
+	if err := c.validatePromptWriteFault(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c Config) validateProvider() error {
+	if strings.TrimSpace(c.Provider.Kind) == "" || strings.TrimSpace(c.Provider.Model) == "" {
+		return fmt.Errorf("provider kind and model are required")
+	}
+	if len(c.Capabilities.Provider.ProviderKinds) != 1 || c.Capabilities.Provider.ProviderKinds[0] != c.Provider.Kind {
+		return fmt.Errorf("provider capability kind does not match configured provider")
+	}
+	if c.Provider.Command == "" || !filepath.IsAbs(c.Provider.Command) {
+		return fmt.Errorf("provider adapter command must be absolute")
+	}
+	if strings.TrimSpace(c.Provider.AdapterName) == "" {
+		return fmt.Errorf("provider adapter name is required")
+	}
+	if got := c.Capabilities.AdapterDigests[c.Provider.AdapterName]; got == "" || got != c.Provider.AdapterDigest {
+		return fmt.Errorf("provider adapter digest does not match advertised capability")
+	}
+	return nil
+}
+
+func (c Config) validateWorkspaceDirectories() error {
+	if c.SessionBaseDir == "" || !filepath.IsAbs(c.SessionBaseDir) {
+		return fmt.Errorf("session base directory must be absolute")
+	}
+	if c.DurableWorkspaceDir != "" && !filepath.IsAbs(c.DurableWorkspaceDir) {
+		return fmt.Errorf("durable workspace directory must be absolute when set")
+	}
+	if c.DurableWorkspaceKey != "" {
+		if c.DurableWorkspaceDir == "" || !acp.IsValidSessionPathComponent(c.DurableWorkspaceKey) {
+			return fmt.Errorf("a stable durable workspace key requires a durable root and a safe directory component")
+		}
+		if c.Capabilities.Limits.MaxResidentSessions != 1 || c.Capabilities.Limits.MaxConcurrentPrompts != 1 {
+			return fmt.Errorf("a stable durable workspace key requires a dedicated single-session pool")
+		}
+	}
+	if c.DurableWorkspaceDir != "" {
+		relative, err := filepath.Rel(filepath.Clean(c.DurableWorkspaceDir), filepath.Clean(c.SessionBaseDir))
+		if err != nil {
+			return fmt.Errorf("compare session and durable workspace directories: %w", err)
+		}
+		if relative == "." || (relative != ".." &&
+			!strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)) {
+			return fmt.Errorf("session base directory must not equal or be beneath the durable workspace directory")
+		}
+	}
+	return nil
+}
+
+func (c Config) validatePromptWriteFault() error {
+	if marker := c.E2EPromptWriteAmbiguityMarker; marker != "" {
+		if strings.TrimSpace(marker) != marker || len(marker) > 128 ||
+			!strings.HasPrefix(marker, "ORKA_E2E_") || !strings.HasSuffix(marker, "_OK") {
+			return fmt.Errorf("E2E prompt write ambiguity marker must be an ORKA_E2E_*_OK token")
+		}
+		for _, value := range marker {
+			if (value < 'A' || value > 'Z') && (value < '0' || value > '9') && value != '_' {
+				return fmt.Errorf("E2E prompt write ambiguity marker must contain only uppercase ASCII letters, digits, and underscores")
+			}
+		}
+		if c.DurableWorkspaceDir == "" && c.E2EPromptWriteFaultRecorder == nil {
+			return fmt.Errorf("E2E prompt write fault recorder is required without a durable workspace")
+		}
 	}
 	return nil
 }

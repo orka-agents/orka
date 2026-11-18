@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils'
-import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution-events'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
-import type { Task, PlanState, TaskPhase, ExecutionEvent } from '@/schemas/task'
+import type { Task, PlanState } from '@/schemas/task'
+import { isTaskTerminal } from '@/lib/task-phase'
 
 interface TimelineEvent {
   key: string
@@ -17,11 +17,6 @@ interface TimelineEvent {
    */
   bucket: number
   status: 'done' | 'active' | 'pending' | 'failed' | 'cancelled'
-}
-
-/** The backend's terminal task phases — no further iterations follow these. */
-function isTerminalPhase(phase?: TaskPhase | string): boolean {
-  return phase === 'Succeeded' || phase === 'Failed' || phase === 'Cancelled'
 }
 
 /** A condition as carried on task.status.conditions[]. */
@@ -84,7 +79,7 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   // sorts after the work that led to it rather than floating to the end.
   const iteration = task.status?.iteration ?? 0
   if (iteration > 0) {
-    const terminal = isTerminalPhase(phase)
+    const terminal = isTaskTerminal(phase)
     const startMs = task.status?.startTime
       ? new Date(task.status.startTime).getTime()
       : NaN
@@ -107,7 +102,7 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   // Terminal marker — pinned to the last bucket so it always renders last,
   // with phase-correct styling. Cancelled is terminal too (a user-stopped run),
   // shown neutrally rather than as a failure.
-  if (isTerminalPhase(phase)) {
+  if (isTaskTerminal(phase)) {
     events.push({
       key: 'terminal',
       label: phase as string,
@@ -169,7 +164,6 @@ function EventIcon({ status }: { status: TimelineEvent['status'] }) {
 interface RunTimelineProps {
   task: Task
   plan?: PlanState
-  events?: ExecutionEvent[]
   className?: string
 }
 
@@ -187,24 +181,9 @@ interface RunTimelineProps {
 export function RunTimeline({
   task,
   plan,
-  events: taskEvents = [],
   className,
 }: RunTimelineProps) {
   const events = buildEvents(task, plan)
-  const modelEvents = latestModelUsageEvents(taskEvents)
-  const contextEvent = latestModelContextEvent(taskEvents)
-  const totalIn = modelEvents.reduce(
-    (sum, event) => sum + (event.inputTokens ?? 0),
-    0,
-  )
-  const totalOut = modelEvents.reduce(
-    (sum, event) => sum + (event.outputTokens ?? 0),
-    0,
-  )
-  const totalCachedIn = modelEvents.reduce(
-    (sum, event) => sum + (event.cachedInputTokens ?? 0),
-    0,
-  )
   const iteration = task.status?.iteration ?? 0
   const progressPct = plan?.progressPct
   const goalComplete = plan?.goalComplete ?? false
@@ -252,55 +231,6 @@ export function RunTimeline({
                   aria-hidden="true"
                 />
               ))}
-          </div>
-        </div>
-      )}
-
-      {modelEvents.length > 0 && (
-        <div
-          className="rounded-md border bg-card p-3 text-xs"
-          aria-label="GenAI telemetry"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">GenAI</span>
-            <span className="rounded-full bg-muted px-2 py-0.5">
-              {totalIn + totalOut} tokens
-            </span>
-            <span className="text-muted-foreground">
-              {totalIn} input / {totalOut} output
-              {totalCachedIn > 0 ? ` / ${totalCachedIn} cached input` : ''}
-            </span>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {modelEvents.map((event) => (
-              <span
-                key={event.id || event.seq}
-                className="rounded-full border px-2 py-0.5 text-muted-foreground"
-              >
-                {event.model ?? 'unknown model'}
-                {event.provider ? ` · ${event.provider}` : ''}
-                {event.stopReason ? ` · ${event.stopReason}` : ''}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {contextEvent?.contextWindowSize !== undefined && (
-        <div
-          className="rounded-md border bg-card p-3 text-xs"
-          aria-label="GenAI context window"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">Context</span>
-            <span className="rounded-full bg-muted px-2 py-0.5">
-              {contextEvent.contextWindowUsed ?? 0} / {contextEvent.contextWindowSize} tokens
-            </span>
-            {contextEvent.contextWindowSize > 0 && (
-              <span className="text-muted-foreground">
-                {Math.round(((contextEvent.contextWindowUsed ?? 0) / contextEvent.contextWindowSize) * 100)}% used
-              </span>
-            )}
           </div>
         </div>
       )}

@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,79 +27,6 @@ func setupTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 	return NewStore(db, ":memory:")
-}
-
-func TestMigrateBackfillsMonitorItemGitHubUpdatedAtSentinel(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	_, err = db.Exec(`CREATE TABLE monitor_items (
-		monitor_namespace     TEXT NOT NULL,
-		monitor_name          TEXT NOT NULL,
-		kind                  TEXT NOT NULL,
-		item_key              TEXT NOT NULL,
-		number                INTEGER NOT NULL DEFAULT 0,
-		sha                   TEXT NOT NULL DEFAULT '',
-		title                 TEXT NOT NULL DEFAULT '',
-		body                  TEXT NOT NULL DEFAULT '',
-		html_url              TEXT NOT NULL DEFAULT '',
-		author                TEXT NOT NULL DEFAULT '',
-		state                 TEXT NOT NULL DEFAULT '',
-		labels_json           TEXT NOT NULL DEFAULT '[]',
-		snapshot_digest       TEXT NOT NULL DEFAULT '',
-		workflow_phase        TEXT NOT NULL DEFAULT '',
-		linked_pr_number      INTEGER NOT NULL DEFAULT 0,
-		last_command_id       TEXT NOT NULL DEFAULT '',
-		last_command_intent   TEXT NOT NULL DEFAULT '',
-		last_action_id        TEXT NOT NULL DEFAULT '',
-		last_action_kind      TEXT NOT NULL DEFAULT '',
-		last_action_task_name TEXT NOT NULL DEFAULT '',
-		base_branch           TEXT NOT NULL DEFAULT '',
-		head_branch           TEXT NOT NULL DEFAULT '',
-		head_sha              TEXT NOT NULL DEFAULT '',
-		base_sha              TEXT NOT NULL DEFAULT '',
-		draft                 BOOLEAN NOT NULL DEFAULT FALSE,
-		mergeable_state       TEXT NOT NULL DEFAULT '',
-		ci_state              TEXT NOT NULL DEFAULT '',
-		skip_reason           TEXT NOT NULL DEFAULT '',
-		last_review_id        TEXT NOT NULL DEFAULT '',
-		last_reviewed_head_sha TEXT NOT NULL DEFAULT '',
-		last_verdict          TEXT NOT NULL DEFAULT '',
-		repair_state          TEXT NOT NULL DEFAULT '',
-		automerge_state       TEXT NOT NULL DEFAULT '',
-		status_comment_id     TEXT NOT NULL DEFAULT '',
-		status_comment_url    TEXT NOT NULL DEFAULT '',
-		last_publish_id       TEXT NOT NULL DEFAULT '',
-		last_publish_phase    TEXT NOT NULL DEFAULT '',
-		last_publish_reason   TEXT NOT NULL DEFAULT '',
-		last_publish_url      TEXT NOT NULL DEFAULT '',
-		updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		PRIMARY KEY (monitor_namespace, monitor_name, kind, item_key)
-	)`)
-	if err != nil {
-		t.Fatalf("create old monitor_items table error = %v", err)
-	}
-	const updatedAt = "2026-06-01T12:34:56Z"
-	_, err = db.Exec(`INSERT INTO monitor_items (monitor_namespace, monitor_name, kind, item_key, number, updated_at) VALUES ('demo', 'orka', 'issue', '123', 123, ?)`, updatedAt)
-	if err != nil {
-		t.Fatalf("insert old monitor_items row error = %v", err)
-	}
-
-	if err := migrate(db); err != nil {
-		t.Fatalf("migrate() error = %v", err)
-	}
-
-	var githubUpdatedAt string
-	if err := db.QueryRow(`SELECT github_updated_at FROM monitor_items WHERE monitor_namespace = 'demo' AND monitor_name = 'orka' AND kind = 'issue' AND item_key = '123'`).Scan(&githubUpdatedAt); err != nil {
-		t.Fatalf("select github_updated_at error = %v", err)
-	}
-	if githubUpdatedAt != updatedAt {
-		t.Fatalf("github_updated_at = %q, want %q", githubUpdatedAt, updatedAt)
-	}
 }
 
 func TestResultStore(t *testing.T) {
@@ -295,7 +221,7 @@ func TestSessionStore(t *testing.T) {
 		if err := s.CreateSession(ctx, session); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
-		if err := s.DeleteSession(ctx, "ns1", "gateway-session"); !errors.Is(err, store.ErrGatewayOwnedSession) {
+		if err := s.DeleteSession(ctx, "ns1", "gateway-session", time.Now().UTC()); !errors.Is(err, store.ErrGatewayOwnedSession) {
 			t.Fatalf("DeleteSession error = %v, want ErrGatewayOwnedSession", err)
 		}
 		if _, err := s.GetSession(ctx, "ns1", "gateway-session"); err != nil {
@@ -314,7 +240,7 @@ func TestSessionStore(t *testing.T) {
 		if err := s.CreateSession(ctx, session); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
-		if err := s.DeleteSession(ctx, "ns1", "session-del"); err != nil {
+		if err := s.DeleteSession(ctx, "ns1", "session-del", time.Now().UTC()); err != nil {
 			t.Fatalf("DeleteSession: %v", err)
 		}
 
@@ -343,20 +269,20 @@ func TestSessionLocking(t *testing.T) {
 	}
 
 	t.Run("acquire lock", func(t *testing.T) {
-		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-a", ""); err != nil {
+		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-a", "", time.Now().UTC()); err != nil {
 			t.Fatalf("AcquireLock: %v", err)
 		}
 	})
 
 	t.Run("double acquire fails", func(t *testing.T) {
-		err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", "")
+		err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", "", time.Now().UTC())
 		if err == nil {
 			t.Fatal("expected error on double acquire, got nil")
 		}
 	})
 
 	t.Run("is locked by different task", func(t *testing.T) {
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "", time.Now().UTC())
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -366,7 +292,7 @@ func TestSessionLocking(t *testing.T) {
 	})
 
 	t.Run("is not locked for current holder", func(t *testing.T) {
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-a", "")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-a", "", time.Now().UTC())
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -380,7 +306,7 @@ func TestSessionLocking(t *testing.T) {
 			t.Fatalf("ReleaseLock: %v", err)
 		}
 
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "", time.Now().UTC())
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -388,13 +314,13 @@ func TestSessionLocking(t *testing.T) {
 			t.Error("expected locked=false after release")
 		}
 
-		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", ""); err != nil {
+		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", "", time.Now().UTC()); err != nil {
 			t.Fatalf("re-AcquireLock: %v", err)
 		}
 	})
 
 	t.Run("is locked for nonexistent session returns ErrNotFound", func(t *testing.T) {
-		_, err := s.IsLocked(ctx, "ns1", "nonexistent", "task-a", "")
+		_, err := s.IsLocked(ctx, "ns1", "nonexistent", "task-a", "", time.Now().UTC())
 		if err != store.ErrNotFound {
 			t.Errorf("got %v, want ErrNotFound", err)
 		}
@@ -410,10 +336,10 @@ func TestSessionLockFencesTaskUID(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-a"); err != nil {
+	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-a", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	locked, err := s.IsLocked(ctx, "ns1", "uid-lock", "task-a", "uid-b")
+	locked, err := s.IsLocked(ctx, "ns1", "uid-lock", "task-a", "uid-b", time.Now().UTC())
 	if err != nil || !locked {
 		t.Fatalf("replacement Task lock state = (%v, %v), want locked", locked, err)
 	}
@@ -424,7 +350,7 @@ func TestSessionLockFencesTaskUID(t *testing.T) {
 	if err != nil || session.ActiveTask != "task-a" || session.ActiveTaskUID != "uid-a" {
 		t.Fatalf("lock after replacement release = (%+v, %v)", session, err)
 	}
-	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-b"); err == nil {
+	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-b", time.Now().UTC()); err == nil {
 		t.Fatal("replacement Task acquired the original Task lock")
 	}
 	if err := s.ReleaseLock(ctx, "ns1", "uid-lock", "task-a", "uid-a"); err != nil {
@@ -666,7 +592,7 @@ func TestCascadeDelete(t *testing.T) {
 	}
 
 	// Delete session
-	if err := s.DeleteSession(ctx, "ns1", "cascade-session"); err != nil {
+	if err := s.DeleteSession(ctx, "ns1", "cascade-session", time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
@@ -1049,10 +975,10 @@ func TestClosedDBErrors(t *testing.T) {
 	if _, err := s.ListSessions(ctx, "ns"); err == nil {
 		t.Error("expected error from ListSessions on closed DB")
 	}
-	if err := s.AcquireLock(ctx, "ns", "s", "t", ""); err == nil {
+	if err := s.AcquireLock(ctx, "ns", "s", "t", "", time.Now().UTC()); err == nil {
 		t.Error("expected error from AcquireLock on closed DB")
 	}
-	if _, err := s.IsLocked(ctx, "ns", "s", "t", ""); err == nil {
+	if _, err := s.IsLocked(ctx, "ns", "s", "t", "", time.Now().UTC()); err == nil {
 		t.Error("expected error from IsLocked on closed DB")
 	}
 	if err := s.AppendMessages(ctx, "ns", "s", []store.SessionMessage{{Role: "user"}}); err == nil {
@@ -1107,7 +1033,7 @@ func TestAcquireLockNonexistentSession(t *testing.T) {
 	ctx := context.Background()
 
 	// AcquireLock on a session that doesn't exist should fail (rows affected = 0)
-	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x", "")
+	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x", "", time.Now().UTC())
 	if err == nil {
 		t.Fatal("expected error for nonexistent session, got nil")
 	}
@@ -1128,7 +1054,7 @@ func TestDeleteSessionNonexistent(t *testing.T) {
 	ctx := context.Background()
 
 	// Deleting a session that doesn't exist should be a no-op
-	if err := s.DeleteSession(ctx, "ns1", "never-existed"); err != nil {
+	if err := s.DeleteSession(ctx, "ns1", "never-existed", time.Now().UTC()); err != nil {
 		t.Errorf("DeleteSession nonexistent: %v", err)
 	}
 }
@@ -1178,7 +1104,7 @@ func TestListSessionsMetadata(t *testing.T) {
 	}
 
 	// Acquire lock so active_task is set
-	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task", ""); err != nil {
+	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task", "", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
@@ -1269,11 +1195,11 @@ func TestContextCancellation(t *testing.T) {
 		t.Error("expected error on cancelled context for UpdateTokenCounts")
 	}
 
-	if _, err := s.IsLocked(ctx, "ns1", "s", "t", ""); err == nil {
+	if _, err := s.IsLocked(ctx, "ns1", "s", "t", "", time.Now().UTC()); err == nil {
 		t.Error("expected error on cancelled context for IsLocked")
 	}
 
-	if err := s.AcquireLock(ctx, "ns1", "s", "t", ""); err == nil {
+	if err := s.AcquireLock(ctx, "ns1", "s", "t", "", time.Now().UTC()); err == nil {
 		t.Error("expected error on cancelled context for AcquireLock")
 	}
 }

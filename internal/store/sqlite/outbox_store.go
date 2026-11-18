@@ -17,16 +17,19 @@ var _ store.OutboxPersistenceStore = (*Store)(nil)
 // EnqueueOutboxProjection inserts a restart-safe projection record. Reusing an
 // ID with byte-identical payload and metadata is idempotent; any mismatch conflicts.
 func (s *Store) EnqueueOutboxProjection(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence) (*store.OutboxProjection, error) {
-	return s.enqueueOutboxProjection(ctx, projection, fence, true)
+	return s.enqueueOutboxProjection(ctx, projection, fence)
 }
 
-// EnqueueOutboxProjectionRecord persists an outbox record after a Kubernetes
-// control store has validated the controller epoch fence.
+// EnqueueOutboxProjectionRecord persists an outbox record for a Kubernetes
+// control store. The fence is checked against the dataset's controller epoch
+// in the transaction that commits the record.
 func (s *Store) EnqueueOutboxProjectionRecord(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence) (*store.OutboxProjection, error) {
-	return s.enqueueOutboxProjection(ctx, projection, fence, false)
+	return writeOperation(ctx, s, "EnqueueOutboxProjectionRecord", &fence, func(ctx context.Context) (*store.OutboxProjection, error) {
+		return s.enqueueOutboxProjection(ctx, projection, fence)
+	})
 }
 
-func (s *Store) enqueueOutboxProjection(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence, requireSQLiteEpoch bool) (*store.OutboxProjection, error) {
+func (s *Store) enqueueOutboxProjection(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence) (*store.OutboxProjection, error) {
 	if projection == nil {
 		return nil, store.ValidationErrorf("outbox projection is required")
 	}
@@ -35,17 +38,15 @@ func (s *Store) enqueueOutboxProjection(ctx context.Context, projection *store.O
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if requireSQLiteEpoch {
-		if err := requireControllerEpoch(ctx, tx, fence); err != nil {
-			return nil, err
-		}
+	if err := requireControllerEpoch(ctx, tx, fence); err != nil {
+		return nil, err
 	}
-	created, err := enqueueOutboxProjectionTx(ctx, tx, normalized, scheduleExplicit)
+	created, err := enqueueOutboxProjectionTx(ctx, tx.Tx, normalized, scheduleExplicit)
 	if err != nil {
 		return nil, err
 	}
@@ -71,17 +72,20 @@ func (s *Store) GetOutboxProjection(ctx context.Context, id string) (*store.Outb
 // ClaimOutboxProjections leases due pending records and expired delivering
 // records in one transaction. Attempts and versions advance before records are returned.
 func (s *Store) ClaimOutboxProjections(ctx context.Context, request store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
-	return s.claimOutboxProjections(ctx, request, true)
+	return s.claimOutboxProjections(ctx, request)
 }
 
-// ClaimOutboxProjectionRecords claims due records after a Kubernetes control
-// store has validated the controller epoch fence.
+// ClaimOutboxProjectionRecords claims due records for a Kubernetes control
+// store. The fence is checked against the dataset's controller epoch in the
+// transaction that commits the claim.
 func (s *Store) ClaimOutboxProjectionRecords(ctx context.Context, request store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
-	return s.claimOutboxProjections(ctx, request, false)
+	return writeOperation(ctx, s, "ClaimOutboxProjectionRecords", &request.Fence, func(ctx context.Context) ([]store.OutboxProjection, error) {
+		return s.claimOutboxProjections(ctx, request)
+	})
 }
 
-func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimOutboxProjectionsRequest, requireSQLiteEpoch bool) ([]store.OutboxProjection, error) {
-	fence, err := normalizeEpochFence(request.Fence)
+func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +97,7 @@ func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimO
 	if request.LeaseDuration <= 0 || request.LeaseDuration > 24*time.Hour {
 		return nil, store.ValidationErrorf("outbox lease duration must be greater than zero and no more than 24 hours")
 	}
-	request.Now = normalizeControlTime(request.Now)
+	request.Now = store.NormalizeControlTime(request.Now)
 	limit := request.Limit
 	if limit <= 0 {
 		limit = defaultOutboxClaimLimit
@@ -103,15 +107,13 @@ func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimO
 	}
 	leaseExpiresAt := request.Now.Add(request.LeaseDuration)
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if requireSQLiteEpoch {
-		if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
-			return nil, err
-		}
+	if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
+		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id FROM outbox_projections
@@ -184,17 +186,20 @@ func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimO
 //
 //nolint:gocyclo // Completion validates distinct retry, delivery, and dead-letter invariants.
 func (s *Store) CompleteOutboxProjection(ctx context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
-	return s.completeOutboxProjection(ctx, request, true)
+	return s.completeOutboxProjection(ctx, request)
 }
 
-// CompleteOutboxProjectionRecord completes a claimed record after a
-// Kubernetes control store has validated the controller epoch fence.
+// CompleteOutboxProjectionRecord completes a claimed record for a Kubernetes
+// control store. The fence is checked against the dataset's controller epoch
+// in the transaction that commits the completion.
 func (s *Store) CompleteOutboxProjectionRecord(ctx context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
-	return s.completeOutboxProjection(ctx, request, false)
+	return writeOperation(ctx, s, "CompleteOutboxProjectionRecord", &request.Fence, func(ctx context.Context) (*store.OutboxProjection, error) {
+		return s.completeOutboxProjection(ctx, request)
+	})
 }
 
 //nolint:gocyclo // Completion validates distinct retry, delivery, and dead-letter invariants.
-func (s *Store) completeOutboxProjection(ctx context.Context, request store.CompleteOutboxProjectionRequest, requireSQLiteEpoch bool) (*store.OutboxProjection, error) {
+func (s *Store) completeOutboxProjection(ctx context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	request.LeaseOwner = strings.TrimSpace(request.LeaseOwner)
 	if err := store.ValidateControlIdentifier("outbox projection ID", request.ID); err != nil {
@@ -203,7 +208,7 @@ func (s *Store) completeOutboxProjection(ctx context.Context, request store.Comp
 	if err := store.ValidateControlIdentifier("outbox lease owner", request.LeaseOwner); err != nil {
 		return nil, err
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +223,7 @@ func (s *Store) completeOutboxProjection(ctx context.Context, request store.Comp
 	if err := store.ValidateCanonicalDigest("outbox completion operation digest", request.OperationDigest); err != nil {
 		return nil, err
 	}
-	request.UpdatedAt = normalizeControlTime(request.UpdatedAt)
+	request.UpdatedAt = store.NormalizeControlTime(request.UpdatedAt)
 	request.LastError = strings.TrimSpace(request.LastError)
 	if err := store.ValidateControlReason("outbox last error", request.LastError); err != nil {
 		return nil, err
@@ -254,15 +259,13 @@ func (s *Store) completeOutboxProjection(ctx context.Context, request store.Comp
 		return nil, store.ValidationErrorf("outbox completion state must be Pending, Delivered, or DeadLetter")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if requireSQLiteEpoch {
-		if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
-			return nil, err
-		}
+	if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
+		return nil, err
 	}
 	projection, err := getOutboxProjection(ctx, tx, request.ID)
 	if err != nil {
@@ -270,15 +273,15 @@ func (s *Store) completeOutboxProjection(ctx context.Context, request store.Comp
 	}
 	if projection.LastOperationID == request.OperationID {
 		if projection.LastOperationDigest != request.OperationDigest {
-			return nil, controlConflict("outbox completion operation %q was reused with a different digest", request.OperationID)
+			return nil, store.ConflictErrorf("outbox completion operation %q was reused with a different digest", request.OperationID)
 		}
 		if outboxCompletionMatches(projection, request) {
 			return &projection, nil
 		}
-		return nil, controlConflict("outbox completion operation %q was already applied with different target values", request.OperationID)
+		return nil, store.ConflictErrorf("outbox completion operation %q was already applied with different target values", request.OperationID)
 	}
 	if projection.Version != request.ExpectedVersion || projection.State != store.OutboxProjectionDelivering || projection.LeaseOwner != request.LeaseOwner {
-		return nil, controlConflict("outbox projection %q no longer matches expected version or lease owner", projection.ID)
+		return nil, store.ConflictErrorf("outbox projection %q no longer matches expected version or lease owner", projection.ID)
 	}
 
 	availableAt := projection.AvailableAt
@@ -347,10 +350,10 @@ func normalizeOutboxProjectionForCreate(projection store.OutboxProjection, fence
 	if err := store.ValidateCanonicalDigest("outbox payload digest", projection.PayloadDigest); err != nil {
 		return store.OutboxProjection{}, store.ControllerEpochFence{}, err
 	}
-	if canonicalBytesDigest(projection.Payload) != projection.PayloadDigest {
+	if store.CanonicalBytesDigest(projection.Payload) != projection.PayloadDigest {
 		return store.OutboxProjection{}, store.ControllerEpochFence{}, store.ValidationErrorf("outbox payload digest does not match payload bytes")
 	}
-	fence, err := normalizeEpochFence(fence)
+	fence, err := store.NormalizeEpochFence(fence)
 	if err != nil {
 		return store.OutboxProjection{}, store.ControllerEpochFence{}, err
 	}
@@ -369,7 +372,7 @@ func normalizeOutboxProjectionForCreate(projection store.OutboxProjection, fence
 		return store.OutboxProjection{}, store.ControllerEpochFence{}, store.ValidationErrorf("new outbox projection must not include delivery state")
 	}
 	if defaultTime.IsZero() {
-		defaultTime = normalizeControlTime(projection.CreatedAt)
+		defaultTime = store.NormalizeControlTime(projection.CreatedAt)
 	} else {
 		defaultTime = defaultTime.UTC()
 	}
@@ -415,7 +418,7 @@ func enqueueOutboxProjectionTx(ctx context.Context, tx *sql.Tx, projection store
 	if getErr == nil && sameOutboxProjectionCreation(existing, projection, compareSchedule) {
 		return existing, nil
 	}
-	return store.OutboxProjection{}, controlConflict("outbox projection %q was reused with different payload or metadata", projection.ID)
+	return store.OutboxProjection{}, store.ConflictErrorf("outbox projection %q was reused with different payload or metadata", projection.ID)
 }
 
 func sameOutboxProjectionCreation(a, b store.OutboxProjection, compareSchedule bool) bool {

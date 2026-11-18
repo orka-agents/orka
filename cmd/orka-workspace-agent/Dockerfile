@@ -1,4 +1,4 @@
-FROM golang:1.27.0 AS builder
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 
 WORKDIR /workspace
 
@@ -8,7 +8,6 @@ RUN go mod download
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
-COPY pkg/ pkg/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 

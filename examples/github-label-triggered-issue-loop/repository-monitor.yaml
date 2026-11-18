@@ -2,21 +2,26 @@ apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryMonitor
 metadata:
   name: issue-to-pr-loop
-  namespace: default
 spec:
   provider: github
   repoURL: https://github.com/example-org/example-repo
   branch: main
-  gitSecretRef:
-    name: git-credentials
+  readCredentialRef:
+    name: orka-monitor-source-read
+  publicationReadCredentialRef:
+    name: orka-monitor-publication-read
+  publicationCredentialRef:
+    name: orka-monitor-publication
+  forgeCredentialRef:
+    name: orka-monitor-forge
   targets:
     issues:
       enabled: true
       maxPerRun: 10
       excludeLabels:
-        - blocked
-        - waiting-external
-        - security-sensitive
+      - blocked
+      - waiting-external
+      - security-sensitive
     pullRequests:
       enabled: true
       includeDrafts: false
@@ -28,22 +33,7 @@ spec:
         consumeCommandLabels: true
         requireActorPermission: write
         issues:
-          triage: orka:triage
-          research: orka:research
-          plan: orka:plan
-          approvePlan: orka:approve-plan
           implement: orka:implement
-          decompose: orka:to-issues
-          stop: orka:stop
-          resume: orka:resume
-        pullRequests:
-          review: orka:review
-          fix: orka:fix
-          fixCI: orka:fix-ci
-          updateBranch: orka:update-branch
-          automerge: orka:automerge
-          stop: orka:stop
-          resume: orka:resume
   agents:
     triager:
       name: issue-researcher
@@ -58,14 +48,10 @@ spec:
     repairer:
       name: issue-implementer
   issueWorkflow:
-    planning:
-      requireHumanApprovalFor:
-        - high
-        - security
-        - database-migration
+    planning: {}
     implementation:
-      requireApprovedPlan: true
       branchPrefix: orka/issue
+      requirePlan: true
   review:
     exactEventEnabled: true
     staleReviewTTL: 24h
@@ -75,29 +61,20 @@ spec:
       mode: summary_with_inline_findings
   repair:
     enabled: true
-    requireMaintainerOptIn: true
     maxRepairsPerPR: 5
     maxRepairsPerHead: 2
-  automerge:
-    enabled: false
-    requireMaintainerOptIn: true
-    requireGlobalMergeGate: true
-    allowedMergeMethods:
-      - squash
   policy:
     protectedLabels:
-      - security
-      - security-sensitive
-      - orka:needs-human
+    - security
+    - security-sensitive
+    - orka:needs-human
     pauseLabels:
-      - blocked
-      - waiting-external
-      - orka:pause
+    - blocked
+    - waiting-external
+    - orka:pause
     allowedRepositoryPermissions:
-      - write
-      - maintain
-      - admin
+    - write
+    - maintain
+    - admin
   validation:
-    mode: changed
-    commands:
-      - make test
+    image: ghcr.io/example-org/example-repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

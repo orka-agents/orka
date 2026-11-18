@@ -12,31 +12,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 webhooks:
-  - name: namespace-mode.{{ .Values.controller.mode }}.orka.ai
-    admissionReviewVersions: [v1]
-    sideEffects: None
-    failurePolicy: Fail
-    matchPolicy: Equivalent
-    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
-    clientConfig:
-      service:
-        name: {{ include "orka.controllerWebhookServiceName" . }}
-        namespace: {{ .Release.Namespace }}
-        path: /validate-v1-namespace-execution-mode
-        port: 443
-      {{- with .Values.webhooks.caBundle }}
-      caBundle: {{ . | quote }}
-      {{- end }}
-    rules:
-      - operations: [CREATE, UPDATE]
-        apiGroups: [""]
-        apiVersions: [v1]
-        resources: [namespaces]
-        scope: Cluster
-    objectSelector:
-      matchLabels:
-        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   - name: task-provenance.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -56,13 +31,42 @@ webhooks:
       - operations: [CREATE, UPDATE]
         apiGroups: [core.orka.ai]
         apiVersions: [v1alpha1]
-        resources: [tasks]
+        resources: [tasks, tasks/status]
         scope: Namespaced
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-  {{- if eq .Values.controller.mode "harness-v2" }}
+
+  - name: workspace-attachment-secret.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-v1-secret-workspace-attachment
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE, DELETE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [secrets]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+    objectSelector:
+      matchExpressions:
+        - key: workspace.orka.ai/attachment-for
+          operator: Exists
   - name: task-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -113,7 +117,60 @@ webhooks:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+  - name: checkpoint-source-use.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE]
+        apiGroups: [workspace.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [executionworkspacecheckpoints]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+  {{- if include "orka.agentHostsEnabled" . }}
+  # The controller serves this path only while agent hosts are enabled.
+  - name: agenthost.{{ .Values.controller.mode }}.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.controllerWebhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agenthost
+        port: 443
+      {{- with .Values.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agenthosts]
+        scope: Namespaced
+    namespaceSelector:
+      matchLabels:
+        orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   {{- end }}
+
   - name: agent-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -158,7 +215,7 @@ webhooks:
       - operations: [CREATE, UPDATE]
         apiGroups: [core.orka.ai]
         apiVersions: [v1alpha1]
-        resources: [agentruntimes]
+        resources: [agentruntimes, agentruntimes/status]
         scope: Namespaced
     namespaceSelector:
       matchLabels:

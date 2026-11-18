@@ -1,8 +1,13 @@
 name: Lint
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
+    # PR branches are linted by the pull_request event. Keep push coverage on
+    # main without running the same branch change twice.
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"
@@ -23,6 +28,12 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  # Supersede earlier runs of the same pull request. Every other event,
+  # including release workflow_call, gets a unique group and never cancels.
+  group: ${{ github.event_name == 'pull_request' && format('lint-pr-{0}', github.event.pull_request.number) || format('lint-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Go Lint
@@ -42,10 +53,34 @@ jobs:
 
       - name: Run linter
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        # Lint the whole tree on every event so findings a diff can't show,
+        # such as code another change left unused, fail before they merge.
         with:
-          version: v2.13.1
+          version: v2.14.0
           install-mode: goinstall
-          only-new-issues: true
+
+  generated:
+    name: Generated files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Test the freshness check
+        run: bash scripts/tests/verify-generated-test.sh
+
+      # Prints each stale file with the command that regenerates it.
+      - name: Fail on stale generated files
+        run: make verify-generated
 
   ui-lint:
     name: UI Lint
@@ -67,3 +102,17 @@ jobs:
 
       - name: Run UI linter
         run: bun run lint
+
+      - name: Fail on a stale route tree
+        run: |
+          set -euo pipefail
+          # Vite alone: bun run build type-checks first, which fails on a new
+          # route before the router plugin can regenerate the tree.
+          bunx vite build
+          # git status also reports the file when the PR deleted it and Vite recreated it.
+          if [[ -n "$(git status --porcelain --untracked-files=all -- src/routeTree.gen.ts)" ]]; then
+            echo "ui/src/routeTree.gen.ts is stale. TanStack Router generates it from ui/src/routes/, so never edit it by hand." >&2
+            echo "Fix: cd ui && bunx vite build, then commit ui/src/routeTree.gen.ts." >&2
+            git status --short --untracked-files=all -- src/routeTree.gen.ts >&2
+            exit 1
+          fi

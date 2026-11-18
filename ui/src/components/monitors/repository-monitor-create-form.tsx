@@ -5,15 +5,20 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
-import { useSecretNames } from '@/hooks/use-secrets'
+import { everyScheduleError, isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
 const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
 
 type ReviewEvent = (typeof REVIEW_EVENTS)[number]
+
+// The controller runs PR reviews only on these built-in runtimes; it refuses
+// other runtimes, external runtimeRef Agents, and Agents with a secretRef.
+const REVIEWER_RUNTIME_TYPES: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode'])
 
 function splitCommaList(value: string) {
   const seen = new Set<string>()
@@ -30,32 +35,6 @@ function splitCommaList(value: string) {
   return labels
 }
 
-function isCredentialFreeGitHubRepositoryURL(value: string) {
-  const repoURL = value.trim()
-  if (!repoURL) return false
-
-  if (/^git@github\.com:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:\.git)?$/.test(repoURL)) {
-    return true
-  }
-
-  if (!repoURL.startsWith('https://')) {
-    return false
-  }
-
-  try {
-    const parsed = new URL(repoURL)
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') return false
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) return false
-
-    const pathParts = parsed.pathname.split('/').filter(Boolean)
-    if (pathParts.length !== 2) return false
-
-    return pathParts.every((part) => /^[A-Za-z0-9._-]+(?:\.git)?$/.test(part))
-  } catch {
-    return false
-  }
-}
-
 function maybeObject<T extends Record<string, unknown>>(value: T) {
   const hasValue = Object.values(value).some((field) => {
     if (Array.isArray(field)) return field.length > 0
@@ -70,7 +49,6 @@ export function RepositoryMonitorCreateForm() {
   const namespace = useUIStore((s) => s.namespace)
   const createMonitor = useCreateRepositoryMonitor()
   const { data: agents, isLoading: agentsLoading } = useAgentList()
-  const { data: secrets } = useSecretNames()
 
   const [name, setName] = useState('')
   const [repoURL, setRepoURL] = useState('')
@@ -87,8 +65,9 @@ export function RepositoryMonitorCreateForm() {
   const [pauseLabels, setPauseLabels] = useState('')
   const [formError, setFormError] = useState('')
 
-  const claudeAgents = useMemo(
-    () => (agents?.items ?? []).filter((agent) => agent.spec.runtime && 'type' in agent.spec.runtime && agent.spec.runtime.type === 'claude'),
+  const reviewerAgents = useMemo(
+    () => (agents?.items ?? []).filter((agent) =>
+      agent.spec.runtime && 'type' in agent.spec.runtime && REVIEWER_RUNTIME_TYPES.has(agent.spec.runtime.type) && !agent.spec.secretRef),
     [agents?.items],
   )
 
@@ -96,6 +75,7 @@ export function RepositoryMonitorCreateForm() {
     const trimmedName = name.trim()
     const trimmedRepoURL = repoURL.trim()
     const trimmedReviewerAgentName = reviewerAgentName.trim()
+    const trimmedSchedule = schedule.trim()
 
     if (!trimmedName) {
       return 'Monitor name is required.'
@@ -111,6 +91,9 @@ export function RepositoryMonitorCreateForm() {
     }
     if (!trimmedReviewerAgentName) {
       return 'Reviewer Agent name is required.'
+    }
+    if (trimmedSchedule && !isCronSchedule(trimmedSchedule)) {
+      return everyScheduleError(trimmedSchedule) ?? 'Schedule must be a five-field cron expression with in-range values, such as */30 * * * *.'
     }
     if (!/^\d+$/.test(maxPRsPerRun)) {
       return 'Max PRs per run must be a whole number from 1 to 100.'
@@ -196,7 +179,7 @@ export function RepositoryMonitorCreateForm() {
         <CardHeader>
           <CardTitle>Monitor setup</CardTitle>
           <CardDescription>
-            Orka stores Secret names only. Add GitHub tokens or Claude keys as Kubernetes Secrets before creating the monitor.
+            Orka stores Secret names only. Add any GitHub token as a Kubernetes Secret before creating the monitor.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -239,7 +222,7 @@ export function RepositoryMonitorCreateForm() {
               </p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="monitor-reviewer-agent" className="text-sm font-medium">Reviewer Agent name</label>
                 <Input
@@ -251,28 +234,22 @@ export function RepositoryMonitorCreateForm() {
                   aria-invalid={formError.includes('Reviewer Agent')}
                 />
                 <datalist id="monitor-reviewer-agent-options">
-                  {claudeAgents.map((agent) => (
+                  {reviewerAgents.map((agent) => (
                     <option key={agent.metadata.name} value={agent.metadata.name} />
                   ))}
                 </datalist>
                 <p className="text-xs text-muted-foreground">
-                  Must be a Claude runtime Agent with an Anthropic credential Secret in this namespace.
+                  Must be a claude, codex, or opencode runtime Agent in this namespace, without a secretRef: the controller's runtime proxy supplies provider credentials.
                 </p>
               </div>
               <div className="space-y-2">
                 <label htmlFor="monitor-git-secret" className="text-sm font-medium">Git Secret name</label>
-                <Input
+                <SecretNameField
                   id="monitor-git-secret"
-                  list="monitor-git-secret-options"
                   value={gitSecretName}
-                  onChange={(event) => setGitSecretName(event.target.value)}
+                  onChange={setGitSecretName}
                   placeholder="Optional, for private repos or rate limits"
                 />
-                <datalist id="monitor-git-secret-options">
-                  {(secrets?.items ?? []).map((secret) => (
-                    <option key={secret.name} value={secret.name} />
-                  ))}
-                </datalist>
                 <p className="text-xs text-muted-foreground">Secret must contain token, password, or GITHUB_TOKEN.</p>
               </div>
             </div>
@@ -280,7 +257,13 @@ export function RepositoryMonitorCreateForm() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="monitor-schedule" className="text-sm font-medium">Schedule</label>
-                <Input id="monitor-schedule" value={schedule} onChange={(event) => setSchedule(event.target.value)} placeholder="*/30 * * * *" />
+                <Input
+                  id="monitor-schedule"
+                  value={schedule}
+                  onChange={(event) => setSchedule(event.target.value)}
+                  placeholder="*/30 * * * *"
+                  aria-invalid={formError.startsWith('Schedule')}
+                />
                 <p className="text-xs text-muted-foreground">Leave empty for manual runs only.</p>
               </div>
               <div className="space-y-2">

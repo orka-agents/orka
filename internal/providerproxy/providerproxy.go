@@ -9,6 +9,7 @@ package providerproxy
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -26,6 +27,12 @@ const (
 // ErrResponseTooLarge reports an upstream response body that exceeds the
 // proxy's configured byte limit.
 var ErrResponseTooLarge = errors.New("provider upstream response exceeds limit")
+
+// ErrDestinationWrite wraps a failure to deliver upstream bytes to the
+// downstream client (it closed its side of the connection). The upstream
+// stream itself was healthy up to that point, so callers that account
+// upstream outcomes must not treat it as an upstream failure.
+var ErrDestinationWrite = errors.New("provider proxy destination write failed")
 
 // HasUnsafePathSegment reports whether a proxied URL path must be rejected
 // before it is joined onto the upstream base URL. It applies the strictest
@@ -184,10 +191,10 @@ func StreamBoundedResponse(destination io.Writer, source io.Reader, limit int64,
 			written, writeErr := destination.Write(buffer[:n])
 			remaining -= int64(written)
 			if writeErr != nil {
-				return writeErr
+				return fmt.Errorf("%w: %w", ErrDestinationWrite, writeErr)
 			}
 			if written != n {
-				return io.ErrShortWrite
+				return fmt.Errorf("%w: %w", ErrDestinationWrite, io.ErrShortWrite)
 			}
 			if flusher != nil {
 				flusher.Flush()

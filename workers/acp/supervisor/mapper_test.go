@@ -32,6 +32,28 @@ const (
 	supervisorTestProviderSessionID = "provider-session"
 )
 
+func TestPromptContentToACPAddsRequiredResourceLinkName(t *testing.T) {
+	blocks := []harnessv2.ContentBlock{
+		{Type: harnessv2.ContentBlockResourceLink, URI: "https://example.com/unnamed"},
+		{Type: harnessv2.ContentBlockResourceLink, URI: "https://example.com/named", Name: "report", MimeType: "text/plain"},
+	}
+
+	mapped, err := promptContentToACP(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mapped) != 2 {
+		t.Fatalf("mapped blocks = %#v", mapped)
+	}
+	if mapped[0].Type != supervisorTestResourceLinkType || mapped[0].URI != blocks[0].URI || mapped[0].Name != blocks[0].URI {
+		t.Fatalf("unnamed resource link = %#v", mapped[0])
+	}
+	if mapped[1].Type != supervisorTestResourceLinkType || mapped[1].URI != blocks[1].URI ||
+		mapped[1].Name != blocks[1].Name || mapped[1].MIMEType != blocks[1].MimeType {
+		t.Fatalf("named resource link = %#v", mapped[1])
+	}
+}
+
 func TestMapACPUpdateDecodesAgentMessageContent(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"agent_message_chunk",
@@ -82,6 +104,43 @@ func TestACPAssistantMessagePhaseAllowsOnlyCodexProtocolEnums(t *testing.T) {
 	}
 	if got := acpAssistantMessagePhase(nil); got != "" {
 		t.Fatalf("nil phase = %q", got)
+	}
+}
+
+func TestACPAssistantMessageIDReadsOnlyAgentMessageChunks(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "named message", raw: `{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"x"}}`, want: "msg-1"},
+		{name: "unnamed message", raw: `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}`},
+		{name: "thought", raw: `{"sessionUpdate":"agent_thought_chunk","messageId":"msg-1","content":{"type":"text","text":"x"}}`},
+		{name: "malformed", raw: `{`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := acpAssistantMessageID(&acp.SessionNotification{Update: json.RawMessage(test.raw)})
+			if got != test.want {
+				t.Fatalf("messageId = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if got := acpAssistantMessageID(nil); got != "" {
+		t.Fatalf("nil messageId = %q", got)
+	}
+}
+
+// The runtime advertises ACP session notices, so the pinned codex-acp sends
+// Codex warnings in this shape; they never reach the agent's reply.
+func TestMapACPUpdateDropsSessionNotices(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"notice",
+		"severity":"warning",
+		"title":"Model metadata for ` + "`gpt-5.4-nano`" + ` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	}`)})
+	if err != nil || ok || update != nil || text != "" {
+		t.Fatalf("notice mapped to update=%+v text=%q ok=%v err=%v", update, text, ok, err)
 	}
 }
 
@@ -627,7 +686,7 @@ func TestMapRuntimeEventSuppressesStatuslessToolOutputBurstWithoutWeakeningRateL
 	}
 
 	ignoredDelta := `{"sessionUpdate":"tool_call_update","toolCallId":"call-1","_meta":{"terminal_output_delta":{"terminal_id":"call-1","data":"x"}}}`
-	for index := range runtimeCodexMaxUpdateEventsPerSecond + 1 {
+	for index := range runtimeMaxUpdateEventsPerSecond + 1 {
 		if mapped := mapEvent(prompt, state, acp.PromptEventUpdate, ignoredDelta, now); mapped != nil {
 			t.Fatalf("status-less tool output delta %d mapped to %#v", index, mapped)
 		}
@@ -767,7 +826,7 @@ func TestMapACPUpdateCanonicalizesOversizedToolCallIDAcrossEvents(t *testing.T) 
 				OptionID: "allow-once", Name: "Allow", Kind: string(harnessv2.PermissionOptionAllowOnce),
 			}},
 		},
-	}, now, time.Minute)
+	}, now, time.Minute, providerKindCodex)
 	if err != nil {
 		t.Fatal(err)
 	}

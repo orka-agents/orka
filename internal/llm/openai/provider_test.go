@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1558,6 +1559,46 @@ func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestComplete_ResponsesAPI_MaxOutputTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"id": "resp_limit",
+			"object": "response",
+			"created_at": 1700000000,
+			"status": "incomplete",
+			"incomplete_details": {"reason": "max_output_tokens"},
+			"model": "gpt-4",
+			"output": [{
+				"id": "msg_1",
+				"type": "message",
+				"role": "assistant",
+				"status": "incomplete",
+				"content": [{"type": "output_text", "text": "partial"}]
+			}],
+			"usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeResponses))
+
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Content != "partial" || resp.StopReason != stopReasonLength {
+		t.Fatalf("response = content %q, stop reason %q; want partial content with %q", resp.Content, resp.StopReason, stopReasonLength)
+	}
+}
+
 func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2010,6 +2051,179 @@ func TestStream_ResponsesAPI_Failed(t *testing.T) {
 	}
 }
 
+func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_limit\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"model\":\"gpt-4\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n") //nolint:errcheck
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeResponses))
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var content, stopReason string
+	var terminal llm.StreamChunk
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		content += chunk.Content
+		if chunk.Done {
+			stopReason = chunk.StopReason
+			terminal = chunk
+		}
+	}
+	if content != "partial" || stopReason != stopReasonLength {
+		t.Fatalf("stream = content %q, stop reason %q; want partial content with %q", content, stopReason, stopReasonLength)
+	}
+	if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 || terminal.Model != "gpt-4" || terminal.Provider != testProviderOpenAI {
+		t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens from gpt-4/openai", terminal)
+	}
+}
+
+func TestStream_ResponsesAPI_OrderedTerminalPreservesUsage(t *testing.T) {
+	for _, tc := range []struct {
+		status     string
+		stopReason string
+	}{
+		{status: "completed", stopReason: stopReasonStop},
+		{status: "incomplete", stopReason: stopReasonLength},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "event: response.%s\ndata: "+
+					`{"type":"response.%s","response":{"id":"resp_usage","status":"%s","model":"fixture","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"message_usage","type":"message","role":"assistant","status":"%s","content":[{"type":"output_text","text":"partial","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}}}`+"\n\n",
+					tc.status, tc.status, tc.status, tc.status)
+			}))
+			defer server.Close()
+
+			provider, err := NewProvider(llm.ProviderConfig{APIKey: "fixture-key", BaseURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.mode.Store(int32(apiModeResponses))
+			chunks, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+				Model: "fixture", Store: new(false), ResponsesInput: true,
+				Messages: []llm.Message{{Role: "user", Content: "hello"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var content, itemStatus string
+			var terminal llm.StreamChunk
+			for chunk := range chunks {
+				if chunk.Error != nil {
+					t.Fatal(chunk.Error)
+				}
+				content += chunk.Content
+				if chunk.OutputItemDone {
+					itemStatus = chunk.OutputItemStatus
+				}
+				if chunk.Done {
+					terminal = chunk
+				}
+			}
+			if content != "partial" || itemStatus != tc.status || terminal.StopReason != tc.stopReason {
+				t.Fatalf("ordered output lost: content=%q status=%q terminal=%+v", content, itemStatus, terminal)
+			}
+			if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 ||
+				terminal.CachedInputTokens == nil || *terminal.CachedInputTokens != 2 ||
+				terminal.CacheWriteInputTokens == nil || *terminal.CacheWriteInputTokens != 1 ||
+				terminal.Model != "fixture" || terminal.Provider != testProviderOpenAI {
+				t.Fatalf("ordered terminal lost usage/model/provider: %+v", terminal)
+			}
+		})
+	}
+}
+
+func TestStream_ResponsesAPI_MaxOutputTokensPreservesUnfinishedToolCall(t *testing.T) {
+	tests := []struct {
+		name           string
+		functionEvents string
+		terminalOutput string
+	}{
+		{
+			name: "tracked partial function call",
+			functionEvents: "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_item\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\"}}\n\n" +
+				"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_item\",\"output_index\":1,\"delta\":\"{\\\"q\\\":\"}\n\n",
+			terminalOutput: "[]",
+		},
+		{
+			name:           "terminal output-only function call",
+			terminalOutput: "[{\"id\":\"fc_item\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\"}]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, _ := w.(http.Flusher)
+				fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
+				flusher.Flush()
+				fmt.Fprint(w, tt.functionEvents) //nolint:errcheck
+				flusher.Flush()
+				fmt.Fprintf(w, "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_limit\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"model\":\"gpt-4\",\"output\":%s,\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n", tt.terminalOutput) //nolint:errcheck
+				flusher.Flush()
+			}))
+			defer server.Close()
+
+			provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			provider.mode.Store(int32(apiModeResponses))
+
+			ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+				Model:    "gpt-4",
+				Messages: []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Stream() error = %v", err)
+			}
+
+			var content, stopReason string
+			var terminal llm.StreamChunk
+			var toolCalls int
+			for chunk := range ch {
+				if chunk.Error != nil {
+					t.Fatalf("unexpected error: %v", chunk.Error)
+				}
+				content += chunk.Content
+				if chunk.ToolCall != nil {
+					toolCalls++
+				}
+				if chunk.Done {
+					stopReason = chunk.StopReason
+					terminal = chunk
+				}
+			}
+			if content != "partial" || stopReason != eventTypeResponseIncomplete || toolCalls != 0 {
+				t.Fatalf("stream = content %q, stop reason %q, tool calls %d; want partial content with an incomplete terminal and no emitted call", content, stopReason, toolCalls)
+			}
+			if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 {
+				t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens", terminal)
+			}
+		})
+	}
+}
+
 func TestStream_ResponsesAPI_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -2332,6 +2546,13 @@ func TestStream_ChatCompletions_RetriesWithoutUnsupportedStreamOptions(t *testin
 		callCount++
 		w.Header().Set("Content-Type", "text/event-stream")
 		body, _ := io.ReadAll(r.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if request["temperature"] != float64(0) || request["max_completion_tokens"] != float64(256) {
+			t.Errorf("retry model settings = temperature:%v tokens:%v, want 0/256", request["temperature"], request["max_completion_tokens"])
+		}
 		if strings.Contains(string(body), "stream_options") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -2355,8 +2576,11 @@ func TestStream_ChatCompletions_RetriesWithoutUnsupportedStreamOptions(t *testin
 	provider.mode.Store(int32(apiModeChatCompletions))
 
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
-		Model:    "gpt-4",
-		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+		Model:          "gpt-4",
+		Messages:       []llm.Message{{Role: "user", Content: "hi"}},
+		Temperature:    0,
+		TemperatureSet: true,
+		MaxTokens:      256,
 	})
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
@@ -2469,5 +2693,82 @@ func TestProviderTelemetryProviderNameNormalizesAzure(t *testing.T) {
 	p := &Provider{providerType: "azure-openai"}
 	if got := p.TelemetryProviderName(); got != "azure.ai.openai" {
 		t.Fatalf("TelemetryProviderName() = %q, want azure.ai.openai", got)
+	}
+}
+
+func TestProviderChatHistoryOrigins(t *testing.T) {
+	for _, fromResponses := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("responses=%t/stream=%t", fromResponses, stream), func(t *testing.T) {
+				captured := make(chan []any, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var request map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					messages, ok := request["messages"].([]any)
+					if !ok {
+						t.Errorf("messages has type %T, want []any", request["messages"])
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					captured <- messages
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n") //nolint:errcheck
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"id":"chat-result","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`) //nolint:errcheck
+					}
+				}))
+				defer server.Close()
+				provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+				if err != nil {
+					t.Fatal(err)
+				}
+				provider.mode.Store(int32(apiModeChatCompletions))
+				req := &llm.CompletionRequest{Model: "test-model", ResponsesInput: fromResponses, Messages: []llm.Message{
+					{Role: "user", Content: "hello"}, {Role: "assistant", Content: "before "}, {Role: "assistant", Content: "after"}, {Role: "user", Content: "continue"},
+				}}
+				expected := `[{"role":"user","content":"hello"},{"role":"assistant","content":"before "},{"role":"assistant","content":"after"},{"role":"user","content":"continue"}]`
+				// Extra capacity exposes accidental mutation when a second call is grouped.
+				backing := []llm.ToolCall{{ID: "call-one", Name: "first", Arguments: json.RawMessage(`{}`)}, {ID: "guard", Name: "guard", Arguments: json.RawMessage(`{}`)}}
+				if fromResponses {
+					req.Messages = []llm.Message{
+						{Role: "user", Content: "hello"}, {Role: "assistant", Content: "before "}, {Role: "assistant", ToolCalls: backing[:1]},
+						{Role: "assistant", Content: "after"}, {Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-two", Name: "second", Arguments: json.RawMessage(`{}`)}}},
+						{Role: "tool", ToolCallID: "call-two", Content: "two"}, {Role: "tool", ToolCallID: "call-one", Content: "one"}, {Role: "user", Content: "continue"},
+					}
+					expected = `[{"role":"user","content":"hello"},{"role":"assistant","content":"before after","tool_calls":[{"type":"function","id":"call-one","function":{"name":"first","arguments":"{}"}},{"type":"function","id":"call-two","function":{"name":"second","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-two","content":"two"},{"role":"tool","tool_call_id":"call-one","content":"one"},{"role":"user","content":"continue"}]`
+				}
+				before, _ := json.Marshal(req.Messages)
+				if stream {
+					chunks, err := provider.Stream(t.Context(), req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for chunk := range chunks {
+						if chunk.Error != nil {
+							t.Fatal(chunk.Error)
+						}
+					}
+				} else if _, err := provider.Complete(t.Context(), req); err != nil {
+					t.Fatal(err)
+				}
+				var want []any
+				if err := json.Unmarshal([]byte(expected), &want); err != nil {
+					t.Fatal(err)
+				}
+				if got := <-captured; !reflect.DeepEqual(want, got) {
+					t.Errorf("outgoing history changed: got %#v, want %#v", got, want)
+				}
+				after, _ := json.Marshal(req.Messages)
+				if string(before) != string(after) || backing[1].ID != "guard" {
+					t.Fatal("provider modified caller-owned history")
+				}
+			})
+		}
 	}
 }

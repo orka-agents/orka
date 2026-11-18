@@ -1,8 +1,8 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
 
 ARG TARGETARCH
 
-# Standalone execution-workspace fixture only. The ACP v2 hard cutover removed
+# Standalone execution-workspace fixture only. The Orka harness v2 hard cutover removed
 # the legacy agent worker from this image; built-in agents run in RuntimePools.
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
@@ -237,7 +237,7 @@ GO
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /out/sandbox-runtime /tmp/sandbox-runtime.go
 
-FROM golang:1.27.0 AS go-runtime
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS go-runtime
 
 FROM debian:bookworm-slim
 

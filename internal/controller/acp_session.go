@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +28,7 @@ const (
 type ACPSessionContinuityConfig struct {
 	SessionControls store.SessionControlStore
 	Transcripts     store.SessionStore
+	GatewayEvents   store.GatewayEventStore
 	Publications    store.PublicationStore
 	BranchClaims    store.BranchClaimStore
 	BootstrapLimits ACPBootstrapLimits
@@ -40,22 +40,13 @@ type ACPSessionContinuityConfig struct {
 	Lineages store.SessionLineageStore
 }
 
-// HarnessV1SessionContinuityConfig supplies only the namespaced continuity
-// stores used by the publication-free harness v1 contract.
-type HarnessV1SessionContinuityConfig struct {
-	SessionControls store.SessionControlStore
-	Transcripts     store.SessionStore
-	BootstrapLimits ACPBootstrapLimits
-	NewSessionUID   func() (string, error)
-	Lineages        store.SessionLineageStore
-}
-
 // ACPSessionContinuity is the controller-side integration boundary for durable
 // ACP Session identity, mutation fencing, canonical transcript bootstrap, and
 // atomic SessionTurn completion. It deliberately does not submit prompts.
 type ACPSessionContinuity struct {
 	controls        store.SessionControlStore
 	transcripts     store.SessionStore
+	gatewayEvents   store.GatewayEventStore
 	publications    store.PublicationStore
 	branchClaims    store.BranchClaimStore
 	bootstrapLimits ACPBootstrapLimits
@@ -78,22 +69,6 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 	return newSessionContinuity(config)
 }
 
-// NewHarnessV1SessionContinuity creates the publication-free v1 continuity
-// boundary. A nonempty publication ID fails closed because no PublicationStore
-// or cluster-scoped BranchClaimStore is attached.
-func NewHarnessV1SessionContinuity(config HarnessV1SessionContinuityConfig) (*ACPSessionContinuity, error) {
-	if config.SessionControls == nil || config.Transcripts == nil {
-		return nil, fmt.Errorf("harness v1 session continuity requires session-control and transcript stores")
-	}
-	return newSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: config.SessionControls,
-		Transcripts:     config.Transcripts,
-		BootstrapLimits: config.BootstrapLimits,
-		NewSessionUID:   config.NewSessionUID,
-		Lineages:        config.Lineages,
-	})
-}
-
 func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinuity, error) {
 	limits, err := config.BootstrapLimits.withDefaults()
 	if err != nil {
@@ -106,6 +81,7 @@ func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinu
 	return &ACPSessionContinuity{
 		controls:        config.SessionControls,
 		transcripts:     config.Transcripts,
+		gatewayEvents:   config.GatewayEvents,
 		publications:    config.Publications,
 		branchClaims:    config.BranchClaims,
 		lineages:        config.Lineages,
@@ -116,8 +92,8 @@ func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinu
 
 // ACPEnsureSessionRequest identifies one canonical transcript Session. An
 // optional ExpectedSessionUID turns loading into an exact immutable-identity
-// assertion; when omitted, a UID is generated only if the control record does
-// not already exist.
+// assertion; when omitted, creation reuses any already-bound durable identity
+// before generating a new UID.
 type ACPEnsureSessionRequest struct {
 	Namespace                 string
 	SessionName               string
@@ -184,19 +160,12 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 		return nil, err
 	}
 
-	sessionUID := request.ExpectedSessionUID
-	if sessionUID == "" {
-		generated, err := c.newSessionUID()
-		if err != nil {
-			return nil, fmt.Errorf("generate ACP session UID: %w", err)
-		}
-		sessionUID = strings.TrimSpace(generated)
-		if err := store.ValidateControlIdentifier("generated session UID", sessionUID); err != nil {
-			return nil, err
-		}
+	sessionUID, err := c.sessionUIDForCreate(ctx, request)
+	if err != nil {
+		return nil, err
 	}
 	requestDigest, err := acpDomainDigest("session-control", map[string]any{
-		"namespace": request.Namespace, "sessionName": request.SessionName, "sessionType": request.SessionType,
+		acpCancelLogKeyNamespace: request.Namespace, "sessionName": request.SessionName, "sessionType": request.SessionType,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("digest ACP session control: %w", err)
@@ -227,6 +196,40 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 		return nil, validateErr
 	}
 	return winner, nil
+}
+
+// sessionUIDForCreate preserves the durable bind-before-control identity if a
+// prior Kubernetes create failed or its outcome was lost. Never unbind it: the
+// original create may have succeeded even when the caller received an error.
+func (c *ACPSessionContinuity) sessionUIDForCreate(ctx context.Context, request ACPEnsureSessionRequest) (string, error) {
+	if cleanup, ok := c.transcripts.(store.SessionCleanupPersistenceStore); ok {
+		boundUID, err := cleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
+		if err != nil {
+			return "", fmt.Errorf("load ACP session cleanup identity: %w", err)
+		}
+		if boundUID != "" {
+			if err := store.ValidateControlIdentifier("bound session UID", boundUID); err != nil {
+				return "", err
+			}
+			if request.ExpectedSessionUID != "" && request.ExpectedSessionUID != boundUID {
+				return "", store.ConflictErrorf("session %s/%s has immutable UID %q, expected %q",
+					request.Namespace, request.SessionName, boundUID, request.ExpectedSessionUID)
+			}
+			return boundUID, nil
+		}
+	}
+	if request.ExpectedSessionUID != "" {
+		return request.ExpectedSessionUID, nil
+	}
+	generated, err := c.newSessionUID()
+	if err != nil {
+		return "", fmt.Errorf("generate ACP session UID: %w", err)
+	}
+	generated = strings.TrimSpace(generated)
+	if err := store.ValidateControlIdentifier("generated session UID", generated); err != nil {
+		return "", err
+	}
+	return generated, nil
 }
 
 func (c *ACPSessionContinuity) ensureTranscriptSession(ctx context.Context, request ACPEnsureSessionRequest, now time.Time) error {
@@ -285,6 +288,7 @@ func validateTranscriptSession(session *store.SessionRecord, expectedType string
 type ACPAcquireSessionLeaseRequest struct {
 	Session             store.SessionControl
 	Fence               store.ControllerEpochFence
+	TaskName            string
 	TaskUID             string
 	Attempt             int64
 	PromptID            string
@@ -317,6 +321,7 @@ type ACPReleaseSessionLeaseRequest struct {
 
 // AcquireMutationLease acquires one monotonic, non-reusable Session lease.
 func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request ACPAcquireSessionLeaseRequest) (*ACPSessionLease, error) {
+	request.TaskName = strings.TrimSpace(request.TaskName)
 	request.TaskUID = strings.TrimSpace(request.TaskUID)
 	request.PromptID = strings.TrimSpace(request.PromptID)
 	if request.Session.Availability != store.SessionAvailable {
@@ -383,6 +388,39 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 	return lease, nil
 }
 
+// CommitRuntimeSessionGeneration records the newest provider RuntimeSession
+// generation proven live while this exact Session mutation lease is active.
+func (c *ACPSessionContinuity) CommitRuntimeSessionGeneration(
+	ctx context.Context,
+	lease ACPSessionLease,
+	fence store.ControllerEpochFence,
+	generation uint64,
+	committedAt time.Time,
+) (*ACPSessionLease, error) {
+	if err := validateACPSessionLease(&lease.Session, lease.Key); err != nil {
+		return nil, err
+	}
+	if generation == 0 || generation > maxControllerRuntimeSessionGeneration {
+		return nil, store.ValidationErrorf("ACP RuntimeSession generation is outside durable Session status capacity")
+	}
+	control, err := c.controls.CommitSessionRuntimeGeneration(ctx, store.CommitSessionRuntimeGenerationRequest{
+		Namespace: lease.Session.Namespace, SessionName: lease.Session.SessionName, SessionUID: lease.Session.SessionUID,
+		Key: lease.Key, Fence: fence, ExpectedSessionVersion: lease.Session.Version,
+		Generation: int64(generation), CommittedAt: committedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("commit ACP RuntimeSession generation: %w", err)
+	}
+	if control.RuntimeSessionGeneration != int64(generation) {
+		return nil, fmt.Errorf("%w: committed ACP RuntimeSession generation changed", store.ErrConflict)
+	}
+	if err := validateACPSessionLease(control, lease.Key); err != nil {
+		return nil, err
+	}
+	lease.Session = *control
+	return &lease, nil
+}
+
 // prepareSessionLineageClaim determines only whether an absent authoritative
 // lineage may be established. Kubernetes remains the decision point: a stale
 // caller that observes a nonempty transcript can still verify a lineage that a
@@ -416,14 +454,41 @@ func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, r
 		if err != nil {
 			return nil, fmt.Errorf("read session transcript for lineage classification: %w", err)
 		}
-		// A nonempty unclassified Session is never adopted implicitly. Static
-		// mode installations require it to be recreated with fresh lineage.
-		claim.EstablishIfAbsent = record.MessageCount == 0
+		if record.SessionType == store.SessionTypeGateway {
+			if err := c.verifyGatewayLineageOwner(ctx, request); err != nil {
+				return nil, err
+			}
+			claim.EstablishIfAbsent = true
+		} else {
+			// Non-Gateway lineage can be established only before the transcript
+			// contains messages. Existing unclassified transcripts fail closed.
+			claim.EstablishIfAbsent = record.MessageCount == 0
+		}
 	}
 	if err := claim.Validate(); err != nil {
 		return nil, err
 	}
 	return claim, nil
+}
+
+func (c *ACPSessionContinuity) verifyGatewayLineageOwner(ctx context.Context, request ACPAcquireSessionLeaseRequest) error {
+	if c.gatewayEvents == nil {
+		return fmt.Errorf("%w: Gateway Task ownership store is unavailable", store.ErrNotReady)
+	}
+	event, err := c.gatewayEvents.GetGatewayEventForTask(
+		ctx, request.Session.Namespace, request.TaskName, request.TaskUID,
+	)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrValidation) {
+		return fmt.Errorf("%w: Gateway Task ownership linkage is pending", store.ErrNotReady)
+	}
+	if err != nil {
+		return fmt.Errorf("verify Gateway Task ownership linkage: %w", err)
+	}
+	if event.Namespace != request.Session.Namespace || event.SessionName != request.Session.SessionName ||
+		event.NamespaceUID != request.NamespaceUID {
+		return fmt.Errorf("%w: linked Gateway event does not match Session lineage identity", store.ErrConflict)
+	}
+	return nil
 }
 
 func (c *ACPSessionContinuity) ReleaseMutationLease(ctx context.Context, request ACPReleaseSessionLeaseRequest) (*store.SessionControl, error) {
@@ -568,6 +633,7 @@ type ACPFinalizeAssistantRequest struct {
 	SessionTurn     ACPSessionTurn
 	Fence           store.ControllerEpochFence
 	AssistantResult string
+	NativeSession   *store.NativeSessionRecord
 	PublicationID   string
 	Projection      ACPFinalizationProjection
 	FinalizedAt     time.Time
@@ -583,6 +649,8 @@ type ACPFinalizeOutcomeUnknownRequest struct {
 	PublicationID string
 	Projection    ACPFinalizationProjection
 	FinalizedAt   time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPFinalizeOutcomeMarkerRequest records a proven non-success terminal marker
@@ -594,6 +662,8 @@ type ACPFinalizeOutcomeMarkerRequest struct {
 	Reason      string
 	Projection  ACPFinalizationProjection
 	FinalizedAt time.Time
+	// NativeSession carries the Session's existing checkpoint across this marker.
+	NativeSession *store.NativeSessionRecord
 }
 
 // ACPSessionFinalization is the committed turn plus its latest Session state.
@@ -646,7 +716,7 @@ func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, requ
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnAssistantResult,
-		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt)
+		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 // FinalizeOutcomeUnknown atomically appends the user prompt and an explicit
@@ -664,7 +734,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, reque
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		marker, request.PublicationID, request.Projection, request.FinalizedAt)
+		marker, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, request ACPFinalizeOutcomeMarkerRequest) (*ACPSessionFinalization, error) {
@@ -677,13 +747,13 @@ func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, reques
 		return nil, err
 	}
 	markerBytes, err := json.Marshal(map[string]any{
-		"kind": kind, "reason": reason, "assistantResultRecorded": false,
+		"kind": kind, eventReasonField: reason, "assistantResultRecorded": false,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		string(markerBytes), "", request.Projection, request.FinalizedAt)
+		string(markerBytes), "", request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 func (c *ACPSessionContinuity) finalizeTurn(
@@ -695,6 +765,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	publicationID string,
 	projectionInput ACPFinalizationProjection,
 	finalizedAt time.Time,
+	native *store.NativeSessionRecord,
 ) (*ACPSessionFinalization, error) {
 	if err := validateACPSessionLease(&sessionTurn.Lease.Session, sessionTurn.Lease.Key); err != nil {
 		return nil, err
@@ -713,7 +784,14 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	}
 	finalizationIdentity := map[string]any{
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
-		"publicationID": publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+		publicationIDField: publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+	}
+	carried := native != nil && terminalKind == store.SessionTurnOutcomeMarker
+	if native != nil {
+		finalizationIdentity["nativeSessionDigest"] = store.NativeSessionCaptureDigest(native)
+	}
+	if carried {
+		finalizationIdentity["nativeSessionCarried"] = true
 	}
 	if blockReason != "" {
 		finalizationIdentity["blockReason"] = blockReason
@@ -736,6 +814,8 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		Key: sessionTurn.Turn.Key, Fence: fence,
 		ExpectedSessionVersion: sessionTurn.Lease.Session.Version, ExpectedTurnVersion: sessionTurn.Turn.Version,
 		FinalizationDigest: finalizationDigest, TerminalKind: terminalKind, TerminalContent: terminalContent,
+		NativeSession:        native,
+		NativeSessionCarried: carried,
 		SkipTranscriptAppend: sessionTurn.SkipTranscriptAppend,
 		SkipUserPromptAppend: sessionTurn.SkipUserPromptAppend,
 		PublicationID:        publicationID,
@@ -759,9 +839,6 @@ func (c *ACPSessionContinuity) publicationBlockReason(ctx context.Context, publi
 	}
 	if err := store.ValidateControlIdentifier("publication ID", publicationID); err != nil {
 		return "", err
-	}
-	if c.publications == nil {
-		return "", fmt.Errorf("%w: harness v1 Session finalization cannot reference a publication", store.ErrConflict)
 	}
 	publication, err := c.publications.GetPublication(ctx, publicationID)
 	if err != nil {
@@ -813,8 +890,7 @@ func buildACPSessionTurnProjection(turnID string, input ACPFinalizationProjectio
 }
 
 func canonicalACPPayloadDigest(payload []byte) string {
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 type acpOutcomeUnknownMarker struct {

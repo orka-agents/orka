@@ -129,11 +129,12 @@ var _ = Describe("Security Enforcement", Ordered, func() {
 			"spec": {
 				"type": "ai",
 				"ai": {
-					"prompt": "Use the code_exec tool to run this bash command: rm -rf /",
+					"prompt": "Use the code_exec tool to run this bash command: rm -rf / [e2e:security-deny-pattern]",
 					"model": "%s",
 					"providerRef": {
 						"name": "%s"
-					}
+					},
+					"tools": ["code_exec"]
 				}
 			}
 		}`, denyPatternTask, namespace, model, denyProviderName)
@@ -149,6 +150,12 @@ var _ = Describe("Security Enforcement", Ordered, func() {
 
 		By("verifying result is available")
 		verifyResultAvailable(denyPatternTask)
+
+		if e2eMockOpenAI {
+			By("verifying the deny pattern blocked the scripted rm -rf before execution")
+			output := expectMockLLMToolResult("[e2e:security-deny-pattern]", "code_exec", 30*time.Second)
+			Expect(output).To(ContainSubstring("command blocked by safety guard: destructive rm command"))
+		}
 	})
 
 	It("should reject chat requests targeting kube-system namespace", func() {
@@ -181,7 +188,7 @@ var _ = Describe("Security Enforcement", Ordered, func() {
 			model = "gpt-4o-mini"
 		}
 		chatBody := fmt.Sprintf(`{
-			"message": "Hello",
+			"message": "Hello [e2e:security-kube-system-chat]",
 			"provider": "%s",
 			"model": "%s",
 			"namespace": "kube-system"
@@ -199,5 +206,12 @@ var _ = Describe("Security Enforcement", Ordered, func() {
 
 		Expect(resp.StatusCode).To(Equal(http.StatusForbidden),
 			"Chat requests to kube-system namespace should be rejected with 403")
+
+		if e2eMockOpenAI {
+			By("verifying the rejected chat never reached the model")
+			requests, err := mockLLMRequestsFor("[e2e:security-kube-system-chat]")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(requests).To(BeEmpty(), "a rejected chat request must not call the model")
+		}
 	})
 })

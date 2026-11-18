@@ -55,7 +55,7 @@ var _ = Describe("Orka CLI binary", Ordered, func() {
 
 	It("authenticates from isolated config and lists model catalogs", func() {
 		By("validating the configured service-account token")
-		validate := runOrka(home, "auth", "validate")
+		validate := runOrka(home, "auth", "validate", "-o", "json")
 		expectOrkaSuccess(validate, token)
 		validateJSON := expectJSONObject(validate.Stdout)
 		Expect(validateJSON["authenticated"]).To(Equal(true))
@@ -289,6 +289,8 @@ spec:
     type: claude
     defaultMaxTurns: 5
     defaultAllowBash: false
+  model:
+    name: claude-opus-5
 `, agentName))
 		agentUpdatedManifest := writeTempManifest(tmpDir, "agent-updated.yaml", fmt.Sprintf(`
 apiVersion: core.orka.ai/v1alpha1
@@ -301,6 +303,8 @@ spec:
     type: claude
     defaultMaxTurns: 7
     defaultAllowBash: false
+  model:
+    name: claude-opus-5
 `, agentName))
 		expectOrkaSuccess(runOrka(home, "agent", "create", "-f", agentManifest), token)
 		agentGet := runOrka(home, "agent", "get", agentName, "-o", "json")

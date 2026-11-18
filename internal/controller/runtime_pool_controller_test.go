@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
@@ -59,6 +60,7 @@ type fakeRuntimePoolSupervisorClient struct {
 	probe       RuntimePoolProbeResult
 	probeErr    error
 	probeCalls  int
+	afterProbe  func()
 	drainCalls  int
 	drainReason string
 	drainErr    error
@@ -75,26 +77,6 @@ type runtimePoolNamespaceReadClient struct {
 	client.Client
 	namespaceReads       int
 	rejectNamespaceReads bool
-}
-
-func TestRuntimePoolWorkspaceDeletionDrainCompleteRequiresCurrentGeneration(t *testing.T) {
-	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Generation: 2},
-		Status: corev1alpha1.RuntimePoolStatus{
-			ObservedGeneration: 1,
-			DesiredReplicas:    0,
-			CurrentReplicas:    0,
-			Lifecycle:          corev1alpha1.RuntimePoolLifecycleStopped,
-		},
-	}
-	if runtimePoolWorkspaceDeletionDrainComplete(pool) {
-		t.Fatal("stale Stopped status completed workspace deletion drain")
-	}
-
-	pool.Status.ObservedGeneration = pool.Generation
-	if !runtimePoolWorkspaceDeletionDrainComplete(pool) {
-		t.Fatal("current Stopped status did not complete workspace deletion drain")
-	}
 }
 
 func (c *runtimePoolNamespaceReadClient) Get(
@@ -130,6 +112,9 @@ func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object
 
 func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string, _ []byte) (RuntimePoolProbeResult, error) {
 	f.probeCalls++
+	if f.afterProbe != nil {
+		f.afterProbe()
+	}
 	return f.probe, f.probeErr
 }
 
@@ -165,6 +150,50 @@ func TestRuntimePoolReconcilerScalesZeroToOneWithHardenedResources(t *testing.T)
 	gotPool := runtimePoolTestGetPool(t, r, pool)
 	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+}
+
+func TestRuntimePoolReconcilerWaitsForProviderProxy(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	configuredProxy := r.ProviderProxy
+	r.ProviderProxy = RuntimePoolProviderProxyConfig{}
+
+	runtimePoolReconcile(t, r, pool)
+	gotPool := runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unconfigured gateway status = %s/%s, want Degraded/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+	if !strings.Contains(gotPool.Status.Message, "authenticated provider proxy base URL is required") {
+		t.Fatalf("missing gateway was not reported: %s", gotPool.Status.Message)
+	}
+	for _, list := range []client.ObjectList{
+		&appsv1.DeploymentList{}, &corev1.PodList{}, &corev1.SecretList{},
+		&corev1.ServiceList{}, &networkingv1.NetworkPolicyList{},
+	} {
+		if err := r.List(context.Background(), list); err != nil {
+			t.Fatal(err)
+		}
+		items, err := meta.ExtractList(list)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("unconfigured gateway created %T resources", list)
+		}
+	}
+
+	// Configuring the gateway later lets the existing pool start.
+	r.ProviderProxy = configuredProxy
+	runtimePoolReconcile(t, r, pool)
+	gotPool = runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting {
+		t.Fatalf("configured gateway status = %s, want Starting", gotPool.Status.Lifecycle)
+	}
+	var deployment appsv1.Deployment
+	key := types.NamespacedName{Namespace: pool.Namespace, Name: runtimePoolResourceName(pool.Namespace, pool.Name)}
+	if err := r.Get(context.Background(), key, &deployment); err != nil {
+		t.Fatalf("configured gateway did not start the runtime Deployment: %v", err)
 	}
 }
 
@@ -988,12 +1017,52 @@ func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.
 			t.Fatal("rollout timeout replaced or stopped the live old template")
 		}
 
+		runtimePoolReconcile(t, r, pool)
+		status = runtimePoolTestGetPool(t, r, pool).Status
+		condition = meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+		if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+			t.Fatalf("timeout retry status/condition = %s/%#v, want Degraded/RolloutTimedOut", status.Lifecycle, condition)
+		}
+
 		supervisor.probe.Status.Pressure.LiveDescendants = 0
 		runtimePoolReconcile(t, r, pool)
 		if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
 			t.Fatalf("lifecycle after late quiescence = %s, want Quiescent", got)
 		}
 	})
+}
+
+func TestRuntimePoolReconcilerRolloutFailsClosedWhenActivePodDisappears(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, oldPod := runtimePoolTestStartServing(t, r, pool, supervisor, "lost-rollout-pod", "lost-rollout-pod-uid", "10.0.0.93", "lost-rollout-boot")
+	oldRevision := deployment.Spec.Template.Annotations[runtimePoolTemplateRevisionAnnotation]
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	if err := r.Delete(context.Background(), &oldPod); err != nil {
+		t.Fatalf("delete old runtime Pod: %v", err)
+	}
+	replacement := runtimePoolReadyPodForDeployment(pool, deployment, "unadmitted-replacement-pod", "unadmitted-replacement-pod-uid", "10.0.0.94")
+	runtimePoolTestCreatePod(t, r, &replacement)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	condition := meta.FindStatusCondition(got.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		got.Status.ActiveInstance == nil || got.Status.ActiveInstance.PodUID != string(oldPod.UID) ||
+		condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonRolloutFailed {
+		t.Fatalf("active-Pod loss status = %s/%s active=%#v condition=%#v, want fail-closed with the old fence preserved", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance, condition)
+	}
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name)
+	if replicas := ptr.Deref(deployment.Spec.Replicas, -1); replicas != 1 {
+		t.Fatalf("replicas after active-Pod loss = %d, want 1", replicas)
+	}
+	if revision := deployment.Spec.Template.Annotations[runtimePoolTemplateRevisionAnnotation]; revision != oldRevision {
+		t.Fatalf("active-Pod loss installed replacement template %q without termination proof; want %q", revision, oldRevision)
+	}
 }
 
 func TestRuntimePoolPodTemplateRevisionChangesForEveryRuntimeIdentityInput(t *testing.T) {
@@ -1035,6 +1104,29 @@ func TestRuntimePoolPodTemplateRevisionChangesForEveryRuntimeIdentityInput(t *te
 				t.Fatalf("template revision did not change for %s", name)
 			}
 		})
+	}
+}
+
+func TestRuntimePoolPodTemplateProjectsE2EPromptWriteAmbiguityMarker(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig: %v", err)
+	}
+	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
+	template := r.runtimePoolPodTemplate(pool, cfg, selector, "auth", "provider")
+	assertRuntimePoolEnvironment(t, r, pool, template.Spec.Containers[0].Env)
+
+	found := false
+	for _, item := range template.Spec.Containers[0].Env {
+		if item.Name == runtimePoolE2EPromptWriteAmbiguity && item.Value == r.E2EPromptWriteAmbiguityMarker {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("runtime template omitted the configured E2E prompt write ambiguity marker")
 	}
 }
 
@@ -1229,8 +1321,12 @@ func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testin
 	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
 		t.Fatalf("first stopped status patch: %v", err)
 	}
-	if _, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue); !apierrors.IsConflict(err) {
-		t.Fatalf("stale stopped status patch error = %v, want conflict", err)
+	// The stale writer loses the optimistic lock; that is a normal race, so
+	// it requeues quietly instead of surfacing a reconcile error, and it
+	// must not count the scale-to-zero a second time.
+	result, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue)
+	if err != nil || result.RequeueAfter != runtimePoolConflictRequeue {
+		t.Fatalf("stale stopped status patch = (%+v, %v), want quiet requeue", result, err)
 	}
 	var afterMetric dto.Metric
 	if err := counter.Write(&afterMetric); err != nil {
@@ -1266,6 +1362,97 @@ func TestRuntimePoolReconcilerClosesAdmissionForTwoReadyPods(t *testing.T) {
 	}
 }
 
+func TestRuntimePoolReconcilerKeepsSupersededPlainPoolAvailableForBoundDemand(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		"profileDigest": pool.Spec.Runtime.Profile.Digest,
+		"runtimeImage":  pool.Spec.Runtime.Image,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+	pool.UID = types.UID(pool.Namespace + "-retired-pool-uid")
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, _ := runtimePoolTestStartServing(t, r, pool, supervisor, "retained-pod", "retained-pod-uid", "10.0.0.95", "retained-boot")
+	r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Spec.DesiredReplicas != 1 || got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("superseded pool = replicas %d status %s/%s, want 1 and Serving/Accepting", got.Spec.DesiredReplicas, got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if got.Spec.Runtime.Image != pool.Spec.Runtime.Image {
+		t.Fatalf("superseded pool image = %q, want immutable original %q", got.Spec.Runtime.Image, pool.Spec.Runtime.Image)
+	}
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name)
+	if replicas := ptr.Deref(deployment.Spec.Replicas, -1); replicas != 1 {
+		t.Fatalf("superseded deployment replicas = %d, want 1 while bound demand may remain", replicas)
+	}
+	if meta.FindStatusCondition(got.Status.Conditions, acpRuntimePoolImageProvenanceCondition) != nil {
+		t.Fatal("test requires Deployment-backed historical image provenance")
+	}
+	newGeneration := got.DeepCopy()
+	newGeneration.Generation++
+	historicalConfig, err := r.runtimePoolConfigForDrain(newGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), newGeneration, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("Deployment provenance did not survive a controller-owned generation change")
+	}
+}
+
+func TestRuntimePoolReconcilerReportsSupersededScaleToZeroPoolStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		configuredImage string
+	}{
+		{name: "rotated image", configuredImage: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)},
+		{name: "provider image removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtimePoolTestScheme(t)
+			pool := runtimePoolTestObject(0)
+			identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+				"profileDigest": pool.Spec.Runtime.Profile.Digest,
+				"runtimeImage":  pool.Spec.Runtime.Image,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+			pool.UID = types.UID(pool.Namespace + "-superseded-stopped-pool-uid")
+			meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+				Type:               acpRuntimePoolImageProvenanceCondition,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: pool.Generation,
+				Reason:             acpRuntimePoolImageProvenanceReason,
+				Message:            "RuntimePool image and profile match a verified immutable Task execution plan",
+			})
+			pool.Generation++
+			r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+			r.AllowedImages.Codex = tc.configuredImage
+
+			runtimePoolReconcile(t, r, pool)
+			got := runtimePoolTestGetPool(t, r, pool)
+			condition := meta.FindStatusCondition(got.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				condition == nil || condition.Status != metav1.ConditionTrue {
+				t.Fatalf("historical scale-to-zero status = %s/%s condition=%#v, want Stopped/Closed with rollout ready", got.Status.Lifecycle, got.Status.AdmissionState, condition)
+			}
+		})
+	}
+}
+
 func TestRuntimePoolReconcilerReportsBadImageAndScheduling(t *testing.T) {
 	t.Run("unmanaged pool is rejected", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
@@ -1280,16 +1467,33 @@ func TestRuntimePoolReconcilerReportsBadImageAndScheduling(t *testing.T) {
 		}
 	})
 
-	t.Run("unapproved digest-pinned image is rejected", func(t *testing.T) {
+	t.Run("deterministic superseded pool without provenance is rejected", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
 		pool := runtimePoolTestObject(1)
 		pool.Spec.Runtime.Image = "docker.io/example/unapproved@sha256:" + strings.Repeat("9", 64)
+		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+			"profileDigest": pool.Spec.Runtime.Profile.Digest,
+			"runtimeImage":  pool.Spec.Runtime.Image,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+		pool.UID = types.UID(pool.Namespace + "-unproven-superseded-pool-uid")
 		r := runtimePoolTestReconciler(t, scheme, nil, pool)
 
 		runtimePoolReconcile(t, r, pool)
 		got := runtimePoolTestGetPool(t, r, pool)
 		if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(got.Status.Message, "controller-approved") {
 			t.Fatalf("unapproved-image status = %#v", got.Status)
+		}
+		var deployment appsv1.Deployment
+		err = r.Get(context.Background(), types.NamespacedName{
+			Namespace: pool.Namespace,
+			Name:      runtimePoolResourceName(pool.Namespace, pool.Name),
+		}, &deployment)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("Deployment exists for unproven superseded image, err=%v", err)
 		}
 	})
 
@@ -1367,7 +1571,8 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		runtimePoolNamespaceLabel: pool.Namespace,
 		runtimePoolNameLabel:      pool.Name,
 	}
-	objects := []client.Object{
+	objects := make([]client.Object, 0, 14)
+	objects = append(objects,
 		pool,
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
@@ -1375,7 +1580,7 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime-pod", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "runtime-rs", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(base, "pdb"), Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
-	}
+	)
 	for _, suffix := range []string{
 		"deny-all", "control-in", "dns-egress", "provider-proxy-egress", "controller-egress",
 		"control-plane-egress", "artifact-api-egress",
@@ -1605,6 +1810,8 @@ func TestRuntimePoolReconcilerUnhealthySupervisorClearsReadinessBeforeRecycle(t 
 	if got := runtimePoolReadyReplicas(status); got != 0 {
 		t.Fatalf("ready replicas = %d, want 0 after unhealthy Pod deletion", got)
 	}
+	// API deletion alone is not process-death evidence for enrolled native Pods.
+	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("unhealthy runtime Pod still exists, err=%v", err)
 	}
@@ -1639,6 +1846,8 @@ func TestRuntimePoolReconcilerClearsProbePressureAfterActivePodDisappears(t *tes
 	if err := r.Delete(context.Background(), &pod); err != nil {
 		t.Fatalf("delete active runtime Pod: %v", err)
 	}
+	// Model the kubelet lifetime observation before testing post-loss metrics.
+	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 
 	runtimePoolReconcile(t, r, pool)
 	status := runtimePoolTestGetPool(t, r, pool).Status
@@ -1730,6 +1939,8 @@ func TestRuntimePoolReconcilerRecyclesPodAfterInPlaceSupervisorRestart(t *testin
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || got.Status.ActiveInstance != nil {
 		t.Fatalf("status after restart Pod recycle = %s/%s active=%#v, want Stopping/Closed with no active instance", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance)
 	}
+	// API deletion alone is not process-death evidence for enrolled native Pods.
+	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("in-place restarted runtime Pod still exists, err=%v", err)
 	}
@@ -1775,8 +1986,18 @@ func TestRuntimePoolReconcilerRecyclesInPlaceRestartDuringRollout(t *testing.T) 
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || got.Status.ActiveInstance != nil {
 		t.Fatalf("rollout restart recycle status = %s active=%#v", got.Status.Lifecycle, got.Status.ActiveInstance)
 	}
+	retained := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), retained); err != nil || retained.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(retained, runtimePoolBootPodFinalizer) {
+		t.Fatalf("rollout restart must retain the Pod until exact container termination: %v", err)
+	}
+	// A new supervisor boot did not prove that the original process tree died.
+	// Model the kubelet's positive evidence separately from API deletion.
+	runtimePoolTestTerminateBootPod(t, r, retained)
+	if err := r.reconcileNativeRuntimePoolRetirement(t.Context(), pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("rollout in-place restarted Pod still exists, err=%v", err)
+		t.Fatalf("terminated rollout restart Pod was not released: %v", err)
 	}
 	if !deleteRecorder.podDeleteHadPreconditions || deleteRecorder.podDeleteUID != pod.UID || deleteRecorder.podDeleteResourceVersion == "" {
 		t.Fatalf("rollout restart delete preconditions = present:%t uid:%q resourceVersion:%q", deleteRecorder.podDeleteHadPreconditions, deleteRecorder.podDeleteUID, deleteRecorder.podDeleteResourceVersion)
@@ -2007,21 +2228,35 @@ func runtimePoolTestReconciler(
 	objects ...client.Object,
 ) *RuntimePoolReconciler {
 	t.Helper()
+	statusObjects := []client.Object{&corev1alpha1.RuntimePool{}, &corev1alpha1.Task{}, &corev1alpha1.ControllerEpoch{}, &corev1alpha1.ExternalEffect{}, &appsv1.Deployment{}, &corev1.Pod{}}
+	if scheme.Recognizes(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")) {
+		statusObjects = append(statusObjects, &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}, &workspacev1alpha1.ExecutionWorkspace{})
+	}
+	var r *RuntimePoolReconciler
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RuntimePool{}, &appsv1.Deployment{}, &corev1.Pod{}).
+		WithStatusSubresource(statusObjects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.CreateOption) error {
-				if secret, ok := object.(*corev1.Secret); ok && secret.UID == "" {
-					secret.UID = types.UID("test-uid-" + secret.Name)
+				switch object.(type) {
+				case *corev1.Secret, *corev1.Service, *policyv1.PodDisruptionBudget, *appsv1.Deployment, *appsv1.ReplicaSet:
+					if object.GetUID() == "" {
+						object.SetUID(types.UID("test-uid-" + object.GetName()))
+					}
 				}
-				return delegate.Create(ctx, object, opts...)
+				if err := delegate.Create(ctx, object, opts...); err != nil {
+					return err
+				}
+				if deployment, ok := object.(*appsv1.Deployment); ok && deployment.Spec.Template.Annotations[runtimePoolBootEnrollmentAnnotation] != "" {
+					runtimePoolTestMaterializeBarePods(t, r, deployment)
+				}
+				return nil
 			},
 		}).
 		WithObjects(objects...).
 		Build()
-	r := &RuntimePoolReconciler{
-		Client: cl, Scheme: scheme, ControllerEpoch: 7, SupervisorClient: supervisor,
+	r = &RuntimePoolReconciler{
+		Client: cl, APIReader: cl, Scheme: scheme, ControllerEpoch: 7, SupervisorClient: supervisor,
 		ControllerAPIURL: "http://orka-api.default.svc:8080", ControllerAPIPort: 8080,
 		WorkspaceArtifactMaxBytes: 100 << 20,
 		ProviderProxy: RuntimePoolProviderProxyConfig{
@@ -2029,9 +2264,9 @@ func runtimePoolTestReconciler(
 			PodLabels:   map[string]string{"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "provider-auth-proxy"},
 			BearerToken: bytes.Clone(runtimePoolTestProviderToken),
 		},
-		AgentSandboxEnabled: true,
-		AllowedImages:       ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
-		Rand:                &runtimePoolTestEntropyReader{}, Now: func() time.Time { return runtimePoolTestNow },
+
+		AllowedImages: ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
+		Rand:          &runtimePoolTestEntropyReader{}, Now: func() time.Time { return runtimePoolTestNow },
 		WorkspaceCredentialSeeder: func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
 			return false, nil
 		},
@@ -2080,6 +2315,11 @@ func runtimePoolReadyPodForDeployment(
 	pod := runtimePoolReadyPod(pool, deployment.Namespace, name, uid, ip)
 	pod.Labels = cloneStringMap(deployment.Spec.Template.Labels)
 	pod.Annotations = cloneStringMap(deployment.Spec.Template.Annotations)
+	if pod.Annotations[runtimePoolBootEnrollmentAnnotation] != "" {
+		pod.Spec = *deployment.Spec.Template.Spec.DeepCopy()
+		pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "ReplicaSet", Name: name + "-rs", UID: types.UID(uid + "-rs"), Controller: new(true)}}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runtime", ContainerID: "containerd://" + uid, ImageID: pool.Spec.Runtime.Image, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(runtimePoolTestNow.Add(-time.Minute))}}}}
+	}
 	return pod
 }
 
@@ -2107,6 +2347,9 @@ func runtimePoolTestSetPodReady(t *testing.T, r *RuntimePoolReconciler, pod *cor
 
 func runtimePoolTestCreatePod(t *testing.T, r *RuntimePoolReconciler, pod *corev1.Pod) {
 	t.Helper()
+	if pod.Annotations[runtimePoolBootEnrollmentAnnotation] != "" {
+		runtimePoolTestPrepareBootEnrollment(t, r, pod)
+	}
 	status := pod.Status.DeepCopy()
 	pod.Status = corev1.PodStatus{}
 	if err := r.Create(context.Background(), pod); err != nil {
@@ -2183,26 +2426,12 @@ func assertRuntimePoolProviderSecret(
 
 func runtimePoolReconcile(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) ctrl.Result {
 	t.Helper()
+	runtimePoolTestSyncBootEpoch(t, r)
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	return result
-}
-
-func runtimePoolTestFinalize(
-	r *RuntimePoolReconciler,
-	pool *corev1alpha1.RuntimePool,
-) (ctrl.Result, bool, error) {
-	current := &corev1alpha1.RuntimePool{}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, true, nil
-		}
-		return ctrl.Result{}, false, err
-	}
-	result, err := r.finalizeRuntimePool(context.Background(), current)
-	return result, false, err
 }
 
 func runtimePoolReadyPod(pool *corev1alpha1.RuntimePool, namespace, name, uid, ip string) corev1.Pod {

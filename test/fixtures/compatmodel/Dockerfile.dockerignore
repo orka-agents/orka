@@ -1,0 +1,8 @@
+# This fixture needs test sources excluded by the production build context.
+**
+!go.mod
+!go.sum
+!test/
+!test/fixtures/
+!test/fixtures/compatmodel/
+!test/fixtures/compatmodel/**

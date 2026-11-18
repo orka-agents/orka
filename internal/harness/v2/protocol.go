@@ -33,14 +33,15 @@ func (r HealthResponse) Validate() error {
 }
 
 type ProviderCapabilities struct {
-	ProviderKinds             []string `json:"providerKinds"`
-	Models                    []string `json:"models,omitempty"`
-	SupportsPermissions       bool     `json:"supportsPermissions"`
-	SupportsCancel            bool     `json:"supportsCancel"`
-	SupportsTools             bool     `json:"supportsTools"`
-	SupportsImages            bool     `json:"supportsImages,omitempty"`
-	SupportsAudio             bool     `json:"supportsAudio,omitempty"`
-	SupportsEmbeddedResources bool     `json:"supportsEmbeddedResources,omitempty"`
+	ProviderKinds                 []string `json:"providerKinds"`
+	Models                        []string `json:"models,omitempty"`
+	SupportsPermissions           bool     `json:"supportsPermissions"`
+	SupportsBrokeredToolApprovals bool     `json:"supportsBrokeredToolApprovals,omitempty"`
+	SupportsCancel                bool     `json:"supportsCancel"`
+	SupportsTools                 bool     `json:"supportsTools"`
+	SupportsImages                bool     `json:"supportsImages,omitempty"`
+	SupportsAudio                 bool     `json:"supportsAudio,omitempty"`
+	SupportsEmbeddedResources     bool     `json:"supportsEmbeddedResources,omitempty"`
 }
 
 func (c ProviderCapabilities) Validate() error {
@@ -65,6 +66,7 @@ type ProtocolLimits struct {
 	MaxResidentSessions      uint32 `json:"maxResidentSessions"`
 	MaxConcurrentPrompts     uint32 `json:"maxConcurrentPrompts"`
 	MaxRequestBytes          int    `json:"maxRequestBytes"`
+	MaxNativeSessionBytes    int    `json:"maxNativeSessionBytes,omitempty"`
 	MaxEventLineBytes        int    `json:"maxEventLineBytes"`
 	MaxTerminalResultBytes   int    `json:"maxTerminalResultBytes"`
 	MaxBufferedEvents        int    `json:"maxBufferedEvents"`
@@ -81,6 +83,7 @@ func DefaultProtocolLimits() ProtocolLimits {
 		MaxResidentSessions:      DefaultMaxResidentSessions,
 		MaxConcurrentPrompts:     DefaultMaxConcurrentPrompts,
 		MaxRequestBytes:          1 << 20,
+		MaxNativeSessionBytes:    DefaultMaxNativeSessionBytes,
 		MaxEventLineBytes:        stream.MaxLineBytes,
 		MaxTerminalResultBytes:   stream.MaxTerminalResultBytes,
 		MaxBufferedEvents:        stream.MaxBufferedEvents,
@@ -92,7 +95,19 @@ func DefaultProtocolLimits() ProtocolLimits {
 	}
 }
 
+// EffectiveMaxNativeSessionBytes preserves the old 512 KiB contract for runtimes
+// that predate the explicit native-session capability limit.
+func (l ProtocolLimits) EffectiveMaxNativeSessionBytes() int {
+	if l.MaxNativeSessionBytes == 0 {
+		return LegacyMaxNativeSessionBytes
+	}
+	return l.MaxNativeSessionBytes
+}
+
 func (l ProtocolLimits) Validate() error {
+	if _, err := NormalizeNativeSessionMaxBytes(l.MaxNativeSessionBytes); err != nil {
+		return err
+	}
 	if l.MaxResidentSessions == 0 {
 		return fmt.Errorf("max resident sessions must be positive")
 	}
@@ -187,6 +202,11 @@ type CapabilitiesResponse struct {
 	SupportsDrain                     bool                            `json:"supportsDrain"`
 	SupportsPublicationFinalization   bool                            `json:"supportsPublicationFinalization"`
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
+	SupportsNativeSessions            bool                            `json:"supportsNativeSessions,omitempty"`
+	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
+	// SupportsOperatorAccess advertises the operator exec and file routes.
+	// Callers must fail closed against supervisors that omit it.
+	SupportsOperatorAccess bool `json:"supportsOperatorAccess,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
@@ -238,28 +258,65 @@ const (
 	SupervisorLifecycleUnhealthy   SupervisorLifecycle = "unhealthy"
 )
 
-const DrainReasonSessionIdentityCapacity = "session_identity_capacity"
+const (
+	DrainReasonSessionIdentityCapacity = "session_identity_capacity"
+	// DrainReasonToolboxUnavailable drains a supervisor whose pool lost
+	// toolbox admission so its workload can be stopped once idle.
+	DrainReasonToolboxUnavailable = "toolbox_unavailable"
+	// DrainReasonWorkspaceRetirement drains a workspace runtime before a
+	// controller-authorized Stop or Delete. Nothing on the instance is
+	// preserved, so a later termination signal may exit promptly.
+	DrainReasonWorkspaceRetirement = "workspace_retirement"
+	// DrainReasonWorkspaceSuspend drains a workspace runtime before a
+	// controller-authorized data-only suspension.
+	DrainReasonWorkspaceSuspend = "workspace_suspend"
+	// DrainReasonWorkerEviction is self-reported by a supervisor whose host
+	// worker began graceful termination (an upgrade roll, node drain, or Spot
+	// reclaim). The supervisor keeps serving so the controller can drain it
+	// and have the provider suspend its data before the eviction window ends.
+	DrainReasonWorkerEviction = "worker_eviction"
+)
+
+// WorkerEvictionSuspendWindow is the Agent Substrate worker shutdown budget:
+// after a worker Pod receives SIGTERM, each hosted Actor has this long to be
+// suspended before the worker kills it.
+const WorkerEvictionSuspendWindow = 30 * time.Minute
 
 type DrainStatus struct {
 	AcceptingNewSessions bool      `json:"acceptingNewSessions"`
 	Requested            bool      `json:"requested"`
 	RequestedAt          time.Time `json:"requestedAt,omitempty"`
 	Reason               string    `json:"reason,omitempty"`
+	// WorkerEvictionAt is when the supervisor's host worker signalled graceful
+	// termination. It is reported independently of Reason, which keeps the
+	// drain that first closed admission, so Core enforces the eviction deadline
+	// even when the signal arrives during a suspension or capacity drain.
+	WorkerEvictionAt time.Time `json:"workerEvictionAt,omitzero"`
 }
 
 type RuntimeSessionStatus struct {
-	RuntimeSessionID        RuntimeSessionID    `json:"runtimeSessionID"`
-	RuntimeSessionUID       RuntimeSessionUID   `json:"runtimeSessionUID"`
-	Generation              uint64              `json:"generation"`
-	State                   RuntimeSessionState `json:"state"`
-	ActivePromptID          PromptID            `json:"activePromptID,omitempty"`
-	PendingPermissionCount  uint32              `json:"pendingPermissionCount"`
-	ReservedForFinalization bool                `json:"reservedForFinalization"`
-	LiveDescendantCount     uint32              `json:"liveDescendantCount"`
-	LastTransitionAt        time.Time           `json:"lastTransitionAt"`
+	NativeInstallUnresolved bool                      `json:"nativeInstallUnresolved,omitempty"`
+	NativeRestoration       *NativeSessionRestoration `json:"nativeRestoration,omitempty"`
+	RuntimeSessionID        RuntimeSessionID          `json:"runtimeSessionID"`
+	RuntimeSessionUID       RuntimeSessionUID         `json:"runtimeSessionUID"`
+	Generation              uint64                    `json:"generation"`
+	State                   RuntimeSessionState       `json:"state"`
+	ActivePromptID          PromptID                  `json:"activePromptID,omitempty"`
+	PendingPermissionCount  uint32                    `json:"pendingPermissionCount"`
+	ReservedForFinalization bool                      `json:"reservedForFinalization"`
+	LiveDescendantCount     uint32                    `json:"liveDescendantCount"`
+	LastTransitionAt        time.Time                 `json:"lastTransitionAt"`
 }
 
 func (s RuntimeSessionStatus) Validate() error {
+	if s.NativeInstallUnresolved && s.State != RuntimeSessionStatePoisoned {
+		return fmt.Errorf("unresolved native install must retain a poisoned runtime session")
+	}
+	if s.NativeRestoration != nil {
+		if err := s.NativeRestoration.Validate(); err != nil {
+			return fmt.Errorf("native restoration: %w", err)
+		}
+	}
 	if err := requireIdentifier("runtime session ID", string(s.RuntimeSessionID)); err != nil {
 		return err
 	}
@@ -407,6 +464,7 @@ type StatusResponse struct {
 	PendingPermissions      []PendingPermissionStatus `json:"pendingPermissions"`
 	Pressure                PressureMetadata          `json:"pressure"`
 	SessionIdentityCapacity *SessionIdentityCapacity  `json:"sessionIdentityCapacity,omitempty"`
+	FoundryBroker           *FoundryBrokerIdentity    `json:"foundryBroker,omitempty"`
 	Timestamp               time.Time                 `json:"timestamp"`
 }
 
@@ -432,6 +490,11 @@ func (r StatusResponse) Validate() error {
 			return err
 		}
 	}
+	if r.FoundryBroker != nil {
+		if err := r.FoundryBroker.Validate(); err != nil {
+			return err
+		}
+	}
 	if r.Drain.Requested {
 		if r.Drain.AcceptingNewSessions {
 			return fmt.Errorf("draining supervisor must not accept new sessions")
@@ -443,7 +506,7 @@ func (r StatusResponse) Validate() error {
 			return fmt.Errorf("requested drain requires draining or terminating lifecycle")
 		}
 	} else {
-		if !r.Drain.RequestedAt.IsZero() || r.Drain.Reason != "" {
+		if !r.Drain.RequestedAt.IsZero() || r.Drain.Reason != "" || !r.Drain.WorkerEvictionAt.IsZero() {
 			return fmt.Errorf("inactive drain must not carry request metadata")
 		}
 		if r.Lifecycle == SupervisorLifecycleDraining {
@@ -507,17 +570,30 @@ func (r StatusResponse) Validate() error {
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest  ErrorCode = "invalid_request"
-	ErrorCodeUnauthenticated ErrorCode = "unauthenticated"
-	ErrorCodeForbidden       ErrorCode = "forbidden"
-	ErrorCodeExpired         ErrorCode = "expired"
-	ErrorCodeStaleFence      ErrorCode = "stale_fence"
-	ErrorCodeDigestConflict  ErrorCode = "digest_conflict"
-	ErrorCodeAlreadyAccepted ErrorCode = "already_accepted"
-	ErrorCodeSettled         ErrorCode = "settled"
-	ErrorCodeRateLimited     ErrorCode = "rate_limited"
-	ErrorCodeSessionPoisoned ErrorCode = "session_poisoned"
-	ErrorCodeOutcomeUnknown  ErrorCode = "outcome_unknown"
+	ErrorCodeInvalidRequest           ErrorCode = "invalid_request"
+	ErrorCodeUnauthenticated          ErrorCode = "unauthenticated"
+	ErrorCodeForbidden                ErrorCode = "forbidden"
+	ErrorCodeExpired                  ErrorCode = "expired"
+	ErrorCodeStaleFence               ErrorCode = "stale_fence"
+	ErrorCodeDigestConflict           ErrorCode = "digest_conflict"
+	ErrorCodeAlreadyAccepted          ErrorCode = "already_accepted"
+	ErrorCodeSettled                  ErrorCode = "settled"
+	ErrorCodeRateLimited              ErrorCode = "rate_limited"
+	ErrorCodeSessionPoisoned          ErrorCode = "session_poisoned"
+	ErrorCodeNativeCaptureUnsupported ErrorCode = "native_capture_unsupported"
+	// ErrorCodeNativeCaptureNotStarted answers a capture reconciliation whose
+	// original operation this runtime incarnation never recorded, so no capture
+	// has started and the controller may begin a fresh one.
+	ErrorCodeNativeCaptureNotStarted ErrorCode = "native_capture_not_started"
+	// RetryReady proves capture failed after writer exit; a fresh operation may retry the retained private tree.
+	ErrorCodeNativeCaptureRetryReady ErrorCode = "native_capture_retry_ready"
+	ErrorCodeWorkspaceResumeLost     ErrorCode = "workspace_resume_lost"
+	ErrorCodeOutcomeUnknown          ErrorCode = "outcome_unknown"
+	ErrorCodeCleanupUnproven         ErrorCode = "cleanup_unproven"
+
+	// ErrorCodePromptNotAccepted proves idle adapter recovery failed before
+	// submitting the prompt. The runtime session is retired, not retryable.
+	ErrorCodePromptNotAccepted ErrorCode = "prompt_not_accepted"
 )
 
 type ErrorResponse struct {
@@ -535,7 +611,8 @@ func (r ErrorResponse) Validate() error {
 	switch r.Code {
 	case ErrorCodeInvalidRequest, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodeExpired,
 		ErrorCodeStaleFence, ErrorCodeDigestConflict, ErrorCodeAlreadyAccepted, ErrorCodeSettled,
-		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodeOutcomeUnknown:
+		ErrorCodeRateLimited, ErrorCodeSessionPoisoned, ErrorCodePromptNotAccepted, ErrorCodeNativeCaptureUnsupported, ErrorCodeNativeCaptureNotStarted, ErrorCodeNativeCaptureRetryReady,
+		ErrorCodeWorkspaceResumeLost, ErrorCodeOutcomeUnknown, ErrorCodeCleanupUnproven:
 	default:
 		return fmt.Errorf("unsupported error code %q", r.Code)
 	}
@@ -547,8 +624,8 @@ func (r ErrorResponse) Validate() error {
 			return fmt.Errorf("classification: %w", err)
 		}
 	}
-	if r.Code == ErrorCodeOutcomeUnknown && r.Retryable {
-		return fmt.Errorf("outcome_unknown must never be retryable")
+	if (r.Code == ErrorCodeOutcomeUnknown || r.Code == ErrorCodeWorkspaceResumeLost || r.Code == ErrorCodePromptNotAccepted) && r.Retryable {
+		return fmt.Errorf("%s must never be retryable", r.Code)
 	}
 	return nil
 }

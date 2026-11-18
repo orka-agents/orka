@@ -53,11 +53,13 @@ namespace_resource="${work_dir}/namespace.json"
 namespace_metadata_patch="${work_dir}/namespace-metadata-patch.json"
 existing_namespace="${work_dir}/existing-namespace.json"
 existing_controller="${work_dir}/existing-controller.json"
+existing_controller_pods="${work_dir}/existing-controller-pods.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
 admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
 workload_prerequisite_manifest="${work_dir}/workload-prerequisite-manifest.json"
 controller_manifest="${work_dir}/controller-manifest.json"
+lease_policy_manifest="${work_dir}/lease-policy-manifest.json"
 workload_dependency_endpoints="${work_dir}/workload-dependency-endpoints.json"
 snapshot_secret="${work_dir}/agent-execution-snapshot-key.json"
 snapshot_key="${work_dir}/snapshot-key"
@@ -162,7 +164,7 @@ jq '
       error("expected exactly one harness-v2 controller Deployment")
     end
 ' "${workload_manifest}" >"${controller_manifest}"
-jq -e '
+jq -e --arg controller_sa "'orka-controller-manager'" '
   ([.items[] | select(
     .apiVersion == "apps/v1" and
     .kind == "Deployment" and
@@ -180,11 +182,37 @@ jq -e '
     .kind == "Deployment" and
     .metadata.namespace == "orka-system" and
     .metadata.name == "orka-controller-manager"
-  )] | length) == 0
+  )] | length) == 0 and
+  ([.items[] | select(
+    .apiVersion == "admissionregistration.k8s.io/v1" and
+    .kind == "ValidatingAdmissionPolicy" and
+    .metadata.name == "orka-acp-workspace-lease-protection" and
+    .spec.failurePolicy == "Fail" and
+    .spec.matchConstraints.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "orka-system" and
+    any(.spec.variables[]; .name == "controllerServiceAccount" and .expression == $controller_sa)
+  )] | length) == 1 and
+  ([.items[] | select(
+    .apiVersion == "admissionregistration.k8s.io/v1" and
+    .kind == "ValidatingAdmissionPolicyBinding" and
+    .metadata.name == "orka-acp-workspace-lease-protection" and
+    .spec.policyName == "orka-acp-workspace-lease-protection" and
+    .spec.validationActions == ["Deny"]
+  )] | length) == 1
 ' "${workload_prerequisite_manifest}" >/dev/null || {
-  echo "workload prerequisite wave must contain each publisher/proxy Deployment exactly once and no controller Deployment" >&2
+  echo "workload prerequisite wave must contain each publisher/proxy Deployment exactly once, no controller Deployment, and the controller-scoped ACP workspace Lease admission policy" >&2
   exit 1
 }
+jq '
+  {
+    apiVersion: "v1",
+    kind: "List",
+    items: [.items[] | select(
+      .apiVersion == "admissionregistration.k8s.io/v1" and
+      (.kind == "ValidatingAdmissionPolicy" or .kind == "ValidatingAdmissionPolicyBinding") and
+      .metadata.name == "orka-acp-workspace-lease-protection"
+    )]
+  }
+' "${workload_prerequisite_manifest}" >"${lease_policy_manifest}"
 jq -esc '
   [.[] | if .kind == "List" then .items[] else . end] as $items
   | ($items | map(select(.apiVersion == "apps/v1" and .kind == "Deployment" and
@@ -263,6 +291,42 @@ validate_existing_controller_identity() {
       select(startswith("--watch-namespace="))] == ["--watch-namespace=orka-system"])
   ' "${existing_controller}" >/dev/null; then
     echo "implicit, legacy, differently scoped, or opposite-mode controllers cannot be upgraded in place; settle or retire the existing installation and deploy harness-v2 in a fresh namespace" >&2
+    return 1
+  fi
+}
+
+# The controller Deployment uses the Recreate strategy, so its replacement Pod
+# starts only after every old Pod exits, and an old Pod's preStop upgrade drain
+# may use its whole termination grace period. Wait for the longest grace period
+# among the applied Deployment, the live Deployment captured by
+# validate_existing_controller_identity, and the existing controller Pods
+# (including any still terminating from an earlier rollout), plus a 3m startup
+# margin, and never less than 5m.
+controller_rollout_timeout() {
+  local selector
+  if ! selector="$(jq -er '
+    .items[0].spec.selector.matchLabels // {}
+    | select(length > 0)
+    | to_entries | map("\(.key)=\(.value)") | join(",")
+  ' "${controller_manifest}")"; then
+    echo "controller Deployment must select its Pods with matchLabels" >&2
+    return 1
+  fi
+  if ! "${kubectl}" -n orka-system get pods -l "${selector}" -o json >"${existing_controller_pods}"; then
+    echo "unable to inspect the existing orka-system/orka-controller-manager Pods" >&2
+    return 1
+  fi
+  if ! jq -enr \
+    --slurpfile applied "${controller_manifest}" \
+    --slurpfile live "${existing_controller}" \
+    --slurpfile pods "${existing_controller_pods}" '
+      [(($applied[0].items[0], $live[]) | .spec.template.spec.terminationGracePeriodSeconds),
+       ($pods[0].items[]? | .spec.terminationGracePeriodSeconds)]
+      | map(if . == null then 30 else . end)
+      | select(all(type == "number" and . >= 0 and . == floor))
+      | "\([max + 180, 300] | max)s"
+    '; then
+    echo "controller terminationGracePeriodSeconds must be a non-negative integer" >&2
     return 1
   fi
 }
@@ -401,8 +465,10 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and
        .sideEffects == "None" and
@@ -410,8 +476,22 @@ render_admission_webhooks() {
        .clientConfig.service.name == "orka-admission" and
        .clientConfig.service.namespace == "orka-system" and
        (.clientConfig.service.path | type == "string" and length > 0))] | all)
+    and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "agenthost.core.orka.ai" and
+             .clientConfig.service.path == "/validate-core-orka-ai-v1alpha1-agenthost" and
+             .rules == [{"operations":["CREATE","UPDATE"],"apiGroups":["core.orka.ai"],"apiVersions":["v1alpha1"],"resources":["agenthosts"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "checkpointsourceuse.workspace.orka.ai" and
+             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
+             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "workspaceattachmentsecret.core.orka.ai" and
+             .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission wave must contain exactly seven unique, fail-closed, CA-pinned orka-admission webhooks and no legacy coexistence policies" >&2
+    echo "admission wave must contain exactly nine unique, fail-closed, CA-pinned orka-admission webhooks, including AgentHost selection, checkpoint source authorization and attachment Secret protection, with namespace-mode claims and ACP workspace coordination Leases enforced by admission policies in the workload wave and no legacy coexistence policies" >&2
     return 1
   }
 }
@@ -510,14 +590,16 @@ smoke_admission_handlers() {
           requestKind: {group: $group, version: $version, kind: $kind},
           requestResource: {group: $group, version: $version, resource: $resource},
           name: "orka-admission-smoke",
-          namespace: (if $group == "" then "" else "orka-system" end),
+          namespace: (if $kind == "Namespace" then "" else "orka-system" end),
           operation: "CREATE",
           userInfo: {username: "system:admin", groups: ["system:masters"]},
           object: {
             apiVersion: (if $group == "" then $version else ($group + "/" + $version) end),
             kind: $kind,
             metadata: ({name: "orka-admission-smoke"} +
-              (if $group == "" then {labels: {"orka.ai/controller-mode": "harness-v2"}}
+              (if $kind == "Namespace" then {labels: {"orka.ai/controller-mode": "harness-v2"}}
+               elif $kind == "Secret" then
+                 {namespace: "orka-system", labels: {"workspace.orka.ai/attachment-for": "smoke-workspace-uid"}}
                else {namespace: "orka-system"} end))
           },
           oldObject: null,
@@ -547,10 +629,12 @@ smoke_admission_handlers() {
       return 1
     fi
   done <<'EOF_ADMISSION_HANDLERS'
-/validate-v1-namespace-execution-mode||v1|Namespace|namespaces
+/validate-v1-secret-workspace-attachment||v1|Secret|secrets
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-core-orka-ai-v1alpha1-agenthost|core.orka.ai|v1alpha1|AgentHost|agenthosts
+/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use|workspace.orka.ai|v1alpha1|ExecutionWorkspaceCheckpoint|executionworkspacecheckpoints
 /validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
 /validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
 /validate-core-orka-ai-v1alpha1-task-execution-authority|core.orka.ai|v1alpha1|Task|tasks-execution-authority
@@ -564,6 +648,7 @@ EOF_ADMISSION_HANDLERS
 # desired generation without rotating an existing snapshot key.
 bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
+controller_rollout_wait="$(controller_rollout_timeout)"
 # Preserve the immutable mode claim as an atomic precondition while converging
 # the remaining platform labels. This cannot relabel or adopt a namespace that
 # changes identity after the preflight.
@@ -571,6 +656,9 @@ validate_existing_controller_identity
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
+# Activate the CEL Lease guard before the admission plane can drop the legacy
+# Lease webhook, so an interrupted run never leaves reserved Leases unguarded.
+"${kubectl}" apply -f "${lease_policy_manifest}"
 "${kubectl}" apply -f "${admission_runtime_manifest}"
 wait_for_admission_endpoints
 smoke_admission_handlers
@@ -579,4 +667,5 @@ render_admission_webhooks
 "${kubectl}" apply -f "${workload_prerequisite_manifest}"
 wait_for_workload_dependencies
 "${kubectl}" apply -f "${controller_manifest}"
-"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager --timeout=2m >/dev/null
+"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager \
+  --timeout="${controller_rollout_wait}" >/dev/null

@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/static-mode-deploy-gate-test.XXXXXX")"
 cleanup() {
@@ -28,7 +36,7 @@ if [[ "$1" == "get" && "$2" == "crd" && $# -ge 3 ]]; then
       exit 1
       ;;
     agentruntimes.core.orka.ai)
-      case "${FAKE_SCHEMA_MODE:-dual}" in
+      case "${FAKE_SCHEMA_MODE:-v2-only}" in
         dual)
           printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}}}}}}}]}}'
           ;;
@@ -48,13 +56,13 @@ if [[ "$1" == "get" && "$2" == "crd" && $# -ge 3 ]]; then
       esac
       ;;
     agents.core.orka.ai)
-      agent_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"runtime":{"properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}},"x-kubernetes-validations":[{"message":"runtime.contractVersion is immutable once set"}]}}}}}}}]}}'
-      case "${FAKE_AGENT_SCHEMA_MODE:-dual}" in
+      agent_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"runtime":{"properties":{"contractVersion":{"enum":["orka.harness.v2"]}},"x-kubernetes-validations":[{"message":"runtime.contractVersion is immutable once set"}]}}}}}}}]}}'
+      case "${FAKE_AGENT_SCHEMA_MODE:-v2-only}" in
         dual)
-          printf '%s\n' "${agent_schema}"
+          jq '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runtime.properties.contractVersion.enum = ["orka.harness.v1", "orka.harness.v2"]' <<<"${agent_schema}"
           ;;
         v2-only)
-          jq '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runtime.properties.contractVersion.enum = ["orka.harness.v2"]' <<<"${agent_schema}"
+          printf '%s\n' "${agent_schema}"
           ;;
         missing-immutability)
           jq '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runtime["x-kubernetes-validations"] = []' <<<"${agent_schema}"
@@ -66,10 +74,13 @@ if [[ "$1" == "get" && "$2" == "crd" && $# -ge 3 ]]; then
       esac
       ;;
     tasks.core.orka.ai)
-      task_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"status":{"properties":{"agentExecutionBinding":{"type":"object","properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}}}},"x-kubernetes-validations":[{"message":"agentExecutionBinding is write-once and immutable"}]}},"x-kubernetes-validations":[{"message":"Task spec is immutable after execution authority is recorded"}]}}}]}}'
-      case "${FAKE_TASK_SCHEMA_MODE:-dual}" in
-        dual)
+      task_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"status":{"properties":{"agentExecutionBinding":{"type":"object","properties":{"contractVersion":{"enum":["orka.harness.v2"]}}}},"x-kubernetes-validations":[{"message":"agentExecutionBinding is write-once and immutable"}]}},"x-kubernetes-validations":[{"message":"Task spec is immutable after execution authority is recorded"}]}}}]}}'
+      case "${FAKE_TASK_SCHEMA_MODE:-v2-only}" in
+        v2-only)
           printf '%s\n' "${task_schema}"
+          ;;
+        dual)
+          jq '.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.agentExecutionBinding.properties.contractVersion.enum = ["orka.harness.v1", "orka.harness.v2"]' <<<"${task_schema}"
           ;;
         missing-authority)
           jq 'del(.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.agentExecutionBinding)' <<<"${task_schema}"
@@ -131,6 +142,8 @@ for crd in \
   agentruntimes.core.orka.ai \
   agents.core.orka.ai \
   branchclaims.core.orka.ai \
+  connections.core.orka.ai \
+  connectorproviders.core.orka.ai \
   controllerepochs.core.orka.ai \
   executionworkspaceclasses.workspace.orka.ai \
   executionworkspacepools.workspace.orka.ai \
@@ -154,14 +167,14 @@ for crd in \
   tools.core.orka.ai; do
   expect_gate_failure "missing shared CRD: ${crd}" FAKE_MISSING_CRD="${crd}"
 done
-for schema_mode in v2-only no-served-version missing-enum; do
-  expect_gate_failure 'AgentRuntime CRD is not the shared orka.harness.v1/orka.harness.v2 schema' FAKE_SCHEMA_MODE="${schema_mode}"
+for schema_mode in dual no-served-version missing-enum; do
+  expect_gate_failure 'AgentRuntime CRD is not the orka.harness.v2 schema' FAKE_SCHEMA_MODE="${schema_mode}"
 done
-for schema_mode in v2-only missing-immutability; do
+for schema_mode in dual missing-immutability; do
   expect_gate_failure 'Agent CRD is missing the immutable shared contract selector' \
     FAKE_AGENT_SCHEMA_MODE="${schema_mode}"
 done
-for schema_mode in missing-authority missing-immutability legacy-disposition old-spec-immutability; do
+for schema_mode in dual missing-authority missing-immutability legacy-disposition old-spec-immutability; do
   expect_gate_failure 'Task CRD is missing the static-mode execution-authority schema' \
     FAKE_TASK_SCHEMA_MODE="${schema_mode}"
 done
@@ -171,7 +184,7 @@ for obsolete_crd in \
   agentexecutioncontrols.core.orka.ai \
   agentexecutionpolicies.core.orka.ai \
   agentexecutionadjudications.core.orka.ai; do
-  expect_gate_failure "unsupported superseded coexistence CRD remains installed: ${obsolete_crd}" \
+  expect_gate_failure "unsupported retired CRD remains installed: ${obsolete_crd}" \
     FAKE_OBSOLETE_CRD="${obsolete_crd}"
 done
 
@@ -259,4 +272,4 @@ if grep -Fq 'claimName: controller-manager-store' <<<"${rendered_default}"; then
   exit 1
 fi
 
-printf '%s\n' 'ok - static-mode deployment requires the Established 24-CRD shared bundle, dual AgentRuntime/Agent/Task selectors, and no superseded coexistence CRDs'
+printf '%s\n' 'ok - deployment requires the Established 26-CRD shared bundle, v2 AgentRuntime/Agent/Task contracts, and no retired CRDs'

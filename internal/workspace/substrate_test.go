@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,11 +33,10 @@ const (
 )
 
 func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
-	executor, err := NewSubstrateExecutor(SubstrateConfig{
-		RouterURL:      "http://router.test",
-		ActorDNSSuffix: "actors.test",
-		ControlClient:  &recordingSubstrateControlClient{},
-	})
+	cfg, _, _, _ := substrateTransportFixture(t)
+	cfg.RouterURL = "https://router.test"
+	cfg.ControlClient = &recordingSubstrateControlClient{}
+	executor, err := NewSubstrateExecutor(cfg)
 	if err != nil {
 		t.Fatalf("NewSubstrateExecutor() error = %v", err)
 	}
@@ -46,23 +46,109 @@ func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	if executor.httpClient.Timeout != 0 {
 		t.Fatalf("default HTTP timeout = %s, want operation context controlled timeout", executor.httpClient.Timeout)
 	}
+	transport, ok := executor.httpClient.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil || transport.TLSClientConfig == nil || transport.TLSClientConfig.GetClientCertificate == nil {
+		t.Fatal("default router client must present the rotating pod-certificate identity without a proxy")
+	}
 }
 
-func TestNewSubstrateExecutorRejectsSessionIdentityCertificateMinting(t *testing.T) {
-	_, err := NewSubstrateExecutor(SubstrateConfig{
-		RouterURL:               "http://router.test",
-		ActorDNSSuffix:          "actors.test",
-		ControlClient:           &recordingSubstrateControlClient{},
-		SessionIdentityMintCert: true,
-	})
-	if err == nil {
-		t.Fatal("NewSubstrateExecutor() error = nil, want unsupported certificate minting error")
+type idleCountingTransport struct{ closed int }
+
+func (*idleCountingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+
+func (t *idleCountingTransport) CloseIdleConnections() { t.closed++ }
+
+// Each executor built without a client makes its own router transport, so Close
+// must drop that transport's idle connections. A caller-supplied client is
+// shared and must be left alone.
+func TestSubstrateExecutorCloseReleasesOnlyItsOwnRouterConnections(t *testing.T) {
+	cfg, _, _, _ := substrateTransportFixture(t)
+	cfg.RouterURL = "https://router.test"
+	cfg.ControlClient = &recordingSubstrateControlClient{}
+	owned, err := NewSubstrateExecutor(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateExecutor() error = %v", err)
 	}
-	if !IsKind(err, ErrorKindFailedPrecondition) {
-		t.Fatalf("NewSubstrateExecutor() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	ownedTransport := &idleCountingTransport{}
+	owned.httpClient.Transport = ownedTransport
+	if err := owned.Close(); err != nil || ownedTransport.closed != 1 {
+		t.Fatalf("Close() = %v, idle closes = %d, want the executor's own connections released once", err, ownedTransport.closed)
 	}
-	if !strings.Contains(err.Error(), "certificate minting is not supported yet") {
-		t.Fatalf("NewSubstrateExecutor() error = %q, want unsupported certificate minting context", err.Error())
+
+	sharedTransport := &idleCountingTransport{}
+	cfg.HTTPClient = &http.Client{Transport: sharedTransport}
+	shared, err := NewSubstrateExecutor(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateExecutor() error = %v", err)
+	}
+	if err := shared.Close(); err != nil || sharedTransport.closed != 0 {
+		t.Fatalf("Close() = %v, idle closes = %d, want a caller-supplied client left alone", err, sharedTransport.closed)
+	}
+}
+
+// An Actor answers daemon requests. Its redirect must not move the controller's
+// request, which carries the bootstrap bearer and the handoff token, to a host
+// the Actor chooses.
+func TestSubstrateExecutorNeverFollowsActorRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, name := range []string{"built router client", "caller-supplied client"} {
+			t.Run(fmt.Sprintf("%s %d", name, status), func(t *testing.T) {
+				var redirected, routed atomic.Int32
+				other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
+				defer other.Close()
+				redirect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					routed.Add(1)
+					http.Redirect(w, r, other.URL+r.URL.Path, status)
+				})
+				cfg := SubstrateConfig{}
+				if name == "caller-supplied client" {
+					router := httptest.NewServer(redirect)
+					defer router.Close()
+					cfg.RouterURL, cfg.HTTPClient = router.URL, router.Client()
+				} else {
+					router := httptest.NewTLSServer(redirect)
+					defer router.Close()
+					cfg, _, _, _ = substrateTransportFixture(t)
+					cfg.RouterURL, cfg.APIInsecureSkipVerify = router.URL, true
+				}
+				cfg.Atespace = "tenant"
+				cfg.ControlClient = &recordingSubstrateControlClient{}
+				cfg.HandoffToken, cfg.BootstrapToken = "handoff-token", "bootstrap-token"
+				executor, err := NewSubstrateExecutor(cfg)
+				if err != nil {
+					t.Fatalf("NewSubstrateExecutor() error = %v", err)
+				}
+				defer executor.Close() //nolint:errcheck
+				if err := executor.restoreHandoffToken(t.Context(), "actor-1"); err == nil {
+					t.Fatal("restoreHandoffToken() = nil, want the redirect reported as a failure")
+				}
+				if err := executor.scrubDaemon(t.Context(), "actor-1"); err == nil {
+					t.Fatal("scrubDaemon() = nil, want the redirect reported as a failure")
+				}
+				if routed.Load() != 2 || redirected.Load() != 0 {
+					t.Fatalf("router requests = %d, redirected requests = %d, want 2 and 0", routed.Load(), redirected.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestNewSubstrateExecutorDefaultRouterClientFailsClosed(t *testing.T) {
+	cfg, _, _, _ := substrateTransportFixture(t)
+	cfg.ControlClient = &recordingSubstrateControlClient{}
+	plaintext := cfg
+	plaintext.RouterURL = "http://router.test"
+	noIdentity := cfg
+	noIdentity.RouterURL = "https://router.test"
+	noIdentity.APICertFile, noIdentity.APIKeyFile = "", ""
+	for name, candidate := range map[string]SubstrateConfig{"plaintext router": plaintext, "missing pod certificate": noIdentity} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewSubstrateExecutor(candidate); !IsKind(err, ErrorKindInvalidArgument) {
+				t.Fatalf("NewSubstrateExecutor() error = %v, want invalid configuration", err)
+			}
+		})
 	}
 }
 
@@ -92,11 +178,10 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 		createErr: NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: http.DefaultClient,
+		routerURL:  "http://router.test",
+		now:        time.Now,
 	}
 
 	got, err := executor.Claim(t.Context(), ClaimRequest{
@@ -119,7 +204,7 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 	if !got.Reused || got.Created {
 		t.Fatalf("Claim() reused=%t created=%t, want reused existing actor", got.Reused, got.Created)
 	}
-	if got.Ref.ID != actorID || got.ReuseKey != reuseKey {
+	if got.Ref.ID != SubstrateActorKey("ate-demo", actorID) || got.ReuseKey != reuseKey {
 		t.Fatalf("Claim() ref=%#v reuseKey=%q, want %s/%s", got.Ref, got.ReuseKey, actorID, reuseKey)
 	}
 }
@@ -156,11 +241,10 @@ func TestSubstrateClaimRejectsReattachedActorTemplateMismatch(t *testing.T) {
 				templateName: "other-template",
 			}
 			executor := &SubstrateWorkspaceExecutor{
-				control:        control,
-				httpClient:     http.DefaultClient,
-				routerURL:      "http://router.test",
-				actorDNSSuffix: "actors.test",
-				now:            time.Now,
+				control:    control,
+				httpClient: http.DefaultClient,
+				routerURL:  "http://router.test",
+				now:        time.Now,
 			}
 
 			_, err := executor.Claim(t.Context(), ClaimRequest{
@@ -194,11 +278,10 @@ func TestSubstrateClaimDerivesRetainedPhaseFromSuspendedActor(t *testing.T) {
 		getStatuses: []string{substrateStatusSuspended},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: http.DefaultClient,
+		routerURL:  "http://router.test",
+		now:        time.Now,
 	}
 
 	got, err := executor.Claim(t.Context(), ClaimRequest{
@@ -412,8 +495,8 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	var sawDetached bool
 	var polls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "actor-1.actors.test" {
-			t.Errorf("Host = %q, want actor-1.actors.test", r.Host)
+		if got := r.Header.Get(daemonprotocol.TargetActorHeader); got != "team-a/actor-1" {
+			t.Errorf("target actor = %q, want team-a/actor-1", got)
 		}
 		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
 			t.Errorf("Authorization = %q, want bearer token", got)
@@ -444,10 +527,10 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	defer server.Close()
 
 	executor := &SubstrateWorkspaceExecutor{
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
 	}
 
 	got, err := executor.Exec(t.Context(), ExecRequest{
@@ -477,10 +560,10 @@ func TestSubstrateExecRejectsResidentModeBeforeDaemonRequest(t *testing.T) {
 	defer server.Close()
 
 	executor := &SubstrateWorkspaceExecutor{
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
 	}
 
 	_, err := executor.Exec(t.Context(), ExecRequest{
@@ -524,10 +607,10 @@ func TestSubstrateExecRetriesTransientPollingErrors(t *testing.T) {
 	defer server.Close()
 
 	executor := &SubstrateWorkspaceExecutor{
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
 	}
 
 	got, err := executor.Exec(t.Context(), ExecRequest{
@@ -579,13 +662,13 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	executor := &SubstrateWorkspaceExecutor{
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
+		atespace:       "team-a",
 		handoffToken:   substrateTestToken,
 		bootstrapToken: "bootstrap-token",
 	}
 
 	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
+		Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		BootstrapHandoff: true,
 		Artifacts: []UploadArtifact{{
 			Path: substrateHandoffTokenUploadPath,
@@ -599,213 +682,6 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	}
 	if !uploaded {
 		t.Fatal("Upload() did not send handoff token")
-	}
-}
-
-func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) {
-	var uploaded bool
-	var execAuthorized bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
-			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
-				t.Errorf("upload Authorization = %q, want bootstrap bearer", got)
-			}
-			var req substrateUploadRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("decode upload request: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			if len(req.Files) != 1 {
-				t.Errorf("upload files len = %d, want 1", len(req.Files))
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			if string(req.Files[0].Data) != "session-jwt" {
-				t.Errorf("uploaded handoff token = %q, want minted session JWT", string(req.Files[0].Data))
-			}
-			uploaded = true
-			_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
-		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
-			if got := r.Header.Get("Authorization"); got == "Bearer session-jwt" {
-				execAuthorized = true
-			} else {
-				t.Errorf("exec Authorization = %q, want minted session JWT", got)
-			}
-			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExitCode: 0})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	identity := &recordingSubstrateSessionIdentityClient{jwt: "session-jwt"}
-	executor := &SubstrateWorkspaceExecutor{
-		httpClient:              server.Client(),
-		routerURL:               server.URL,
-		actorDNSSuffix:          "actors.test",
-		handoffToken:            substrateTestToken,
-		bootstrapToken:          "bootstrap-token",
-		sessionIdentity:         identity,
-		sessionIdentityToken:    "worker-sa-token",
-		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
-		sessionIdentityAppID:    substrateDefaultIdentityAppID,
-		sessionIdentityUserID:   substrateDefaultIdentityUserID,
-	}
-
-	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
-		BootstrapHandoff: true,
-		Artifacts: []UploadArtifact{{
-			Path: substrateHandoffTokenUploadPath,
-			Data: []byte(substrateTestToken),
-			Mode: 0o600,
-		}},
-		Timeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Upload() error = %v", err)
-	}
-	if !uploaded {
-		t.Fatal("Upload() did not send handoff token")
-	}
-	if identity.calls != 1 {
-		t.Fatalf("MintJWT calls = %d, want 1", identity.calls)
-	}
-	if identity.bearerToken != "worker-sa-token" {
-		t.Fatalf("MintJWT bearer token = %q, want worker-sa-token", identity.bearerToken)
-	}
-	if identity.req.SessionID != "actor-1" ||
-		identity.req.AppID != substrateDefaultIdentityAppID ||
-		identity.req.UserID != substrateDefaultIdentityUserID ||
-		!slices.Equal(identity.req.Audience, []string{substrateDefaultIdentityAudience}) {
-		t.Fatalf("MintJWT request = %#v, want default Orka identity for actor-1", identity.req)
-	}
-
-	_, err = executor.Exec(t.Context(), ExecRequest{
-		Ref:     WorkspaceRef{ID: "actor-1"},
-		Command: []string{"true"},
-		Timeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Exec() error = %v", err)
-	}
-	if !execAuthorized {
-		t.Fatal("Exec() did not use minted session JWT")
-	}
-}
-
-func TestSubstrateBootstrapHandoffRequiredSessionIdentityFailsClosedWithoutCredentials(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected daemon request %s %s", r.Method, r.URL.Path)
-		http.Error(w, "unexpected request", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	tests := []struct {
-		name     string
-		executor *SubstrateWorkspaceExecutor
-	}{
-		{
-			name: "missing client",
-			executor: &SubstrateWorkspaceExecutor{
-				httpClient:              server.Client(),
-				routerURL:               server.URL,
-				actorDNSSuffix:          "actors.test",
-				bootstrapToken:          "bootstrap-token",
-				sessionIdentityToken:    "worker-sa-token",
-				sessionIdentityRequired: true,
-			},
-		},
-		{
-			name: "missing bearer token",
-			executor: &SubstrateWorkspaceExecutor{
-				httpClient:              server.Client(),
-				routerURL:               server.URL,
-				actorDNSSuffix:          "actors.test",
-				bootstrapToken:          "bootstrap-token",
-				sessionIdentity:         &recordingSubstrateSessionIdentityClient{jwt: "session-jwt"},
-				sessionIdentityRequired: true,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := tt.executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
-				BootstrapHandoff: true,
-				Artifacts: []UploadArtifact{{
-					Path: substrateHandoffTokenUploadPath,
-					Data: []byte(substrateTestToken),
-					Mode: 0o600,
-				}},
-				Timeout: time.Second,
-			})
-			if err == nil {
-				t.Fatal("Upload() error = nil, want required session identity error")
-			}
-			if !IsKind(err, ErrorKindFailedPrecondition) {
-				t.Fatalf("Upload() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
-			}
-		})
-	}
-}
-
-func TestSubstrateBootstrapHandoffConfiguredSessionIdentityFailsClosed(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected daemon request %s %s", r.Method, r.URL.Path)
-		http.Error(w, "unexpected request", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	tests := []struct {
-		name     string
-		identity *recordingSubstrateSessionIdentityClient
-		wantKind ErrorKind
-	}{
-		{
-			name:     "mint error",
-			identity: &recordingSubstrateSessionIdentityClient{err: NewError("mint session identity", ErrorKindFailedPrecondition, "not authorized", false, nil)},
-			wantKind: ErrorKindFailedPrecondition,
-		},
-		{
-			name:     "empty jwt",
-			identity: &recordingSubstrateSessionIdentityClient{},
-			wantKind: ErrorKindFailedPrecondition,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			executor := &SubstrateWorkspaceExecutor{
-				httpClient:           server.Client(),
-				routerURL:            server.URL,
-				actorDNSSuffix:       "actors.test",
-				bootstrapToken:       "bootstrap-token",
-				sessionIdentity:      tt.identity,
-				sessionIdentityToken: "session-identity-bearer",
-			}
-
-			_, err := executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
-				BootstrapHandoff: true,
-				Artifacts: []UploadArtifact{{
-					Path: substrateHandoffTokenUploadPath,
-					Data: []byte(substrateTestToken),
-					Mode: 0o600,
-				}},
-				Timeout: time.Second,
-			})
-			if err == nil {
-				t.Fatal("Upload() error = nil, want session identity error")
-			}
-			if !IsKind(err, tt.wantKind) {
-				t.Fatalf("Upload() error kind = %s, want %s", KindOf(err), tt.wantKind)
-			}
-			if tt.identity.calls != 1 {
-				t.Fatalf("MintJWT calls = %d, want 1", tt.identity.calls)
-			}
-		})
 	}
 }
 
@@ -814,11 +690,10 @@ func TestSubstrateWaitReadyFailsFastOnNonRetryableActorError(t *testing.T) {
 		getErrs: []error{NewError("get actor", ErrorKindNotFound, "actor missing", false, nil)},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: http.DefaultClient,
+		routerURL:  "http://router.test",
+		now:        time.Now,
 	}
 
 	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
@@ -846,12 +721,12 @@ func TestSubstrateWaitReadyFailsFastOnNonRetryableDaemonError(t *testing.T) {
 		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
@@ -881,12 +756,12 @@ func TestSubstrateWaitReadyCanSkipDaemonHealthCheck(t *testing.T) {
 		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.WaitReady(t.Context(), WaitReadyRequest{
@@ -928,9 +803,9 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 		workers: []substrateWorker{{
 			WorkerNamespace: "ate-demo",
 			WorkerPool:      "codex-pool",
-			WorkerPod:       "ateom-worker-1",
+			WorkerPod:       "ateom-pod-1",
 			ActorID:         "actor-1",
-			IP:              "10.244.0.42",
+			IP:              "10.244.0.10",
 		}},
 		actors: []substrateActor{
 			{ActorID: "actor-1", Status: substrateStatusRunning},
@@ -939,11 +814,11 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 		},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
 		now: func() time.Time {
 			if len(times) == 0 {
 				return time.Unix(100, int64(750*time.Millisecond)).UTC()
@@ -970,8 +845,8 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 	wantPlacement := Placement{
 		WorkerNamespace: "ate-demo",
 		WorkerPool:      "codex-pool",
-		WorkerPodName:   "ateom-worker-1",
-		PodIP:           "10.244.0.42",
+		WorkerPodName:   "ateom-pod-1",
+		PodIP:           "10.244.0.10",
 	}
 	if got.Placement != wantPlacement {
 		t.Fatalf("placement = %#v, want %#v", got.Placement, wantPlacement)
@@ -1013,12 +888,12 @@ func TestSubstrateWaitReadyTreatsPlacementLookupAsBestEffort(t *testing.T) {
 		}},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	start := time.Now()
@@ -1060,12 +935,12 @@ func TestSubstrateWaitReadyPassesBootToResumeActor(t *testing.T) {
 		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
@@ -1081,7 +956,7 @@ func TestSubstrateWaitReadyPassesBootToResumeActor(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
+func TestSubstrateDeleteScrubsBeforeNativeTermination(t *testing.T) {
 	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -1094,16 +969,15 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	defer server.Close()
 
 	control := &recordingSubstrateControlClient{
-		getStatuses:   []string{substrateStatusRunning, substrateStatusSuspending, substrateStatusSuspended},
-		suspendStatus: substrateStatusSuspending,
+		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -1116,8 +990,8 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	if !scrubbed {
 		t.Fatal("Delete() did not scrub the running actor")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1127,7 +1001,7 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testing.T) {
+func TestSubstrateDeleteDoesNotRequireSuccessfulSnapshot(t *testing.T) {
 	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -1140,16 +1014,16 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	defer server.Close()
 
 	control := &recordingSubstrateControlClient{
-		getStatuses: []string{substrateStatusRunning, substrateStatusSuspending, substrateStatusSuspended},
-		suspendErr:  fmt.Errorf("suspend transition still in progress"),
+		getStatuses: []string{substrateStatusRunning},
+		suspendErr:  fmt.Errorf("snapshot is unavailable"),
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -1162,8 +1036,8 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	if !scrubbed {
 		t.Fatal("Delete() did not scrub the running actor")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1189,12 +1063,12 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -1208,8 +1082,8 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 	if scrubbed {
 		t.Fatal("Delete() scrubbed despite SkipScrub")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1235,12 +1109,12 @@ func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
 		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -1253,8 +1127,8 @@ func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
 	if !scrubbed {
 		t.Fatal("Delete() did not attempt scrub before fallback delete")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1 after scrub failure", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 after scrub failure", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called after scrub failure")
@@ -1264,36 +1138,14 @@ func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
-	var restored bool
+func TestSubstrateDeleteKeepsCredentialsRevokedAfterUncertainTermination(t *testing.T) {
+	var scrubbed, restored bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
-			if got := r.Header.Get("Authorization"); got != substrateTestBearer {
-				t.Errorf("scrub Authorization = %q, want handoff bearer", got)
-			}
+			scrubbed = true
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
-			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
-				t.Errorf("restore Authorization = %q, want bootstrap bearer", got)
-			}
-			var req substrateUploadRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("decode restore request: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			if len(req.Files) != 1 {
-				t.Errorf("restore files len = %d, want 1", len(req.Files))
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			file := req.Files[0]
-			if file.Path != substrateHandoffTokenUploadPath ||
-				string(file.Data) != substrateTestToken ||
-				file.Mode != 0o600 {
-				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
-			}
 			restored = true
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -1302,32 +1154,30 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 	}))
 	defer server.Close()
 
-	control := &recordingSubstrateControlClient{
-		getStatuses: []string{substrateStatusRunning, substrateStatusRunning},
-		suspendErr:  fmt.Errorf("suspend failed"),
-	}
+	deleteErr := fmt.Errorf("native delete outcome is unknown")
+	control := &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning}, deleteErrs: []error{deleteErr}}
 	executor := &SubstrateWorkspaceExecutor{
 		control:        control,
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
+		atespace:       "team-a",
 		handoffToken:   substrateTestToken,
 		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
 	}
 
-	_, err := executor.Delete(t.Context(), DeleteRequest{
+	result, err := executor.Delete(t.Context(), DeleteRequest{
 		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		Timeout: time.Second,
 	})
-	if err == nil {
-		t.Fatal("Delete() error = nil, want suspend failure")
+	if !errors.Is(err, deleteErr) || result != nil {
+		t.Fatalf("Delete() result=%v err=%v, want no completion and the uncertain delete error", result, err)
 	}
-	if !restored {
-		t.Fatal("Delete() did not restore handoff token after suspend failure")
+	if !scrubbed || restored {
+		t.Fatalf("scrubbed=%t restored=%t, want scrubbed credentials to remain revoked", scrubbed, restored)
 	}
-	if control.deleted {
-		t.Fatal("DeleteActor was called after suspend failure")
+	if control.suspendCalls != 0 || len(control.deletedActorIDs) != 1 {
+		t.Fatal("Delete() must request termination once without taking a snapshot")
 	}
 }
 
@@ -1379,7 +1229,7 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 		control:        control,
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
+		atespace:       "team-a",
 		handoffToken:   substrateTestToken,
 		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
@@ -1417,12 +1267,12 @@ func TestSubstrateReleaseSkipScrubSuspendsRunningActor(t *testing.T) {
 		suspendStatus: substrateStatusSuspended,
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		handoffToken:   substrateTestToken,
-		now:            time.Now,
+		control:      control,
+		httpClient:   server.Client(),
+		routerURL:    server.URL,
+		atespace:     "team-a",
+		handoffToken: substrateTestToken,
+		now:          time.Now,
 	}
 
 	got, err := executor.Release(t.Context(), ReleaseRequest{
@@ -1460,11 +1310,11 @@ func TestSubstrateReleaseWaitsForSuspendedAfterSuspend(t *testing.T) {
 		suspendStatus: substrateStatusSuspending,
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: server.Client(),
+		routerURL:  server.URL,
+		atespace:   "team-a",
+		now:        time.Now,
 	}
 
 	got, err := executor.Release(t.Context(), ReleaseRequest{
@@ -1498,11 +1348,11 @@ func TestSubstrateReleaseWaitsWhenSuspendReturnsAfterStartingTransition(t *testi
 		suspendErr:  fmt.Errorf("suspend transition still in progress"),
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     server.Client(),
-		routerURL:      server.URL,
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: server.Client(),
+		routerURL:  server.URL,
+		atespace:   "team-a",
+		now:        time.Now,
 	}
 
 	got, err := executor.Release(t.Context(), ReleaseRequest{
@@ -1526,11 +1376,10 @@ func TestSubstrateDescribeDerivesRetainedFromSuspendedActor(t *testing.T) {
 		getStatuses: []string{substrateStatusSuspended},
 	}
 	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
+		control:    control,
+		httpClient: http.DefaultClient,
+		routerURL:  "http://router.test",
+		now:        time.Now,
 	}
 
 	got, err := executor.Describe(t.Context(), DescribeRequest{
@@ -1578,28 +1427,6 @@ type recordingSubstrateControlClient struct {
 	deletedActorIDs   []string
 }
 
-type recordingSubstrateSessionIdentityClient struct {
-	calls       int
-	req         substrateMintJWTRequest
-	bearerToken string
-	jwt         string
-	err         error
-}
-
-func (c *recordingSubstrateSessionIdentityClient) MintJWT(
-	ctx context.Context,
-	req substrateMintJWTRequest,
-	bearerToken string,
-) (string, error) {
-	c.calls++
-	c.req = req
-	c.bearerToken = bearerToken
-	if c.err != nil {
-		return "", c.err
-	}
-	return c.jwt, nil
-}
-
 func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID string) (*substrateActor, error) {
 	if actorID == "" {
 		return nil, fmt.Errorf("actor id required")
@@ -1623,6 +1450,7 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: templateNamespace,
 		TemplateName:      templateName,
 		Status:            status,
@@ -1648,6 +1476,7 @@ func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actor
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            substrateStatusResuming,
@@ -1668,6 +1497,7 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            status,
@@ -1677,7 +1507,7 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 	}, nil
 }
 
-func (c *recordingSubstrateControlClient) DeleteActor(ctx context.Context, actorID string) error {
+func (c *recordingSubstrateControlClient) DeleteActor(ctx context.Context, actorID, _ string) error {
 	call := len(c.deletedActorIDs)
 	c.deleted = true
 	c.deletedActorIDs = append(c.deletedActorIDs, actorID)
