@@ -95,8 +95,8 @@ Codex inputs:
 | --- | --- |
 | Codex ACP source | commit `68d7d2d5ddfc0ed5746f9f6130892dda685e65dd`; codeload archive SHA-256 `51ba8d1d302f8a854c0501887ffbe12fb267f6e8fdae9ad2b58e2c8fc9513b1e` |
 | Codex ACP release | `2.1.1`; npm tar SHA-256 `9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872` |
-| Orka Codex ACP external-sandbox patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `2a8d65f335cf3611de995ffa265bdc46aacd60e6f4e9b69ebd0e3ee854c36223` |
-| Patched Codex ACP `dist/index.js` | SHA-256 `14a23d925301658d5a047e21ab29e09eb303ddead384fbb6119af79fad59fdaa` |
+| Orka Codex ACP external-sandbox and no-session-root-trust patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `46682c7fc07e86a16147cace6334e632d71104233ecec247f7167d3f83322af9` |
+| Patched Codex ACP `dist/index.js` | SHA-256 `796f3cf6d156ca937e3b571e94caa192914c2f06c5d3845e4b1cf036433a1a7c` |
 | Codex CLI | `0.160.0`; source commit `a956835d020762cb2b570053af06f643a11c0ecc` |
 | Codex CLI `linux/amd64` | npm tar SHA-256 `37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc` |
 | Codex CLI `linux/arm64` | npm tar SHA-256 `9286a7e01d500ab224c9e5b4b223b7adf5dd901fba23efd6a438316426798b17` |

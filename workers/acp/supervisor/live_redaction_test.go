@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -480,6 +481,143 @@ func TestInterleavedUpdatesDoNotReleaseHeldText(t *testing.T) {
 	}
 	if joined := strings.Join(emitted, ""); joined != "key [REDACTED] end" {
 		t.Fatalf("emitted %q", emitted)
+	}
+}
+
+func TestInterleavedUpdatesReleaseAFinishedWordInPlace(t *testing.T) {
+	server, state, prompt := newLiveTestPrompt(t, testLiveCredential)
+	now := time.Now().UTC()
+	text := func(kind, text string) map[string]any {
+		return map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": text}}
+	}
+	var emitted []string
+	for i, update := range []map[string]any{
+		text("agent_message_chunk", "an accurate project summary."),
+		{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "kind": "execute", "status": "in_progress"},
+		text("agent_thought_chunk", "keep it short and key!"),
+		text("agent_message_chunk", "This project"),
+	} {
+		events, err := server.mapRuntimeEvents(state, prompt, liveTestUpdate(t, now.Add(time.Duration(i)*time.Millisecond), update))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			switch update := event.Update; {
+			case update.AssistantMessage != nil:
+				emitted = append(emitted, "message:"+update.AssistantMessage.Text)
+			case update.AssistantThought != nil:
+				emitted = append(emitted, "thought:"+update.AssistantThought.Text)
+			case update.ToolCall != nil:
+				emitted = append(emitted, "tool")
+			}
+		}
+	}
+	want := []string{
+		"message:an accurate project ", "message:summary.", "tool",
+		"thought:keep it short and ", "thought:key!", "message:This ",
+	}
+	if !slices.Equal(emitted, want) {
+		t.Fatalf("emitted %q, want %q", emitted, want)
+	}
+}
+
+func TestRedactionStreamReleasesOnlyTextNothingCanCompleteIntoACredential(t *testing.T) {
+	redactor := newCredentialRedactor(testLiveCredential)
+	for held, released := range map[string]bool{
+		"summary.":                      true,
+		"key!":                          true,
+		testLiveCredential[:12]:         false,
+		"ghp_abc":                       false,
+		"sk-proj":                       false,
+		"eyJhbGci.eyJzdWIi":             false,
+		"https://user:pa":               false,
+		"//demoAuth7":                   false,
+		"(//user:pw":                    false,
+		"login?demoAuth7":               false,
+		"page#demoAuth7":                false,
+		"café.txt":                      false,
+		"following:":                    false,
+		"it (works), really!":           true,
+		"token=":                        false,
+		"QWERTYUIOPASDFGHJKLZ":          false,
+		"internationalization":          false,
+		"`curl https://example.test?x=": false,
+	} {
+		stream := redactor.stream()
+		stream.held = held
+		if got := stream.release() != ""; got != released {
+			t.Errorf("release of %q = %v, want %v", held, got, released)
+		}
+		if stream.held != held {
+			t.Errorf("held %q became %q", held, stream.held)
+		}
+	}
+}
+
+func TestReleasedTextStillRedactsTheCredentialItBegins(t *testing.T) {
+	redactor := newCredentialRedactor(testLiveCredential)
+	for _, tc := range []struct{ first, rest, secret string }{
+		{"password", "=demo-value-123 and more", "demo-value-123"},
+		{"sk", "-proj-abcdefghijklmnopqrstuvwxyz0123 and more", "abcdefghijklmnopqrstuvwxyz0123"},
+		{"gh", "p_abcdefghijklmnopqrstuvwxyz0123456789 and more", "abcdefghijklmnopqrstuvwxyz0123456789"},
+		{"token", " is hunter2hunter2 and more", "hunter2hunter2"},
+		{"see", " " + testLiveCredential + " and more", testLiveCredential},
+		{"file.txt", "?x=1&sig=demoAuth7 and more", "demoAuth7"},
+		{"HTTPS", "://example.test/a?sig=demoAuth7 and more", "demoAuth7"},
+	} {
+		stream := redactor.stream()
+		var sent []string
+		send := func(text string) {
+			sent = append(sent, executionevents.RedactExecutionEventText(text))
+		}
+		send(stream.write("the " + tc.first))
+		early := stream.release()
+		if early == "" {
+			t.Fatalf("%q was not released", tc.first)
+		}
+		sent = append(sent, early)
+		// Released text is not sent again, even when nothing follows it.
+		if again := stream.release(); again != "" {
+			t.Fatalf("released %q twice", again)
+		}
+		for _, piece := range strings.SplitAfter(tc.rest, "-") {
+			send(stream.write(piece))
+			if released := stream.release(); released != "" {
+				sent = append(sent, released)
+			}
+		}
+		send(stream.flush())
+		joined := strings.Join(sent, "")
+		if strings.Contains(joined, tc.secret) || strings.Count(strings.ToLower(joined), strings.ToLower(tc.first)) != 1 {
+			t.Errorf("%q then %q sent %q", tc.first, tc.rest, sent)
+		}
+		if !strings.HasPrefix(joined, "the "+tc.first) || !strings.HasSuffix(joined, " and more") {
+			t.Errorf("%q then %q sent %q, want the text around the credential once", tc.first, tc.rest, sent)
+		}
+	}
+	// Text released and followed by nothing is sent once.
+	stream := redactor.stream()
+	if first := stream.write("the end."); first != "the " {
+		t.Fatalf("write = %q", first)
+	}
+	if released := stream.release(); released != "end." {
+		t.Fatalf("release = %q", released)
+	}
+	if stream.pending() {
+		t.Fatal("released text is still pending")
+	}
+	if rest := stream.flush(); rest != "" {
+		t.Fatalf("flush sent %q again", rest)
+	}
+	// Prose after released text continues it without repeating it.
+	stream = redactor.stream()
+	stream.write("an accurate project ")
+	stream.write("summary.")
+	if released := stream.release(); released != "summary." {
+		t.Fatalf("release = %q", released)
+	}
+	if next := stream.write("This project is "); next != "This project is " {
+		t.Fatalf("write after release = %q", next)
 	}
 }
 

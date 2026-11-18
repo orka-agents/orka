@@ -11,7 +11,8 @@ tools for administrators, not an agent feature:
 
 - They are **off by default**, and an administrator must enable them at three
   independent levels.
-- Every call needs a dedicated Kubernetes permission and is **audited**.
+- Every call needs a dedicated Kubernetes permission, and every authenticated
+  call is **audited**.
 - Anything that could change the workspace **taints** the Task's session.
   After that, the Task is never published, reused, checkpointed for forks, or
   continued.
@@ -26,7 +27,7 @@ orka-api. The CLI never connects to a runtime Pod directly.
 | Target | Supported |
 | --- | --- |
 | Class-backed ACP Task (`spec.execution.workspace.classRef`) on an Agent Sandbox or other Pod-backed provider, while its RuntimeSession is live | Yes |
-| The same workspace after the Task finished, while it is still attached to the Task or the Task held its last attachment, and its runtime is still running | Yes |
+| The same workspace after the Task finished, while it is still attached to the Task or the Task held its last attachment, until settlement suspends or deletes it. With a `Suspend` class that happens within seconds of completion, and calls then return `409 execution workspace is not running` | Yes |
 | Substrate native-process workspaces | Not yet (`501`) |
 | Suspended or deleted workspaces, built-in pools without an execution workspace, container Tasks, external `AgentRuntime` registrations | No |
 
@@ -191,9 +192,12 @@ use these exit codes:
 `orka task exec` and `orka task cp` into a workspace can change anything the
 session's identity can write. Before either one starts, orka-api records the
 `acp.workspace.orka.ai/operator-tainted` annotation on the Task and on its
-ExecutionWorkspace. If that write fails, the operation is refused. Only the
-Orka controller identity can write either annotation, so a Task author cannot
-remove it.
+ExecutionWorkspace. If that write fails, the operation is refused. Task
+provenance admission reserves the Task annotation to Orka's controller
+identities. The core workspace admission policy makes the workspace annotation
+permanent: once it is set, no identity can remove or change it. Orka treats a
+workspace as tainted when either the workspace or any Task that used it
+carries the annotation.
 
 A tainted session:
 
@@ -218,16 +222,27 @@ leaves the session tainted.
 
 ## Audit
 
-Each call produces records for when it started and finished, or when it was
-denied, under one audit ID. Records go to the orka-api log under
-`audit: operator workspace access` and are emitted as Kubernetes Events on the
-Task (`OperatorAccessStarted`, `OperatorAccessFinished`, `OperatorAccessDenied`):
+Each authenticated call produces records for when it started and finished, or
+when it was denied, under one audit ID. Records go to the orka-api log under
+`audit: operator workspace access`. Once orka-api has read the Task, they are
+also emitted as Kubernetes Events on the Task (`OperatorAccessStarted`,
+`OperatorAccessFinished`, `OperatorAccessDenied`):
 
 ```bash
 kubectl get events -n team-a --field-selector involvedObject.name=my-task
 ```
 
-Each record includes:
+Not every refusal reaches both places:
+
+- A refusal before orka-api reads the Task is recorded as denied in the
+  orka-api log only, because an Event needs the Task UID. That covers a missing
+  `tasks/exec`, `tasks/files`, or Task `get` permission, a refused identity or
+  context-token scope, and a controller without
+  `--operator-workspace-access-enabled`.
+- A request with missing or invalid credentials fails authentication with
+  `401` and produces no operator audit record.
+
+Each record includes what is known at that point:
 
 - the actor and authentication type
 - the namespace, Task, and Task UID

@@ -130,8 +130,8 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	}
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
+	before = runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, before)))
 	addAHPTables(t, before)
-	before = stampedApplicationRows(t, before)
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -302,6 +302,9 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		"version 2":                     `PRAGMA user_version=2`,
 		"version 3":                     `PRAGMA user_version=3`,
 		"version 4":                     `PRAGMA user_version=4`,
+		"version 5":                     `PRAGMA user_version=5`,
+		"version 6":                     `PRAGMA user_version=6`,
+		"version 7":                     `PRAGMA user_version=7`,
 		"unknown":                       `PRAGMA user_version=2147483647`,
 		"negative":                      `PRAGMA user_version=-1`,
 		"version reset":                 `PRAGMA user_version=0`,

@@ -103,6 +103,13 @@ overall result should follow the chain. `wait_for_tasks` does this automatically
 whose turn parked is reported as unfinished until its newest continuation finishes, and the
 result describes that continuation (`continuationTask`, `waitState`).
 
+A Task [webhook](task-webhooks.md#parked-agent-turns) follows the chain too. A parked
+Task sends no `task.succeeded` notice for its own turn. While its wait is active, nothing
+is sent. Once it resumes, the continuation, which inherits `spec.webhookURL`, sends the
+notice when it finishes. If the wait ends without a continuation, the parked Task sends one
+notice: `task.cancelled` for a cancelled wait, and `task.failed` for an expired wait or for
+a wait abandoned after a successful turn.
+
 ## Cancel a wait
 
 ```bash

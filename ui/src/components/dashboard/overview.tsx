@@ -9,6 +9,7 @@ import { Distribution } from '@/components/ui/distribution'
 import { taskPhaseSchema } from '@/schemas/task'
 import { StatsCards } from './stats-cards'
 import { RecentTasks } from './recent-tasks'
+import { NeedsYouCard } from './needs-you-card'
 import { loadProblem, loadProblemText } from '@/lib/load-problem'
 
 // Drive the distribution from the full phase enum (Pending/Running/Succeeded/
@@ -58,6 +59,7 @@ export function Overview() {
         // Each card renders as soon as its own list arrives.
         loading={{ tasks: tasksLoading, sessions: sessionsLoading, agents: agentsLoading, tools: toolsLoading }}
       />
+      <NeedsYouCard />
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Sized to its content instead of stretching to the Recent Tasks height. */}
         <Card className="lg:col-span-1 lg:self-start">

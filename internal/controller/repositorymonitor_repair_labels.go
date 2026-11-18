@@ -49,6 +49,11 @@ type repositoryMonitorCIFailures struct {
 	incomplete bool
 	introduced []repositoryMonitorCIFailure
 	inherited  []repositoryMonitorCIFailure
+	// pending lists head check runs that had not completed.
+	pending []repositoryMonitorCIFailure
+	// headIncomplete means the failing head result came from partial check
+	// runs or statuses, so introduced may not list every failure.
+	headIncomplete bool
 }
 
 // errRepositoryMonitorCIIncomplete defers work that needs complete CI results.
@@ -134,7 +139,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 		return repositoryMonitorCIFailures{}, nil
 	}
 	if strings.TrimSpace(pr.BaseSHA) == "" || len(head.failed) == 0 {
-		failures := repositoryMonitorCIFailures{broke: true}
+		failures := repositoryMonitorCIFailures{broke: true, pending: head.pending, headIncomplete: head.incomplete}
 		failures.introduced = append(failures.introduced, head.failed...)
 		return failures, nil
 	}
@@ -151,7 +156,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	for _, failure := range base.failed {
 		baseFailed[failure.key()] = struct{}{}
 	}
-	var failures repositoryMonitorCIFailures
+	failures := repositoryMonitorCIFailures{pending: head.pending, headIncomplete: head.incomplete}
 	for _, failure := range head.failed {
 		if _, ok := baseFailed[failure.key()]; ok {
 			failures.inherited = append(failures.inherited, failure)

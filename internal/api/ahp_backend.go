@@ -865,7 +865,7 @@ func ahpSessionConfig(mode string) *ahptypes.SessionConfigState {
 	values, _ := json.Marshal(mode)
 	available, _ := json.Marshal([]string{ahpApprovalManual, ahpApprovalAllowAll})
 	return &ahptypes.SessionConfigState{
-		Schema: ahptypes.SessionConfigSchema{Type: "object", Properties: map[string]ahptypes.SessionConfigPropertySchema{
+		Schema: ahptypes.SessionConfigSchema{Type: mcpSchemaTypeObject, Properties: map[string]ahptypes.SessionConfigPropertySchema{
 			ahpConfigApprovalMode: {Type: ahpSchemaString, Title: "Approvals", Description: &description, Enum: modes,
 				EnumLabels: []string{"Manual approvals", "Allow all"}, SessionMutable: &mutable},
 			ahpConfigAvailableModes: {Type: "array", Title: "Available approvals", ReadOnly: &readOnly, SessionMutable: &notMutable,

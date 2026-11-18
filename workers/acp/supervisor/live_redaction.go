@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -115,6 +116,12 @@ type redactionStream struct {
 	// until it ends, so a long unfinished construct costs one pass rather
 	// than one per chunk.
 	overflow *strings.Builder
+	// released is how many bytes at the start of the held text were sent
+	// already, ahead of an interleaved event, and sent is the text the client
+	// got for them. The held text stays, so what follows is redacted together
+	// with it, and only what the client has not got is sent.
+	released int
+	sent     string
 }
 
 func (r *credentialRedactor) stream() *redactionStream {
@@ -144,6 +151,10 @@ func (s *redactionStream) write(chunk string) string {
 	if text != joined || strings.ContainsAny(chunk, redactionWhitespace) {
 		cut = patternSafeCut(text, limit)
 	}
+	if cut < s.released {
+		// A cut inside text already sent would split what the client got.
+		cut = 0
+	}
 	if cut == 0 && len(text) > maxPatternHeldBytes {
 		s.overflow = &strings.Builder{}
 		s.overflow.WriteString(text)
@@ -154,7 +165,37 @@ func (s *redactionStream) write(chunk string) string {
 		cut--
 	}
 	s.held = text[cut:]
-	return text[:cut]
+	return s.unsent(text[:cut], cut > 0)
+}
+
+// unsent returns what the client has not got of final, the start of the held
+// text, and with done forgets what was sent of it. With nothing sent early,
+// final is returned as it is, to be redacted by the caller. Otherwise final is
+// redacted whole, so a credential that began in the text sent early is still
+// recognized, and the client gets the redacted text past what it has. When
+// the redaction covers some of what it has, it gets the redaction itself.
+func (s *redactionStream) unsent(final string, done bool) string {
+	if s.released == 0 {
+		return final
+	}
+	if !done {
+		return ""
+	}
+	redacted := executionevents.RedactExecutionEventText(final)
+	common := 0
+	if len(redacted) >= len(s.sent) && strings.EqualFold(redacted[:len(s.sent)], s.sent) {
+		// The text sent early is plain ASCII; URL serialization can only
+		// lowercase it as a scheme, which the client's copy already shows.
+		common = len(s.sent)
+	}
+	for common < len(redacted) && common < len(s.sent) && redacted[common] == s.sent[common] {
+		common++
+	}
+	for common > 0 && common < len(redacted) && !utf8.RuneStart(redacted[common]) {
+		common--
+	}
+	s.released, s.sent = 0, ""
+	return redacted[common:]
 }
 
 // maxPatternHeldBytes bounds the text a stream re-examines on each chunk.
@@ -213,11 +254,48 @@ func (s *redactionStream) flush() string {
 	if s.redactor != nil {
 		text = s.redactor.replace(text)
 	}
+	return s.unsent(text, true)
+}
+
+// releasablePlainText is held text that can be sent before an interleaved
+// event: ASCII words, spaces and sentence punctuation. Without URL, query,
+// assignment, quoting or escaping characters it can hold no part of a URL's
+// password, query or fragment, and redacting it together with what follows
+// can only replace it, never rewrite it, so the client's copy stays a prefix.
+var releasablePlainText = regexp.MustCompile(`^[A-Za-z0-9 \t\n\f\r.,;!'()*_~-]*$`)
+
+// heldCredentialShape matches plain text that may still be the start of a
+// credential: a JWT, or a long token-like run.
+var heldCredentialShape = regexp.MustCompile(`eyJ|[A-Za-z0-9_~-]{16,}`)
+
+// release sends the held text before an event of another kind, so the text
+// keeps its place among them, when it is no part of a credential on its own:
+// it is plain text, begins no exact credential, waits for no value, and does
+// not look like the start of a credential. The text stays held, and what follows it is
+// redacted together with it, so a credential it turns out to begin, such as
+// "password" followed by "=value", is still redacted. Otherwise nothing is
+// sent until the stream's next chunk or end. The returned text is redacted.
+func (s *redactionStream) release() string {
+	if s == nil || s.overflow != nil || len(s.held) == s.released {
+		return ""
+	}
+	if s.redactor != nil && s.redactor.heldPrefixLength(s.held) > 0 {
+		return ""
+	}
+	if !releasablePlainText.MatchString(s.held) || heldCredentialShape.MatchString(s.held) || !patternFinal(s.held, "") {
+		return ""
+	}
+	redacted := executionevents.RedactExecutionEventText(s.held)
+	if !strings.HasPrefix(redacted, s.sent) {
+		return ""
+	}
+	text := redacted[len(s.sent):]
+	s.released, s.sent = len(s.held), redacted
 	return text
 }
 
 func (s *redactionStream) pending() bool {
-	return s != nil && (s.held != "" || s.overflow != nil && s.overflow.Len() > 0)
+	return s != nil && (len(s.held) > s.released || s.overflow != nil && s.overflow.Len() > 0)
 }
 
 // redactPermission redacts the agent-controlled text of a permission request.
@@ -513,12 +591,32 @@ func (s *Server) flushHeldTextLocked(state *sessionState, prompt *promptState, a
 	return events
 }
 
+// releaseHeldTextLocked returns as events the held text of the streams other
+// than except that can be released before an interleaved event, so a word
+// held at the end of a message does not follow the tool call or thought that
+// came after it. Text that could still be part of a credential stays held:
+// a tool update or another stream can come between two chunks of one
+// message. Callers hold s.mu.
+func (s *Server) releaseHeldTextLocked(
+	state *sessionState, prompt *promptState, except *redactionStream, at time.Time,
+) []harnessv2.Event {
+	var events []harnessv2.Event
+	if prompt.assistantRedaction != except {
+		events = append(events, s.textUpdateEventsLocked(
+			state, prompt, harnessv2.UpdateAssistantMessageChunk, prompt.assistantRedaction.release(), at)...)
+	}
+	if prompt.thoughtRedaction != except {
+		events = append(events, s.textUpdateEventsLocked(
+			state, prompt, harnessv2.UpdateAssistantThoughtChunk, prompt.thoughtRedaction.release(), at)...)
+	}
+	return events
+}
+
 // flushTextRedaction ends both text streams when the prompt's event stream
-// ends. Held text is released only by its own stream's next chunk or here,
-// never by an interleaved event: a tool update or another stream can come
-// between two chunks of one message, so releasing it early could emit a
-// credential's prefix apart from its rest. The held text keeps the last
-// event's time, so it never follows the terminal event's settlement time.
+// ends. Before then, held text is released by its own stream's next chunk,
+// or before an interleaved event only when releaseHeldTextLocked finds it
+// safe. The held text keeps the last event's time, so it never follows the
+// terminal event's settlement time.
 func (s *Server) flushTextRedaction(state *sessionState, prompt *promptState) []harnessv2.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()

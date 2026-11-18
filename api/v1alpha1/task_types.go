@@ -138,6 +138,19 @@ type TaskTransaction struct {
 	Context map[string]string `json:"context,omitempty"`
 }
 
+// TaskWebhookEvent is an opt-in, non-terminal webhook event (ADR 0053).
+// +kubebuilder:validation:Enum=task.approval_requested;task.approval_resolved
+type TaskWebhookEvent string
+
+const (
+	// TaskWebhookEventApprovalRequested notifies when a human approval for the
+	// Task is requested.
+	TaskWebhookEventApprovalRequested TaskWebhookEvent = "task.approval_requested"
+	// TaskWebhookEventApprovalResolved notifies when a requested approval is
+	// approved, declined, expired, or cancelled.
+	TaskWebhookEventApprovalResolved TaskWebhookEvent = "task.approval_resolved"
+)
+
 // TaskSpec defines the desired state of Task
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
@@ -156,6 +169,9 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type == 'agent' || !has(self.agentRuntime) || !has(self.agentRuntime.permissionDecisions) || self.agentRuntime.permissionDecisions != 'Requester'",message="agentRuntime.permissionDecisions Requester is only supported for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="!has(self.webhookEvents) || size(self.webhookEvents) == 0 || (has(self.webhookURL) && size(self.webhookURL) > 0)",message="webhookEvents requires webhookURL"
+// +kubebuilder:validation:XValidation:rule="!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type == 'ai' && !has(self.sessionRef))",message="ai.memoryConsolidation requires an ai Task without sessionRef"
+// +kubebuilder:validation:XValidation:rule="(has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai) && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation) || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)",message="ai.memoryConsolidation is immutable"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -195,6 +211,16 @@ type TaskSpec struct {
 	// WebhookURL is the URL to call when the task completes
 	// +optional
 	WebhookURL string `json:"webhookURL,omitempty"`
+
+	// WebhookEvents opts spec.webhookURL into non-terminal notices (ADR 0053).
+	// Terminal notices (task.succeeded, task.failed, task.cancelled) are always
+	// sent and cannot be listed here; empty or absent keeps terminal notices
+	// only. Selecting any approval event also enables the task.approval_overflow
+	// notice. Requires webhookURL.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=2
+	WebhookEvents []TaskWebhookEvent `json:"webhookEvents,omitempty"`
 
 	// SecretRef references a Kubernetes Secret containing credentials
 	// +optional
@@ -427,6 +453,61 @@ type AISpec struct {
 	// Tools lists the tools available for this task
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// MemoryConsolidation makes this Task a memory consolidation run: it reads
+	// the namespace's current memories and recently changed Sessions and
+	// reports, or proposes, merges, supersessions and retirements for review
+	// (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+	// Prompt, when set, steers what it focuses on. Creating such a Task, or
+	// changing its spec, requires list and get on sessions and list on
+	// memories in the namespace, and in Propose mode create on
+	// memoryproposals.
+	// +optional
+	MemoryConsolidation *MemoryConsolidationSpec `json:"memoryConsolidation,omitempty"`
+}
+
+// MemoryConsolidationMode selects what a memory consolidation run does with
+// the operations it finds.
+// +kubebuilder:validation:Enum=DryRun;Propose
+type MemoryConsolidationMode string
+
+const (
+	// MemoryConsolidationDryRun reports the operations without creating
+	// proposals.
+	MemoryConsolidationDryRun MemoryConsolidationMode = "DryRun"
+	// MemoryConsolidationPropose also creates a memory proposal for each
+	// accepted operation.
+	MemoryConsolidationPropose MemoryConsolidationMode = "Propose"
+)
+
+// MemoryConsolidationSpec configures a memory consolidation run.
+type MemoryConsolidationSpec struct {
+	// Mode is DryRun, the default, or Propose.
+	// +kubebuilder:default=DryRun
+	// +optional
+	Mode MemoryConsolidationMode `json:"mode,omitempty"`
+
+	// MinNewSessions is the fewest Sessions that must have changed since the
+	// last completed run for this run to call the model. Fewer skips the run.
+	// Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MinNewSessions *int32 `json:"minNewSessions,omitempty"`
+
+	// MaxOperations is the most operations one run reports or proposes.
+	// Defaults to 10.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxOperations *int32 `json:"maxOperations,omitempty"`
+
+	// Lookback is how far back the first run of its mode in a namespace
+	// reads. Later runs start where the latest completed run ended. Defaults
+	// to 168h; at most 720h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h') && duration(self) <= duration('720h')",message="lookback must be between 1h and 720h"
+	// +optional
+	Lookback *metav1.Duration `json:"lookback,omitempty"`
 }
 
 // MarshalJSON preserves an explicitly empty native tool policy instead of
@@ -543,6 +624,14 @@ type TaskStatus struct {
 	// +optional
 	WebhookDelivery *TaskWebhookDelivery `json:"webhookDelivery,omitempty"`
 
+	// ApprovalWebhooks records the opt-in approval notices selected by
+	// spec.webhookEvents (ADR 0053): a bounded queue projected from the Task's
+	// durable approval events, and the projection cursor that keeps a
+	// transition from ever being notified twice. It is independent of the
+	// terminal notice in webhookDelivery.
+	// +optional
+	ApprovalWebhooks *TaskApprovalWebhooks `json:"approvalWebhooks,omitempty"`
+
 	// Message provides additional status information
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -616,8 +705,10 @@ const (
 	// TaskWebhookDeliveryDelivered means the receiver acknowledged the notice
 	// with a 2xx response.
 	TaskWebhookDeliveryDelivered TaskWebhookDeliveryState = "Delivered"
-	// TaskWebhookDeliveryFailed means the notice was rejected by policy or
-	// exhausted its bounded attempts. It is never retried.
+	// TaskWebhookDeliveryFailed means the notice was rejected by policy,
+	// exhausted its bounded attempts, belonged to a parked turn whose
+	// continuation now reports instead, or was an approval notice retired
+	// unsent. It is never retried.
 	TaskWebhookDeliveryFailed TaskWebhookDeliveryState = "Failed"
 )
 
@@ -676,6 +767,118 @@ type TaskWebhookDelivery struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	LastError string `json:"lastError,omitempty"`
+}
+
+// TaskApprovalWebhookTransition is the approval change an approval notice
+// reports.
+// +kubebuilder:validation:Enum=Requested;Resolved;Overflow
+type TaskApprovalWebhookTransition string
+
+const (
+	// TaskApprovalWebhookRequested reports a new approval request.
+	TaskApprovalWebhookRequested TaskApprovalWebhookTransition = "Requested"
+	// TaskApprovalWebhookResolved reports an approval's single resolution.
+	TaskApprovalWebhookResolved TaskApprovalWebhookTransition = "Resolved"
+	// TaskApprovalWebhookOverflow reports that later transitions were not
+	// recorded because the notice queue was full.
+	TaskApprovalWebhookOverflow TaskApprovalWebhookTransition = "Overflow"
+)
+
+// MaxTaskApprovalWebhookNotices bounds status.approvalWebhooks.notices. One
+// slot is reserved for the overflow notice.
+const MaxTaskApprovalWebhookNotices = 16
+
+// TaskApprovalWebhooks is the durable projection of a Task's approval events
+// into signed webhook notices.
+type TaskApprovalWebhooks struct {
+	// ProjectedSeq is the projection cursor: the highest approval event stream
+	// sequence already projected. A transition at or below it is never
+	// projected again, so a delivered or pruned notice is never regenerated.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ProjectedSeq int64 `json:"projectedSeq,omitempty"`
+
+	// Tracking records that projectedSeq has followed the approval events
+	// since the Task selected an approval event. The controller sets it when
+	// it initializes the status of a Task that selects one. Otherwise, the
+	// first projection raises projectedSeq to the stream's high-water mark
+	// before setting it, so history from before the selection, or from while
+	// the Task selected no approval event, is never notified. It is cleared
+	// when the Task selects no approval event.
+	// +optional
+	Tracking bool `json:"tracking,omitempty"`
+
+	// Notices are the retained notices in stream order. Pending notices are
+	// never removed; settled ones are pruned, oldest first, to make room.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Notices []TaskApprovalWebhookNotice `json:"notices,omitempty"`
+
+	// Pruned counts settled notices removed to make room.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Pruned int32 `json:"pruned,omitempty"`
+
+	// Overflowed is set once the queue was full of pending notices. A single
+	// overflow notice is then recorded and no later transition is notified.
+	// +optional
+	Overflowed bool `json:"overflowed,omitempty"`
+
+	// Omitted counts approval transitions not notified because of overflow.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Omitted int32 `json:"omitted,omitempty"`
+}
+
+// TaskApprovalWebhookNotice is one approval notice and its delivery record.
+// It holds only the safe identifiers the payload carries; the payload is
+// rendered from this record alone, so every attempt sends identical bytes.
+type TaskApprovalWebhookNotice struct {
+	TaskWebhookDelivery `json:",inline"`
+
+	// Transition is the approval change this notice reports.
+	Transition TaskApprovalWebhookTransition `json:"transition"`
+
+	// StreamSeq is the approval event stream sequence of the transition. For
+	// the overflow notice it is the first transition that was not notified.
+	// +kubebuilder:validation:Minimum=0
+	StreamSeq int64 `json:"streamSeq"`
+
+	// ApprovalID identifies the approval. Empty for the overflow notice.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ApprovalID string `json:"approvalID,omitempty"`
+
+	// Resolution is how a resolved approval ended.
+	// +optional
+	// +kubebuilder:validation:Enum=approved;declined;expired;cancelled
+	Resolution string `json:"resolution,omitempty"`
+
+	// TargetTool is the tool name the approval gates, when it has one.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	TargetTool string `json:"targetTool,omitempty"`
+
+	// Severity is the approval's severity label.
+	// +optional
+	// +kubebuilder:validation:MaxLength=16
+	Severity string `json:"severity,omitempty"`
+
+	// ExpiresAt is the enforced approval deadline, when the approval has one.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
+	// SigningDeadline is the latest time the notice may wait for webhook signing
+	// keys. It is set when the notice is queued. While the keys are
+	// unavailable at or after it, the notice is retired unsent so later
+	// notices can proceed. It is not part of the payload.
+	// +optional
+	SigningDeadline *metav1.Time `json:"signingDeadline,omitempty"`
+
+	// Parked reports a parked-turn sign-off approval (ADR 0041).
+	// +optional
+	Parked bool `json:"parked,omitempty"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
@@ -882,7 +1085,7 @@ type ConnectionBinding struct {
 // The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
 // soul-only binding it compares every field except TaskControlFields; a test
 // regenerates that field list from TaskSpec.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.webhookEvents) == has(oldSelf.spec.webhookEvents) && (!has(self.spec.webhookEvents) || self.spec.webhookEvents == oldSelf.spec.webhookEvents) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {

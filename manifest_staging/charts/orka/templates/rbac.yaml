@@ -12,10 +12,11 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connections"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Orka creates Tasks for callers it has already authorized, so it may use
-  # every Agent; see --agent-use-authorization-enabled.
+  # Orka creates Tasks and Agents for callers it has already authorized, so it
+  # may use every Agent and Provider; see --agent-use-authorization-enabled and
+  # --provider-use-authorization-enabled.
   - apiGroups: ["core.orka.ai"]
-    resources: ["agents"]
+    resources: ["agents", "providers"]
     verbs: ["use"]
   # The API binds Agent identities only for callers it has checked for bind.
   - apiGroups: ["core.orka.ai"]
@@ -39,6 +40,13 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
+  # Scheduled memory consolidation runs: see memory-consolidation-policy.yaml.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memories"]
+    verbs: ["list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memoryproposals"]
+    verbs: ["create"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status"]
     verbs: ["get", "update", "patch"]
@@ -609,6 +617,9 @@ rules:
     resources: ["agents"]
     verbs: ["get", "create", "update", "delete", "use"]
   - apiGroups: ["core.orka.ai"]
+    resources: ["providers"]
+    verbs: ["use"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
@@ -697,6 +708,9 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
     verbs: ["get", "create", "update", "delete", "use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["providers"]
+    verbs: ["use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]

@@ -463,6 +463,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - providers
+  verbs:
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agentruntimes
   verbs:
   - get
@@ -1146,7 +1152,6 @@ rules:
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -1235,6 +1240,7 @@ rules:
   - core.orka.ai
   resources:
   - agents
+  - providers
   verbs:
   - create
   - delete
@@ -1254,6 +1260,18 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryproposals
+  verbs:
+  - create
 - apiGroups:
   - core.orka.ai
   resources:
@@ -1851,6 +1869,12 @@ rules:
   - create
   - update
   - delete
+  - use
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
   - use
 - apiGroups:
   - core.orka.ai
@@ -3614,6 +3638,15 @@ spec:
     message: only the Orka core controller may set or change ExecutionWorkspace attachment
       intent (attachment and attachmentEpoch)
     reason: Forbidden
+  - expression: |-
+      oldObject == null || !has(oldObject.metadata.annotations) || !('acp.workspace.orka.ai/operator-tainted' in oldObject.metadata.annotations) || (has(object.metadata.annotations) &&
+
+       'acp.workspace.orka.ai/operator-tainted' in object.metadata.annotations &&
+       object.metadata.annotations['acp.workspace.orka.ai/operator-tainted'] ==
+         oldObject.metadata.annotations['acp.workspace.orka.ai/operator-tainted'])
+    message: the operator access taint of an ExecutionWorkspace is permanent; no identity
+      may remove or change it
+    reason: Forbidden
   variables:
   - expression: 'has(object.metadata.labels) && ''workspace.orka.ai/controller-name''
       in object.metadata.labels ? object.metadata.labels[''workspace.orka.ai/controller-name'']
@@ -3835,6 +3868,43 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: '!variables.checkedRun || (authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''list'').allowed()
+      && authorizer.group(''core.orka.ai'').resource(''sessions'').namespace(request.namespace).check(''get'').allowed())'
+    message: caller is not authorized to list and get Sessions, which a memory consolidation
+      run reads
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memories, which a memory consolidation
+      run reads and reports on
+    reason: Forbidden
+  - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
+      != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'
+    message: caller is not authorized to create memory proposals, which a Propose
+      memory consolidation run creates
+    reason: Forbidden
+  variables:
+  - expression: has(object.spec.ai) && has(object.spec.ai.memoryConsolidation) &&
+      (oldObject == null || object.spec != oldObject.spec)
+    name: checkedRun
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-task-workspace-class-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3987,6 +4057,15 @@ metadata:
   name: orka-namespace-mode-protection
 spec:
   policyName: orka-namespace-mode-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-memory-consolidation.orka.ai
+spec:
+  policyName: orka-task-memory-consolidation.orka.ai
   validationActions:
   - Deny
 ---
