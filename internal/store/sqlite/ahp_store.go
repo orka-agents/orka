@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 var _ store.AHPStore = (*Store)(nil)
@@ -223,6 +224,15 @@ func (s *Store) putAHPClient(ctx context.Context, client store.AHPClient) error 
 		return err
 	} else if n == 0 {
 		return store.ErrConflict
+	}
+	// A user who keeps connecting with new clientIds keeps only the most
+	// recently used.
+	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_clients
+		WHERE user_key = ? AND client_id NOT IN (
+			SELECT client_id FROM ahp_clients WHERE user_key = ?
+			ORDER BY updated_at DESC, client_id DESC LIMIT ?)`,
+		client.UserKey, client.UserKey, storagev1.MaxAHPClientsPerUser); err != nil {
+		return fmt.Errorf("prune AHP clients: %w", err)
 	}
 	return nil
 }

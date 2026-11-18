@@ -74,6 +74,25 @@ func runAHP(t *testing.T, newProvider StateFactory) {
 			CreatedAt: at, UpdatedAt: at.Add(time.Minute)}, client)
 	})
 
+	t.Run("a user keeps only their most recently used clients", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		require.NoError(t, p.PutAHPClient(ctx, storagev1.AHPClient{ClientID: "bob-client", UserKey: "bob", ProtocolVersion: "1.0.0",
+			Dialect: "default", UpdatedAt: at}))
+		for i := range storagev1.MaxAHPClientsPerUser + 2 {
+			require.NoError(t, p.PutAHPClient(ctx, storagev1.AHPClient{ClientID: fmt.Sprintf("alice-%d", i), UserKey: "alice",
+				ProtocolVersion: "1.0.0", Dialect: "default", UpdatedAt: at.Add(time.Duration(i+1) * time.Second)}))
+		}
+		for _, gone := range []string{"alice-0", "alice-1"} {
+			_, err := p.GetAHPClient(ctx, gone)
+			require.ErrorIs(t, err, storagev1.ErrNotFound, "the least recently used client is forgotten")
+		}
+		for _, kept := range []string{"alice-2", fmt.Sprintf("alice-%d", storagev1.MaxAHPClientsPerUser+1), "bob-client"} {
+			_, err := p.GetAHPClient(ctx, kept)
+			require.NoError(t, err, kept)
+		}
+	})
+
 	t.Run("the journal appends in sequence, prunes and reports gaps", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		limits := storagev1.AHPJournalLimits{MaxEntries: 5}
