@@ -126,6 +126,19 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 		t.Fatalf("earlier-second readiness phases = %v", got)
 	}
 
+	// Readiness observed for an earlier generation can predate the sequence,
+	// even in the publication's own second.
+	w.Status.Conditions[0].LastTransitionTime = metav1.NewTime(subsecond.Truncate(time.Second))
+	w.Generation, w.Status.Conditions[0].ObservedGeneration = 4, 3
+	got = phaseDurations(externalRuntimeStartPhases(pool, w, subsecond.Add(3*time.Second)))
+	if len(got) != 1 || got[externalRuntimePhaseStartTotal] != 3*time.Second {
+		t.Fatalf("stale-generation readiness phases = %v", got)
+	}
+	w.Status.Conditions[0].ObservedGeneration = 4
+	if got = phaseDurations(externalRuntimeStartPhases(pool, w, subsecond.Add(3*time.Second))); len(got) != 3 {
+		t.Fatalf("current-generation readiness phases = %v", got)
+	}
+
 	// A milestone from another sequence reports nothing.
 	w.Annotations[externalWorkloadPublishedAnnotation] = formatExternalRuntimeMilestone(1, published)
 	if phases := externalRuntimeStartPhases(pool, w, published.Add(time.Hour)); phases != nil {
@@ -208,35 +221,50 @@ func TestExternalRuntimeTimingReportsObserveRetirementStart(t *testing.T) {
 
 func TestStampExternalRuntimeStopRequestedOnlyOnFirstAuthorization(t *testing.T) {
 	r := &RuntimePoolReconciler{}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{UID: "pool"}}
 	requested := time.Unix(4000, 0).UTC()
-	r.externalTimings.observeRetirement("pool", 3, false, requested)
-	r.externalTimings.observeRetirement("pool", 3, true, requested)
+	r.externalTimings.observeRetirement(pool.UID, 3, false, requested)
+	r.externalTimings.observeRetirement(pool.UID, 3, true, requested)
 	w := &workspacev1alpha1.ExecutionWorkspace{Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 		Retirement: &workspacev1alpha1.WorkloadRetirement{Sequence: 3, Action: workspacev1alpha1.WorkloadRetirementSuspend},
 	}}
-	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(2*time.Second), false)
+	r.stampExternalRuntimeStopRequested(w, nil, pool, requested.Add(2*time.Second))
 	stamped := formatExternalRuntimeMilestone(3, requested)
 	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
 		t.Fatalf("stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
 	}
-	// Deletion superseding a Suspend that has not stopped the instance keeps
-	// the start of the one stop.
+	// Deletion superseding a Suspend whose stop Core has not proven keeps the
+	// start of the one stop, even when the provider already reports Stopped.
 	previous := w.Spec.Retirement.DeepCopy()
 	w.Spec.Retirement.Action = workspacev1alpha1.WorkloadRetirementDelete
-	r.externalTimings.observeRetirement("pool", 3, false, requested.Add(time.Minute))
-	r.stampExternalRuntimeStopRequested(w, previous, "pool", requested.Add(time.Hour), false)
+	w.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: 3, State: workspacev1alpha1.AllocationStopped}
+	r.externalTimings.observeRetirement(pool.UID, 3, false, requested.Add(time.Minute))
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	r.stampExternalRuntimeStopRequested(w, previous, pool, requested.Add(time.Hour))
 	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
-		t.Fatalf("unfinished re-authorization stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
+		t.Fatalf("unproven re-authorization stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
 	}
-	// A Delete that follows a finished Suspend of the same sequence did not drain.
-	r.stampExternalRuntimeStopRequested(w, previous, "pool", requested.Add(time.Hour), true)
-	if raw, present := w.Annotations[externalRuntimeStopRequestedAnnotation]; present {
-		t.Fatalf("re-authorization after the stop kept stop start %q", raw)
+	// Once Core proved the Suspend's stop, a following Delete did not drain:
+	// whether the proof is a persisted Stopped status or one this process saw.
+	for _, prove := range []func(){
+		func() { pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped },
+		func() {
+			r.externalTimings.noteStopProven(pool.UID, externalRuntimeStopKey(previous), requested.Add(time.Minute))
+		},
+	} {
+		pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		r.externalTimings.forget(pool.UID)
+		w.Annotations[externalRuntimeStopRequestedAnnotation] = stamped
+		prove()
+		r.stampExternalRuntimeStopRequested(w, previous, pool, requested.Add(time.Hour))
+		if raw, present := w.Annotations[externalRuntimeStopRequestedAnnotation]; present {
+			t.Fatalf("re-authorization after the proven stop kept stop start %q", raw)
+		}
 	}
 	// An unknown start leaves no stale one behind.
 	w.Annotations[externalRuntimeStopRequestedAnnotation] = stamped
 	w.Spec.Retirement.Sequence = 4
-	r.stampExternalRuntimeStopRequested(w, nil, "pool", requested.Add(time.Hour), false)
+	r.stampExternalRuntimeStopRequested(w, nil, pool, requested.Add(time.Hour))
 	if raw, present := w.Annotations[externalRuntimeStopRequestedAnnotation]; present {
 		t.Fatalf("unknown start kept %q", raw)
 	}

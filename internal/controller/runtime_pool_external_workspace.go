@@ -967,8 +967,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		w.Spec.Retirement = retirement
 		authorized := r.now()
 		setExternalRuntimeMilestone(w, externalRetirementAuthorizedAnnotation, retirement.Sequence, authorized)
-		r.stampExternalRuntimeStopRequested(w, before.Spec.Retirement, pool.UID, authorized,
-			a.State == workspacev1alpha1.AllocationStopped || a.State == workspacev1alpha1.AllocationDeleted)
+		r.stampExternalRuntimeStopRequested(w, before.Spec.Retirement, pool, authorized)
 		if deleting {
 			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 			w.Spec.Attachment = nil

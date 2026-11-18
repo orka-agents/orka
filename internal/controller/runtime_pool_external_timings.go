@@ -140,11 +140,12 @@ func externalRuntimeStartPhases(pool *corev1alpha1.RuntimePool, w *workspacev1al
 // externalRuntimeReadyAt returns when the provider reported DataPlaneReady
 // for the published sequence. A condition time keeps whole seconds only, so a
 // report in the publication's own second can read as slightly before it; that
-// report counts as ready at publication. Readiness from an earlier second
-// predates this sequence and is ignored.
+// report counts as ready at publication. Readiness from an earlier second, or
+// observed for an earlier generation, can predate this sequence and is
+// ignored.
 func externalRuntimeReadyAt(w *workspacev1alpha1.ExecutionWorkspace, published time.Time) (time.Time, bool) {
 	ready := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
-	if ready == nil || ready.Status != metav1.ConditionTrue {
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != w.Generation {
 		return time.Time{}, false
 	}
 	at := ready.LastTransitionTime.Time
@@ -181,18 +182,19 @@ func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped 
 // stampExternalRuntimeStopRequested adds the observed start of the stop to the
 // patch that first authorizes the sequence's retirement. A later
 // authorization of the same sequence, such as deletion superseding a Suspend,
-// keeps that start while the instance still runs, and drops it once the
-// instance already stopped: its drain had ended.
-func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool types.UID, authorized time.Time, retired bool) {
+// keeps that start until Core proved the earlier retirement's stop, by a
+// persisted Stopped status or a proof this process saw, and then drops it:
+// that stop was already reported and its drain had ended.
+func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool *corev1alpha1.RuntimePool, authorized time.Time) {
 	sequence := w.Spec.Retirement.Sequence
 	if previous != nil && previous.Sequence == sequence {
-		if retired {
+		if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped || r.externalTimings.stopProven(pool.UID, externalRuntimeStopKey(previous)) {
 			delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
 		}
 		return
 	}
 	delete(w.Annotations, externalRuntimeStopRequestedAnnotation)
-	if requested, ok := r.externalTimings.retirementRequested(pool, sequence); ok && !requested.After(authorized) {
+	if requested, ok := r.externalTimings.retirementRequested(pool.UID, sequence); ok && !requested.After(authorized) {
 		setExternalRuntimeMilestone(w, externalRuntimeStopRequestedAnnotation, sequence, requested)
 	}
 }
@@ -335,6 +337,15 @@ func (t *externalRuntimeTimingReports) noteStopProven(uid types.UID, key string,
 	if report.provenKey != key {
 		report.provenKey, report.provenAt = key, at
 	}
+}
+
+// stopProven reports whether this process proved the retirement's
+// termination.
+func (t *externalRuntimeTimingReports) stopProven(uid types.UID, key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	report := t.pools[uid]
+	return report != nil && report.provenKey == key
 }
 
 func (t *externalRuntimeTimingReports) forget(uid types.UID) {
