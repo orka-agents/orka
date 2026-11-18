@@ -34,7 +34,7 @@ It describes current behavior. The contract for changing that behavior is
 | Provider-native tools (`Read`, `Bash`, `WebFetch` and others) | Runtime session configuration, plus ACP permission requests Orka resolves | Through the runtime's own tool list | Runtime-specific | Yes, from the frozen tool policy |
 | Workspace intent and publication | Filesystem permissions for read intent; the controller and the Publisher | Only by reading the Task spec | A filesystem error for a write under read intent; a Task-level failure for publication | Yes, from the frozen execution plan, except an operator taint, which is live state |
 | Orka API authorization in built-in tools: namespace scope, API authorization checks including context-token scopes, Task creation limits | Orka API and the tools | No | A tool result with `permission_denied`, `authorization_failed` or `limit_reached`, plus a message and suggestion. `code_exec`'s resource authorization is the exception: an unclassified "resource authorization: …" error. | Yes |
-| Agent runtime ceilings (`Agent.spec.runtime.ceiling`, ADR 0048) | Controller, before it binds a Task and again until the Task starts; for a `runtimeRef` Agent, at planning and binding against the registered AgentRuntime policy | No | Nothing when the call is made: `delegate_task` creates the child Task, which then fails with a message such as "agent … ceiling forbids Bash, …" | Yes, from the target Agent's current ceiling and the child's resolved settings, and for a `runtimeRef` Agent its registered AgentRuntime policy |
+| Agent runtime ceilings (`Agent.spec.runtime.ceiling`, ADR 0048) | Controller. For a built-in runtime, before it binds a Task and again until the Task starts; for a `runtimeRef` Agent, only at planning and binding, against the registered AgentRuntime policy | No | Nothing when the call is made: `delegate_task` creates the child Task, which then fails with a message such as "agent … ceiling forbids Bash, …" | Yes, from the target Agent's current ceiling and the child's resolved settings, and for a `runtimeRef` Agent its registered AgentRuntime policy |
 | Per-namespace active-Task cap (`--max-tasks-per-namespace`) | Controller | No | No refusal. A child Task over the cap doesn't start; it's requeued every 10 seconds, with a `NamespaceTaskLimitReached` event. | Yes, from the controller setting and the current count |
 | Delegation limits in the parent Agent's `spec.coordination`: `allowedAgents`, `maxDepth` and `maxConcurrentChildren` | `delegate_task` checks the allowed agents and the depth. It reads them from the parent Agent on ACP, and on native AI workers from the worker's environment, set when its Job was built. The controller checks all three again, against the parent Agent's current spec, whenever the child Task reconciles. | No | From `delegate_task`, a raw error such as "coordination depth exceeded: …" or "agent … is not in the allowed agents list"; an ACP agent sees `-32002`. From the controller, a depth or allowed-agents failure fails the child Task. At `maxConcurrentChildren`, nothing is refused: the child Task is requeued every 10 seconds. | Yes, from the parent Agent's current spec and the current count of active children |
 | Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, an unavailable binding is the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
@@ -198,10 +198,13 @@ These come from the frozen Task spec, but the agent isn't told about them. If th
 the publication fails, the agent or the caller sees a Task-level failure only after the
 turn.
 
-Publication is also refused once an operator has run `orka task exec` or `orka task cp`
-in the workspace (ADR 0044), even if nothing changed, because that taints the Task and its
-workspace. The Task then ends `Cancelled` with delivery reason `OperatorTainted`. The taint
-is a marker on the Task and workspace, not part of the Task spec.
+Publication is also refused once an operator has run `orka task exec` in the workspace,
+or copied a file into it with `orka task cp` (ADR 0044). Copying files out never taints.
+The taint is written before the command starts, so it applies even if the command changed
+nothing. If the Task then has changes to publish, it ends `Cancelled`, with delivery state
+`CancelledBeforePublish` and reason `OperatorTainted`. A Task whose workspace ends
+unchanged finishes as usual. The taint is a marker on the Task and workspace, not part of
+the Task spec.
 
 ### Orka API authorization in built-in tools
 
