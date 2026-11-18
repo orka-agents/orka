@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -32,7 +33,12 @@ const (
 	closeGoingAway    = websocket.StatusGoingAway
 	closeSlowClient   = websocket.StatusTryAgainLater
 
-	maxFrameBytes           = 4 << 20
+	maxFrameBytes = 4 << 20
+	// maxRequestIDBytes bounds a request's id, which its response echoes.
+	maxRequestIDBytes = 256
+	// maxQueuedBytes bounds the messages waiting for one slow client by size,
+	// as SendQueue bounds them by count.
+	maxQueuedBytes          = 64 << 20
 	maxClientIDLength       = 256
 	maxURILength            = 2048
 	maxWatchesPerConnection = 64
@@ -101,6 +107,8 @@ type conn struct {
 	principal Principal
 	ws        *websocket.Conn
 	send      chan frame
+	// queued is the size of the messages in send.
+	queued    atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
 
@@ -251,6 +259,7 @@ func (c *conn) writeLoop(ctx context.Context) {
 			writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 			err := c.ws.Write(writeCtx, websocket.MessageText, next.data)
 			cancel()
+			c.queued.Add(-int64(len(next.data)))
 			if err != nil {
 				c.closeWith(websocket.StatusInternalError, "")
 				return
@@ -278,10 +287,18 @@ func (c *conn) closeWith(code websocket.StatusCode, reason string) {
 }
 
 func (c *conn) enqueue(message []byte) {
+	size := int64(len(message))
+	if c.queued.Add(size) > maxQueuedBytes {
+		c.queued.Add(-size)
+		c.closeWith(closeSlowClient, "the client is not reading fast enough")
+		return
+	}
 	select {
 	case <-c.done:
+		c.queued.Add(-size)
 	case c.send <- frame{data: message}:
 	default:
+		c.queued.Add(-size)
 		c.closeWith(closeSlowClient, "the client is not reading fast enough")
 	}
 }
@@ -338,6 +355,10 @@ func (c *conn) handle(ctx context.Context, data []byte) {
 		return
 	}
 	isRequest := len(msg.ID) > 0 && !bytes.Equal(msg.ID, []byte("null"))
+	if len(msg.ID) > maxRequestIDBytes {
+		c.write(outbound{ID: json.RawMessage("null"), Error: rpcErr(ahptypes.ErrorCodeInvalidRequest, "the request id is too long")})
+		return
+	}
 	if !isRequest {
 		c.handleNotification(ctx, msg)
 		return

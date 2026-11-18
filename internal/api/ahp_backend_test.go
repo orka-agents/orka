@@ -1208,6 +1208,33 @@ func TestAHPBackendDefaultBranchBackfillKeepsARemovedProjectRemoved(t *testing.T
 	require.Equal(t, "main", project.DefaultBranch, "a branch already found stays")
 }
 
+// A repeat clone that finds the default branch while the project is being
+// removed leaves it removed.
+func TestAHPBackendRepeatCloneKeepsARemovedProjectRemoved(t *testing.T) {
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
+	env := newAHPTestEnv(t, gitSecret)
+	ctx := ahpCtx(t)
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Issuer: "https://issuer.example",
+		Subject: "alice", Username: "alice", Namespace: ahpTestNamespace}
+	repo := "https://github.com/octo/widgets"
+	id := "project-" + ahpHash(repo)[:16]
+	require.NoError(t, env.backend.putRecord(ctx, alice.UserKey, ahpRecordProject, id, ahpProject{ID: id, URL: repo, Name: "widgets", Owner: "octo"}))
+	env.backend.gitHTTP = &http.Client{Transport: ahpRoundTrip(func(*http.Request) (*http.Response, error) {
+		// The project is removed while its default branch is looked up.
+		removed, err := env.backend.removeProject(context.Background(), alice, id)
+		require.NoError(t, err)
+		require.True(t, removed)
+		body := ahpTestAdvertisement("main")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
+	project, err := env.backend.addProject(ctx, alice, repo)
+	require.NoError(t, err)
+	require.Equal(t, "main", project.DefaultBranch)
+	var stored ahpProject
+	require.ErrorIs(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordProject, id, &stored), store.ErrNotFound,
+		"the late backfill does not recreate the project")
+}
+
 // A project's checkout path leaves out the host, so the same owner and name on
 // another host is refused rather than opening the first one's checkout.
 func TestAHPBackendRefusesAProjectOnAnotherProjectsPath(t *testing.T) {
