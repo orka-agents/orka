@@ -56,8 +56,8 @@ response, streamed updates do not extend it. Each ACP prompt is one streamed
 request, so a turn that runs longer is reset mid-stream, and Core logs
 `runtime prompt stream disconnected`. Because the runtime had already accepted
 the prompt, Core can't tell whether the turn finished, so it marks the Task
-`OutcomeUnknown` and doesn't replay it. If Core also can't save that outcome,
-the Task fails with `ExecutionEventPersistenceFailed` instead. Set
+`OutcomeUnknown` and doesn't replay it. If Core can't record the stream-failure
+event, the Task fails with `ExecutionEventPersistenceFailed` instead. Set
 `--route-timeout` above the longest turn your Tasks may run. The agentgateway
 dataplane ignores this flag and takes its routes from its static configuration,
 so set the equivalent timeout there. Orka cannot set either.

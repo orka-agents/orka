@@ -15,8 +15,8 @@
   dedicated WorkerPool and that a worker is Active with capacity for one Actor.
   Physical worker capacity is separate from Actor count.
 - Stream stops early (`runtime prompt stream disconnected`, Task
-  `OutcomeUnknown`, or `ExecutionEventPersistenceFailed` if Core also can't save
-  the outcome): with the Envoy dataplane, raise the native router's
+  `OutcomeUnknown`, or `ExecutionEventPersistenceFailed` if Core can't record
+  the stream-failure event): with the Envoy dataplane, raise the native router's
   `--route-timeout` above the longest turn. It caps total response time, so
   streamed updates don't extend it. agentgateway ignores the flag, so set the
   route timeout in its static configuration. An Envoy router rollout also resets
