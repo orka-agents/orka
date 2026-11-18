@@ -224,8 +224,20 @@ func acpWorkspaceTaskWakePredicate() predicate.Predicate {
 	}
 }
 
+// acpWorkspaceTaskWrittenDemandAnnotations are workspace annotations that
+// waiting Tasks themselves rewrite: the resume/materialization demand record
+// and the frozen detach action. No Task gate waits for another Task to change
+// them, and two live Tasks of one Session can each rewrite them in turn while
+// a suspension settles. Waking on them would let those Tasks re-trigger each
+// other without any delay; their changes are left to the fallback poll and
+// to the spec and status changes that accompany every real handshake.
+var acpWorkspaceTaskWrittenDemandAnnotations = []string{
+	acpWorkspaceResumeRequestedAnnotation,
+	acpWorkspaceDetachActionAnnotation,
+}
+
 func acpWorkspaceTaskGateChanged(oldWorkspace, newWorkspace *workspacev1alpha1.ExecutionWorkspace) bool {
-	if objectMetadataGateChanged(oldWorkspace, newWorkspace) {
+	if objectMetadataGateChanged(oldWorkspace, newWorkspace, acpWorkspaceTaskWrittenDemandAnnotations...) {
 		return true
 	}
 	oldStatus, newStatus := &oldWorkspace.Status, &newWorkspace.Status
@@ -277,13 +289,28 @@ func activeInstanceIdentity(instance *corev1alpha1.RuntimePoolActiveInstanceStat
 	return identity
 }
 
-func objectMetadataGateChanged(oldObject, newObject client.Object) bool {
+// annotationsEqualIgnoring reports whether the two annotation maps are equal
+// once the ignored keys are removed from both.
+func annotationsEqualIgnoring(oldAnnotations, newAnnotations map[string]string, ignored []string) bool {
+	relevant := func(annotations map[string]string) map[string]string {
+		filtered := make(map[string]string, len(annotations))
+		for key, value := range annotations {
+			if !slices.Contains(ignored, key) {
+				filtered[key] = value
+			}
+		}
+		return filtered
+	}
+	return maps.Equal(relevant(oldAnnotations), relevant(newAnnotations))
+}
+
+func objectMetadataGateChanged(oldObject, newObject client.Object, ignoredAnnotations ...string) bool {
 	return oldObject.GetUID() != newObject.GetUID() ||
 		oldObject.GetGeneration() != newObject.GetGeneration() ||
 		oldObject.GetDeletionTimestamp().IsZero() != newObject.GetDeletionTimestamp().IsZero() ||
 		!slices.Equal(oldObject.GetFinalizers(), newObject.GetFinalizers()) ||
 		!maps.Equal(oldObject.GetLabels(), newObject.GetLabels()) ||
-		!maps.Equal(oldObject.GetAnnotations(), newObject.GetAnnotations())
+		!annotationsEqualIgnoring(oldObject.GetAnnotations(), newObject.GetAnnotations(), ignoredAnnotations)
 }
 
 // conditionGatesChanged compares the condition fields gates decide on: type,

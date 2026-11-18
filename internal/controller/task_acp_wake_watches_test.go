@@ -189,6 +189,19 @@ func TestACPWorkspaceTaskWakePredicate(t *testing.T) {
 			w.Status.Conditions = append(w.Status.Conditions, metav1.Condition{Type: "Attached", Status: metav1.ConditionTrue})
 		}},
 		{name: "spec generation", want: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Generation = 4 }},
+		// Two live Tasks of one Session each rewrite the resume demand while
+		// a suspension settles; waking on it would let them re-trigger each
+		// other with no delay.
+		{name: "resume demand rewritten by another waiting Task", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceResumeRequestedAnnotation] = "2026-11-18T00:00:01Z other other-uid"
+		}},
+		{name: "detach action rewritten", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceDetachActionAnnotation] = "Delete"
+		}},
+		{name: "demand rewritten with another annotation change", want: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceResumeRequestedAnnotation] = "2026-11-18T00:00:01Z other other-uid"
+			w.Annotations[acpWorkspaceLastSettledTaskAnnotation] = "attached-uid 2"
+		}},
 		{name: "revocation stamp", want: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Annotations[acpWorkspaceRevocationStartedAnnotation] = "2 2026-11-18T00:00:00Z"
 		}},
@@ -306,5 +319,41 @@ func TestExecutionBindingLeavesTaskReadyForOptimisticWorkspaceLink(t *testing.T)
 		lagging.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name {
 		t.Fatalf("lagging pass did not adopt the bound Task (rv %s want %s, labels %v)",
 			lagging.ResourceVersion, first.ResourceVersion, lagging.Labels)
+	}
+}
+
+// A cached copy that predates the binding while the API server already shows
+// the Task past its pending stage is never adopted into the pending pass: the
+// pass requeues and lifecycle handling re-enters once the cache catches up.
+func TestExecutionBindingRefusesToAdoptAnAdvancedTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := bindingTestTask()
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), agent.DeepCopy())
+	cached := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), cached); err != nil {
+		t.Fatal(err)
+	}
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, cached.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("binding = handled=%v err=%v", handled, err)
+	}
+	advanced := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), advanced); err != nil {
+		t.Fatal(err)
+	}
+	advanced.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if err := reconciler.Status().Update(ctx, advanced); err != nil {
+		t.Fatal(err)
+	}
+
+	lagging := cached.DeepCopy()
+	result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, lagging, agent)
+	if err != nil || !handled || result.RequeueAfter <= 0 {
+		t.Fatalf("lagging pass on an advanced Task = result=%+v handled=%v err=%v, want a requeue", result, handled, err)
+	}
+	if lagging.Status.AgentExecutionBinding != nil || lagging.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("the pending pass adopted the advanced Task: phase %q binding %v", lagging.Status.Phase, lagging.Status.AgentExecutionBinding)
 	}
 }
