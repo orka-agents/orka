@@ -8,6 +8,7 @@ package ahphost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
@@ -38,6 +39,11 @@ type terminalBackend struct {
 	// exitAtOnce makes a terminal's shell exit with this code before
 	// CreateTerminal returns.
 	exitAtOnce *int64
+	// onReap runs while terminals are being reaped.
+	onReap func(channels []string)
+	// onTerminals runs, holding mu, each time the running terminals are
+	// listed.
+	onTerminals func()
 }
 
 func (b *terminalBackend) CreateTerminal(ctx context.Context, _ Principal, params ahptypes.CreateTerminalParams, emit Emitter) (ahptypes.TerminalState, error) {
@@ -56,6 +62,9 @@ func (b *terminalBackend) CreateTerminal(ctx context.Context, _ Principal, param
 }
 
 func (b *terminalBackend) ReapTerminals(_ context.Context, _ Principal, channels []string) error {
+	if b.onReap != nil {
+		b.onReap(channels)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.reapFails > 0 {
@@ -77,6 +86,9 @@ func (b *terminalBackend) DisposeTerminal(_ context.Context, _ Principal, channe
 func (b *terminalBackend) Terminals(context.Context, Principal) ([]ahptypes.TerminalInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.onTerminals != nil {
+		b.onTerminals()
+	}
 	out := make([]ahptypes.TerminalInfo, 0, len(b.running))
 	for channel := range b.running {
 		out = append(out, ahptypes.TerminalInfo{Resource: channel, Title: "shell",
@@ -129,6 +141,85 @@ func TestATerminalWhoseShellExitsAtOnceIsStoredAsExited(t *testing.T) {
 	result, _, err := client.Subscribe(ctx, rootChannel)
 	require.NoError(t, err)
 	require.Empty(t, result.Snapshot.State.Root.Terminals, "an exited shell is not listed as running")
+}
+
+// Ended terminals nothing follows go when another terminal is created, so a
+// client that never disposes of them cannot grow what is stored; one a
+// connection still follows stays.
+func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
+	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	require.NoError(t, err)
+	tokens := &TokenService{Store: s}
+	code := int64(0)
+	backend := &terminalBackend{fakeBackend: &fakeBackend{}, running: map[string]bool{}, exitAtOnce: &code}
+	registry, err := NewRegistry(backend)
+	require.NoError(t, err)
+	host, err := New(Config{Store: s, Tokens: tokens, Backends: registry, Logger: logr.Discard()})
+	require.NoError(t, err)
+	server := httptest.NewServer(host)
+	t.Cleanup(server.Close)
+	env := &testEnv{t: t, host: host, tokens: tokens, store: s, backend: backend.fakeBackend, server: server}
+	client := env.connect(env.mint("alice").Token)
+	ctx := ctx5(t)
+	_, err = client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+	alice := UserKey("https://issuer.example", "alice")
+	claim := ahptypes.TerminalClaim{Value: &ahptypes.TerminalClientClaim{Kind: ahptypes.TerminalClaimKindClient, ClientId: "client-a"}}
+	create := func(channel string) {
+		require.NoError(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: channel, Claim: claim}, nil))
+	}
+	stored := func() []string {
+		channels, err := s.ListAHPChannels(ctx, alice, terminalScheme)
+		require.NoError(t, err)
+		return channels
+	}
+
+	create("ahp-terminal:/one")
+	create("ahp-terminal:/two")
+	require.ElementsMatch(t, []string{"ahp-terminal:/one", "ahp-terminal:/two"}, stored(), "ended terminals the client follows stay")
+	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/one"))
+	create("ahp-terminal:/three")
+	require.ElementsMatch(t, []string{"ahp-terminal:/two", "ahp-terminal:/three"}, stored(), "an ended terminal nothing follows goes")
+	backend.mu.Lock()
+	require.Equal(t, []string{"ahp-terminal:/one"}, backend.reaped, "its shell is stopped first")
+	backend.mu.Unlock()
+
+	// One a connection starts following while it is being dropped stays.
+	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/two"))
+	other := env.connect(env.mint("alice").Token)
+	_, err = other.Initialize(ctx, "client-b", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+	var subscribeErr error
+	backend.onReap = func([]string) {
+		// The client library decodes no terminal snapshot; the raw request
+		// subscribes all the same.
+		var raw json.RawMessage
+		subscribeErr = other.Request(ctx, "subscribe", ahptypes.SubscribeParams{Channel: "ahp-terminal:/two"}, &raw)
+	}
+	create("ahp-terminal:/four")
+	require.NoError(t, subscribeErr)
+	require.Contains(t, stored(), "ahp-terminal:/two", "a terminal followed meanwhile is kept")
+
+	// One whose URI runs a shell again by the time it is claimed is not
+	// reaped: the second look finds it running.
+	backend.onReap = nil
+	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/three"))
+	require.NoError(t, other.Unsubscribe(ctx, "ahp-terminal:/two"))
+	looks := 0
+	backend.onTerminals = func() {
+		looks++
+		if looks == 2 {
+			backend.running["ahp-terminal:/three"] = true
+		}
+	}
+	backend.mu.Lock()
+	backend.reaped = nil
+	backend.mu.Unlock()
+	create("ahp-terminal:/five")
+	backend.mu.Lock()
+	require.Equal(t, []string{"ahp-terminal:/two"}, backend.reaped, "a running shell is never reaped")
+	backend.mu.Unlock()
+	require.Contains(t, stored(), "ahp-terminal:/three")
 }
 
 // A terminal whose early output or exit cannot be stored is taken back: its

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -322,6 +323,99 @@ func (h *Host) sweep(ctx context.Context, principal Principal) error {
 		return nil
 	}
 	return h.cfg.Store.DeleteAHPChannelStates(ctx, principal.UserKey, stale)
+}
+
+// dropOrphanedTerminals removes the user's stored terminal channels that no
+// shell runs and no connection follows. It runs before another terminal is
+// created: a client that never disposes of terminals whose shells ended would
+// otherwise keep their state and output stored without bound. A connection
+// that follows an ended terminal keeps it. Stored channels are listed before
+// running ones, as in sweep, so a terminal being created is never dropped.
+// Each dropped URI is held meanwhile, so it cannot be created again, and a
+// shell an earlier process left is stopped before its channel goes. The last
+// check and the delete run under the user's lock, which a subscription takes,
+// so a channel a connection starts following is kept.
+func (h *Host) dropOrphanedTerminals(ctx context.Context, principal Principal) error {
+	stored, err := h.cfg.Store.ListAHPChannels(ctx, principal.UserKey, terminalScheme)
+	if err != nil || len(stored) == 0 {
+		return err
+	}
+	live, err := h.cfg.Backends.terminals(ctx, principal)
+	if err != nil {
+		return err
+	}
+	keep := h.followed(principal.UserKey)
+	for _, terminal := range live {
+		keep[terminal.Resource] = true
+	}
+	var held []string
+	for _, channel := range stored {
+		if keep[channel] {
+			continue
+		}
+		release, claimed := h.claimChannelURI(principal.UserKey, channel, false)
+		if !claimed {
+			// Being created or dropped right now.
+			continue
+		}
+		defer release()
+		held = append(held, channel)
+	}
+	if len(held) == 0 {
+		return nil
+	}
+	// A terminal disposed of and created again under a URI between the first
+	// look and its claim runs now: the claims keep that from changing, so
+	// looking again finds it.
+	live, err = h.cfg.Backends.terminals(ctx, principal)
+	if err != nil {
+		return err
+	}
+	running := map[string]bool{}
+	for _, terminal := range live {
+		running[terminal.Resource] = true
+	}
+	held = slices.DeleteFunc(held, func(channel string) bool { return running[channel] })
+	if len(held) == 0 {
+		return nil
+	}
+	if _, provider, ok := h.cfg.Backends.terminalProvider(); ok {
+		if reaper, ok := provider.(TerminalReaper); ok {
+			if err := reaper.ReapTerminals(ctx, principal, held); err != nil {
+				return err
+			}
+		}
+	}
+	return h.locked(ctx, principal.UserKey, func(int64) error {
+		followed := h.followedLocked(h.hub(principal.UserKey))
+		orphaned := slices.DeleteFunc(held, func(channel string) bool { return followed[channel] })
+		if len(orphaned) == 0 {
+			return nil
+		}
+		return h.cfg.Store.DeleteAHPChannelStates(ctx, principal.UserKey, orphaned)
+	})
+}
+
+// followed returns the channels the user's connections in this process
+// subscribe to.
+func (h *Host) followed(userKey string) map[string]bool {
+	hub := h.hub(userKey)
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	return h.followedLocked(hub)
+}
+
+// followedLocked is followed for a caller that holds hub.mu.
+func (h *Host) followedLocked(hub *userHub) map[string]bool {
+	followed := map[string]bool{}
+	for c := range hub.conns {
+		c.mu.Lock()
+		for channel := range c.subs {
+			followed[channel] = true
+		}
+		c.mu.Unlock()
+	}
+	return followed
 }
 
 // liveWatches returns the channels of the user's resource watches open in
