@@ -36,9 +36,17 @@ const (
 
 // noRedirectClient carries credentials: a redirect, from the server or a
 // proxy in front of it, would send them past the origin and transport checks,
-// so it is answered as it is instead of followed.
+// so it is answered as it is instead of followed. It sends the sign-in calls,
+// each bounded to a minute.
 var noRedirectClient = &http.Client{
 	Timeout:       time.Minute,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// sessionAPIClient sends a session's API calls, which follow no redirect
+// either. It sets no overall deadline, as the API client's default does
+// not: streamed logs and chat replies last as long as they run.
+var sessionAPIClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
@@ -153,7 +161,7 @@ func newLoginCmd() *cobra.Command {
 			// The new session goes only to its own server: never through a
 			// redirect.
 			hosts := client.NewWithNamespace(server, session.Token, session.Namespace)
-			hosts.HTTPClient = noRedirectClient
+			hosts.HTTPClient = sessionAPIClient
 			return waitForAgentHost(ctx, cmd, hosts, session.Connection, agentHostReasonGitHubMembershipEnded, agentHostReasonGitHubTokenNeverExpires)
 		},
 	}

@@ -302,7 +302,8 @@ Pass the code on, together with that warning. A few things to know:
 Good to know:
 
 - **Your sign-in lasts 12 hours** and renews itself whenever you use `orka` in its last two
-  hours. If it lapses, run `orka login` again and you get the same environment.
+  hours. If your GitHub App's user tokens never expire, it lasts 8 hours and can't renew. If
+  it lapses, run `orka login` again and you get the same environment.
 - **Your environment doesn't depend on the CLI.** It keeps working in the Copilot app while you
   are signed out, and Orka refreshes its GitHub token on its own.
 - **When someone leaves your org**, they can't renew, so their sign-in ends within 12 hours.

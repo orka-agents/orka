@@ -287,7 +287,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	response, err := h.issueSession(ctx, ui)
+	response, err := h.issueSession(ctx, ui, h.signInSessionDeadline(ctx, connection, tokens))
 	if err != nil {
 		return err
 	}
@@ -324,6 +324,13 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "could not refresh your GitHub token; retry")
 	}
+	// A token GitHub does not expire is held only until the deadline Orka
+	// chose, which a session from it already ends at: renewing could not
+	// outlast it. The person signs in again, and their membership is
+	// checked then.
+	if !held.Refreshable {
+		return fiber.NewError(fiber.StatusUnauthorized, "your GitHub link cannot be refreshed and ends with this session; sign in again")
+	}
 	// The link must still hold this person's own grant: the session's
 	// subject, not whoever the refreshed token belongs to, renews.
 	provider, err := h.signInProvider(ctx)
@@ -348,7 +355,7 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub membership; retry")
 	}
 	ui.Username = account.Login
-	token, next, err := h.newSession(ui)
+	token, next, err := h.newSession(ui, time.Time{})
 	if err != nil {
 		return err
 	}
@@ -387,9 +394,10 @@ func (h *Handlers) sessionIdentity(c fiber.Ctx) (*UserInfo, error) {
 	return ui, nil
 }
 
-// issueSession stores a new session for ui and returns its token, once.
-func (h *Handlers) issueSession(ctx context.Context, ui *UserInfo) (SessionResponse, error) {
-	token, session, err := h.newSession(ui)
+// issueSession stores a new session for ui and returns its token, once. A
+// non-zero deadline ends the session no later.
+func (h *Handlers) issueSession(ctx context.Context, ui *UserInfo, deadline time.Time) (SessionResponse, error) {
+	token, session, err := h.newSession(ui, deadline)
 	if err != nil {
 		return SessionResponse{}, err
 	}
@@ -400,18 +408,56 @@ func (h *Handlers) issueSession(ctx context.Context, ui *UserInfo) (SessionRespo
 		Namespace: session.Namespace}, nil
 }
 
-func (h *Handlers) newSession(ui *UserInfo) (string, store.AuthSession, error) {
+func (h *Handlers) newSession(ui *UserInfo, deadline time.Time) (string, store.AuthSession, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return "", store.AuthSession{}, fiber.NewError(fiber.StatusInternalServerError, "could not create a session")
 	}
 	token := sessionTokenPrefix + base64.RawURLEncoding.EncodeToString(secret)
 	now := h.githubSignIn.now().UTC()
+	expires := now.Add(SessionTTL)
+	if !deadline.IsZero() && deadline.Before(expires) {
+		expires = deadline.UTC()
+	}
 	return token, store.AuthSession{
 		ID: uuid.NewString(), TokenHash: getTokenHash(token),
 		Issuer: ui.Issuer, Subject: ui.Subject, Username: ui.Username, Namespace: ui.Namespace,
-		CreatedAt: now, ExpiresAt: now.Add(SessionTTL),
+		CreatedAt: now, ExpiresAt: expires,
 	}, nil
+}
+
+// signInSessionDeadline is when a sign-in's session must end: with the token
+// custody holds for the link when that token cannot refresh, as the session
+// could not renew past it. A repeat sign-in may keep an earlier link, so the
+// link's own token decides, not the one just submitted; when custody cannot
+// be read, the submitted token stands in for it.
+func (h *Handlers) signInSessionDeadline(ctx context.Context, connection *corev1alpha1.Connection, tokens githubauth.Tokens) time.Time {
+	cfg := h.githubSignIn
+	if cfg.Credentials != nil {
+		held, err := cfg.Credentials.HostCredential(ctx, connection.Namespace, connection.Name, sessionRenewHorizon)
+		if err == nil {
+			if held.Refreshable {
+				return time.Time{}
+			}
+			return held.ExpiresAt
+		}
+	}
+	if tokens.RefreshToken != "" {
+		return time.Time{}
+	}
+	return gitHubTokenExpiry(cfg.now(), tokens.ExpiresIn)
+}
+
+// gitHubTokenExpiry is when a GitHub token obtained at now ends: as GitHub
+// reported, at most maxGitHubAccessTokenLife, which is also the deadline of
+// one reported without an expiry. The lifetime is capped in seconds, before
+// it becomes a Duration: a large submitted expiresIn would overflow and land
+// in the past.
+func gitHubTokenExpiry(now time.Time, expiresIn int) time.Time {
+	if expiresIn > 0 && expiresIn < int(maxGitHubAccessTokenLife/time.Second) {
+		return now.Add(time.Duration(expiresIn) * time.Second)
+	}
+	return now.Add(maxGitHubAccessTokenLife)
 }
 
 // errSignInLinkUnrecorded is a sign-in whose custody was committed but whose
@@ -496,12 +542,7 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
-	// The lifetime is capped in seconds, before it becomes a Duration: a
-	// large submitted expiresIn would overflow and land in the past.
-	expires := now.Add(maxGitHubAccessTokenLife)
-	if tokens.ExpiresIn > 0 && tokens.ExpiresIn < int(maxGitHubAccessTokenLife/time.Second) {
-		expires = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)
-	}
+	expires := gitHubTokenExpiry(now, tokens.ExpiresIn)
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")

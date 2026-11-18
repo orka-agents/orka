@@ -266,7 +266,8 @@ operator suspended is reported and left suspended. `orka login --no-host` links 
   with `Retry-After`.
 - The session lasts 12 hours and is stored only as a hash. The CLI renews it in its last two
   hours, refreshing the person's GitHub token and checking membership again; `orka logout`
-  ends it. The CLI sends it only to the server that issued it, and never over plain HTTP except
+  ends it. A GitHub App whose user tokens never expire gives no refresh token: Orka holds such
+  a token for 8 hours, the session ends with it, and renewing asks the person to sign in again. The CLI sends it only to the server that issued it, and never over plain HTTP except
   to localhost.
 - Signing in again keeps a link that still works, and Orka revokes the new GitHub token. A
   person keeps at most 10 sessions; signing in beyond that ends their oldest.

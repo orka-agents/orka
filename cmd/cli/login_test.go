@@ -388,6 +388,18 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	}
 }
 
+// A session's API calls follow no redirect but have no overall deadline,
+// which would cut streamed logs and chat replies off; the sign-in calls keep
+// theirs.
+func TestSessionAPICallsHaveNoOverallDeadline(t *testing.T) {
+	if sessionAPIClient.Timeout != 0 {
+		t.Fatalf("session API client timeout = %s, want none", sessionAPIClient.Timeout)
+	}
+	if sessionAPIClient.CheckRedirect == nil || noRedirectClient.Timeout == 0 {
+		t.Fatal("session calls must not follow redirects, and sign-in calls stay bounded")
+	}
+}
+
 // A config write during a renewal waits for it and builds on the saved
 // successor, so neither undoes the other.
 func TestConfigWritesWaitForARenewal(t *testing.T) {

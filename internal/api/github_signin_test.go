@@ -966,6 +966,55 @@ func TestSessionRenewsOnceAndSignsOut(t *testing.T) {
 	}
 }
 
+// A link GitHub gives no refresh token for ends with its token, so its
+// session ends then too, and renewing it asks the person to sign in again
+// rather than failing as if GitHub could not be reached.
+func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
+	h := newSignInHarness(t)
+	h.identity = nil
+	// Custody cannot be read here, so the submitted token decides.
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{}
+	before := time.Now()
+	_, session := h.signIn(map[string]any{"accessToken": "ghu_alice"})
+	if session.ExpiresAt.After(before.Add(maxGitHubAccessTokenLife+time.Minute)) || session.ExpiresAt.Before(before.Add(maxGitHubAccessTokenLife-time.Minute)) {
+		t.Fatalf("session ends at %v, want with its token about %s from now", session.ExpiresAt, maxGitHubAccessTokenLife)
+	}
+	if err := h.asSession(session.Token); err != nil {
+		t.Fatal(err)
+	}
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice", unrefreshable: true}
+	resp, raw := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil)
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(raw), "sign in again") {
+		t.Fatalf("renew = %d %s, want 401 asking to sign in again", resp.StatusCode, raw)
+	}
+
+	// A repeat sign-in that keeps a link which cannot refresh ends with that
+	// link's token, not the one just submitted.
+	kept := time.Now().Add(time.Hour)
+	h.identity = nil
+	h.handlers.githubSignIn.Credentials = keptSignInCredentials{expires: kept}
+	_, session = h.signIn(map[string]any{"accessToken": "ghu_alice"})
+	if !session.ExpiresAt.Equal(kept.UTC()) {
+		t.Fatalf("session ends at %v, want with the kept link's token at %v", session.ExpiresAt, kept)
+	}
+
+	// A link that can refresh keeps the full session.
+	h.identity = nil
+	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice"}
+	before = time.Now()
+	_, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800})
+	if session.ExpiresAt.Before(before.Add(SessionTTL - time.Minute)) {
+		t.Fatalf("session ends at %v, want %s from now", session.ExpiresAt, SessionTTL)
+	}
+}
+
+// keptSignInCredentials holds a link that cannot refresh, ending at expires.
+type keptSignInCredentials struct{ expires time.Time }
+
+func (k keptSignInCredentials) HostCredential(context.Context, string, string, time.Duration) (credential.HostCredential, error) {
+	return credential.HostCredential{AccessToken: "ghu_alice", ExpiresAt: k.expires}, nil
+}
+
 // GitHub failing to answer a membership check is retried, never taken as
 // the person having left: sign-in and renewal answer 503, not 403.
 func TestMembershipThatCannotBeCheckedIsRetryable(t *testing.T) {

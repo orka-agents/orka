@@ -265,7 +265,7 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 	c := client.NewWithNamespace(server, token, ns)
 	c.TxnToken = txnToken
 	if sessionToken(token, session, server) {
-		c.HTTPClient = noRedirectClient
+		c.HTTPClient = sessionAPIClient
 	}
 	return c, closeTunnel, nil
 }
