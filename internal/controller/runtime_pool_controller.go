@@ -399,6 +399,10 @@ type RuntimePoolReconciler struct {
 	SubstrateRouter *RuntimePoolSubstrateRouter
 	Rand            io.Reader
 	Now             func() time.Time
+
+	// externalTimings deduplicates execution-workspace runtime start and stop
+	// timing reports. It never affects reconciliation.
+	externalTimings externalRuntimeTimingReports
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
@@ -3567,6 +3571,9 @@ func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, poo
 		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
+	if runtimePoolHasExternalWorkspace(pool) {
+		r.observeExternalRuntimeTransition(ctx, pool, base.Status, status)
+	}
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}

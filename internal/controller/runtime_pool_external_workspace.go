@@ -93,6 +93,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
+	ctx = withExternalRuntimeTimingWorkspace(ctx, w)
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	// A provider-reported Failed instance is terminal: retire it, never replace it.
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
@@ -425,6 +426,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	before := w.DeepCopy()
 	w.Spec.Workload, w.Spec.Retirement = &request, nil
+	setExternalRuntimeMilestone(w, externalWorkloadPublishedAnnotation, request.Sequence, r.now())
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -954,6 +956,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
+		setExternalRuntimeMilestone(w, externalRetirementAuthorizedAnnotation, retirement.Sequence, r.now())
 		if deleting {
 			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 			w.Spec.Attachment = nil
@@ -1029,6 +1032,12 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	// A deleted pool never records Stopped: its released finalizer is the
+	// persisted proof that the runtime stopped.
+	if before.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		r.observeExternalRuntimeStop(ctx, pool)
+	}
+	r.externalTimings.forget(pool.UID)
 	return ctrl.Result{}, nil
 }
 
@@ -1041,6 +1050,9 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 	}
 	if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 		return true, err
+	}
+	if w.Spec.Retirement != nil {
+		r.externalTimings.noteStopProven(pool.UID, externalRuntimeStopKey(w.Spec.Retirement), r.now())
 	}
 	if w.Spec.Workload != nil {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.PoolBinding.UID != pool.UID {
