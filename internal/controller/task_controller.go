@@ -207,10 +207,10 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
 // The controller creates the scheduled runs of a memory consolidation Task,
 // which the memory consolidation admission policy checks for list on memories
-// and, in Propose mode, create on memoryproposals, as it checked the parent's
-// creator.
+// and memoryproposals and, in Propose mode, create on memoryproposals, as it
+// checked the parent's creator.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
-// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=create
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=list;create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete

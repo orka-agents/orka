@@ -195,9 +195,9 @@ type TaskExecutionStatus struct {
 	// +optional
 	RuntimeSessionMCPDigest string `json:"runtimeSessionMCPDigest,omitempty"`
 
-	// RuntimeSessionWorkspaceDigest binds a reusable Session generation to the
-	// exact repository, source ref, verified baseline, intent, and relative root.
-	// It contains no credential material.
+	// RuntimeSessionWorkspaceDigest binds a reusable Session generation, or a
+	// task-scoped RuntimeSession, to the exact repository, source ref, verified
+	// baseline, intent, and relative root. It contains no credential material.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +optional
 	RuntimeSessionWorkspaceDigest string `json:"runtimeSessionWorkspaceDigest,omitempty"`
