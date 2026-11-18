@@ -279,8 +279,8 @@ The token routes require a person's own verified OIDC sign-in carrying an issuer
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt"}`. The token is shown only in this response. |
-| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt"}]}`. Expired and revoked tokens stay listed. |
+| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt"}`. The token is shown only in this response. A person holds at most 50 tokens that are neither revoked nor expired; past that the request returns `409` until they revoke one. |
+| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt"}]}`. The 50 newest expired or revoked tokens stay listed; older ones are removed when a new token is created. |
 | `/api/v1/ahp-tokens/:id` | DELETE | Revoke one of the caller's tokens and close its connections. Another person's token reads as 404. |
 | `/ahp` | GET | The AHP WebSocket endpoint. |
 
