@@ -6487,7 +6487,11 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 			}
 			return nil, err
 		}
-		if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(expectedInstance) {
+		// A prompt-only reservation is not gated on admission, so capacity
+		// freed on an instance that started retiring during the wait is not
+		// used: the prompt is requeued for the replacement.
+		retiring := runtimePoolHasExternalWorkspace(target.pool) && runtimePoolWorkspaceInstanceRetiring(pool)
+		if retiring || pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(expectedInstance) {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			releaseErr := d.releaseRuntimePoolReservation(releaseCtx, *identity)
 			cancel()

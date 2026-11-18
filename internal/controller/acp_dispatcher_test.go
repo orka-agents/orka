@@ -5057,6 +5057,29 @@ func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstanceAtCapacity(t *tes
 	}
 }
 
+// A prompt-only reservation is not gated on admission, so capacity can open on
+// an instance that started retiring while the prompt waited. The reservation
+// is released and the prompt requeued for the replacement rather than retried
+// on the retiring instance.
+func TestWaitForPromptCapacityDoesNotReuseCapacityOnARetiringInstance(t *testing.T) {
+	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+	dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+	current := promptAdmissionWorkspacePool(t, kubeClient, pool, true, corev1alpha1.RuntimePoolLifecycleServing,
+		corev1alpha1.RuntimePoolAdmissionClosed, map[string]string{externalRuntimeEvictionAnnotation: "{}"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, "pod-uid.boot-id")
+	if lease != nil || !errors.Is(err, errACPPromptAdmissionInstanceRetiring) {
+		t.Fatalf("waitForPromptCapacityReservation = %v, %v; want the retiring instance refused", lease, err)
+	}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 0 {
+		t.Fatalf("reservations = %#v, want the reservation on the retiring instance released", current.Status.Capacity.Reservations)
+	}
+}
+
 func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
