@@ -1047,7 +1047,7 @@ func validateFrozenACPDispatchPlan(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
-	acpPreDispatch.report(ctx, task)
+	acpPreDispatch.markStarted(task)
 	var promptTrace *acpSpan
 	defer func() { promptTrace.End(retErr) }()
 
@@ -1172,6 +1172,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
+	// Every early requeue of the reservation is behind this point; the turn
+	// proceeds to its Session lease and runtime session, so the pre-dispatch
+	// milestones, with started at this attempt's entry, are reported once.
+	acpPreDispatch.report(ctx, task)
 	var sessionExecution *acpTaskSession
 	sessionCompleted := false
 	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)

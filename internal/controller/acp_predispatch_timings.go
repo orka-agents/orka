@@ -97,6 +97,13 @@ func (t *acpPreDispatchTimings) mark(task *corev1alpha1.Task, milestone acpPreDi
 	t.record(task, milestone, false)
 }
 
+// markStarted records the start of each reserved execution attempt,
+// replacing an earlier attempt's start: an attempt that requeues before its
+// turn begins leaves the record for the attempt that does.
+func (t *acpPreDispatchTimings) markStarted(task *corev1alpha1.Task) {
+	t.record(task, acpPreDispatchStarted, true)
+}
+
 // markQueueWriteIssued records the queued milestone immediately before the
 // Queued status write is issued. The write is watch-visible before it
 // returns, so the dispatcher can scan and even start the Task first; marking
@@ -110,6 +117,14 @@ func (t *acpPreDispatchTimings) markQueueWriteIssued(task *corev1alpha1.Task) {
 	t.record(task, acpPreDispatchQueued, true)
 }
 
+// acpPreDispatchCreatesRecord reports whether a milestone may start a Task's
+// record. Only the passes before a Task has any execution do, so a mark from a
+// later stage, which can run after the Task's start already reported and
+// removed its record, never recreates one that nothing would report.
+func acpPreDispatchCreatesRecord(milestone acpPreDispatchMilestone) bool {
+	return milestone == acpPreDispatchObserved || milestone == acpPreDispatchStatusInitialized
+}
+
 func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPreDispatchMilestone, replace bool) {
 	if t == nil || task == nil || task.UID == "" || task.Spec.Type != corev1alpha1.TaskTypeAgent ||
 		milestone < 0 || milestone >= acpPreDispatchMilestoneCount {
@@ -120,6 +135,9 @@ func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPre
 	defer t.mu.Unlock()
 	record := t.records[task.UID]
 	if record == nil {
+		if !acpPreDispatchCreatesRecord(milestone) {
+			return
+		}
 		if len(t.records) >= acpPreDispatchMaxRecords {
 			t.pruneLocked(now)
 			if len(t.records) >= acpPreDispatchMaxRecords {
@@ -143,8 +161,8 @@ func (t *acpPreDispatchTimings) pruneLocked(now time.Time) {
 	}
 }
 
-// finish records the started milestone and removes the Task's record,
-// returning it. A Task with no record, such as one queued before this process
+// finish removes the Task's record and returns it, recording the started
+// milestone if no attempt did. A Task with no record, such as one queued before this process
 // started, returns nil.
 func (t *acpPreDispatchTimings) finish(task *corev1alpha1.Task) *acpPreDispatchRecord {
 	if t == nil || task == nil || task.UID == "" {
