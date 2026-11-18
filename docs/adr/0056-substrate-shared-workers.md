@@ -41,24 +41,50 @@ workers, but gives no per-Actor proof of sandbox exit:
 - Co-hosted Actors share one privileged worker process, the node's `/var/lib/ate`, and
   their egress mTLS keys. Upstream's threat model states that workers are not a
   boundary between Actors.
+- Placement checks no Atespace or tenant. It matches only Worker labels, which are
+  copied from WorkerPool metadata labels, so any template whose selector those labels
+  satisfy, including an empty one, can land on a worker.
+- A worker Pod has a hardcoded 3600 s termination grace, within which the worker drains
+  for at most 30 minutes.
+- The egress gateway caches an Actor's policy for 10 s; the worker's DNS relay for 5 s,
+  and it keeps a stale policy when a refresh fails.
 
 ## Decision
 
 ### Opt-in and scope
 
 - **A frozen profile field.** Sharing is opt-in per profile through
-  `spec.placement.sharedWorkers: {maxActorsPerWorker: 2..16, maxWorkerLifetime: ≤24h,
+  `spec.placement.sharedWorkers: {maxActorsPerWorker: 2..16, maxWorkerLifetime: 3h..24h,
   default 24h}`. The field is part of the immutable, hashed profile spec, so opting in
   requires a new profile and changes the frozen profile hash. An absent field keeps
-  today's behavior exactly.
+  today's allocation path exactly. The provider's leader sweep adds only a Kubernetes
+  list of shared pools.
 - **One pool, one scope.** A shared pool serves exactly one workspace namespace and
-  Atespace, profile UID and hash, Actor size, and operator WorkerPool. It is never
-  shared across namespaces or profiles.
-- **Pool identity and ledger.** Pool labels carry a random value that is journaled. The
-  derived template selects it. A resourceVersion-protected ledger on the pool lists
-  every hosted allocation and Actor UID.
+  Atespace, profile UID and hash, Actor size, and operator WorkerPool. This scope is the
+  provider's bookkeeping. It does not by itself keep other tenants off the worker.
+- **Pool identity and ledger.** A shared pool carries only a provider-owned label with a
+  random journaled value, never the operator pool's labels, and the derived template
+  selects only that label. A resourceVersion-protected ledger on the pool lists every
+  hosted allocation and Actor UID.
 - **A foreign Actor fails closed.** Any assigned Actor that is not in the ledger fails
   observation, and the pool stops admitting and is retired through the strong path.
+
+### Tenancy: a dedicated install only
+
+- **The flag.** Sharing is allowed only when the provider runs with
+  `--substrate-dedicated-install` (default false). The operator thereby asserts that no
+  tenant other than this Orka creates Actors or ActorTemplates on the Agent Substrate
+  install.
+- **Without it.** An opted-in profile's allocation is refused, with the error on the
+  workspace's `Provisioned` condition, and existing shared pools are strongly retired.
+- **Verified even with it.** The provider holds global viewer and lists every
+  ActorTemplate. Any template outside the pool's Atespace whose selector is empty or is
+  satisfied by the pool's labels fails closed: the pool stops admitting and is strongly
+  retired. This runs before each claim, before each Resume, and on every sweep.
+- **Residual risk.** A foreign template or Actor created between two checks can reach a
+  shared worker until the next check, the ledger's assignment check, or observation
+  detects it. Detection then strongly retires the pool. The checks bound this race; they
+  do not prevent it.
 
 ### Never shared
 
@@ -70,8 +96,10 @@ These keep the private single-Actor path:
 - every profile without the field.
 
 The provider also requires gateway injection of the provider-proxy credential, so the
-long-lived provider token never enters a shared sandbox. An Actor on a shared worker
-whose workspace is tainted, quarantined, or fails is retired through the strong path.
+long-lived provider token never enters a shared sandbox. Suspicion is re-checked when a
+slot is claimed (the allocation moves to a private worker) and immediately before
+Resume (it fails closed). A pool hosting a workspace that becomes tainted, quarantined,
+or `Failed` is strongly retired.
 
 ### Interim termination evidence
 
@@ -82,34 +110,55 @@ hold:
    the issued suspend, with the expected new `VOLUMES` snapshot generation. A Stop issues
    the same suspend for evidence only.
 2. **The fenced worker no longer hosts it.** Its assignment is absent from the same
-   Worker UID and Pod UID, with `registered_epoch` and
+   `ACTIVE` worker: the same Worker UID and Pod UID, with `registered_epoch` and
    `observed_epoch == registered_epoch` unchanged, and the worker version is re-read
    unchanged.
 3. **Everything it could use is revoked.**
    - Its egress policy, including credential injection, is replaced by deny-all and
-     verified before `SuspendActor` is issued, so before the suspension is reported. A
-     leaked sandbox has neither a tunnel nor egress.
-   - The instance's Orka credentials are unusable (see the next section).
-4. **The residue is bounded in time.** A worker past its admission window takes no new
-   Actors. At `maxWorkerLifetime` it is deleted, and every hosted instance proves
-   termination with today's Pod-absence proof.
+     verified. `SuspendActor` is issued only after deny-all has been stored for 15 s,
+     the gateway's 10 s policy cache plus a margin; upstream offers no enforcement
+     acknowledgement. The checkpoint then deactivates the Actor's tunnel synchronously.
+     A DNS relay that cannot refresh keeps its stale policy until then, which is
+     residual risk.
+   - The instance's Orka credentials are made unusable by Core, asynchronously (see the
+     next section).
+4. **The residue is bounded in time.** `maxWorkerLifetime` is a hard bound on the worker
+   Pod, not on when its deletion begins:
+   - strong retirement starts the Pod's full 3600 s grace plus 5 minutes before it;
+   - admission closes an hour earlier;
+   - a Pod still present 5 minutes before the bound is re-deleted with a one-second
+     grace, never zero, so its absence stays kubelet-confirmed;
+   - all of this runs first in each provider sweep, using Kubernetes alone.
 
 ### Credentials Core owns
 
-Core already makes these unusable:
+Core makes these unusable, asynchronously:
 
 - **The attachment bearer** authenticates requests into the runtime, which the router
   no longer delivers to the sandbox.
 - **The pool's controller bearer and capability secret** are accepted by the MCP broker
-  only while the RuntimePool's exact active instance is set. Core clears that instance
-  when it observes `Stopped`. It rotates both, by unpublishing and replacing the bound
-  auth Secret, before any successor boots.
+  only while the RuntimePool's exact active instance is set.
+  - The provider reports `Stopped` first. Core clears the active instance on its next
+    RuntimePool reconcile, which the workspace watch triggers and the 1 s retirement
+    progress requeue bounds while the controller runs. Throughout that interval the
+    leaked sandbox has no tunnel and deny-all egress.
+  - Core rotates both, by unpublishing and replacing the bound auth Secret, before any
+    successor boots.
 
 ### Strong fallback
 
-- **When it applies.** On any doubt (the assignment is still present, the epoch or
-  identity changes mid-proof, the worker is terminating, or any upstream error), the
-  strong path replaces the interim evidence.
+- **When it applies.** The strong path replaces the interim evidence on any doubt:
+  - the assignment is still present;
+  - the worker's epoch, identity or `ACTIVE` state changes mid-proof;
+  - the worker is terminating;
+  - a foreign template or Actor appears;
+  - any upstream error.
+
+  It also applies to any uncertainty in the suspend path: an unreadable Actor, failed
+  egress revocation, or a suspend issued whose effect is unresolved.
+- **No replay.** An unresolved suspend is never replayed. Once the worker Pod is proven
+  absent, the instance is reported lost and retires through Stop with its last
+  checkpoint.
 - **What it does.** The provider closes the pool and deletes it. Core observes the
   terminating worker and drains each co-hosted Actor for data-only suspension inside
   its eviction window (ADR 0046). Every hosted instance then proves termination by exact
@@ -138,10 +187,15 @@ Core already makes these unusable:
   skips worker birth, and up to 16 Actors of one namespace share one worker Pod.
 - **Weaker than ADRs 0031 and 0049.** A per-Actor stop is proven by control-plane
   bookkeeping plus revocation, not by observed sandbox exit. The owner accepted this
-  because sharing is opt-in, namespace-confined, time-bounded and revoked.
-- **Residual risk: a leaked sandbox.** If teardown failed, that sandbox's memory,
-  including its already-revoked credentials and workspace data, may persist on the node
-  until the worker is recycled.
+  because sharing is opt-in, limited to a dedicated and continuously verified install,
+  hard-bounded in time, and revoked.
+- **Residual risk: a leaked sandbox.** If teardown failed, that sandbox's memory may
+  persist on the node until the worker Pod is gone, at most `maxWorkerLifetime` with a
+  responsive kubelet. That memory includes workspace data and the instance's
+  credentials, which Core makes unusable asynchronously as described above.
+- **Residual risk: foreign tenants.** Isolation from other tenants rests on the
+  operator's dedicated-install assertion. Verification detects a violation after it
+  happens and then strongly retires the pool.
 - **Residual risk: worker compromise.** A compromised worker exposes every co-hosted
   Actor of the same namespace and profile.
 - **Strong retirements disturb neighbours.** A strong retirement suspends a pool's
