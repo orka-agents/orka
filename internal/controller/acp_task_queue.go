@@ -181,6 +181,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			}
 			return ctrl.Result{}, err
 		}
+		acpPreDispatch.mark(task, acpPreDispatchRuntimePoolReady)
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
 		if !externalDispatch && (task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
@@ -231,6 +232,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("persist ACP prompt attempt: %w", err)
 	}
+	acpPreDispatch.mark(task, acpPreDispatchAttemptPersisted)
 
 	metadataBase := task.DeepCopy()
 	if task.Labels == nil {

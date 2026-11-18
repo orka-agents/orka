@@ -37,6 +37,13 @@ const (
 	// acpPreDispatchWorkspaceReady is the first pass that finds the
 	// attachment admitted and acknowledged.
 	acpPreDispatchWorkspaceReady
+	// acpPreDispatchRuntimePoolReady is the first queue pass whose RuntimePool
+	// is ensured and, for an execution workspace, whose post-attach handshake
+	// holds, including the provider observing the current workspace
+	// generation.
+	acpPreDispatchRuntimePoolReady
+	// acpPreDispatchAttemptPersisted is the durable PromptAttempt write.
+	acpPreDispatchAttemptPersisted
 	// acpPreDispatchQueued is the Queued status write.
 	acpPreDispatchQueued
 	// acpPreDispatchScanned is the first dispatcher scan that offers the
@@ -55,6 +62,8 @@ var acpPreDispatchMilestoneNames = [acpPreDispatchMilestoneCount]string{
 	"executionBound",
 	"workspaceAttachRequested",
 	"workspaceReady",
+	"runtimePoolReady",
+	"promptAttemptPersisted",
 	"dispatchQueued",
 	"dispatchScanned",
 	"reserved",

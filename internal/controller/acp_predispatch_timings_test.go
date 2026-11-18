@@ -409,6 +409,10 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 	if queued.IsZero() {
 		t.Fatal("the start report ran without the queued milestone")
 	}
+	poolReady, persisted := reported.marks[acpPreDispatchRuntimePoolReady], reported.marks[acpPreDispatchAttemptPersisted]
+	if poolReady.IsZero() || persisted.IsZero() || persisted.Before(poolReady) || queued.Before(persisted) {
+		t.Fatalf("queue sub-milestones out of order: runtimePoolReady %s, promptAttemptPersisted %s, queued %s", poolReady, persisted, queued)
+	}
 	if scanned.Before(queued) {
 		t.Fatalf("scanned at %s precedes queued at %s", scanned, queued)
 	}

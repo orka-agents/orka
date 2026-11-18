@@ -45,6 +45,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -403,7 +404,26 @@ type RuntimePoolReconciler struct {
 	// externalTimings deduplicates execution-workspace runtime start and stop
 	// timing reports. It never affects reconciliation.
 	externalTimings externalRuntimeTimingReports
+
+	// MaxConcurrentReconciles is how many different RuntimePools the
+	// controller reconciles at once; one pool is never reconciled
+	// concurrently with itself. Zero selects
+	// DefaultRuntimePoolMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
 }
+
+const (
+	// DefaultRuntimePoolMaxConcurrentReconciles lets independent pools, such
+	// as concurrent cold starts, publish their workloads without queueing
+	// behind each other. Every object a pool reconcile creates or writes is
+	// named for, or linked one-to-one with, that pool; writes to shared
+	// objects are create-if-absent or resourceVersion-checked; and the
+	// reconciler holds no mutable state between reconciles.
+	DefaultRuntimePoolMaxConcurrentReconciles = 4
+	// MaxRuntimePoolMaxConcurrentReconciles bounds
+	// --runtime-pool-max-concurrent-reconciles.
+	MaxRuntimePoolMaxConcurrentReconciles = 64
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
@@ -4145,6 +4165,11 @@ func runtimePoolRequestForChild(_ context.Context, object client.Object) []recon
 
 // SetupWithManager sets up watches for RuntimePools and their cross-namespace children.
 func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	workers, err := effectiveMaxConcurrentReconciles("runtimepool", r.MaxConcurrentReconciles,
+		DefaultRuntimePoolMaxConcurrentReconciles, MaxRuntimePoolMaxConcurrentReconciles)
+	if err != nil {
+		return err
+	}
 	builder := ctrl.NewControllerManagedBy(mgr).For(&corev1alpha1.RuntimePool{})
 	if _, err := mgr.GetRESTMapper().RESTMapping(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace").GroupKind(), workspacev1alpha1.GroupVersion.Version); err == nil {
 		builder = builder.Watches(&workspacev1alpha1.ExecutionWorkspace{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
@@ -4164,5 +4189,6 @@ func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Named("runtimepool").
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).
 		Complete(r)
 }
