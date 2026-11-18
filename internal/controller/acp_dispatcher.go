@@ -1318,6 +1318,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		workspace.ExpectDurableResumeMinGeneration = resumeFloor
 	}
 	workspaceAuthorization := preparedWorkspace.authorization
+	if sessionExecution == nil && task.Status.Execution.RuntimeSessionWorkspaceDigest != preparedWorkspace.bindingDigest {
+		// A task-scoped RuntimeSession has no Session binding to carry its
+		// workspace identity. Record it before the session exists so recovery
+		// of an abandoned validation barrier can prove the rebuilt baseline is
+		// the one this exact session was created with.
+		if err := d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
+			execution.RuntimeSessionWorkspaceDigest = preparedWorkspace.bindingDigest
+		}); err != nil {
+			return err
+		}
+	}
 	if sessionExecution != nil {
 		previousRuntimeFence := runtimeFence
 		bound, workspaceChanged, bindErr := bindACPRuntimeSessionWorkspace(
@@ -6982,6 +6993,13 @@ const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a te
 // Task with ExecutionEventPersistenceFailed.
 const acpInterruptedOutputFlushTimeout = 60 * time.Second
 
+// acpPromptLifecyclePersistTimeout bounds the detached journal append that
+// records a prompt's stream failure or settlement. It shares the journal's
+// single SQLite connection for the same reason as
+// acpInterruptedOutputFlushTimeout, so it gets the same deadline: a failed
+// append fails the Task with ExecutionEventPersistenceFailed.
+const acpPromptLifecyclePersistTimeout = acpInterruptedOutputFlushTimeout
+
 const (
 	acpCancelLogKeyNamespace = "namespace"
 	acpCancelLogKeyTask      = "task"
@@ -7086,7 +7104,7 @@ func appendPromptStreamFailureLifecycleDetached(
 	journalState *v2eventjournal.State,
 	streamErr error,
 ) error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptLifecyclePersistTimeout)
 	defer cancel()
 	return appendPromptStreamFailureLifecycleIfNew(persistCtx, journalState, time.Now().UTC(), streamErr)
 }
@@ -7097,7 +7115,7 @@ func appendPromptSettlementLifecycleDetached(
 	settlement harnessv2.PromptSettlement,
 	cancellationReason harnessv2.CancelReason,
 ) error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptLifecyclePersistTimeout)
 	defer cancel()
 	_, _, err := journalState.AppendPromptSettlementIfNew(persistCtx, settlement, cancellationReason)
 	return err

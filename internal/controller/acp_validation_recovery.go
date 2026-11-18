@@ -214,7 +214,20 @@ func (d *ACPDispatcher) recoveredValidationWorkspace(ctx context.Context, task *
 		return fail(err)
 	}
 	digest, err = acpRuntimeWorkspaceBindingDigest(sourceRef, workspace)
-	if err != nil || digest != task.Status.Execution.RuntimeSessionWorkspaceDigest {
+	if err != nil {
+		return fail(fmt.Errorf("%w: recovered baseline differs from the frozen runtime workspace", store.ErrConflict))
+	}
+	frozenDigest := task.Status.Execution.RuntimeSessionWorkspaceDigest
+	if frozenDigest == "" && body.SessionRef == nil {
+		// Task-scoped Tasks dispatched by earlier controllers never recorded
+		// a workspace digest, so every recovery attempt for them failed and
+		// retried forever. Their baseline still comes only from committed
+		// evidence for this exact Task and prompt, the runtime rejects any
+		// VerifiedBaseline other than the one its session was created with,
+		// and this recovery never publishes.
+		return baseline, workspace, nil
+	}
+	if digest != frozenDigest {
 		return fail(fmt.Errorf("%w: recovered baseline differs from the frozen runtime workspace", store.ErrConflict))
 	}
 	return baseline, workspace, nil
