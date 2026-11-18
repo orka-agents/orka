@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -311,5 +314,47 @@ func TestRepositoryMonitorRepairValidationFeedbackKeepsTheFullCommand(t *testing
 	prompt := repositoryMonitorRepairPromptWithValidationFeedback("Fix the PR."+repositoryMonitorRepairPromptInputMarker+"{}", command, "exit 1", 1, 2)
 	if !strings.Contains(prompt, command) {
 		t.Fatalf("retry prompt does not contain the full %d-byte command", len(command))
+	}
+}
+
+func TestRepositoryMonitorRepairValidationRetryDropsRuntimeMetadata(t *testing.T) {
+	h := newRepairValidationRetryHarness(t, "repair-validation-retry-metadata", repairValidationTestCommand, nil)
+	first := h.job().TaskName
+	created := h.task(first)
+	wantLabels := maps.Clone(created.Labels)
+	wantAnnotations := maps.Clone(created.Annotations)
+	// Every key the monitor sets at creation must survive a retry.
+	for key := range wantLabels {
+		if !slices.Contains(repositoryMonitorRepairTaskLabelKeys, key) {
+			t.Fatalf("repair Task label %q is not carried to a validation retry", key)
+		}
+	}
+	for key := range wantAnnotations {
+		if !slices.Contains(repositoryMonitorRepairTaskAnnotationKeys, key) {
+			t.Fatalf("repair Task annotation %q is not carried to a validation retry", key)
+		}
+	}
+
+	// Metadata the attempt picked up while it ran belongs to that attempt.
+	created.Labels["acp.workspace.orka.ai/runtime-pool"] = "pool-a"
+	created.Annotations["acp.workspace.orka.ai/attachment-epoch"] = "3"
+	created.Annotations["acp.workspace.orka.ai/last-settled-task-uid"] = string(created.UID)
+	created.Annotations[labels.AnnotationCancelRequested] = "true"
+	created.Annotations[labels.AnnotationTransactionTokenSecret] = "attempt-token"
+	created.Annotations[labels.AnnotationTraceParent] = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+	if err := h.client.Update(h.ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	h.failValidation(first, repositoryMonitorRepairValidationFailedDeliveryReason, "Validation command exited with status 2.")
+	h.ingest()
+
+	retry := h.task(repositoryMonitorRepairValidationRetryTaskName(first, 1))
+	wantAnnotations[repositoryMonitorRepairValidationAttemptAnnotation] = "1"
+	wantAnnotations[repositoryMonitorRepairValidationOriginalTaskAnnotation] = first
+	if !maps.Equal(retry.Labels, wantLabels) {
+		t.Fatalf("retry labels = %v, want %v", retry.Labels, wantLabels)
+	}
+	if !maps.Equal(retry.Annotations, wantAnnotations) {
+		t.Fatalf("retry annotations = %v, want %v", retry.Annotations, wantAnnotations)
 	}
 }

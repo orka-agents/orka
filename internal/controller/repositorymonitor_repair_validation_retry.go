@@ -9,7 +9,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -158,6 +157,33 @@ func repositoryMonitorRepairPromptWithoutValidationFeedback(prompt string) strin
 // retryRepositoryMonitorRepairAfterValidation continues a repair whose patch
 // failed pre-push validation. It reports false when the budget is exhausted,
 // leaving the caller to fail the job with repair_validation_failed.
+// repositoryMonitorRepairTaskLabelKeys and repositoryMonitorRepairTaskAnnotationKeys
+// are the metadata createRepositoryMonitorRepairTaskWithEvidence sets. A
+// validation retry carries only these forward: the failed attempt also holds
+// runtime metadata written while it ran (ACP workspace settlement, transaction,
+// trace, and cancellation keys) that belongs to that attempt alone.
+var (
+	repositoryMonitorRepairTaskLabelKeys = []string{
+		labels.LabelManaged, labels.LabelCreatedBy, labels.LabelRepositoryMonitor, labels.LabelMonitorRun,
+		labels.LabelGitHubRepository, labels.LabelGitHubTarget, labels.LabelGitHubNumber,
+	}
+	repositoryMonitorRepairTaskAnnotationKeys = []string{
+		labels.AnnotationRepositoryMonitorName, labels.AnnotationMonitorRunID, labels.AnnotationMonitorItemKind,
+		labels.AnnotationMonitorItemNumber, labels.AnnotationMonitorHeadSHA, labels.AnnotationGitHubRepository,
+		repositoryMonitorIssueAnnotationCommandID, labels.AnnotationAgentRuntimeAuthOnly,
+	}
+)
+
+func repositoryMonitorRepairRetryMetadata(previous map[string]string, keys []string) map[string]string {
+	out := make(map[string]string, len(keys)+2)
+	for _, key := range keys {
+		if value, ok := previous[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 func (r *RepositoryMonitorReconciler) retryRepositoryMonitorRepairAfterValidation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, job *store.RepairJob, previous *corev1alpha1.Task) (bool, error) {
 	failures := repositoryMonitorRepairTaskPriorValidationFailures(previous) + 1
 	job.ValidationAttempts = failures
@@ -173,17 +199,14 @@ func (r *RepositoryMonitorReconciler) retryRepositoryMonitorRepairAfterValidatio
 	if previous.Status.Delivery != nil {
 		evidence = previous.Status.Delivery.Message
 	}
-	annotations := maps.Clone(previous.Annotations)
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
+	annotations := repositoryMonitorRepairRetryMetadata(previous.Annotations, repositoryMonitorRepairTaskAnnotationKeys)
 	annotations[repositoryMonitorRepairValidationAttemptAnnotation] = strconv.Itoa(failures)
 	annotations[repositoryMonitorRepairValidationOriginalTaskAnnotation] = original
 	retry := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        repositoryMonitorRepairValidationRetryTaskName(original, failures),
 			Namespace:   previous.Namespace,
-			Labels:      maps.Clone(previous.Labels),
+			Labels:      repositoryMonitorRepairRetryMetadata(previous.Labels, repositoryMonitorRepairTaskLabelKeys),
 			Annotations: annotations,
 		},
 		Spec: *previous.Spec.DeepCopy(),
