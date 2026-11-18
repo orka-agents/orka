@@ -208,8 +208,16 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
-	if operatoraccess.Tainted(workspace.Annotations) &&
-		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
+	tainted := false
+	if workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID {
+		// The workspace marker alone is not authoritative: a Task linked to
+		// this incarnation that operator access tainted forfeits reuse too.
+		tainted, err = acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	if tainted {
 		// Operator access tainted this incarnation. It is never re-attached,
 		// cold-resumed, or reused warm by another Task. While its holder
 		// still settles (which always deletes a tainted workspace), a
@@ -382,7 +390,10 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 	}, func(current *workspacev1alpha1.ExecutionWorkspace, candidate *corev1alpha1.Task, now time.Time) error {
-		return validateACPClassWorkspaceAttachmentAttempt(current, candidate, binding, plan.PoolName, now)
+		if err := validateACPClassWorkspaceAttachmentAttempt(current, candidate, binding, plan.PoolName, now); err != nil {
+			return err
+		}
+		return refuseOperatorTaintedACPWorkspaceHandoff(ctx, uncachedReader(r.APIReader, r.Client), current, candidate)
 	})
 	if err != nil {
 		if errors.Is(err, ErrWorkspaceAttachmentLocked) {
@@ -408,6 +419,30 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	// core re-admission and the adapter's enforced-epoch acknowledgement on
 	// the next pass, so RuntimePool demand can never precede them.
 	return "", false, nil
+}
+
+// refuseOperatorTaintedACPWorkspaceHandoff refuses each optimistic-lock
+// attachment attempt that would hand an incarnation tainted through any linked
+// Task to a different Task. validateACPClassWorkspaceAttachmentAttempt checks
+// the workspace marker of the exact object version; this adds the linked Task
+// markers, which the workspace marker cannot stand in for.
+func refuseOperatorTaintedACPWorkspaceHandoff(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) error {
+	if workspace.Spec.Attachment != nil && workspace.Spec.Attachment.TaskRef.UID == task.UID {
+		return nil
+	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	if err != nil {
+		return err
+	}
+	if tainted {
+		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
+	return nil
 }
 
 // An external provider needs an acknowledged attachment before core publishes
@@ -1240,7 +1275,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// Operator access forfeits retention: a tainted workspace is never
 	// suspended into a data checkpoint, retained for recovery export, or
 	// handed to a continuation. Its settlement always applies Delete.
-	operatorTainted := operatoraccess.Tainted(workspace.Annotations)
+	// The workspace marker and the marker of every Task linked to this exact
+	// incarnation both count; an unreadable Task fails settlement closed.
+	operatorTainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+	if err != nil {
+		return false, err
+	}
 	if terminallyFailed && !operatorTainted &&
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {

@@ -155,8 +155,12 @@ patch, and the Task. If either write fails, the operation is refused. Copies
 out never taint.
 
 Both prefixes are controller-protected: by the core workspace admission policy
-and by the Task provenance webhook. A tainted session is enforced at these
-points:
+and by the Task provenance webhook. The core workspace admission policy also
+makes the workspace marker permanent for every identity, including one that
+holds the core `admit` verb. Each enforcement point below treats the
+incarnation as tainted when either the workspace or any Task linked to that
+exact workspace UID carries the marker, and fails closed when it cannot read
+those Tasks. A tainted session is enforced at these points:
 
 - **Publication.** The fresh and recovery pre-publishing decision treats taint
   like cancellation and settles the publication as cancelled before publish.

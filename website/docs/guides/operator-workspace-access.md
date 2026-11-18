@@ -192,9 +192,12 @@ use these exit codes:
 `orka task exec` and `orka task cp` into a workspace can change anything the
 session's identity can write. Before either one starts, orka-api records the
 `acp.workspace.orka.ai/operator-tainted` annotation on the Task and on its
-ExecutionWorkspace. If that write fails, the operation is refused. Only the
-Orka controller identity can write either annotation, so a Task author cannot
-remove it.
+ExecutionWorkspace. If that write fails, the operation is refused. Task
+provenance admission reserves the Task annotation to Orka's controller
+identities. The core workspace admission policy makes the workspace annotation
+permanent: once it is set, no identity can remove or change it. Orka treats a
+workspace as tainted when either the workspace or any Task that used it
+carries the annotation.
 
 A tainted session:
 
