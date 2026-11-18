@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 163 authenticated external route registrations, including 66
+The table covers all 167 authenticated external route registrations, including 69
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -362,6 +362,8 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `delete` | `:name` | `Q` | none |
 | `GET` | `/api/v1/auth/validate` | none | none | identity only | empty | not applicable | Authenticated identity only |
 | `GET` | `/api/v1/auth/whoami` | none | none | identity only | empty | not applicable | Authenticated identity only |
+| `POST` | `/api/v1/auth/session/renew` | none | none | identity only | empty | not applicable | A GitHub sign-in session renews only itself |
+| `DELETE` | `/api/v1/auth/session` | none | none | identity only | empty | not applicable | A GitHub sign-in session ends only itself |
 | `GET` | `/api/v1/connectors` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `GET` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
@@ -376,6 +378,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; returns only the caller's own agent host, found through their own Connections; context-token callers need a connector read scope |
 | `POST` | `/api/v1/agent-hosts/me/wake` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope; an operator-suspended host is not woken |
 | `DELETE` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope |
+| `POST` | `/api/v1/agent-hosts/invites` | `core.orka.ai` | `agenthosts` | `create` | empty | `Q` | none |
+| `GET` | `/api/v1/agent-hosts/invites/:id` | `core.orka.ai` | `agenthosts` | `create` | empty | `Q` | none |
 | `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |

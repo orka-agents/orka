@@ -53,6 +53,10 @@ func (h *Handlers) ahpTokenIdentity(c fiber.Ctx) (*UserInfo, string, error) {
 	if ui == nil {
 		return nil, "", fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 	}
+	if ui.AuthType == AuthTypeGitHubSession {
+		// A session from orka login reaches only the person's links and host.
+		return nil, "", fiber.NewError(fiber.StatusForbidden, "AHP tokens require the person's own OIDC sign-in; a GitHub sign-in session cannot mint them yet")
+	}
 	if ui.AuthType != AuthTypeOIDC {
 		return nil, "", fiber.NewError(fiber.StatusForbidden, "AHP tokens require the person's own OIDC sign-in; delegated context tokens are not accepted")
 	}

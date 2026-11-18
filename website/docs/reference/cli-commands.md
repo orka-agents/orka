@@ -35,6 +35,8 @@ Available Commands:
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   host          See and manage your agent host for the Copilot app
+  login         Sign in to Orka with GitHub
+  logout        End your Orka session from orka login
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -1343,6 +1345,7 @@ Usage:
 
 Available Commands:
   delete      Delete your agent host and its volume
+  invite      Invite someone who cannot reach Orka to a Copilot environment
   status      Show your agent host
   wake        Start your agent host after it idled out
 
@@ -1372,6 +1375,28 @@ Usage:
 Flags:
   -h, --help   help for delete
       --yes    Confirm deleting the host and its volume
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host invite`
+
+```text
+Start GitHub's device flow for a GitHub login. Pass the code on; once that person approves it with that GitHub account, and is in an allowed org or team, Orka links their account and starts their Copilot environment. They need only a browser and the Copilot app. Needs Kubernetes credentials allowed to create agenthosts.
+
+Usage:
+  orka host invite <github-login> [flags]
+
+Flags:
+  -h, --help               help for invite
+      --timeout duration   How long to wait for the invited person (default 16m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1415,6 +1440,51 @@ Usage:
 
 Flags:
   -h, --help   help for wake
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka login`
+
+```text
+Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass --no-host. The session replaces the token and namespace saved in your Orka config, and renews itself.
+
+Usage:
+  orka login [flags]
+
+Flags:
+  -h, --help               help for login
+      --no-host            Link GitHub without starting a Copilot environment on Orka
+      --no-open            Print the GitHub URL without opening a browser
+      --timeout duration   How long to wait for the code to be approved and the host to start (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka logout`
+
+```text
+End your Orka session from orka login
+
+Usage:
+  orka logout [flags]
+
+Flags:
+  -h, --help   help for logout
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

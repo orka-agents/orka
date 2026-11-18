@@ -367,6 +367,12 @@ func (p envelopedState) CreateActionRecord(ctx context.Context, a1 *storagev1.Ac
 	return err
 }
 
+func (p envelopedState) CreateAuthSession(ctx context.Context, a1 storagev1.AuthSession) error {
+	return p.ops.run(ctx, writeCall{method: "CreateAuthSession", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateAuthSession(ctx, a1)
+	})
+}
+
 func (p envelopedState) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	var w1 *storagev1.CommandEvent
 	err := p.ops.run(ctx, writeCall{method: "CreateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -1040,6 +1046,12 @@ func (p envelopedState) ReleaseTaskDataFence(ctx context.Context, a1 storagev1.T
 	})
 }
 
+func (p envelopedState) RenewAuthSession(ctx context.Context, a1 string, a2 storagev1.AuthSession, a3 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "RenewAuthSession", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.RenewAuthSession(ctx, a1, a2, a3)
+	})
+}
+
 func (p envelopedState) RenewGatewayEventClaim(ctx context.Context, a1 string, a2 string, a3 string, a4 time.Time, a5 time.Duration) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	err := p.ops.run(ctx, writeCall{method: "RenewGatewayEventClaim", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
@@ -1117,6 +1129,12 @@ func (p envelopedState) ReviewMemoryProposal(ctx context.Context, a1 storagev1.M
 func (p envelopedState) RevokeAHPToken(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
 	return p.ops.run(ctx, writeCall{method: "RevokeAHPToken", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
 		return p.StateProvider.RevokeAHPToken(ctx, a1, a2, a3)
+	})
+}
+
+func (p envelopedState) RevokeAuthSession(ctx context.Context, a1 string, a2 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "RevokeAuthSession", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.RevokeAuthSession(ctx, a1, a2)
 	})
 }
 

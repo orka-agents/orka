@@ -64,6 +64,18 @@ type orkaConfig struct {
 	Server    string `yaml:"server,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
+	// TokenKind is github-session for a session from orka login, which
+	// renews itself and is sent only to SessionServer, the server that
+	// issued it: changing Server never redirects it.
+	TokenKind      string     `yaml:"tokenKind,omitempty"`
+	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
+	SessionServer  string     `yaml:"sessionServer,omitempty"`
+	// SessionLogin is the GitHub login the session signed in, for display.
+	SessionLogin string `yaml:"sessionLogin,omitempty"`
+	// SessionSubject is the numeric GitHub user ID the session signed in.
+	// A renewal keeps it, so a successor is told from another person's
+	// session: a login can be renamed and reused, the ID cannot.
+	SessionSubject string `yaml:"sessionSubject,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.
@@ -150,6 +162,25 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	return c
 }
 
+// sessionToken reports whether token is an Orka session, saved by orka login
+// or passed with --token, which then goes only to its own server and never
+// through a redirect, which can reach another port of the same host with it.
+// A session passed with --token crosses the network only as a saved one does:
+// over https, or over http only to this machine; otherwise the command stops.
+func sessionToken(token string, saved bool, server string) bool {
+	if token == "" {
+		return false
+	}
+	if saved {
+		return true
+	}
+	if !strings.HasPrefix(token, sessionTokenPrefix) {
+		return false
+	}
+	cobra.CheckErr(sessionServerAllowed(server))
+	return true
+}
+
 // newClientWithTunnel is newClientFromCmd for a command that handles
 // interrupts itself. A port-forward this call starts normally ends on the
 // first interrupt. With ownTunnel the caller decides instead: no interrupt
@@ -194,9 +225,16 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 	if server == "" {
 		server = configuredServer(cmd, cfg)
 	}
-	token, err := configuredToken(cmd, cfg)
+	token, saved, err := configuredTokenSource(cmd, cfg)
 	if err != nil {
 		return nil, closeTunnel, err
+	}
+	// A session saved by orka login renews itself and goes only to the
+	// server that issued it: configuredSession withholds it from any other.
+	// A token given with --token, --token-file or ORKA_TOKEN is used as given.
+	session := false
+	if saved && cfg.TokenKind == tokenKindGitHubSession {
+		token, session = configuredSession(cmd, server, cfg), true
 	}
 	txnToken, err := configuredTxnToken(cmd)
 	if err != nil {
@@ -209,12 +247,14 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 		// Read the context's token, including a tokenFile, before connecting,
 		// so a token written to that file meanwhile, perhaps for another
 		// context, does not go through this context's port-forward.
+		// A session withheld from this server is not replaced by a
+		// Kubernetes credential, which would reach that server instead.
 		var kubeToken string
-		if token == "" {
+		if token == "" && !session {
 			kubeToken, _ = target.token()
 		}
 		server, closeTunnel = connectThroughKubeconfig(target, ownTunnel)
-		if server != "" && token == "" {
+		if server != "" && token == "" && !session {
 			token = kubeToken
 		}
 	}
@@ -224,6 +264,9 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 
 	c := client.NewWithNamespace(server, token, ns)
 	c.TxnToken = txnToken
+	if sessionToken(token, session, server) {
+		c.HTTPClient = sessionAPIClient
+	}
 	return c, closeTunnel, nil
 }
 
@@ -272,17 +315,18 @@ func explicitNamespace(cmd *cobra.Command) (string, string) {
 	return "", ""
 }
 
-// configuredToken returns the bearer token from --token, --token-file,
-// ORKA_TOKEN or the config file, in that order.
-func configuredToken(cmd *cobra.Command, cfg orkaConfig) (string, error) {
+// configuredTokenSource returns the bearer token from --token, --token-file,
+// ORKA_TOKEN or the config file, in that order, and whether it is the config
+// file's, as a session saved by orka login is.
+func configuredTokenSource(cmd *cobra.Command, cfg orkaConfig) (string, bool, error) {
 	token, err := flagToken(cmd)
 	if err != nil || token != "" {
-		return token, err
+		return token, false, err
 	}
 	if token := strings.TrimSpace(os.Getenv(envToken)); token != "" {
-		return token, nil
+		return token, false, nil
 	}
-	return cfg.Token, nil
+	return cfg.Token, cfg.Token != "", nil
 }
 
 // flagToken returns the bearer token given by --token or --token-file, or ""
@@ -1097,7 +1141,22 @@ func saveConfig(cfg orkaConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	// A private temporary file renamed over the config, which os.Rename
+	// replaces on every platform: a concurrent reader never sees a partial
+	// config, and on Unix sees the old one or the new one.
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return os.Rename(file.Name(), path)
 }
 
 // maskToken shows only the first 4 chars + *** for security.

@@ -186,9 +186,13 @@ PUT /api/v1/connections/:name | identity
 DELETE /api/v1/connections/:name | identity
 POST /api/v1/connections/:name/authorize | identity
 POST /api/v1/connections/:name/complete | identity
+POST /api/v1/auth/session/renew | identity
+DELETE /api/v1/auth/session | identity
 GET /api/v1/agent-hosts/me | identity
 POST /api/v1/agent-hosts/me/wake | identity
 DELETE /api/v1/agent-hosts/me | identity
+POST /api/v1/agent-hosts/invites | create core.orka.ai:agenthosts
+GET /api/v1/agent-hosts/invites/:id | create core.orka.ai:agenthosts
 POST /api/v1/ahp-tokens | identity
 GET /api/v1/ahp-tokens | identity
 DELETE /api/v1/ahp-tokens/:id | identity
@@ -420,6 +424,9 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 		}
 		if key == "GET "+connectors.CallbackPath {
 			continue // The OAuth callback is authenticated by signed single-use state; see connection_handlers_test.go.
+		}
+		if key == "GET /api/v1/auth/config" || key == "POST /api/v1/auth/github" {
+			continue // GitHub sign-in precedes any Orka credential: the GitHub token is checked; see github_signin_test.go.
 		}
 		require.Contains(t, externalAPIPolicies, key, "external route lacks an explicit policy")
 		require.True(t, cases[key], "external route lacks an HTTP authorization test: %s", key)

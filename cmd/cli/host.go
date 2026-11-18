@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +19,9 @@ import (
 
 // agentHostAPIPath is the signed-in person's own agent host.
 const agentHostAPIPath = "/api/v1/agent-hosts/me"
+
+// agentHostInvitesAPIPath starts and reads invites.
+const agentHostInvitesAPIPath = "/api/v1/agent-hosts/invites"
 
 // agentHostPhaseFailed is the phase of a host that cannot run until its cause
 // is fixed.
@@ -31,6 +37,11 @@ const (
 	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
 )
+
+// A sign-in that just succeeded also supersedes this reason on a host kept
+// from before: its account is a member again. The host recovers at its next
+// reconcile.
+const agentHostReasonGitHubMembershipEnded = "GitHubMembershipEnded"
 
 // agentHostReadyPollInterval paces waiting for a host after linking.
 var agentHostReadyPollInterval = 2 * time.Second
@@ -58,7 +69,7 @@ func newHostCmd() *cobra.Command {
 		Long: "Your agent host runs the Copilot app's environment on Orka. Orka creates it when you link " +
 			"GitHub through a provider that serves agent hosts, and it appears in the Copilot app as orka-<host>.",
 	}
-	cmd.AddCommand(newHostStatusCmd(), newHostWakeCmd(), newHostDeleteCmd())
+	cmd.AddCommand(newHostStatusCmd(), newHostWakeCmd(), newHostDeleteCmd(), newHostInviteCmd())
 	return cmd
 }
 
@@ -180,12 +191,14 @@ func printAgentHost(out io.Writer, host agentHostView) {
 
 // waitForAgentHost waits until the host fed by connection, the link just made
 // to a provider that serves agent hosts, is ready, and says how the Copilot
-// app lists it.
-func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string) error {
+// app lists it. A Failed host is waited on only for a reason the new link
+// clears or one of the stale reasons.
+func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
-	// The last failure seen that the new link may clear: it is waited out,
-	// and reported if the wait ends on it.
+	woken := false
+	// The last failure seen that the new link or sign-in may clear: it is
+	// waited out, and reported if the wait ends on it.
 	var failed *agentHostView
 	for {
 		host, err := getOwnAgentHost(ctx, c)
@@ -198,12 +211,23 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		case err == nil && host.Connection != connection:
 		// A host being deleted is not the one to use; its replacement follows.
 		case err == nil && host.Deleting:
+		// An operator's suspension is theirs to lift, and is checked first: a
+		// host just suspended can still report the Ready of its last run. A
+		// host that idled out is woken once, as 'orka host wake' would.
+		case err == nil && host.OperatorSuspended:
+			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
 		case err == nil && host.Ready:
 			fmt.Fprintf(out, "Host ready: %s. Pick it in the Copilot app's Environments.\n", host.Environment) //nolint:errcheck
 			return nil
+		case err == nil && host.Suspended && !woken:
+			if _, err := c.DoJSON(ctx, http.MethodPost, agentHostAPIPath+"/wake", nil, nil); err != nil {
+				return agentHostError(err)
+			}
+			woken = true
+			fmt.Fprintln(out, "Your agent host idled out; waking it.") //nolint:errcheck
 		// A host kept from an earlier link still shows the failure that link
 		// left until the controller sees the new one.
-		case err == nil && host.Phase == agentHostPhaseFailed && linkMayClear(host.Reason):
+		case err == nil && host.Phase == agentHostPhaseFailed && (linkMayClear(host.Reason) || slices.Contains(stale, host.Reason)):
 			failed = &host
 		case err == nil && host.Phase == agentHostPhaseFailed:
 			return fmt.Errorf("your agent host %s failed: %s: %s", host.Name, host.Reason, host.Message)
@@ -240,4 +264,90 @@ func agentHostError(err error) error {
 		return errors.Join(err, errors.New("your agent host belongs to a signed-in person: pass your OIDC token with --token, or a context token with --txn-token"))
 	}
 	return err
+}
+
+// inviteView is an invite and how it ended.
+type inviteView struct {
+	ID              string    `json:"id"`
+	Login           string    `json:"login"`
+	State           string    `json:"state"`
+	Message         string    `json:"message"`
+	UserCode        string    `json:"userCode"`
+	VerificationURI string    `json:"verificationURI"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	AgentHost       bool      `json:"agentHost"`
+}
+
+// controllerWide sends no namespace: invites act in the namespace the
+// controller watches, which the CLI's default namespace would contradict.
+var controllerWide = map[string]string{"namespace": ""}
+
+// invitePollInterval paces waiting for an invite's outcome.
+var invitePollInterval = 3 * time.Second
+
+func newHostInviteCmd() *cobra.Command {
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "invite <github-login>",
+		Short: "Invite someone who cannot reach Orka to a Copilot environment",
+		Long: "Start GitHub's device flow for a GitHub login. Pass the code on; once that person approves it with that " +
+			"GitHub account, and is in an allowed org or team, Orka links their account and starts their Copilot " +
+			"environment. They need only a browser and the Copilot app. Needs Kubernetes credentials allowed to " +
+			"create agenthosts.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			body, err := json.Marshal(map[string]string{"login": args[0]})
+			if err != nil {
+				return err
+			}
+			raw, err := c.DoJSON(context.Background(), http.MethodPost, agentHostInvitesAPIPath, controllerWide, body)
+			if err != nil {
+				return err
+			}
+			var invite inviteView
+			if err := decodeInto(raw, &invite); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Ask %s to open %s and enter the code %s before %s.\n", //nolint:errcheck
+				invite.Login, invite.VerificationURI, invite.UserCode, invite.ExpiresAt.Local().Format(time.Kitchen))
+			if invite.AgentHost {
+				fmt.Fprintln(out, "Tell them first: approving starts their Copilot environment on Orka, and code running there can read their GitHub token.") //nolint:errcheck
+			}
+			outcome := agentHostInvitesAPIPath + "/" + url.PathEscape(invite.ID)
+			stopped := fmt.Errorf("stopped waiting; the invite stays open until %s, and GET %s reports its outcome. "+
+				"Running this command again creates another invite with a new code",
+				invite.ExpiresAt.Local().Format(time.Kitchen), outcome)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			for {
+				select {
+				case <-ctx.Done():
+					return stopped
+				case <-time.After(invitePollInterval):
+				}
+				raw, err := c.DoJSON(ctx, http.MethodGet, outcome, controllerWide, nil)
+				if err != nil {
+					if ctx.Err() != nil {
+						return stopped
+					}
+					return err
+				}
+				var current inviteView
+				if err := decodeInto(raw, &current); err != nil {
+					return err
+				}
+				switch current.State {
+				case "Accepted":
+					fmt.Fprintf(out, "%s accepted: %s.\n", current.Login, current.Message) //nolint:errcheck
+					return nil
+				case "Refused", "Expired":
+					return fmt.Errorf("the invite for %s was %s: %s", current.Login, strings.ToLower(current.State), current.Message)
+				}
+			}
+		},
+	}
+	cmd.Flags().DurationVar(&timeout, "timeout", 16*time.Minute, "How long to wait for the invited person")
+	return cmd
 }

@@ -131,9 +131,15 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
-	ahp                       *ahphost.Host
-	completionLocks           *completionLocks
-	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
+	githubSignIn              GitHubSignInConfig
+	signInLimiter             *gatewayIngressLimiter
+	invites                   *githubInvites
+	// oidcEnabled says whether OIDC sign-in is configured, for clients
+	// choosing how to sign in.
+	oidcEnabled        bool
+	ahp                *ahphost.Host
+	completionLocks    *completionLocks
+	substrateMCPRouter *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
 	// attentionBounds overrides the attention scan bounds; zero uses defaults.
@@ -168,6 +174,8 @@ type HandlersConfig struct {
 	GatewayDeliveryStore     store.GatewayDeliveryStore
 	GatewayService           *gatewayruntime.Service
 	Connectors               ConnectorConfig
+	GitHubSignIn             GitHubSignInConfig
+	OIDCEnabled              bool
 	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
 	AHP               *ahphost.Host
 	SubstrateMCPProxy SubstrateMCPProxyConfig
@@ -208,6 +216,10 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		githubSignIn:              cfg.GitHubSignIn,
+		signInLimiter:             newGitHubSignInLimiter(),
+		invites:                   &githubInvites{},
+		oidcEnabled:               cfg.OIDCEnabled,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),

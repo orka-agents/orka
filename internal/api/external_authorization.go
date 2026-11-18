@@ -273,19 +273,25 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"DELETE /api/v1/connections/:name":         {identityOnly: true},
 	"POST /api/v1/connections/:name/authorize": {identityOnly: true},
 	"POST /api/v1/connections/:name/complete":  {identityOnly: true},
+	// A GitHub sign-in session renews and ends itself.
+	"POST /api/v1/auth/session/renew": {identityOnly: true},
+	"DELETE /api/v1/auth/session":     {identityOnly: true},
 	// A person's own agent host, found from their verified identity only.
 	"GET /api/v1/agent-hosts/me":       {identityOnly: true},
 	"POST /api/v1/agent-hosts/me/wake": {identityOnly: true},
 	"DELETE /api/v1/agent-hosts/me":    {identityOnly: true},
-	"GET /api/v1/secrets":              {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
-	"POST /api/v1/chat":                coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
-	"GET /api/v1/chat/config":          coreAPIPolicy("get", "chats/config", ""),
-	"DELETE /api/v1/chat/:sessionId":   coreAPIPolicy("delete", "sessions", "sessionId"),
-	"POST /openai/v1/responses":        coreAPIPolicy("create", "chats", ""),
-	"POST /openai/v1/chat/completions": coreAPIPolicy("create", "chats", ""),
-	"GET /openai/v1/models":            coreAPIPolicy("list", "providers", ""),
-	"POST /anthropic/v1/messages":      coreAPIPolicy("create", "chats", ""),
-	"GET /anthropic/v1/models":         coreAPIPolicy("list", "providers", ""),
+	// Inviting someone to a host is an operator's act: create on agenthosts.
+	"POST /api/v1/agent-hosts/invites":    coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/agent-hosts/invites/:id": coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/secrets":                 {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
+	"POST /api/v1/chat":                   coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
+	"GET /api/v1/chat/config":             coreAPIPolicy("get", "chats/config", ""),
+	"DELETE /api/v1/chat/:sessionId":      coreAPIPolicy("delete", "sessions", "sessionId"),
+	"POST /openai/v1/responses":           coreAPIPolicy("create", "chats", ""),
+	"POST /openai/v1/chat/completions":    coreAPIPolicy("create", "chats", ""),
+	"GET /openai/v1/models":               coreAPIPolicy("list", "providers", ""),
+	"POST /anthropic/v1/messages":         coreAPIPolicy("create", "chats", ""),
+	"GET /anthropic/v1/models":            coreAPIPolicy("list", "providers", ""),
 
 	// AHP token routes are identity-only like Connections: the handlers
 	// require a verified OIDC or context-token owner and refuse ServiceAccounts.
@@ -364,6 +370,32 @@ func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {
 	}
 }
 
+// githubSessionRoutes are the identity-only routes a GitHub sign-in session
+// may reach: those that act on the caller's own sign-in, links, agent host
+// and AHP tokens. The control-plane MCP endpoint is identity-only because
+// each tool call is authorized as the REST route it replays, but it is not
+// a session's.
+var githubSessionRoutes = map[string]bool{
+	"GET /api/v1/auth/validate":                true,
+	"GET /api/v1/auth/whoami":                  true,
+	"GET /api/v1/connectors":                   true,
+	"GET /api/v1/connections":                  true,
+	"POST /api/v1/connections":                 true,
+	"GET /api/v1/connections/:name":            true,
+	"PUT /api/v1/connections/:name":            true,
+	"DELETE /api/v1/connections/:name":         true,
+	"POST /api/v1/connections/:name/authorize": true,
+	"POST /api/v1/connections/:name/complete":  true,
+	"POST /api/v1/auth/session/renew":          true,
+	"DELETE /api/v1/auth/session":              true,
+	"GET /api/v1/agent-hosts/me":               true,
+	"POST /api/v1/agent-hosts/me/wake":         true,
+	"DELETE /api/v1/agent-hosts/me":            true,
+	"POST /api/v1/ahp-tokens":                  true,
+	"GET /api/v1/ahp-tokens":                   true,
+	"DELETE /api/v1/ahp-tokens/:id":            true,
+}
+
 func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	policy, ok := externalAPIPolicies[route]
 	if !ok || (!policy.identityOnly && len(policy.permissions) == 0) {
@@ -372,6 +404,13 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	ui := GetUserInfo(c)
 	if ui == nil {
 		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	// A GitHub sign-in session reaches only routes that act on the caller's
+	// own links, host and AHP tokens; everything else needs OIDC or
+	// Kubernetes credentials. Being identity-only is not enough: a route
+	// opts in, so one added later is closed to sessions until it does.
+	if ui.AuthType == AuthTypeGitHubSession && (!policy.identityOnly || !githubSessionRoutes[route]) {
+		return fiber.NewError(fiber.StatusForbidden, "a GitHub sign-in session reaches only your own links, agent host and AHP tokens")
 	}
 	// Direct OIDC validation and transaction tokens have their own contracts.
 	// Do not reinterpret them as Kubernetes TokenReview identities.
