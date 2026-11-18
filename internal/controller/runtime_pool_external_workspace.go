@@ -472,9 +472,13 @@ func (r *RuntimePoolReconciler) setExternalRuntimeTelemetryReady(pool *corev1alp
 // not depend on the publishing reconcile's status write landing. Only a native
 // request is fitted to the backend environment limit; a Pod-backed request, or
 // none, carries no condition. Fitting is deterministic, so re-fitting the
-// frozen environment reproduces the publish-time verdict. A request the
-// current controller configuration would project differently was published
-// under another configuration, so its recorded condition is kept.
+// frozen environment reproduces the publish-time verdict. The verdict is
+// against the signals the controller configures now: when a changed
+// configuration still yields the frozen projection, the runtime exports
+// exactly what that configuration asks for, and a signal turned off is not
+// reported as dropped. A request the current configuration would project
+// differently was published under another configuration, so its recorded
+// condition is kept.
 func (r *RuntimePoolReconciler) deriveExternalRuntimeTelemetryReady(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, request *workspacev1alpha1.WorkloadRequest) {
 	if request == nil || (request.Runtime != nil && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)) {
 		r.setExternalRuntimeTelemetryReady(pool, status, true, "")

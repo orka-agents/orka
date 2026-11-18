@@ -753,6 +753,27 @@ func TestExternalRuntimePoolKeepsTelemetryReadyAcrossConfigurationChange(t *test
 	assertTelemetryReady(t, pool, metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
 }
 
+// A configuration change that leaves the frozen projection unchanged is judged
+// against the signals now configured: once metrics are turned off, the
+// trace-only runtime exports every configured signal and does not report
+// metrics as dropped for the environment limit.
+func TestExternalRuntimePoolTelemetryReadyFollowsConfiguredSignalsForUnchangedProjection(t *testing.T) {
+	for key, value := range reducedNativeTelemetryEnv {
+		t.Setenv(key, value)
+	}
+	f := newExternalRuntimePoolFixture(t)
+	f.r.EnableTelemetry = true
+	f.advertiseNativeProcess(t)
+	before := f.publish(t).Spec.Workload.Revision
+	assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonNativeEnvironmentLimit)
+	t.Setenv(runtimePoolMetricsExporterEnv, "none")
+	runtimePoolReconcile(t, f.r, f.pool)
+	if f.currentWorkspace(t).Spec.Workload.Revision != before {
+		t.Fatal("configuration change republished the request")
+	}
+	assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
+}
+
 // Empty model limits are equivalent to unset ones for both the supervisor
 // and the controller, so the native template omits them; set limits stay.
 func TestRuntimePoolNativeProcessTemplateOmitsOnlyEmptyModelLimits(t *testing.T) {
