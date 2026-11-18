@@ -94,69 +94,29 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	defer func() { _ = stream.Close() }()
 
-	var (
-		message                                  anthropic.Message
-		inputReported, outputReported, completed bool
-		cacheRead, cacheWrite                    *int64
-	)
+	acc := completionAccumulator{provider: p.TelemetryProviderName()}
 	for stream.Next() {
-		event := stream.Current()
-		if err := message.Accumulate(event); err != nil {
-			return nil, toProviderError(err)
-		}
-		switch e := event.AsAny().(type) {
-		case anthropic.MessageStartEvent:
-			u := e.Message.Usage
-			inputReported = u.JSON.InputTokens.Valid()
-			outputReported = u.JSON.OutputTokens.Valid()
-			cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, u.JSON.CacheReadInputTokens.Valid())
-			cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, u.JSON.CacheCreationInputTokens.Valid())
-		case anthropic.MessageDeltaEvent:
-			u := e.Usage
-			inputReported = inputReported || u.JSON.InputTokens.Valid()
-			outputReported = outputReported || u.JSON.OutputTokens.Valid()
-			if u.JSON.CacheReadInputTokens.Valid() {
-				cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, true)
-			}
-			if u.JSON.CacheCreationInputTokens.Valid() {
-				cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, true)
-			}
-			completed = completed || e.Delta.StopReason != ""
-		case anthropic.MessageStopEvent:
-			completed = true
+		if err := acc.add(stream.Current()); err != nil {
+			return acc.failed(toProviderError(err))
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, toProviderError(err)
+		return acc.failed(toProviderError(err))
 	}
-	if !completed {
+	if !acc.completed {
 		// A dropped connection ends the stream without an error. Returning
 		// the partial message would pass truncated output off as complete.
 		// None of it has reached the caller, so report a gateway failure,
 		// which the retry layer retries.
-		return nil, &llm.ProviderError{
+		return acc.failed(&llm.ProviderError{
 			Provider:   providerName,
 			Message:    "anthropic stream ended before the message finished",
 			StatusCode: http.StatusBadGateway,
-		}
+		})
 	}
 
-	// Convert response
-	resp := &llm.CompletionResponse{
-		Provider:              p.TelemetryProviderName(),
-		ID:                    message.ID,
-		Model:                 message.Model,
-		StopReason:            string(message.StopReason),
-		InputTokens:           int(message.Usage.InputTokens),
-		OutputTokens:          int(message.Usage.OutputTokens),
-		InputExcludesCache:    true,
-		UsageReported:         inputReported && outputReported,
-		CachedInputTokens:     cacheRead,
-		CacheWriteInputTokens: cacheWrite,
-	}
-
-	// Extract content and tool calls
-	for _, block := range message.Content {
+	resp := acc.usage()
+	for _, block := range acc.message.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
 			resp.Content += b.Text
@@ -168,8 +128,72 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 			})
 		}
 	}
-
 	return resp, nil
+}
+
+// completionAccumulator assembles a streamed message and the usage the
+// stream reported along the way.
+type completionAccumulator struct {
+	provider                                          string
+	message                                           anthropic.Message
+	started, inputReported, outputReported, completed bool
+	cacheRead, cacheWrite                             *int64
+}
+
+func (a *completionAccumulator) add(event anthropic.MessageStreamEventUnion) error {
+	if err := a.message.Accumulate(event); err != nil {
+		return err
+	}
+	switch e := event.AsAny().(type) {
+	case anthropic.MessageStartEvent:
+		u := e.Message.Usage
+		a.started = true
+		a.inputReported = u.JSON.InputTokens.Valid()
+		a.outputReported = u.JSON.OutputTokens.Valid()
+		a.cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, u.JSON.CacheReadInputTokens.Valid())
+		a.cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, u.JSON.CacheCreationInputTokens.Valid())
+	case anthropic.MessageDeltaEvent:
+		u := e.Usage
+		a.inputReported = a.inputReported || u.JSON.InputTokens.Valid()
+		a.outputReported = a.outputReported || u.JSON.OutputTokens.Valid()
+		if u.JSON.CacheReadInputTokens.Valid() {
+			a.cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, true)
+		}
+		if u.JSON.CacheCreationInputTokens.Valid() {
+			a.cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, true)
+		}
+		a.completed = a.completed || e.Delta.StopReason != ""
+	case anthropic.MessageStopEvent:
+		a.completed = true
+	}
+	return nil
+}
+
+// usage returns a response that carries the message's identity and usage
+// but none of its content.
+func (a *completionAccumulator) usage() *llm.CompletionResponse {
+	return &llm.CompletionResponse{
+		Provider:              a.provider,
+		ID:                    a.message.ID,
+		Model:                 a.message.Model,
+		StopReason:            string(a.message.StopReason),
+		InputTokens:           int(a.message.Usage.InputTokens),
+		OutputTokens:          int(a.message.Usage.OutputTokens),
+		InputExcludesCache:    true,
+		UsageReported:         a.inputReported && a.outputReported,
+		CachedInputTokens:     a.cacheRead,
+		CacheWriteInputTokens: a.cacheWrite,
+	}
+}
+
+// failed returns err, with the usage the stream reported before it failed so
+// usage accounting still counts the tokens the attempt was billed for. It
+// leaves out the partial content, which callers must not use.
+func (a *completionAccumulator) failed(err error) (*llm.CompletionResponse, error) {
+	if !a.started {
+		return nil, err
+	}
+	return a.usage(), err
 }
 
 // buildMessages converts llm messages to Anthropic format.

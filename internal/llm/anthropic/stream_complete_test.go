@@ -193,6 +193,10 @@ func TestCompleteRejectsTruncatedStream(t *testing.T) {
 	if pe.StatusCode != http.StatusBadGateway || !llm.ShouldRetry(err) {
 		t.Errorf("status code = %d, retry = %t; want 502, true", pe.StatusCode, llm.ShouldRetry(err))
 	}
+	// The attempt was billed for its input, so its usage survives the error.
+	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
+		t.Errorf("response = %+v, want only the reported input usage", resp)
+	}
 }
 
 func TestCompleteReturnsStreamErrorEvent(t *testing.T) {
@@ -201,13 +205,16 @@ func TestCompleteReturnsStreamErrorEvent(t *testing.T) {
 		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
 		_, _ = fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
 	})
-	_, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
 	if err == nil {
 		t.Fatal("Complete() succeeded, want the stream's error event")
 	}
 	pe, ok := errors.AsType[*llm.ProviderError](err)
 	if !ok {
 		t.Fatalf("error type = %T, want *llm.ProviderError", err)
+	}
+	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
+		t.Errorf("response = %+v, want only the reported input usage", resp)
 	}
 	// Overloaded before the stream starts is an HTTP 529, which is retried.
 	if pe.StatusCode != 529 || !llm.ShouldRetry(err) {
@@ -221,10 +228,13 @@ func TestCompleteKeepsHTTPStatusCode(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`)
 	})
-	_, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
 	pe, ok := errors.AsType[*llm.ProviderError](err)
 	if !ok {
 		t.Fatalf("error = %v (%T), want *llm.ProviderError", err, err)
+	}
+	if resp != nil {
+		t.Errorf("response = %+v, want nil when the request failed before streaming", resp)
 	}
 	if pe.StatusCode != http.StatusBadRequest {
 		t.Errorf("status code = %d, want 400", pe.StatusCode)
