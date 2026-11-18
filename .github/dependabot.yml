@@ -22,6 +22,11 @@ updates:
         patterns:
           - "github.com/onsi/*"
 
+  - package-ecosystem: "gomod"
+    directory: "/pkg/storage"
+    schedule:
+      interval: "weekly"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

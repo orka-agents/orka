@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Messages serves inter-agent messages.
+service Messages {
+  option (go_interface) = "MessageStore";
+
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ListUnreadMessages(ListUnreadMessagesRequest) returns (ListUnreadMessagesResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  // ConsumeMessages marks the messages it returns read, so it is a write.
+  rpc ConsumeMessages(ConsumeMessagesRequest) returns (ConsumeMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteTaskMessages(DeleteTaskMessagesRequest) returns (DeleteTaskMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteParentMessages(DeleteParentMessagesRequest) returns (DeleteParentMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+}
+
+message Message {
+  int64 id = 1;
+  string namespace = 2;
+  string from_task = 3;
+  string to_task = 4;
+  string parent_task = 5;
+  string content = 6;
+  bool read = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message SendMessageRequest {
+  Message msg = 1;
+}
+
+// SendMessageResponse carries the stored message, with the ID and creation
+// time the provider assigned, back into the caller's message.
+message SendMessageResponse {
+  Message msg = 1 [(write_back) = true];
+}
+
+message ListUnreadMessagesRequest {
+  string namespace = 1;
+  string task_name = 2;
+  string parent_task = 3;
+  int64 limit = 4;
+}
+
+message ListUnreadMessagesResponse {
+  repeated Message messages = 1;
+}
+
+// ConsumeMessagesRequest is both the RPC's request and the Go contract's
+// ConsumeMessagesRequest record.
+message ConsumeMessagesRequest {
+  string namespace = 1;
+  string task_name = 2;
+  string parent_task = 3;
+  int64 limit = 4;
+}
+
+message ConsumeMessagesResponse {
+  repeated Message messages = 1;
+}
+
+message DeleteTaskMessagesRequest {
+  string namespace = 1;
+  string task_name = 2;
+}
+
+message DeleteTaskMessagesResponse {}
+
+message DeleteParentMessagesRequest {
+  string namespace = 1;
+  string parent_task = 2;
+}
+
+message DeleteParentMessagesResponse {}

@@ -25,6 +25,38 @@ type suiteOptions struct {
 	providerAttachesEnvelopes bool
 	maintenance               *MaintenanceHarness
 	durability                *DurabilityHarness
+	parallel                  bool
+	// recomputedDigests names the write methods whose request digests a
+	// transport recomputes.
+	recomputedDigests map[string]bool
+}
+
+// Parallel runs the contract families in parallel with each other. Cases
+// within a family still run in order. The factory must then be safe for
+// concurrent use, and each dataset it returns must stay isolated from the
+// others, as a schema per case on a shared database is.
+func Parallel() Option {
+	return func(o *suiteOptions) { o.parallel = true }
+}
+
+// RecomputesRequestDigests runs the suite against a provider that serves the
+// named methods across a process boundary, through a transport that
+// recomputes each write's request digest from the decoded request and
+// refuses a mismatch with ErrValidation, as [storagev1.WriteEnvelope]
+// requires. A retry of one of those writes that reuses an operation ID with a
+// digest that does not match its arguments is then refused by the transport
+// before the provider compares it with the stored receipt, so the receipt
+// cases expect ErrValidation where an in-process provider returns
+// ErrDuplicateMismatch. Run the suite in process too, to cover that check.
+func RecomputesRequestDigests(methods ...string) Option {
+	return func(o *suiteOptions) {
+		if o.recomputedDigests == nil {
+			o.recomputedDigests = map[string]bool{}
+		}
+		for _, method := range methods {
+			o.recomputedDigests[method] = true
+		}
+	}
 }
 
 // ProviderAttachesEnvelopes runs the suite against a provider that attaches

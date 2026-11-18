@@ -17,6 +17,8 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
+COPY pkg/storage/go.mod pkg/storage/go.mod
+COPY pkg/storage/go.sum pkg/storage/go.sum
 # Download modules into BuildKit's module cache, which the Go builds of the
 # other images share; the build step mounts it and the Go build cache too.
 RUN --mount=type=cache,target=/go/pkg/mod go mod download

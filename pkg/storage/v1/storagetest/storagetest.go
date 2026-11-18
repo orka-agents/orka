@@ -94,9 +94,6 @@ var stateFamilies = []stateFamily{
 	{"lost-responses", runLostResponses},
 	{"grouped-writes", runGroupedWrites},
 	{"protocols", runProtocols},
-	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
-		runWriteCatalog(t, newProvider, stateWriteCases)
-	}},
 	{"write-watermark", func(t *testing.T, newProvider StateFactory) {
 		runWriteWatermark(t, newProvider)
 	}},
@@ -121,9 +118,18 @@ func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	newProvider = stateFactory(newProvider, settings)
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
+			if settings.parallel {
+				t.Parallel()
+			}
 			family.run(t, newProvider)
 		})
 	}
+	t.Run("write-envelopes", func(t *testing.T) {
+		if settings.parallel {
+			t.Parallel()
+		}
+		runWriteCatalog(t, newProvider, stateWriteCases, settings)
+	})
 	runOptionalFamilies(t, newProvider, stateWriteCases, settings)
 }
 
@@ -140,13 +146,16 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 	}
 	newProvider = artifactFactory(newProvider, settings)
 	t.Run("artifacts", func(t *testing.T) {
+		if settings.parallel {
+			t.Parallel()
+		}
 		runArtifacts(t, newProvider)
 	})
 	t.Run("artifact-write-order", func(t *testing.T) {
 		runArtifactWriteOrder(t, newProvider)
 	})
 	t.Run("write-envelopes", func(t *testing.T) {
-		runWriteCatalog(t, newProvider, artifactWriteCases)
+		runWriteCatalog(t, newProvider, artifactWriteCases, settings)
 	})
 	t.Run("dataset-binding", func(t *testing.T) {
 		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.ArtifactProvider) {

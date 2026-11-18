@@ -4,6 +4,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 COPY test/fixtures/connectors ./test/fixtures/connectors
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /fixture ./test/fixtures/connectors/cmd
 FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
