@@ -24,6 +24,10 @@ type AHPToken struct {
 // MaxAHPClientsPerUser bounds the clients a user's AHP connections record.
 const MaxAHPClientsPerUser = 256
 
+// MaxAHPEndedTokensPerUser bounds the revoked and expired tokens a user's
+// token list keeps.
+const MaxAHPEndedTokensPerUser = 50
+
 // AHPClient binds an AHP clientId to the user that first used it and records
 // what that connection negotiated, so a reconnect restores it.
 type AHPClient struct {
@@ -84,7 +88,9 @@ type AHPJournalLimits struct {
 // Byte values are opaque to the provider and are returned exactly as stored.
 type AHPStore interface {
 	// CreateAHPToken stores a new token. It returns ErrConflict when the ID or
-	// the hash is already stored.
+	// the hash is already stored. The user keeps the
+	// [MaxAHPEndedTokensPerUser] newest of their tokens that were revoked or
+	// had expired by the new token's CreatedAt; older ones are deleted.
 	CreateAHPToken(ctx context.Context, token AHPToken) error
 	// GetAHPTokenByHash returns ErrNotFound for an unknown hash.
 	GetAHPTokenByHash(ctx context.Context, tokenHash string) (AHPToken, error)

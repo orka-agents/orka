@@ -43,6 +43,13 @@ var ErrInvalidToken = errors.New("invalid AHP connection token")
 // ErrInvalidMintRequest is returned when a mint request is refused as asked.
 var ErrInvalidMintRequest = errors.New("invalid AHP token request")
 
+// ErrTooManyTokens is returned by Mint for a person who already holds
+// MaxActiveTokensPerUser tokens that are neither revoked nor expired.
+var ErrTooManyTokens = errors.New("too many active AHP tokens")
+
+// MaxActiveTokensPerUser bounds the live tokens one person holds.
+const MaxActiveTokensPerUser = 50
+
 // Principal is the user behind an AHP connection.
 type Principal struct {
 	UserKey   string
@@ -147,6 +154,19 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 		return MintedToken{}, fmt.Errorf("%w: ttl must be between 1m and %s", ErrInvalidMintRequest, s.maxTTL())
 	}
 	now := s.now()
+	owned, err := s.Store.ListAHPTokens(ctx, UserKey(req.Issuer, req.Subject))
+	if err != nil {
+		return MintedToken{}, err
+	}
+	active := 0
+	for _, token := range owned {
+		if token.RevokedAt == nil && token.ExpiresAt.After(now) {
+			active++
+		}
+	}
+	if active >= MaxActiveTokensPerUser {
+		return MintedToken{}, fmt.Errorf("%w: revoke one of your %d active tokens first", ErrTooManyTokens, active)
+	}
 	expires := now.Add(ttl)
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
