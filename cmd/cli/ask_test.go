@@ -347,6 +347,17 @@ func TestAskRejectsQuestionAndTokenBothOnStdin(t *testing.T) {
 	}
 }
 
+func TestAskRejectsQuestionAndAPITokenBothOnStdin(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	_, _, err := runAsk(t, srv, "api-token-value", "-", "--token-file", "-")
+	if err == nil || !strings.Contains(err.Error(), "--token-file token can't both come from stdin") {
+		t.Fatalf("err = %v, want the shared-stdin error for --token-file", err)
+	}
+	if srv.created != nil {
+		t.Fatalf("no Task may be created when stdin holds the token: %#v", srv.created)
+	}
+}
+
 func TestAskRejectsTokenFileThatIsStdin(t *testing.T) {
 	// Standard input is a file, and --txn-token-file names it by another path,
 	// as /dev/stdin does.

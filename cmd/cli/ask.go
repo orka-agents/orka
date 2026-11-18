@@ -158,9 +158,9 @@ func askQuestion(cmd *cobra.Command, args []string) (string, error) {
 	if readStdin {
 		// A token read from stdin would otherwise become the question and
 		// reach the model.
-		if tokenReadsStdin(cmd) {
-			return "", fmt.Errorf("the question and the --txn-token-file token can't both come from stdin: " +
-				"pass the question as an argument or the token in another file")
+		if flag := stdinCredentialFlag(cmd); flag != "" {
+			return "", fmt.Errorf("the question and the --%s token can't both come from stdin: "+
+				"pass the question as an argument or the token in another file", flag)
 		}
 		data, err := io.ReadAll(cmd.InOrStdin())
 		if err != nil {
@@ -175,26 +175,37 @@ func askQuestion(cmd *cobra.Command, args []string) (string, error) {
 	return question, nil
 }
 
-// tokenReadsStdin reports whether the client reads the transaction token from
-// standard input: --txn-token is unset and --txn-token-file is "-" or names
-// the file standard input is, such as /dev/stdin.
-func tokenReadsStdin(cmd *cobra.Command) bool {
-	if token, _ := cmd.Flags().GetString("txn-token"); token != "" {
-		return false
+// stdinCredentialFlag returns the credential file flag the client reads from
+// standard input, or "" when none: --token-file, or --txn-token-file while
+// --txn-token is unset, set to "-" or to a path naming the file standard input
+// is, such as /dev/stdin.
+func stdinCredentialFlag(cmd *cobra.Command) string {
+	flags := []string{"token-file"}
+	// --txn-token wins, and --txn-token-file is then not read.
+	if token, _ := cmd.Flags().GetString("txn-token"); token == "" {
+		flags = append(flags, "txn-token-file")
 	}
-	path, _ := cmd.Flags().GetString("txn-token-file")
-	if path == "-" {
-		return true
+	for _, flag := range flags {
+		if path, _ := cmd.Flags().GetString(flag); credentialPathReadsStdin(path) {
+			return flag
+		}
 	}
+	return ""
+}
+
+func credentialPathReadsStdin(path string) bool {
 	if strings.TrimSpace(path) == "" {
 		return false
 	}
-	tokenFile, err := os.Stat(path)
+	if readsStdin(path) {
+		return true
+	}
+	file, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
 	stdin, err := os.Stdin.Stat()
-	return err == nil && os.SameFile(tokenFile, stdin)
+	return err == nil && os.SameFile(file, stdin)
 }
 
 func createAskTask(ctx context.Context, c *client.Client, agent, question string) (string, error) {
