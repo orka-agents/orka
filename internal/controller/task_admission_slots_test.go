@@ -9,7 +9,9 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -253,7 +255,7 @@ func TestReapNamespaceAdmissionLedgers(t *testing.T) {
 	})
 	r.APIReader = base
 	r.ControllerNamespace = "orka-system"
-	if err := r.reapNamespaceAdmissionLedgers(ctx, now); err != nil {
+	if err := r.reapTaskAdmissionLedgers(ctx, now); err != nil {
 		t.Fatal(err)
 	}
 	for namespace, wantKept := range map[string]bool{"gone": false, "busy": true, "idle": false, "fresh": true, "raced": true} {
@@ -304,5 +306,133 @@ func TestTaskAdmissionClampsALimitAboveTheCap(t *testing.T) {
 	scope.list = func(context.Context) ([]corev1alpha1.Task, error) { return append(holders, *contender), nil }
 	if granted, err := r.acquireTaskAdmissionSlot(ctx, contender, scope); err != nil || granted {
 		t.Fatalf("granted=%t err=%v with %d holders, want the capped limit to hold", granted, err, MaxTaskAdmissionSlots)
+	}
+}
+
+// writeAdmissionLedger stores grants in a ledger as a forger with write
+// access to it would.
+func writeAdmissionLedger(t *testing.T, c client.Client, ledger types.NamespacedName, grants ...types.UID) {
+	t.Helper()
+	encoded, err := json.Marshal(grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(context.Background(), &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: ledger.Namespace, Name: ledger.Name,
+		Annotations: map[string]string{taskAdmissionLedgerAnnotation: string(encoded)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A grant in the ledger is not enough to be admitted. A Task that writes its
+// own UID into a full namespace or child ledger is still refused, and grants
+// naming no live, schedule-free Task of the scope take no capacity.
+func TestForgedAdmissionGrantsNeverRaiseCapacity(t *testing.T) {
+	ctx := context.Background()
+	parent := limitTestTask("coordinator")
+	running := limitTestTask("running")
+	running.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+	running.Status.Phase = corev1alpha1.TaskPhaseRunning
+	forger := limitTestTask("forger")
+	forger.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+	finished := limitTestTask("finished")
+	finished.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	recurring := limitTestTask("recurring")
+	recurring.Spec.Schedule = "*/5 * * * *"
+	recurring.Status.Phase = corev1alpha1.TaskPhaseScheduled
+
+	for _, kind := range []string{"namespace", "children"} {
+		t.Run(kind+" limit full", func(t *testing.T) {
+			r := newUnitReconciler(newTestScheme(), parent, running, forger)
+			r.APIReader = r.Client
+			scope := r.namespaceAdmissionScope("default", 1)
+			if kind == "children" {
+				scope = r.childrenAdmissionScope(parent, 1)
+			}
+			writeAdmissionLedger(t, r.Client, scope.ledger, forger.UID)
+			if granted, err := r.acquireTaskAdmissionSlot(ctx, forger, scope); err != nil || granted {
+				t.Fatalf("granted=%t err=%v, want a self-written grant refused while the slot is held", granted, err)
+			}
+		})
+	}
+
+	t.Run("grants for no eligible Task", func(t *testing.T) {
+		r := newUnitReconciler(newTestScheme(), forger, finished, recurring)
+		r.APIReader = r.Client
+		scope := r.namespaceAdmissionScope("default", 1)
+		writeAdmissionLedger(t, r.Client, scope.ledger, "no-such-task", finished.UID, recurring.UID)
+		if granted, err := r.acquireTaskAdmissionSlot(ctx, forger, scope); err != nil || !granted {
+			t.Fatalf("granted=%t err=%v, want the free slot despite grants naming no eligible Task", granted, err)
+		}
+		stored := &coordinationv1.Lease{}
+		if err := r.Get(ctx, scope.ledger, stored); err != nil {
+			t.Fatal(err)
+		}
+		if got := stored.Annotations[taskAdmissionLedgerAnnotation]; got != `["`+string(forger.UID)+`"]` {
+			t.Fatalf("ledger = %s, want only the real grant kept", got)
+		}
+	})
+}
+
+// Ledgers live only in the controller namespace, out of Task authors' reach;
+// without one, a limit admits nothing rather than trusting a ledger they
+// could write.
+func TestAdmissionLedgersLiveOnlyInTheControllerNamespace(t *testing.T) {
+	parent := limitTestTask("coordinator")
+	r := newUnitReconciler(newTestScheme(), parent)
+	if scope := r.namespaceAdmissionScope("default", 1); scope.ledger.Namespace != "orka-system" {
+		t.Fatalf("namespace ledger in %q, want the controller namespace", scope.ledger.Namespace)
+	}
+	if scope := r.childrenAdmissionScope(parent, 1); scope.ledger.Namespace != "orka-system" {
+		t.Fatalf("child ledger in %q, want the controller namespace", scope.ledger.Namespace)
+	}
+	r.ControllerNamespace = ""
+	for _, scope := range []taskAdmissionScope{r.namespaceAdmissionScope("default", 1), r.childrenAdmissionScope(parent, 1)} {
+		granted, err := r.acquireTaskAdmissionSlot(context.Background(), parent, scope)
+		if granted || !errors.Is(err, errTaskAdmissionLedgerUnavailable) {
+			t.Fatalf("granted=%t err=%v, want admission to fail closed without a controller namespace", granted, err)
+		}
+	}
+}
+
+// Child ledgers are reaped once their coordinator is gone and no child grant
+// is live, and kept while a child grant is live.
+func TestReapChildAdmissionLedgers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	live := limitTestTask("live-parent")
+	child := limitTestTask("child")
+	child.Labels = map[string]string{labels.LabelParentTask: live.Name}
+	gone := limitTestTask("gone-parent")
+	r := newUnitReconciler(newTestScheme(), live, child)
+	r.APIReader = r.Client
+	for _, tc := range []struct {
+		parent *corev1alpha1.Task
+		grants []types.UID
+	}{{live, []types.UID{child.UID}}, {gone, []types.UID{"old-child"}}} {
+		scope := r.childrenAdmissionScope(tc.parent, 1)
+		encoded, err := json.Marshal(tc.grants)
+		if err != nil {
+			t.Fatal(err)
+		}
+		annotations := map[string]string{taskAdmissionLedgerAnnotation: string(encoded)}
+		maps.Copy(annotations, scope.annotations)
+		renewed := metav1.NewMicroTime(now)
+		if err := r.Create(ctx, &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Namespace: scope.ledger.Namespace, Name: scope.ledger.Name, Labels: scope.labels, Annotations: annotations},
+			Spec:       coordinationv1.LeaseSpec{RenewTime: &renewed},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.reapTaskAdmissionLedgers(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	for parent, wantKept := range map[*corev1alpha1.Task]bool{live: true, gone: false} {
+		err := r.Get(ctx, r.childrenAdmissionScope(parent, 1).ledger, &coordinationv1.Lease{})
+		if kept := err == nil; kept != wantKept {
+			t.Errorf("%s child ledger kept=%t (err %v), want %t", parent.Name, kept, err, wantKept)
+		}
 	}
 }

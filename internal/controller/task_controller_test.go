@@ -48,6 +48,8 @@ func newReconciler() *TaskReconciler {
 		Recorder:        record.NewFakeRecorder(100),
 		ResultStore:     ss,
 		PlanStore:       ss,
+		// Admission ledgers live in the controller namespace.
+		ControllerNamespace: "default",
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -25,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -41,6 +41,13 @@ import (
 // contenders can never both take the last slot, and whenever a slot is free
 // some contender takes it: waiting Tasks never block each other. Holders free
 // their slot by reaching a terminal phase or being deleted.
+//
+// Ledgers live only in the controller namespace, the trust boundary that also
+// holds the controller-epoch Lease; Task authors cannot write there. A grant
+// counts only when it names a live, schedule-free Task of the scope by UID,
+// and every admission, a granted Task's included, requires the other holders
+// to number fewer than the limit. A forged or stale grant can therefore only
+// delay admission, never raise capacity above the limit.
 
 const (
 	// taskAdmissionLedgerAnnotation holds the granted Task UIDs, sorted, as a
@@ -48,17 +55,24 @@ const (
 	taskAdmissionLedgerAnnotation = "orka.ai/task-admission-slots"
 	taskAdmissionNamespaceLedger  = "orka-task-admission-"
 	taskAdmissionChildrenLedger   = "orka-child-admission-"
-	// taskAdmissionLedgerKindLabel marks namespace ledgers kept in the
-	// controller namespace, and taskAdmissionLedgerNamespaceAnnotation names
-	// the Task namespace a ledger admits, for the reaper.
+	// taskAdmissionLedgerKindLabel marks ledgers for the reaper, which reads
+	// the scope a ledger admits from its annotations.
 	taskAdmissionLedgerKindLabel           = "orka.ai/task-admission-ledger"
 	taskAdmissionLedgerKindNamespace       = "namespace"
+	taskAdmissionLedgerKindChildren        = "children"
 	taskAdmissionLedgerNamespaceAnnotation = "orka.ai/task-admission-namespace"
-	// taskAdmissionLedgerStaleAfter is how long a namespace ledger with no
-	// live grant is kept after its last grant.
+	taskAdmissionLedgerParentAnnotation    = "orka.ai/task-admission-parent"
+	taskAdmissionLedgerParentUIDAnnotation = "orka.ai/task-admission-parent-uid"
+	// taskAdmissionLedgerStaleAfter is how long a ledger with no live grant
+	// is kept after its last grant.
 	taskAdmissionLedgerStaleAfter   = time.Hour
 	taskAdmissionLedgerReapInterval = 10 * time.Minute
 )
+
+// errTaskAdmissionLedgerUnavailable fails admission closed when no controller
+// namespace is configured to hold admission ledgers.
+var errTaskAdmissionLedgerUnavailable = errors.New(
+	"task admission limits require a controller namespace to hold admission ledgers; no Task is admitted under a limit without one")
 
 // MaxTaskAdmissionSlots bounds every admission limit. A ledger never holds
 // more grants than its limit, each about 40 bytes of JSON, so this keeps a
@@ -77,57 +91,57 @@ func effectiveTaskAdmissionLimit(limit int32) int32 {
 // every Task it covers from the API server.
 type taskAdmissionScope struct {
 	ledger types.NamespacedName
-	// owner, when set, owns the ledger so it is collected with it.
-	owner *corev1alpha1.Task
-	limit int32
+	limit  int32
 	// list returns the scope's Tasks. It is called after each ledger read,
 	// so every grant the read returns belongs to a Task the list can see
 	// unless that Task is gone.
 	list func(context.Context) ([]corev1alpha1.Task, error)
-	// labels and annotations mark a ledger the reaper owns.
+	// labels and annotations identify the scope for the reaper.
 	labels      map[string]string
 	annotations map[string]string
 }
 
-// namespaceAdmissionScope is the namespace Task limit. Its ledger lives in the
-// controller namespace when one is configured, where Task authors cannot edit
-// the admin-set quota's grants.
+// namespaceAdmissionScope is the namespace Task limit.
 func (r *TaskReconciler) namespaceAdmissionScope(namespace string, limit int32) taskAdmissionScope {
-	ledgerNamespace := strings.TrimSpace(r.ControllerNamespace)
-	if ledgerNamespace == "" {
-		ledgerNamespace = namespace
-	}
-	scope := taskAdmissionScope{
-		ledger: types.NamespacedName{Namespace: ledgerNamespace, Name: taskAdmissionNamespaceLedger + taskAdmissionLedgerDigest(namespace)},
-		limit:  limit,
+	return taskAdmissionScope{
+		ledger: types.NamespacedName{
+			Namespace: strings.TrimSpace(r.ControllerNamespace), Name: taskAdmissionNamespaceLedger + taskAdmissionLedgerDigest(namespace),
+		},
+		limit: limit,
 		list: func(ctx context.Context) ([]corev1alpha1.Task, error) {
 			tasks := &corev1alpha1.TaskList{}
 			err := uncachedReader(r.APIReader, r.Client).List(ctx, tasks, client.InNamespace(namespace))
 			return tasks.Items, err
 		},
+		labels:      map[string]string{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindNamespace},
+		annotations: map[string]string{taskAdmissionLedgerNamespaceAnnotation: namespace},
 	}
-	if ledgerNamespace != namespace {
-		// A ledger outside the Task namespace is not deleted with it; the
-		// reaper finds it by these.
-		scope.labels = map[string]string{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindNamespace}
-		scope.annotations = map[string]string{taskAdmissionLedgerNamespaceAnnotation: namespace}
-	}
-	return scope
 }
 
-// childrenAdmissionScope is a coordinator's maxConcurrentChildren. Its ledger
-// is owned by the parent Task, in the parent's namespace.
+// childrenAdmissionScope is a coordinator's maxConcurrentChildren.
 func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit int32) taskAdmissionScope {
 	return taskAdmissionScope{
-		ledger: types.NamespacedName{Namespace: parent.Namespace, Name: taskAdmissionChildrenLedger + taskAdmissionLedgerDigest(string(parent.UID))},
-		owner:  parent, limit: limit,
+		ledger: types.NamespacedName{
+			Namespace: strings.TrimSpace(r.ControllerNamespace), Name: taskAdmissionChildrenLedgerName(parent.Namespace, parent.UID),
+		},
+		limit: limit,
 		list: func(ctx context.Context) ([]corev1alpha1.Task, error) {
 			siblings := &corev1alpha1.TaskList{}
 			err := uncachedReader(r.APIReader, r.Client).List(ctx, siblings, client.InNamespace(parent.Namespace),
 				client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)})
 			return siblings.Items, err
 		},
+		labels: map[string]string{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindChildren},
+		annotations: map[string]string{
+			taskAdmissionLedgerNamespaceAnnotation: parent.Namespace,
+			taskAdmissionLedgerParentAnnotation:    parent.Name,
+			taskAdmissionLedgerParentUIDAnnotation: string(parent.UID),
+		},
 	}
+}
+
+func taskAdmissionChildrenLedgerName(namespace string, parentUID types.UID) string {
+	return taskAdmissionChildrenLedger + taskAdmissionLedgerDigest(namespace+"/"+string(parentUID))
 }
 
 func taskAdmissionLedgerDigest(value string) string {
@@ -152,38 +166,54 @@ func taskAdmittedByState(task *corev1alpha1.Task) bool {
 	return task.Status.AgentExecutionBinding != nil || strings.TrimSpace(task.Status.JobName) != "" || task.Status.Execution != nil
 }
 
-// taskAdmissionHolders returns the slot holders other than task: granted
-// entries still live, and live Tasks admitted by state. A Task is live until
-// it is terminal or gone.
-func taskAdmissionHolders(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) (holders map[types.UID]struct{}, live map[types.UID]struct{}) {
-	live = make(map[types.UID]struct{}, len(tasks))
+// taskAdmissionGrantEligible reports a listed Task a grant may name: live
+// (not terminal) and not a recurring Task's scheduling parent.
+func taskAdmissionGrantEligible(task *corev1alpha1.Task) bool {
+	return task.UID != "" && !task.Status.Phase.IsTerminal() && task.Spec.Schedule == ""
+}
+
+// taskAdmissionHolders returns the slot holders other than task, and the
+// grants still valid: a grant counts only when it names, by UID, a listed
+// Task of the scope that is grant-eligible; live Tasks admitted by state
+// count on their own.
+func taskAdmissionHolders(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) (holders map[types.UID]struct{}, valid []types.UID) {
+	eligible := make(map[types.UID]struct{}, len(tasks))
 	holders = map[types.UID]struct{}{}
 	for i := range tasks {
 		candidate := &tasks[i]
-		if candidate.UID == "" || candidate.Status.Phase.IsTerminal() {
+		if !taskAdmissionGrantEligible(candidate) {
 			continue
 		}
-		live[candidate.UID] = struct{}{}
+		eligible[candidate.UID] = struct{}{}
 		if candidate.UID != task.UID && taskAdmittedByState(candidate) {
 			holders[candidate.UID] = struct{}{}
 		}
 	}
 	for _, uid := range granted {
-		if _, ok := live[uid]; ok && uid != task.UID {
+		if _, ok := eligible[uid]; !ok || slices.Contains(valid, uid) {
+			continue
+		}
+		valid = append(valid, uid)
+		if uid != task.UID {
 			holders[uid] = struct{}{}
 		}
 	}
-	return holders, live
+	return holders, valid
 }
 
 // acquireTaskAdmissionSlot reports whether task holds one of the scope's
-// slots, granting it one if a slot is free.
+// slots, granting it one if a slot is free. A Task already in the ledger is
+// admitted only while the other holders number fewer than the limit, so a
+// grant nobody made can never admit a Task past it.
 func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
 	if task == nil || task.UID == "" {
 		return false, fmt.Errorf("task identity is required for admission")
 	}
 	if scope.limit <= 0 {
 		return true, nil
+	}
+	if scope.ledger.Namespace == "" {
+		return false, errTaskAdmissionLedgerUnavailable
 	}
 	scope.limit = effectiveTaskAdmissionLimit(scope.limit)
 	reader := uncachedReader(r.APIReader, r.Client)
@@ -202,24 +232,19 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		if err != nil {
 			return fmt.Errorf("admission ledger %s: %w", scope.ledger, err)
 		}
-		if slices.Contains(entries, task.UID) {
-			granted = true
-			return nil
-		}
 		tasks, err := scope.list(ctx)
 		if err != nil {
 			return err
 		}
-		holders, live := taskAdmissionHolders(task, entries, tasks)
+		holders, valid := taskAdmissionHolders(task, entries, tasks)
 		if int32(len(holders)) >= scope.limit { //nolint:gosec // bounded by the listed Task count
 			return nil
 		}
-		next := []types.UID{task.UID}
-		for _, uid := range entries {
-			if _, ok := live[uid]; ok {
-				next = append(next, uid)
-			}
+		if slices.Contains(valid, task.UID) {
+			granted = true
+			return nil
 		}
+		next := append([]types.UID{task.UID}, valid...)
 		slices.Sort(next)
 		encoded, err := json.Marshal(next)
 		if err != nil {
@@ -238,15 +263,6 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		}
 		renewed := metav1.NewMicroTime(time.Now())
 		lease.Spec.RenewTime = &renewed
-		if scope.owner != nil && !exists {
-			scheme := r.Scheme
-			if scheme == nil {
-				scheme = r.Client.Scheme()
-			}
-			if err := controllerutil.SetOwnerReference(scope.owner, lease, scheme); err != nil {
-				return err
-			}
-		}
 		if exists {
 			// The read's resourceVersion makes this a compare-and-swap: a
 			// concurrent grant conflicts and the slots are counted again.
@@ -276,25 +292,24 @@ func decodeTaskAdmissionLedger(raw string) ([]types.UID, error) {
 	return entries, nil
 }
 
-// reapNamespaceAdmissionLedgers deletes namespace ledgers kept in the
-// controller namespace that no longer admit anything: their namespace is
-// gone, or none of their grants belongs to a live Task and none was made for
-// taskAdmissionLedgerStaleAfter. A deletion is conditional on the ledger's
-// UID and resourceVersion, so a grant made meanwhile keeps it.
-func (r *TaskReconciler) reapNamespaceAdmissionLedgers(ctx context.Context, now time.Time) error {
+// reapTaskAdmissionLedgers deletes admission ledgers that no longer admit
+// anything: none of their grants belongs to a live Task of their scope, and
+// their namespace or coordinator is gone or finished, or none was granted for
+// taskAdmissionLedgerStaleAfter. A deletion is conditional on the ledger's UID
+// and resourceVersion, so a grant made meanwhile keeps it.
+func (r *TaskReconciler) reapTaskAdmissionLedgers(ctx context.Context, now time.Time) error {
 	controllerNamespace := strings.TrimSpace(r.ControllerNamespace)
 	if controllerNamespace == "" {
 		return nil
 	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	ledgers := &coordinationv1.LeaseList{}
-	if err := reader.List(ctx, ledgers, client.InNamespace(controllerNamespace),
-		client.MatchingLabels{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindNamespace}); err != nil {
+	if err := reader.List(ctx, ledgers, client.InNamespace(controllerNamespace), client.HasLabels{taskAdmissionLedgerKindLabel}); err != nil {
 		return err
 	}
 	for i := range ledgers.Items {
 		ledger := &ledgers.Items[i]
-		reap, err := r.namespaceAdmissionLedgerReapable(ctx, reader, ledger, now)
+		reap, err := r.taskAdmissionLedgerReapable(ctx, reader, ledger, now)
 		if err != nil {
 			return err
 		}
@@ -310,28 +325,58 @@ func (r *TaskReconciler) reapNamespaceAdmissionLedgers(ctx context.Context, now 
 	return nil
 }
 
-func (r *TaskReconciler) namespaceAdmissionLedgerReapable(
+//nolint:gocyclo // Each ledger kind's identity and liveness checks are kept together.
+func (r *TaskReconciler) taskAdmissionLedgerReapable(
 	ctx context.Context,
 	reader client.Reader,
 	ledger *coordinationv1.Lease,
 	now time.Time,
 ) (bool, error) {
 	namespace := strings.TrimSpace(ledger.Annotations[taskAdmissionLedgerNamespaceAnnotation])
-	if namespace == "" || ledger.Name != taskAdmissionNamespaceLedger+taskAdmissionLedgerDigest(namespace) {
+	if namespace == "" {
 		return false, nil
 	}
 	entries, err := decodeTaskAdmissionLedger(ledger.Annotations[taskAdmissionLedgerAnnotation])
 	if err != nil {
 		return false, nil
 	}
+	options := []client.ListOption{client.InNamespace(namespace)}
+	var parentGone bool
+	switch ledger.Labels[taskAdmissionLedgerKindLabel] {
+	case taskAdmissionLedgerKindNamespace:
+		if ledger.Name != taskAdmissionNamespaceLedger+taskAdmissionLedgerDigest(namespace) {
+			return false, nil
+		}
+	case taskAdmissionLedgerKindChildren:
+		parentName := strings.TrimSpace(ledger.Annotations[taskAdmissionLedgerParentAnnotation])
+		parentUID := types.UID(strings.TrimSpace(ledger.Annotations[taskAdmissionLedgerParentUIDAnnotation]))
+		if parentName == "" || parentUID == "" || ledger.Name != taskAdmissionChildrenLedgerName(namespace, parentUID) {
+			return false, nil
+		}
+		options = append(options, client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)})
+		parent := &corev1alpha1.Task{}
+		switch err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: parentName}, parent); {
+		case apierrors.IsNotFound(err):
+			parentGone = true
+		case err != nil:
+			return false, err
+		default:
+			parentGone = parent.UID != parentUID || parent.Status.Phase.IsTerminal()
+		}
+	default:
+		return false, nil
+	}
 	tasks := &corev1alpha1.TaskList{}
-	if err := reader.List(ctx, tasks, client.InNamespace(namespace)); err != nil {
+	if err := reader.List(ctx, tasks, options...); err != nil {
 		return false, err
 	}
 	for i := range tasks.Items {
 		if slices.Contains(entries, tasks.Items[i].UID) && !tasks.Items[i].Status.Phase.IsTerminal() {
 			return false, nil
 		}
+	}
+	if parentGone {
+		return true, nil
 	}
 	if err := reader.Get(ctx, types.NamespacedName{Name: namespace}, &corev1.Namespace{}); apierrors.IsNotFound(err) {
 		return true, nil
@@ -343,7 +388,7 @@ func (r *TaskReconciler) namespaceAdmissionLedgerReapable(
 	return now.Sub(renewed) >= taskAdmissionLedgerStaleAfter, nil
 }
 
-// taskAdmissionLedgerReaper reaps namespace admission ledgers on the leader.
+// taskAdmissionLedgerReaper reaps admission ledgers on the leader.
 type taskAdmissionLedgerReaper struct {
 	reconciler *TaskReconciler
 	interval   time.Duration
@@ -359,8 +404,8 @@ func (p *taskAdmissionLedgerReaper) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := p.reconciler.reapNamespaceAdmissionLedgers(ctx, time.Now()); err != nil && ctx.Err() == nil {
-				logf.FromContext(ctx).Error(err, "reap namespace admission ledgers")
+			if err := p.reconciler.reapTaskAdmissionLedgers(ctx, time.Now()); err != nil && ctx.Err() == nil {
+				logf.FromContext(ctx).Error(err, "reap task admission ledgers")
 			}
 		}
 	}
