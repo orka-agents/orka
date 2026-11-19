@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -194,16 +195,18 @@ type TaskReconciler struct {
 	webhookDeliveries *taskWebhookDispatcher
 	// MaxConcurrentReconciles is how many different Tasks the controller
 	// reconciles at once; one Task is never reconciled concurrently with
-	// itself. Zero selects DefaultTaskMaxConcurrentReconciles. Above one,
-	// --max-tasks-per-namespace and maxConcurrentChildren become best-effort
-	// under bursts, because each check counts Tasks in the informer cache
-	// before a concurrently admitted Task's transition lands there.
+	// itself. Zero selects DefaultTaskMaxConcurrentReconciles.
 	MaxConcurrentReconciles int
 }
 
 const (
-	// DefaultTaskMaxConcurrentReconciles keeps Task reconciliation serial.
-	DefaultTaskMaxConcurrentReconciles = 1
+	// DefaultTaskMaxConcurrentReconciles lets independent Tasks reconcile in
+	// parallel. A Task is never reconciled concurrently with itself, the
+	// namespace Task limit and maxConcurrentChildren count Tasks from the API
+	// server, writes to objects other Tasks share are create-if-absent or
+	// resourceVersion-checked, and the reconciler's own state is
+	// lock-protected.
+	DefaultTaskMaxConcurrentReconciles = 4
 	// MaxTaskMaxConcurrentReconciles bounds --task-max-concurrent-reconciles.
 	MaxTaskMaxConcurrentReconciles = 64
 )
@@ -261,13 +264,22 @@ func (r *TaskReconciler) taskMetadataReader() client.Reader {
 }
 
 func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.NamespacedName, present bool) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	_, err := r.patchTaskFinalizerReturning(ctx, key, present)
+	return err
+}
+
+// patchTaskFinalizerReturning patches the finalizer and returns the Task as
+// the API server last returned it, carrying its current resourceVersion.
+func (r *TaskReconciler) patchTaskFinalizerReturning(ctx context.Context, key types.NamespacedName, present bool) (*corev1alpha1.Task, error) {
+	var result *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Task{}
 		if err := r.taskMetadataReader().Get(ctx, key, current); err != nil {
 			return err
 		}
 		hasFinalizer := controllerutil.ContainsFinalizer(current, labels.TaskFinalizer)
 		if hasFinalizer == present {
+			result = current
 			return nil
 		}
 		base := current.DeepCopy()
@@ -276,8 +288,45 @@ func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.Names
 		} else {
 			controllerutil.RemoveFinalizer(current, labels.TaskFinalizer)
 		}
-		return r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		result = current
+		return nil
 	})
+	return result, err
+}
+
+// acpTaskChainsAdmission reports whether a Task's first passes run as one
+// reconcile: an ACP agent Task continues from adding its finalizer through
+// its Pending status into binding, workspace attachment, and queueing,
+// instead of waiting a queue round after each of its own writes. Each step
+// still writes and checks exactly as it would in its own pass. Job-backed and
+// scheduled Tasks keep one step per reconcile.
+func acpTaskChainsAdmission(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Spec.Schedule == "" &&
+		task.DeletionTimestamp.IsZero()
+}
+
+// initializePendingStatus writes the initial Pending status from the Task in
+// hand, which a chained pass holds at its current resourceVersion; a conflict
+// falls back to the re-reading retry.
+func (r *TaskReconciler) initializePendingStatus(ctx context.Context, task *corev1alpha1.Task) error {
+	initialize := func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhasePending
+		startTrackingInitialApprovalSelection(t)
+	}
+	candidate := task.DeepCopy()
+	initialize(candidate)
+	err := r.Status().Update(ctx, candidate)
+	if err == nil {
+		candidate.DeepCopyInto(task)
+		return nil
+	}
+	if !apierrors.IsConflict(err) {
+		return err
+	}
+	return r.updateStatusWithRetry(ctx, task, initialize)
 }
 
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
@@ -347,6 +396,60 @@ func taskPhaseCountsTowardConcurrency(phase corev1alpha1.TaskPhase) bool {
 	default:
 		return false
 	}
+}
+
+// admitNewTask adds the Task's finalizer and initializes its Pending status.
+// done reports that the caller must return result and err; otherwise the
+// pass continues with task as these writes left it.
+func (r *TaskReconciler) admitNewTask(ctx context.Context, req ctrl.Request, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	// Add the finalizer with a metadata-only optimistic patch. A full-object
+	// update can re-serialize equivalent duration strings (for example 12m as
+	// 12m0s) and trip immutable-spec admission rules.
+	chainAdmission := acpTaskChainsAdmission(task)
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		patched, err := r.patchTaskFinalizerReturning(ctx, req.NamespacedName, true)
+		if err != nil {
+			log.Error(err, "failed to add finalizer")
+			return ctrl.Result{}, err, true
+		}
+		if !chainAdmission || patched == nil || patched.UID != task.UID || !acpTaskChainsAdmission(patched) ||
+			!controllerutil.ContainsFinalizer(patched, labels.TaskFinalizer) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+		// Continue with the Task as the patch returned it, at its new
+		// resourceVersion, rather than waiting for the cache to deliver it.
+		patched.DeepCopyInto(task)
+	}
+
+	// Initialize status if empty
+	if task.Status.Phase == "" {
+		var err error
+		if chainAdmission {
+			err = r.initializePendingStatus(ctx, task)
+		} else {
+			err = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				t.Status.Phase = corev1alpha1.TaskPhasePending
+				startTrackingInitialApprovalSelection(t)
+			})
+		}
+		if err != nil {
+			log.Error(err, "failed to update initial status")
+			return ctrl.Result{}, err, true
+		}
+		acpPreDispatch.mark(task, acpPreDispatchStatusInitialized)
+		_ = r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskCreated,
+			execevents.ExecutionEventSeverityInfo,
+			"Task status initialized to Pending",
+		)
+		if !chainAdmission {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+	}
+	return ctrl.Result{}, nil, false
 }
 
 // Reconcile handles the reconciliation loop for Task resources
@@ -421,37 +524,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleDeletion(ctx, task)
 	}
 
-	// Add the finalizer with a metadata-only optimistic patch. A full-object
-	// update can re-serialize equivalent duration strings (for example 12m as
-	// 12m0s) and trip immutable-spec admission rules.
-	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
-			log.Error(err, "failed to add finalizer")
+	if result, err, done := r.admitNewTask(ctx, req, task); done {
+		if err != nil {
 			tracing.RecordSpanError(span, err)
-			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
-
-	// Initialize status if empty
-	if task.Status.Phase == "" {
-		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-			t.Status.Phase = corev1alpha1.TaskPhasePending
-			startTrackingInitialApprovalSelection(t)
-		}); err != nil {
-			log.Error(err, "failed to update initial status")
-			tracing.RecordSpanError(span, err)
-			return ctrl.Result{}, err
-		}
-		acpPreDispatch.mark(task, acpPreDispatchStatusInitialized)
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskCreated,
-			execevents.ExecutionEventSeverityInfo,
-			"Task status initialized to Pending",
-		)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return result, err
 	}
 
 	// Work a cancelled Task delegated stops with it, at every depth, as soon
@@ -989,8 +1066,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		if !validationTask {
+			// Count from the API server, not the informer cache. A Task is
+			// counted from its Pending write, which commits before its own
+			// check, so every Task that passed this check is visible here
+			// however many Tasks reconcile at once.
 			var namespaceTasks corev1alpha1.TaskList
-			if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
+			if err := uncachedReader(r.APIReader, r.Client).List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
 				log.Error(err, "failed to list namespace tasks for limit check")
 				return ctrl.Result{}, err
 			}
@@ -1357,8 +1438,10 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 	// Enforce maxConcurrentChildren (requeue if at limit)
 	if coord.MaxConcurrentChildren > 0 {
+		// Counted from the API server for the same reason as the namespace
+		// limit: a sibling admitted concurrently is already Pending there.
 		var siblings corev1alpha1.TaskList
-		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
+		if err := uncachedReader(r.APIReader, r.Client).List(ctx, &siblings, client.InNamespace(task.Namespace),
 			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
 			log.Error(err, "failed to list sibling tasks")
 			return ctrl.Result{}, err, true
@@ -4594,6 +4677,14 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder, err = registerACPTaskWakeWatches(context.Background(), mgr, builder)
 	if err != nil {
 		return fmt.Errorf("register ACP workspace Task wakeups: %w", err)
+	}
+	if informer, informerErr := mgr.GetCache().GetInformer(context.Background(), &corev1alpha1.Task{}); informerErr == nil {
+		// Timing only: the queue wait before a new Task's first reconcile.
+		if _, handlerErr := informer.AddEventHandler(toolscache.ResourceEventHandlerDetailedFuncs{
+			AddFunc: acpPreDispatchTaskAdded,
+		}); handlerErr != nil {
+			mgr.GetLogger().Error(handlerErr, "ACP pre-dispatch informer timing unavailable")
+		}
 	}
 	return builder.Named("task").
 		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -116,6 +117,7 @@ func enqueueDurableTaskTerminalProjectionForUID(
 		return getErr
 	}
 	if _, err = projectionStore.EnqueueOutboxProjection(ctx, projection, fence); err == nil {
+		wakeACPOutboxProjectors()
 		return nil
 	} else if !errors.Is(err, store.ErrConflict) {
 		return err
@@ -142,7 +144,67 @@ const (
 	defaultACPOutboxLease    = 30 * time.Second
 	defaultACPOutboxLimit    = 32
 	defaultACPOutboxAttempts = 10
+	// defaultACPOutboxIdleClaimInterval bounds how long an idle projector
+	// goes without claiming. Each claim takes the controller-epoch mutation
+	// interlock that every fenced control-store write shares, so an idle
+	// projector claims only on this cadence, when a projection is enqueued,
+	// or when a retry it scheduled falls due.
+	defaultACPOutboxIdleClaimInterval = 10 * time.Second
 )
+
+// acpOutboxWakeups fans an enqueue out to every running projector. Every
+// terminal projection is enqueued through enqueueDurableTaskTerminalProjectionForUID
+// under the controller-epoch fence, so only this process's leader enqueues.
+var acpOutboxWakeups = struct {
+	sync.Mutex
+	subscribers map[chan struct{}]struct{}
+}{subscribers: map[chan struct{}]struct{}{}}
+
+func subscribeACPOutboxWakeups() (<-chan struct{}, func()) {
+	wake := make(chan struct{}, 1)
+	acpOutboxWakeups.Lock()
+	acpOutboxWakeups.subscribers[wake] = struct{}{}
+	acpOutboxWakeups.Unlock()
+	return wake, func() {
+		acpOutboxWakeups.Lock()
+		delete(acpOutboxWakeups.subscribers, wake)
+		acpOutboxWakeups.Unlock()
+	}
+}
+
+func wakeACPOutboxProjectors() {
+	acpOutboxWakeups.Lock()
+	defer acpOutboxWakeups.Unlock()
+	for wake := range acpOutboxWakeups.subscribers {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// acpOutboxPass is what one projection pass claimed and scheduled.
+type acpOutboxPass struct {
+	claimed int
+	// nextRetry is the earliest time a projection this pass returned to
+	// Pending becomes claimable again; zero when none was.
+	nextRetry time.Time
+}
+
+// nextACPOutboxClaim returns when the projector should claim next after a
+// pass at now. A failed pass, or one that filled its claim limit, claims again
+// on the next tick; otherwise the projector waits for an enqueue wakeup, the
+// earliest retry it scheduled, or the idle interval, whichever comes first.
+func nextACPOutboxClaim(now time.Time, pass acpOutboxPass, err error, idle time.Duration) time.Time {
+	if err != nil || pass.claimed >= defaultACPOutboxLimit {
+		return now
+	}
+	next := now.Add(idle)
+	if !pass.nextRetry.IsZero() && pass.nextRetry.Before(next) {
+		next = pass.nextRetry
+	}
+	return next
+}
 
 type ACPOutboxProjector struct {
 	Client      client.Client
@@ -151,6 +213,9 @@ type ACPOutboxProjector struct {
 	WorkerID    string
 	Interval    time.Duration
 	MaxAttempts int64
+	// IdleClaimInterval is the longest an idle projector goes without a
+	// claim; zero selects defaultACPOutboxIdleClaimInterval.
+	IdleClaimInterval time.Duration
 }
 
 func (p *ACPOutboxProjector) NeedLeaderElection() bool { return true }
@@ -169,32 +234,52 @@ func (p *ACPOutboxProjector) Start(ctx context.Context) error {
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = defaultACPOutboxAttempts
 	}
+	idle := p.IdleClaimInterval
+	if idle <= 0 {
+		idle = defaultACPOutboxIdleClaimInterval
+	}
+	wake, unsubscribe := subscribeACPOutboxWakeups()
+	defer unsubscribe()
 	ticker := time.NewTicker(p.Interval)
 	defer ticker.Stop()
+	var nextClaim time.Time // claim at once: projections may predate this process
 	for {
-		if err := p.projectOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logf.FromContext(ctx).Error(err, "ACP outbox projection pass failed")
+		if now := time.Now(); !now.Before(nextClaim) {
+			pass, err := p.projectPass(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logf.FromContext(ctx).Error(err, "ACP outbox projection pass failed")
+			}
+			nextClaim = nextACPOutboxClaim(time.Now(), pass, err, idle)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wake:
+			nextClaim = time.Time{}
 		case <-ticker.C:
 		}
 	}
 }
 
 func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
+	_, err := p.projectPass(ctx)
+	return err
+}
+
+func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, error) {
+	var pass acpOutboxPass
 	fence, err := p.Epochs.CurrentFence(ctx)
 	if err != nil {
-		return err
+		return pass, err
 	}
 	now := time.Now().UTC()
 	projections, err := p.Store.ClaimOutboxProjections(ctx, store.ClaimOutboxProjectionsRequest{
 		Fence: fence, WorkerID: p.WorkerID, Limit: defaultACPOutboxLimit, LeaseDuration: defaultACPOutboxLease, Now: now,
 	})
 	if err != nil {
-		return err
+		return pass, err
 	}
+	pass.claimed = len(projections)
 	for i := range projections {
 		projection := &projections[i]
 		deliveryDigest, projectErr := p.deliver(ctx, *projection)
@@ -213,6 +298,9 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
+				if pass.nextRetry.IsZero() || availableAt.Before(pass.nextRetry) {
+					pass.nextRetry = availableAt
+				}
 			}
 			deliveryDigest = ""
 		}
@@ -221,7 +309,7 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			"deliveryDigest": deliveryDigest, "lastError": lastError, "availableAt": availableAt,
 		})
 		if err != nil {
-			return err
+			return pass, err
 		}
 		_, err = p.Store.CompleteOutboxProjection(ctx, store.CompleteOutboxProjectionRequest{
 			ID: projection.ID, Fence: fence, ExpectedVersion: projection.Version, LeaseOwner: p.WorkerID,
@@ -229,10 +317,10 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			NewState: state, DeliveryDigest: deliveryDigest, LastError: lastError, AvailableAt: availableAt, UpdatedAt: time.Now().UTC(),
 		})
 		if err != nil {
-			return err
+			return pass, err
 		}
 	}
-	return nil
+	return pass, nil
 }
 
 type taskTerminalProjection = taskterminal.Projection

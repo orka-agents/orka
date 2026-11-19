@@ -4135,6 +4135,7 @@ func (d *ACPDispatcher) finalizeRecoveredTaskSessionAfterTerminal(
 
 //nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
 func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Task) (*corev1alpha1.Task, acpDispatchTarget, error) {
+	steps := newACPDispatchScanTimer(time.Now, false)
 	task := &corev1alpha1.Task{}
 	reader := uncachedReader(d.APIReader, d.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, task); err != nil {
@@ -4226,6 +4227,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		target.pool = pool
 		target.reservation = reservation
 	}
+	steps.mark("capacityClaim")
 	releaseClaim := func() {
 		if target.reservation == nil {
 			return
@@ -4244,6 +4246,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		}
 		return nil, acpDispatchTarget{}, err
 	}
+	steps.mark("credentialFreeze")
 	bound, err := refreshTarget()
 	if err != nil {
 		releaseClaim()
@@ -4253,6 +4256,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	steps.mark("targetRefresh")
 	if hasExternal {
 		if err := d.AdmissionGate.Check(); err != nil {
 			return nil, acpDispatchTarget{}, err
@@ -4267,6 +4271,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	steps.mark("attemptReserved")
 	bound, err = refreshTarget()
 	if err != nil {
 		releaseClaim()
@@ -4286,6 +4291,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, err
 	}
+	steps.mark("taskReserved")
 	bound, err = refreshTarget()
 	if err != nil {
 		releaseClaim()
@@ -4295,7 +4301,10 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	steps.mark("finalRefresh")
 	acpPreDispatch.mark(task, acpPreDispatchReserved)
+	logf.FromContext(ctx).V(1).Info(acpReservationTimingsLogMessage,
+		append([]any{"namespace", task.Namespace, acpCancelLogKeyTask, task.Name}, steps.values...)...)
 	return task, target, nil
 }
 
