@@ -47,6 +47,7 @@ var contractSentinels = map[string]error{
 	"ErrTaskDataCleanupChanged":       storagev1.ErrTaskDataCleanupChanged,
 	"ErrUsageSelectionTooLarge":       storagev1.ErrUsageSelectionTooLarge,
 	"ErrDatasetDetached":              storagev1.ErrDatasetDetached,
+	"ErrDatasetMigrated":              storagev1.ErrDatasetMigrated,
 	"ErrDatasetMismatch":              storagev1.ErrDatasetMismatch,
 	"ErrClockSkew":                    storagev1.ErrClockSkew,
 	"ErrOperationExpired":             storagev1.ErrOperationExpired,
@@ -62,6 +63,7 @@ var alsoMatches = map[string][]string{
 	"ErrFenced":             {"ErrConflict"},
 	"ErrPreconditionFailed": {"ErrConflict"},
 	"ErrDatasetDetached":    {"ErrNotReady"},
+	"ErrDatasetMigrated":    {"ErrNotReady"},
 }
 
 // A contract error the codec does not know would reach the client as a
@@ -327,4 +329,27 @@ func TestStatusesCarryTheStorageErrorInfo(t *testing.T) {
 	foreign, err := status.New(codes.NotFound, "x").WithDetails(&errdetails.ErrorInfo{Domain: "example.com", Reason: ReasonNotFound})
 	require.NoError(t, err)
 	require.Nil(t, storageErrorInfo(foreign), "another domain's ErrorInfo is not authoritative")
+}
+
+// A write refused because its contract part migrated travels as
+// DATASET_MIGRATED and decodes to ErrDatasetMigrated, which matches
+// ErrNotReady and is a definite refusal. A client from before the reason
+// existed decodes it as an unknown reason, which for a write is an unknown
+// outcome, so it never reports the refused write as committed.
+func TestDatasetMigratedRefusesWritesDefinitely(t *testing.T) {
+	encoded, ok := contractStatus(fmt.Errorf("save: %w", storagev1.ErrDatasetMigrated))
+	require.True(t, ok)
+	require.Equal(t, ReasonDatasetMigrated, storageErrorInfo(status.Convert(encoded)).GetReason())
+	decoded := decodeError(t.Context(), writeMethod, encoded, &sendEvidence{})
+	require.ErrorIs(t, decoded, storagev1.ErrDatasetMigrated)
+	require.ErrorIs(t, decoded, storagev1.ErrNotReady)
+	require.NotErrorIs(t, decoded, storagev1.ErrOutcomeUnknown)
+
+	known := sentinelReasons
+	sentinelReasons = slices.DeleteFunc(slices.Clone(known), func(entry sentinelReason) bool {
+		return entry.reason == ReasonDatasetMigrated
+	})
+	t.Cleanup(func() { sentinelReasons = known })
+	require.ErrorIs(t, decodeError(t.Context(), writeMethod, encoded, &sendEvidence{}), storagev1.ErrOutcomeUnknown,
+		"a client that does not know the reason treats the refused write as an unknown outcome")
 }
