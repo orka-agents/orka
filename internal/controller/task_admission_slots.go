@@ -21,6 +21,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,7 +36,7 @@ import (
 // Task admission limits (--max-tasks-per-namespace and a coordinator's
 // maxConcurrentChildren) admit Tasks through a slot ledger. A Task is a slot
 // holder once it has been granted a slot, or once its own state shows it
-// admitted (see taskAdmittedByState); a Task still waiting for a slot, or a
+// admitted (see taskAdmittedByWork and taskAdmissionRetryPending); a Task still waiting for a slot, or a
 // recurring Task's scheduling parent, is not counted. A waiting Task joins the
 // ledger with a resourceVersion-checked update of one shared Lease, so two
 // contenders can never both take the last slot, and whenever a slot is free
@@ -185,13 +186,16 @@ func taskAdmissionLedgerDigest(value string) string {
 	return hex.EncodeToString(sum[:])[:20]
 }
 
-// taskAdmittedByState reports a Task whose own state shows it past admission
-// and running work, such as one admitted before the ledger existed: Running
-// or Finalizing, or Pending with its execution bound, its Job created, or an
-// ACP attempt. A recurring Task's scheduling parent never holds a slot: it
-// bypasses admission, stays Scheduled, and runs nothing itself; each of its
-// runs is a separate child Task that takes its own slot.
-func taskAdmittedByState(task *corev1alpha1.Task) bool {
+// A Task's own state shows it admitted, such as one admitted before the
+// ledger existed, when it is past admission and running work
+// (taskAdmittedByWork) or Pending in retry backoff between Job attempts
+// (taskAdmissionRetryPending). A recurring Task's scheduling parent never
+// holds a slot: it bypasses admission, stays Scheduled, and runs nothing
+// itself; each of its runs is a separate child Task that takes its own slot.
+//
+// taskAdmittedByWork reports a Task Running or Finalizing, or Pending with its
+// execution bound, its Job created, or an ACP attempt.
+func taskAdmittedByWork(task *corev1alpha1.Task) bool {
 	if task.Spec.Schedule != "" {
 		return false
 	}
@@ -200,6 +204,18 @@ func taskAdmittedByState(task *corev1alpha1.Task) bool {
 		return true
 	}
 	return task.Status.AgentExecutionBinding != nil || strings.TrimSpace(task.Status.JobName) != "" || task.Status.Execution != nil
+}
+
+// taskAdmissionRetryPending reports a Pending Task between Job attempts:
+// retryTask cleared its Job, and the retry-pending condition is the only sign
+// it was admitted. It still holds its slot, so a Task admitted before the
+// ledger existed is not overtaken while it backs off.
+func taskAdmissionRetryPending(task *corev1alpha1.Task) bool {
+	if task.Spec.Schedule != "" || task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return false
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
+	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == taskRetryPendingReason
 }
 
 // taskAdmissionGrantEligible reports a listed Task a grant may name: live
@@ -211,17 +227,29 @@ func taskAdmissionGrantEligible(task *corev1alpha1.Task) bool {
 // taskAdmissionHolders returns the slot holders other than task, and the
 // grants still valid: a grant counts only when it names, by UID, a listed
 // Task of the scope that is grant-eligible; live Tasks admitted by state
-// count on their own.
+// count on their own. A Task backing off between retries is itself one of
+// the Tasks admitted before the ledger, so when it asks it does not count
+// others held only by a retry backoff: Tasks over a newly lowered limit then
+// take the slots one at a time instead of each waiting for the other.
 func taskAdmissionHolders(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) (holders map[types.UID]struct{}, valid []types.UID) {
 	eligible := make(map[types.UID]struct{}, len(tasks))
 	holders = map[types.UID]struct{}{}
+	retrying := false
+	for i := range tasks {
+		if tasks[i].UID == task.UID {
+			retrying = taskAdmissionRetryPending(&tasks[i])
+		}
+	}
 	for i := range tasks {
 		candidate := &tasks[i]
 		if !taskAdmissionGrantEligible(candidate) {
 			continue
 		}
 		eligible[candidate.UID] = struct{}{}
-		if candidate.UID != task.UID && taskAdmittedByState(candidate) {
+		if candidate.UID == task.UID {
+			continue
+		}
+		if taskAdmittedByWork(candidate) || (!retrying && taskAdmissionRetryPending(candidate)) {
 			holders[candidate.UID] = struct{}{}
 		}
 	}

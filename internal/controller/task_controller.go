@@ -1047,7 +1047,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 	if delay := r.remainingRetryDelay(task, time.Now()); delay > 0 {
-		return ctrl.Result{RequeueAfter: delay}, nil
+		return r.holdRetryAdmission(ctx, task, delay)
 	}
 
 	// Non-agent workers use the Session lock lifecycle. Agent Tasks claim
@@ -1059,36 +1059,8 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	// Controller-owned validation children must be able to run while their
-	// review parent occupies the namespace's only ordinary task slot.
-	if r.MaxTasksPerNamespace > 0 {
-		validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to verify repository validation provenance for namespace limit")
-			if errors.Is(err, errRepositoryMonitorValidationConfinement) {
-				return r.failTask(ctx, task, err.Error())
-			}
-			return ctrl.Result{}, err
-		}
-		if !validationTask {
-			// Slots are counted from the API server and granted through the
-			// namespace's admission ledger, so parallel reconciles never
-			// admit past the limit and waiting Tasks never block each other.
-			granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace))
-			if err != nil {
-				log.Error(err, "failed to acquire a namespace task slot")
-				return ctrl.Result{}, err
-			}
-			if !granted {
-				log.Info("namespace task limit reached, requeueing",
-					"namespace", task.Namespace,
-					"limit", r.MaxTasksPerNamespace,
-				)
-				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-					"namespace %q has no free task slot (limit: %d), requeueing", task.Namespace, r.MaxTasksPerNamespace)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-		}
+	if result, done, _, err := r.acquireNamespaceAdmission(ctx, task); done {
+		return result, err
 	}
 
 	// Resolve agent if referenced
@@ -1355,9 +1327,87 @@ func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Ta
 	return agent, nil
 }
 
+// acquireNamespaceAdmission holds the Task to --max-tasks-per-namespace.
+// Returns (result, done, waiting, err) where done=true means the caller should
+// return the result/err, and waiting=true that it is done only because no
+// slot is free yet (it waits 10 seconds).
+func (r *TaskReconciler) acquireNamespaceAdmission(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, bool, error) {
+	if r.MaxTasksPerNamespace <= 0 {
+		return ctrl.Result{}, false, false, nil
+	}
+	log := logf.FromContext(ctx)
+	// Controller-owned validation children must be able to run while their
+	// review parent occupies the namespace's only ordinary task slot.
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to verify repository validation provenance for namespace limit")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			result, err := r.failTask(ctx, task, err.Error())
+			return result, true, false, err
+		}
+		return ctrl.Result{}, true, false, err
+	}
+	if validationTask {
+		return ctrl.Result{}, false, false, nil
+	}
+	// Slots are counted from the API server and granted through the
+	// namespace's admission ledger, so parallel reconciles never admit past
+	// the limit and waiting Tasks never block each other.
+	granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace))
+	if err != nil {
+		log.Error(err, "failed to acquire a namespace task slot")
+		return ctrl.Result{}, true, false, err
+	}
+	if !granted {
+		log.Info("namespace task limit reached, requeueing",
+			"namespace", task.Namespace,
+			"limit", r.MaxTasksPerNamespace,
+		)
+		r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+			"namespace %q has no free task slot (limit: %d), requeueing", task.Namespace, r.MaxTasksPerNamespace)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, true, true, nil
+	}
+	return ctrl.Result{}, false, false, nil
+}
+
+// holdRetryAdmission keeps a Task's slots through its retry backoff: before
+// the delay returns, the Task takes (or keeps) its grant in each admission
+// ledger that covers it, so its slot rests on a durable grant and not only
+// on the retry-pending condition. A slot not yet free is retried after the
+// delay; any other outcome (an error, or a check that fails the Task) is
+// returned now, as it would be after the delay. Slots are taken in the same
+// order as on admission, namespace before children, and a Task waiting for
+// its namespace slot takes no child slot, so two Tasks never each hold the
+// slot the other waits for.
+func (r *TaskReconciler) holdRetryAdmission(ctx context.Context, task *corev1alpha1.Task, delay time.Duration) (ctrl.Result, error) {
+	backoff := ctrl.Result{RequeueAfter: delay}
+	if result, done, waiting, err := r.acquireNamespaceAdmission(ctx, task); done {
+		if waiting {
+			return backoff, nil
+		}
+		return result, err
+	}
+	if result, done, waiting, err := r.coordinationConstraints(ctx, task); done && !waiting {
+		return result, err
+	}
+	return backoff, nil
+}
+
 // validateCoordinationConstraints validates depth, allowed agents, and concurrency for child tasks.
 // Returns (result, err, done) where done=true means the caller should return the result/err.
 func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	result, done, _, err := r.coordinationConstraints(ctx, task)
+	return result, err, done
+}
+
+// coordinationConstraints is validateCoordinationConstraints that also
+// reports waiting=true when it is done only because no child slot is free.
+func (r *TaskReconciler) coordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (result ctrl.Result, done, waiting bool, err error) {
+	result, err, done = r.checkCoordinationConstraints(ctx, task, &waiting)
+	return result, done, waiting, err
+}
+
+func (r *TaskReconciler) checkCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task, waiting *bool) (ctrl.Result, error, bool) {
 	depthStr, ok := task.Annotations[labels.AnnotationCoordinationDepth]
 	if !ok {
 		return ctrl.Result{}, nil, false
@@ -1462,6 +1512,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		}
 		if !granted {
 			log.Info("coordination concurrency limit reached", "max", coord.MaxConcurrentChildren)
+			*waiting = true
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 		}
 	}
