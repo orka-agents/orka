@@ -161,10 +161,12 @@ hold:
      scope counts only if the pool's immutable name commits to it (a hash of the scope
      in the name); a name committing to another scope is doubt, and a pool named before
      the scheme gets 3h;
-   - when the journals cannot be listed, that ceiling drops to creation plus 3h and
-     admission (claims and Resumes) closes at once. Every shared pool is strongly
-     retired only if the listing still fails 60 s later, so one transient API error
-     never evicts every shared Actor. That 60 s limit is independent of the discovery
+   - when the journals cannot be listed, admission (claims and Resumes) closes at
+     once. Inside a 60 s outage window, retirement and escalation keep the annotations'
+     bound under the 24h ceiling, so one transient failed List never retires or
+     escalates a healthy pool. Only if the listing still fails 60 s later does the
+     ceiling drop to creation plus 3h, and every shared pool is then strongly
+     retired, so one transient API error never evicts every shared Actor. That 60 s limit is independent of the discovery
      budget: the pool List has its own deadline, so a journal read that uses up the
      budget never keeps the pools unlisted, and a failed pool List is retried within
      10 s while a failed journal read keeps admission closed;
