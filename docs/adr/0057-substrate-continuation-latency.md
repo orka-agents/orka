@@ -85,43 +85,101 @@ value is `<RFC3339Nano deadline> <Task UID>`.
 
 - The deadline is two minutes after the start, so an unclaimed runtime cannot idle on pool
   credentials. A normal attach takes seconds; the margin covers a controller restart.
-- It is written once per Task with an optimistic lock and **never extended**. A later pass by
-  the same Task, or by a restarted controller, leaves it unchanged. Once it has expired, that
-  Task does not record it again.
+- It is **never extended**. A later pass by the same Task, or by a restarted controller, leaves
+  it unchanged. A Task whose own start expired never renews it.
+- It is recorded in a write the Task already makes, so it cannot lose a race to core admission:
+  - **first turn:** the write that creates the workspace;
+  - **resume:** the single resume-request write described below.
+
+  Any other recording retries a conflicting write from a fresh read.
 - It is written **before** any pool demand.
 - Then the Task activates the RuntimePool. It creates the pool for a first turn, or scales the
   existing one to one replica for a resume. This uses exactly the pool-identity checks of the
   ordinary path: frozen class, provider, profile, required features, workspace link, UID pin,
   image, and profile digest. Only the post-attach handshake is skipped.
-- The start is best-effort. Any failure leaves the ordinary attach-then-demand path in force and
-  never fails the Task.
+- The start is best-effort. Any failure leaves the ordinary path in force and never fails the
+  Task.
+
+#### The staged attachment
+
+Round 5 measured why the first implementation saved nothing:
+
+- **Publication waited on the flip.** It still trailed the start by about 3 s, because the
+  RuntimePool could publish only after Core re-admitted the flip back to `Ready` and the provider
+  observed it.
+- **The marker lost races.** Its own write lost optimistic-lock races to core admission 31 times
+  across 22 Tasks.
+- **Spare runtimes were admitted twice.** A spare runtime that booted before the attach landed
+  was admitted, then closed and re-admitted about 9 s later, because the attach bumped the
+  workspace generation and the admission fence ("admit only after the provider observed the
+  current generation") applied again.
+
+So the flip, the publication, and the attachment now land in **one workspace write**:
+
+- **The Task stages its attachment.** It runs the attachment manager's own steps: claim the
+  Lease, create (or recover) the next epoch's bearer Secret, and fence the Lease to that epoch.
+  It records only a digest-only intent, `acp.workspace.orka.ai/attachment-intent` (Task, epoch,
+  Secret name, bearer digest, expiry), and never writes the attachment itself.
+- **The resume request.** For a continuation of a settled suspension with verified retained data
+  (the current request observed `Stopped` at the current generation, with retained data bound to
+  that exact instance), one write records:
+  - its demand;
+  - its frozen detach action;
+  - the resumed-lineage marker;
+  - the speculative start;
+  - the attachment intent.
+
+  Desired state stays `Suspended`. A rival continuation waits for the flip instead of making its
+  own.
+- **The RuntimePool.** It holds that pending resume's pool and treats it as not stopping. It
+  proves the previous instance terminated, rotates the consumed bootstrap material, and then, in
+  one optimistic write:
+  - flips desired state to `Ready`;
+  - publishes the next request with the retained data;
+  - installs the staged attachment as `spec.attachment` at its epoch.
+
+  A first turn's publication installs its staged attachment in the same way.
+- **The install rechecks every attach fence** against the exact object version the write is
+  locked on:
+  - the intent's Task owns the demand and the start;
+  - no attachment exists, and the next epoch equals the intent's;
+  - the intent has not expired;
+  - no taint (workspace or linked Task), no quarantine, no pending settlement;
+  - the Secret's owner, epoch, and bearer digest match;
+  - the Lease is held by that Task, unexpired, and fenced to that epoch.
+
+  A failed check publishes without attaching, and the Task attaches itself.
+- **The provider observes one generation.** It acknowledges the epoch and starts the runtime in
+  the same pass. The runtime is attested and admitted once, and no later attach invalidates it.
+  The admission fence is unchanged.
+
+#### Fallbacks
+
+- **The request expires unclaimed.** The Task flips the workspace itself and attaches through the
+  ordinary path. That attach recovers the staged Secret (`recoverOrphanedAttachmentSecret`) and
+  renews the same Lease, at the same epoch.
+- **The RuntimePool cannot be activated.** The Task flips at once.
+- **No verified retained data.** The Task flips as before.
+- **The pool publishes before a first turn's intent exists.** The first turn attaches through the
+  ordinary path, before or after the publication. Either order admits the runtime once, unless
+  the runtime finishes booting before the attach lands.
 
 #### Pool demand
 
-`WorkspaceRuntimePoolReconciler` keeps an unattached pool's replicas while the start is open:
+`WorkspaceRuntimePoolReconciler` keeps an unattached pool's replicas in two cases:
 
-- the deadline has not passed;
-- the workspace is still in the allowed state above, including outstanding demand.
+- **while a start is open:** the deadline has not passed, and the workspace is still in the
+  allowed state above, including outstanding demand;
+- **while a speculative resume is pending.**
 
 It wakes at the deadline. Before it scales any unattached pool to zero, it re-reads the
 workspace from the API server. A cached copy older than the pool event that woke it must not
 undo the start or a fresh attachment.
 
-#### The provider starts at once
-
-The RuntimePool controller is unchanged. Once the workspace is admitted at its current generation
-and the provider has observed it:
-
-- it proves the previous instance terminated;
-- it rotates the consumed bootstrap material;
-- it publishes the next workload request.
-
-The provider then boots the runtime while Core finishes the attachment and its handshakes.
-
 #### Attachment during the boot
 
-The class attachment rule also accepts a recorded speculative start whose exact published request
-is still booting:
+When the Task attaches itself, the class attachment rule also accepts a recorded speculative start
+whose exact published request is still booting:
 
 - the request is unretired;
 - the observation is `Pending` for the same key and sequence, at the same revision if it reports
@@ -131,7 +189,24 @@ is still booting:
 Every other guard still applies: current core admission, the provider observed the current
 generation, `Pending` state, no quarantine, no revocation stamp, no taint. A `Ready` allocation
 already passes the generic rule, exactly as a warm-window attach does. The attach patch removes
-the start along with the demand.
+the start, the demand, and any intent.
+
+#### Warm-window expiry and live demand
+
+This amends ADR 0055's expiry. At its deadline, a warm window defers for at most two minutes while
+any of these exists:
+
+- a live recorded requester;
+- an open speculative start;
+- any live continuation Task of the Session, bound or not yet linked.
+
+A continuation that reaches a window within two minutes of its deadline records its demand before
+it attaches. Retention's delayed Suspend is an optimistic write on the same object, so from then
+on it either sees the demand or loses the write, exactly as against an attachment.
+
+Round 5 iteration 3 showed why. A continuation bound four seconds before expiry was suspended
+under it and waited 60 s for the suspension. A window that an eviction or upgrade drain ended
+(ADR 0055) gets no grace.
 
 ### 2. Default warm window for new Substrate workspaces
 
@@ -178,12 +253,16 @@ the start along with the demand.
    dispatched to.
 2. **One writer.** The attachment is the same optimistic, epoch-fenced Lease and Secret handoff.
    Two Tasks never hold it, because the attach validation reruns on every optimistic-lock
-   attempt. A concurrent continuation of the same Session may claim a speculative runtime its
-   rival started. That is safe for two reasons:
-   - the runtime is scoped to the Session's pool, cold booted, and holds no Task state;
-   - the claimant passes every check the requester would.
+   attempt.
+   - **Staging claims the same Lease.** A rival therefore waits while a requester's staged
+     attachment is pending, and the install puts the requester's exact staged attachment in
+     place under the same epoch arithmetic as an attach.
+   - **An unstaged start can go to a rival.** A concurrent continuation of the same Session may
+     claim a speculative runtime its rival started without staging. That is safe for two reasons:
+     the runtime is scoped to the Session's pool, cold booted, and holds no Task state; and the
+     claimant passes every check the requester would.
 
-   The rival then queues behind it as today.
+   The other Task then queues behind it as today.
 3. **Every startup proof still runs.** A speculative runtime cold-boots under rotated bootstrap
    material and still goes through all of these before the pool can serve:
    - exact-instance startup attestation;
@@ -199,8 +278,12 @@ the start along with the demand.
    attachment bearer never reaches it. An unclaimed speculative runtime is the ADR 0055 warm
    state, a supervisor idling on pool credentials with no attachment bearer and no ACP child,
    bounded by two minutes instead of the warm window.
-5. **A rejected or cancelled Task.** Its settlement runs the existing path for a requester that
-   never attached:
+5. **A rejected or cancelled Task.** Its settlement first releases what it staged and never had
+   installed. It removes the intent and, on a still-suspended workspace, its resume request,
+   demand, and start, in one optimistic write. That write fences the RuntimePool's install and
+   flip. Only then does it delete the bearer Secret and the Lease it holds. Revocation of an
+   older epoch leaves an uninstalled newer staged Lease alone. Settlement then runs the existing
+   path for a requester that never attached:
    - Suspend on a committed resume re-suspends, and that write removes the start;
    - an empty first turn is deleted, and the pool is torn down with it;
    - a queued successor may take over through the existing deferral.
@@ -237,7 +320,7 @@ the start along with the demand.
 
 ### Provider requirements
 
-Neither change needs an `orka-workspace` code change. The provider must keep three properties of
+Neither change needs an `orka-workspace` code change. The provider must keep four properties of
 today's `ExecutionWorkspaceReconciler.reconcileLifecycle` and cover them in its conformance
 suite:
 
@@ -252,27 +335,39 @@ suite:
 
    Its sandbox gets the same deny-all egress and termination evidence as any retirement (ADR
    0056 on shared workers).
+4. **One write from `Suspended`.** A single generation that moves a settled `Suspended` workspace
+   to desired `Ready`, sets `spec.workload` to the next sequence (`previousInstance` and
+   `retainedData` from the stopped observation), clears `spec.retirement`, and sets
+   `spec.attachment` and `spec.attachmentEpoch` must be handled in one pass once Core re-admits
+   it:
+   - the epoch is acknowledged;
+   - `EnsureAllocation` is called for that request, resuming from the retained data;
+   - no intermediate `Ready` generation with the stale request is required.
 
-Two provider changes would shorten the path further. Neither is required, and neither is made
-here:
+   Today's code already does this: the `DesiredSuspended` case no longer matches, and the
+   `EnsureAllocation` case does. The conformance suite should assert it.
 
-- accepting a workload published in the same write as the resume flip, which saves one provider
-  observation;
-- acknowledging an attachment in the same pass that first observes it.
+Further latency now depends on the two re-admission hops that every spec write costs: core
+admission, then provider observation. Removing them would change ADR 0023's admission contract
+and is not done here.
 
 ## Consequences
 
-- **Expected saving on resume: about 1.8–2.5 s.**
-  - The workload is published about one provider observation after the flip, instead of after
-    the attach acknowledgement and the pool chain (about 1.75–1.95 s earlier).
-  - The attach acknowledgement, pool handshake, PromptAttempt, and queue then overlap the
-    provider's 2.1–2.5 s boot.
-  - The re-read before scale-down also removes a replica flap that a stale cache could cause
-    right after an attach.
-  - The owner's estimate of 2.5–3.5 s may hold when queueing fully hides behind the boot. Live
-    timing (`speculativeStartMs` in the pre-dispatch log) must confirm it.
+- **Expected saving on resume.**
+  - The first implementation measured no saving in round 5: bind → publish went from 3.0 s to
+    3.3–4.6 s.
+  - With one write, publication follows the resume request after only the RuntimePool's own
+    passes (rotation and publication), not after a core re-admission and provider observation of
+    the flip. Bind → provider allocation start is then one re-admission hop plus one provider
+    observation, an expected 1–1.5 s.
+  - The 0.5 s target needs the re-admission hops above removed.
+  - The pre-dispatch `speculativeStartMs` and the provider's allocation timing must confirm this
+    live.
+- **Spare and shared paths admit once.** Round 5's spare probe → serving of 5.4–6.6 s came from
+  the second admission. That admission no longer happens when the intent is installed in the
+  publication write.
 - **Expected saving on a first turn: about 1.0–1.5 s.** The pool is created at workspace
-  creation and publishes at core admission, in parallel with the attach and its acknowledgement.
+  creation and publishes at core admission, carrying the staged attachment.
 - **Default warm window.** Most follow-ups within five minutes take ADR 0055's warm path (about
   6.1 s today) instead of a cold resume. Each eligible Session holds one idle Actor slot for up
   to five minutes after each detach:

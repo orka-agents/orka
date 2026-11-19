@@ -831,8 +831,9 @@ func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			name := "acp-ws-warm-veto-" + test.name
-			// The tainted case cuts an open window short; the others expire.
-			deadline := now.Add(-time.Minute)
+			// The tainted case cuts an open window short; the others expire
+			// past the grace that live continuation demand earns (ADR 0057).
+			deadline := now.Add(-acpWorkspaceWarmExpiryGrace - time.Minute)
 			if test.name == "tainted" {
 				deadline = now.Add(5 * time.Minute)
 			}

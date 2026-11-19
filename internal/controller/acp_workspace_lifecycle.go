@@ -265,32 +265,28 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		// generic serving path in Draining with no undrain transition.
 		switch workspace.Status.State {
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
-			base := workspace.DeepCopy()
-			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-			if workspace.Annotations == nil {
-				workspace.Annotations = map[string]string{}
+			now := time.Now()
+			if acpWorkspaceSpeculativeResumePending(workspace, now) {
+				// ADR 0057: a continuation already requested a speculative
+				// resume. The RuntimePool controller flips the workspace back
+				// to Ready in the same write that publishes the workload; a
+				// rival continuation waits for that flip instead of racing it.
+				return "", false, nil
 			}
-			// The resume flip records pending demand without changing the last
-			// detach instant: a cold boot can outlast idleTimeout, so retention
-			// must treat the workspace as demanded until the continuation
-			// attaches. If that requester dies, idle retention resumes from the
-			// actual detach instead of granting another full retention interval. The
-			// continuation's frozen effective detach action replaces the
-			// suspender's in the same patch (a continuation that selects
-			// Delete and dies during cold boot must settle with Delete, not
-			// resuspend under the predecessor's stale action), and the
-			// resumed-lineage marker makes later pool loss terminal even
-			// after Ready is projected.
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			// The demand record carries the requesting Task's name so
-			// retention can retire demand whose requester died before
-			// attaching instead of holding the workspace forever.
-			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name + " " + string(task.UID)
-			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
-			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
-			// A speculative start left by an earlier cycle never carries over.
-			delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
-			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			deadline, owner, recorded := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+			ownExpired := recorded && owner == string(task.UID) && !now.Before(deadline)
+			if !ownExpired && acpWorkspaceSuspendCapable(workspace) && acpWorkspaceRetainedDataAvailable(workspace) {
+				// Record the resume request, demand, and speculative start in
+				// one write without flipping desired state; the RuntimePool
+				// controller then flips and publishes together, so the
+				// provider starts the resume on a single observation. This
+				// Task's own expired request is never renewed: it flips itself.
+				if err := r.requestACPWorkspaceSpeculativeResume(ctx, workspace, task, binding, plan.PoolName, now); err != nil {
+					return "", false, client.IgnoreNotFound(err)
+				}
+				return "", false, nil
+			}
+			if err := r.flipACPWorkspaceForColdResume(ctx, workspace, task, binding.Class.EffectiveOnDetach); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
 			return "", false, nil
@@ -403,6 +399,12 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	// it, and every later Task for that Session would queue forever.
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
+	}
+	if err := r.stampACPWorkspaceWarmDemand(ctx, workspace, task, time.Now()); err != nil {
+		if apierrors.IsConflict(err) {
+			return "", false, nil
+		}
+		return "", false, client.IgnoreNotFound(err)
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
@@ -547,7 +549,8 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
 		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" &&
 		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" && !warmDeadline && !warmPending &&
-		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] == "" {
+		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] == "" &&
+		workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation] == "" {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -564,8 +567,11 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	// it: the warm runtime now serves this attachment.
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
-	// The attachment claims any speculative start (ADR 0057).
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	// The attachment claims any speculative start and staged attachment
+	// (ADR 0057).
 	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+	delete(workspace.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -851,6 +857,13 @@ func (r *TaskReconciler) createACPClassWorkspace(
 		return nil, err
 	}
 	maps.Copy(workspace.Annotations, defaultWindow)
+	if binding.Class.SuspendMode == acpWorkspaceSuspendDataOnly &&
+		slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+		// ADR 0057: a first turn records its speculative start in the
+		// creating write, so no later write races core admission for it.
+		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] =
+			formatACPWorkspaceSpeculativeStart(time.Now().Add(acpWorkspaceSpeculativeStartTTL), task.UID)
+	}
 	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
 			return nil, fmt.Errorf("session-reused execution workspace requires spec.sessionRef.name")
@@ -891,6 +904,9 @@ func (r *TaskReconciler) createACPClassWorkspace(
 	}
 	if err := r.Create(ctx, workspace); err != nil {
 		return nil, err
+	}
+	if _, recorded := workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]; recorded {
+		acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
 	}
 	return workspace, nil
 }
@@ -1176,6 +1192,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// state (for example a continuation's resume request) belongs to the
 		// newer attachment.
 		return true, nil
+	}
+	// A staged attachment or pending speculative resume this Task never had
+	// installed is released before anything else, including the receipt
+	// shortcut below, so an interrupted release is always retried (ADR 0057).
+	if changed, err := r.releaseACPWorkspaceSpeculativeClaims(ctx, workspace, task); err != nil || changed {
+		return false, err
 	}
 	// A live attachment or UID-bound pending resume demand owned by this Task is
 	// stronger evidence than an old workspace receipt. Process it below so the
@@ -1746,6 +1768,7 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	// Each detach gets its own window: a deadline left by an earlier epoch is
 	// replaced, never carried into this one.
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	if window := acpWorkspaceWarmDetachWindow(workspace, task); window > 0 {
 		workspace.Annotations[acpWorkspaceSuspendAtAnnotation] = startedAt.Add(window).Format(time.RFC3339Nano)
 	} else {

@@ -352,7 +352,7 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 				}
 			}
 			f.r.APIReader = reader
-			_, err = f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, f.currentWorkspace(t), auth, providerSecret)
+			_, err = f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, f.currentWorkspace(t), auth, providerSecret, false)
 			w := f.currentWorkspace(t)
 			if reader.reads == 0 {
 				t.Fatal("publication used cached provider capabilities")

@@ -85,7 +85,11 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 	if w.Spec.Attachment == nil {
-		if deadline, held := acpWorkspaceSpeculativeStartHoldsPool(w, now); held {
+		deadline, held := acpWorkspaceSpeculativeStartHoldsPool(w, now)
+		if !held && acpWorkspaceSpeculativeResumePending(w, now) {
+			deadline, _, held = parseACPWorkspaceSpeculativeStart(w.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+		}
+		if held {
 			// Only the deadline ends an unclaimed speculative start; this
 			// controller watches no Tasks, so wake at expiry.
 			return ctrl.Result{RequeueAfter: deadline.Sub(now) + time.Second}, nil
@@ -111,6 +115,9 @@ func workspaceRuntimePoolDemandHeld(w *workspacev1alpha1.ExecutionWorkspace, now
 		return true
 	}
 	if acpWorkspaceWarmWindowHoldsPool(w) {
+		return true
+	}
+	if acpWorkspaceSpeculativeResumePending(w, now) {
 		return true
 	}
 	_, held := acpWorkspaceSpeculativeStartHoldsPool(w, now)

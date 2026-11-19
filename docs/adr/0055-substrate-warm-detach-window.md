@@ -124,6 +124,14 @@ which the mid-Task bearer rotation already applies to a running Actor.
   either). A `Suspend` already authorized for the exact instance before the taint
   landed is not rewritten mid-capture; the workspace's Delete disposition removes
   that data.
+- **A drain ends the window at once.** When the RuntimePool must drain a detached warm runtime,
+  because of a worker eviction or a retirement for an upgrade or a changed runtime fence, it
+  moves `suspend-at` to now and records `acp.workspace.orka.ai/warm-window-drained-at`. It never
+  moves the deadline later. Retention then applies the frozen Suspend immediately, without any
+  live-demand grace, so the suspension lands inside the drain's deadline. A window longer than
+  that deadline (up to one hour is allowed) would otherwise expire after the eviction had already
+  killed the runtime, which loses data. A later detach, the suspension, and an attachment clear
+  the marker.
 - **A vetoed expiry keeps its requeue.** Expiry deletion is fenced like idle expiry,
   so a Session continuation admitted before the fence cancels it. Retention then keeps
   its bounded `maxLifetime` / poll requeue, because it watches only workspaces and a

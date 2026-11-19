@@ -99,7 +99,7 @@ func TestExternalRuntimePoolPublishedLegacyPodSurvivesRestartAndResume(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), &pool, cfg, w, auth, providerSecret); err != nil {
+	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), &pool, cfg, w, auth, providerSecret, false); err != nil {
 		t.Fatal(err)
 	}
 	request := f.currentWorkspace(t).Spec.Workload

@@ -8,11 +8,21 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -162,6 +172,10 @@ func acpWorkspaceSpeculativeStartEligible(workspace *workspacev1alpha1.Execution
 		// Other classes keep the attach-first path.
 		return false
 	}
+	if _, warm := acpWorkspaceWarmWindowOpen(workspace); warm {
+		// The warm window already keeps the runtime running.
+		return false
+	}
 	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
 		return workspace.Spec.Workload != nil
 	}
@@ -192,45 +206,509 @@ func (r *TaskReconciler) startACPWorkspaceSpeculativeRuntime(
 		// read for a Task queued behind a long turn.
 		return
 	}
-	// Re-read through the uncached reader: this pass may have just flipped
-	// the workspace back to Ready or created it, and the start should follow
+	// Re-read through the uncached reader: this pass may have just recorded a
+	// resume request or created the workspace, and the start should follow
 	// at once rather than one requeue later.
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, key, workspace); err != nil {
 		return
 	}
+	now := time.Now()
+	if acpWorkspaceSpeculativeResumePending(workspace, now) {
+		_, owner, _ := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+		if owner != string(task.UID) {
+			return
+		}
+		// The RuntimePool flips and publishes once it has demand. If it
+		// cannot be activated, this Task flips itself instead of waiting.
+		if _, _, err := r.ensureACPRuntimePoolDemand(
+			ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID), allowCreate, requiredUID, false,
+		); err != nil {
+			logger.Info("speculative resume demand failed; flipping directly", "workspace", workspace.Name, "error", err.Error())
+			if flipErr := r.flipACPWorkspaceForColdResume(ctx, workspace, task, binding.Class.EffectiveOnDetach); flipErr != nil {
+				logger.Info("cold-resume flip deferred", "workspace", workspace.Name, "error", flipErr.Error())
+			}
+		}
+		return
+	}
 	if !acpWorkspaceSpeculativeStartEligible(workspace, task) {
 		return
 	}
-	now := time.Now()
 	deadline, owner, recorded := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
-	if recorded && owner == string(task.UID) {
-		if !now.Before(deadline) {
-			// Expired: the runtime retires and this Task attaches through the
-			// ordinary path.
+	if recorded && owner == string(task.UID) && !now.Before(deadline) {
+		// Expired: the runtime retires and this Task attaches through the
+		// ordinary path.
+		return
+	}
+	_, hasIntent := workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation]
+	if !recorded || owner != string(task.UID) || (!hasIntent && workspace.Spec.Workload == nil) {
+		if !r.recordACPWorkspaceSpeculativeStart(ctx, reader, workspace, task, binding, plan.PoolName, now) {
 			return
 		}
-	} else {
-		// The workspace marker is checked above; Tasks linked to this exact
-		// incarnation count too, and an unreadable Task refuses the start.
-		tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
-		if err != nil || tainted {
-			return
-		}
-		base := workspace.DeepCopy()
-		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] =
-			formatACPWorkspaceSpeculativeStart(now.Add(acpWorkspaceSpeculativeStartTTL), task.UID)
-		// The hold is durable before any pool demand: the pool controller
-		// re-reads the workspace before it scales an unattached pool down.
-		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			logger.Info("speculative workspace start not recorded", "workspace", workspace.Name, "error", err.Error())
-			return
-		}
-		acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
 	}
 	if _, _, err := r.ensureACPRuntimePoolDemand(
 		ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID), allowCreate, requiredUID, false,
 	); err != nil {
 		logger.Info("speculative workspace runtime demand deferred", "workspace", workspace.Name, "error", err.Error())
 	}
+}
+
+// recordACPWorkspaceSpeculativeStart records this Task's speculative start
+// and, for a workspace not yet published, its staged attachment, retrying a
+// conflicting write from a fresh read. The deadline is written once per Task
+// and never extended. It reports whether the start is recorded.
+func (r *TaskReconciler) recordACPWorkspaceSpeculativeStart(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	binding *ACPRuntimeWorkspaceBinding,
+	poolName string,
+	now time.Time,
+) bool {
+	logger := logf.FromContext(ctx).V(1)
+	// The workspace marker is checked by eligibility; Tasks linked to this
+	// exact incarnation count too, and an unreadable Task refuses the start.
+	if tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace); err != nil || tainted {
+		return false
+	}
+	intent := ""
+	if _, staged := workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation]; !staged && workspace.Spec.Workload == nil {
+		intent = r.stageACPWorkspaceAttachmentIntent(ctx, workspace, task, binding, poolName)
+	}
+	recorded := false
+	first := true
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := workspace
+		if !first {
+			current = &workspacev1alpha1.ExecutionWorkspace{}
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				return err
+			}
+			if current.UID != workspace.UID || !acpWorkspaceSpeculativeStartEligible(current, task) {
+				return nil
+			}
+		}
+		first = false
+		base := current.DeepCopy()
+		changed := false
+		if _, owner, ok := parseACPWorkspaceSpeculativeStart(current.Annotations[acpWorkspaceSpeculativeStartAnnotation]); !ok || owner != string(task.UID) {
+			current.Annotations[acpWorkspaceSpeculativeStartAnnotation] =
+				formatACPWorkspaceSpeculativeStart(now.Add(acpWorkspaceSpeculativeStartTTL), task.UID)
+			changed = true
+		}
+		if _, staged := current.Annotations[acpWorkspaceAttachmentIntentAnnotation]; intent != "" && !staged && current.Spec.Workload == nil {
+			current.Annotations[acpWorkspaceAttachmentIntentAnnotation] = intent
+			changed = true
+		}
+		if changed {
+			if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				return err
+			}
+			acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
+		}
+		recorded = true
+		return nil
+	})
+	if err != nil {
+		logger.Info("speculative workspace start not recorded", "workspace", workspace.Name, "error", err.Error())
+	}
+	return recorded
+}
+
+// acpWorkspaceRetainedDataAvailable reports that the workspace's current
+// request is observed stopped, at the current generation, with retained data
+// bound to that exact instance: the only state a cold resume may publish from.
+func acpWorkspaceRetainedDataAvailable(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	request, observation := workspace.Spec.Workload, workspace.Status.Allocation
+	return request != nil && observation != nil && workspace.Status.ObservedGeneration == workspace.Generation &&
+		observation.State == workspacev1alpha1.AllocationStopped && observation.Startup == nil &&
+		observation.Key == request.Key && observation.Sequence == request.Sequence &&
+		observation.Identity.RequestRevision == request.Revision && observation.Identity.Valid() &&
+		observation.RetainedData != nil && observation.RetainedData.Valid() &&
+		observation.RetainedData.SourceInstance == observation.Identity
+}
+
+// acpWorkspaceSpeculativeResumePending reports a settled suspended workspace
+// whose continuation recorded an open speculative resume (ADR 0057). The
+// RuntimePool controller then flips desired state back to Ready in the same
+// write that publishes the next workload, so the provider observes the flip
+// and the request together. Every guard of a Task's own flip holds here.
+func acpWorkspaceSpeculativeResumePending(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) bool {
+	if workspace == nil || !workspace.DeletionTimestamp.IsZero() ||
+		workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
+		workspace.Spec.Attachment != nil ||
+		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended ||
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue ||
+		strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "" ||
+		acpWorkspaceQuarantined(workspace) || operatoraccess.Tainted(workspace.Annotations) ||
+		!acpWorkspaceSuspendCapable(workspace) || !acpWorkspaceRetainedDataAvailable(workspace) {
+		return false
+	}
+	deadline, owner, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+	return ok && now.Before(deadline) &&
+		acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], owner)
+}
+
+// requestACPWorkspaceSpeculativeResume records, in one write, a continuation's
+// cold-resume request on a settled suspended workspace: its demand, its frozen
+// detach action, the resumed-lineage marker, and an open speculative start.
+// Desired state stays Suspended; the RuntimePool controller flips it while
+// publishing. A conflicting write is retried from a fresh read, and stops if
+// the workspace left the settled suspended state.
+func (r *TaskReconciler) requestACPWorkspaceSpeculativeResume(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	binding *ACPRuntimeWorkspaceBinding,
+	poolName string,
+	now time.Time,
+) error {
+	reader := uncachedReader(r.APIReader, r.Client)
+	// The attachment is staged first so the RuntimePool can install it in the
+	// same write as the flip and publication; without it the ordinary attach
+	// follows the flip.
+	intent := r.stageACPWorkspaceAttachmentIntent(ctx, workspace, task, binding, poolName)
+	effectiveOnDetach := binding.Class.EffectiveOnDetach
+	first := true
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := workspace
+		if !first {
+			current = &workspacev1alpha1.ExecutionWorkspace{}
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
+				return err
+			}
+			if current.UID != workspace.UID || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
+				current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended || current.Spec.Attachment != nil ||
+				acpWorkspaceSpeculativeResumePending(current, now) {
+				// Another writer moved the workspace on; the next pass decides.
+				return nil
+			}
+		}
+		first = false
+		base := current.DeepCopy()
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		current.Annotations[acpWorkspaceResumeRequestedAnnotation] = now.UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+		current.Annotations[acpWorkspaceDetachActionAnnotation] = effectiveOnDetach
+		current.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+		current.Annotations[acpWorkspaceSpeculativeStartAnnotation] = formatACPWorkspaceSpeculativeStart(now.Add(acpWorkspaceSpeculativeStartTTL), task.UID)
+		if intent != "" {
+			current.Annotations[acpWorkspaceAttachmentIntentAnnotation] = intent
+		}
+		if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
+		return nil
+	})
+}
+
+// flipACPWorkspaceForColdResume is a continuation's own cold-resume flip: the
+// same concrete workspace returns to Ready, and the RuntimePool replaces the
+// runtime with a fresh boot and credential bootstrap before this Task can
+// attach. It is used when a speculative resume does not apply, or expired
+// without the RuntimePool claiming it.
+func (r *TaskReconciler) flipACPWorkspaceForColdResume(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	effectiveOnDetach string,
+) error {
+	base := workspace.DeepCopy()
+	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	// The resume flip records pending demand without changing the last
+	// detach instant: a cold boot can outlast idleTimeout, so retention must
+	// treat the workspace as demanded until the continuation attaches. If
+	// that requester dies, idle retention resumes from the actual detach
+	// instead of granting another full retention interval. The
+	// continuation's frozen effective detach action replaces the suspender's
+	// in the same patch (a continuation that selects Delete and dies during
+	// cold boot must settle with Delete, not resuspend under the
+	// predecessor's stale action), and the resumed-lineage marker makes later
+	// pool loss terminal even after Ready is projected. The demand record
+	// carries the requesting Task's name so retention can retire demand whose
+	// requester died before attaching instead of holding the workspace
+	// forever.
+	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+		time.Now().UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = effectiveOnDetach
+	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+	// A speculative start left by an earlier cycle, or an expired one, never
+	// carries over.
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+// acpWorkspaceAttachmentIntentAnnotation carries a Task's staged attachment
+// (ADR 0057): Lease claimed and epoch-fenced, bearer Secret created, but no
+// workspace spec names it yet. It holds only the Secret name and the bearer
+// digest. The RuntimePool controller installs it in the same write that
+// publishes the workload (and, on a resume, flips desired state), so the
+// provider acknowledges the epoch and starts the runtime on one observation.
+const acpWorkspaceAttachmentIntentAnnotation = "acp.workspace.orka.ai/attachment-intent"
+
+type acpWorkspaceAttachmentIntent struct {
+	TaskName    string    `json:"taskName"`
+	TaskUID     types.UID `json:"taskUID"`
+	Epoch       int64     `json:"epoch"`
+	TokenSHA256 string    `json:"tokenSHA256"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	SecretName  string    `json:"secretName"`
+}
+
+func encodeACPWorkspaceAttachmentIntent(attachment *workspacev1alpha1.ExecutionWorkspaceAttachment) (string, error) {
+	encoded, err := json.Marshal(acpWorkspaceAttachmentIntent{
+		TaskName: attachment.TaskRef.Name, TaskUID: attachment.TaskRef.UID, Epoch: attachment.Epoch,
+		TokenSHA256: attachment.TokenSHA256, ExpiresAt: attachment.ExpiresAt.UTC(), SecretName: attachment.TokenSecretRef.Name,
+	})
+	return string(encoded), err
+}
+
+func parseACPWorkspaceAttachmentIntent(workspace *workspacev1alpha1.ExecutionWorkspace) (*acpWorkspaceAttachmentIntent, bool) {
+	raw, present := workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation]
+	if !present {
+		return nil, false
+	}
+	intent := &acpWorkspaceAttachmentIntent{}
+	if err := json.Unmarshal([]byte(raw), intent); err != nil || intent.TaskUID == "" || intent.TaskName == "" ||
+		intent.Epoch <= 0 || intent.SecretName != attachmentSecretName(workspace.Name, intent.Epoch) ||
+		!strings.HasPrefix(intent.TokenSHA256, "sha256:") || intent.ExpiresAt.IsZero() {
+		return nil, false
+	}
+	return intent, true
+}
+
+func (i *acpWorkspaceAttachmentIntent) attachment() *workspacev1alpha1.ExecutionWorkspaceAttachment {
+	attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: i.TaskName, UID: i.TaskUID},
+		Epoch:   i.Epoch, TokenSHA256: i.TokenSHA256, ExpiresAt: metav1.NewTime(i.ExpiresAt),
+	}
+	attachment.TokenSecretRef.Name = i.SecretName
+	return attachment
+}
+
+// validateACPWorkspaceAttachmentIntentTarget is the attach rule for a staged
+// attachment: the exact frozen bindings, no attachment or pending settlement,
+// no taint or quarantine, a Suspend-capable lifecycle, and either a fresh
+// workspace or a settled suspension with retained data that this Task's
+// resume request will flip.
+func validateACPWorkspaceAttachmentIntentTarget(
+	ctx context.Context,
+	reader client.Reader,
+	binding *ACPRuntimeWorkspaceBinding,
+	poolName string,
+) func(*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task, time.Time) error {
+	return func(workspace *workspacev1alpha1.ExecutionWorkspace, task *corev1alpha1.Task, _ time.Time) error {
+		if err := verifyACPClassWorkspace(workspace, task, binding, poolName); err != nil {
+			return err
+		}
+		if workspace.Spec.Attachment != nil || strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "" ||
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed || acpWorkspaceQuarantined(workspace) ||
+			!acpWorkspaceSuspendCapable(workspace) {
+			return fmt.Errorf("workspace %s cannot stage a speculative attachment", workspace.Name)
+		}
+		fresh := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			workspace.Spec.AttachmentEpoch == 0 && workspace.Status.AttachedEpoch == 0
+		resume := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended &&
+			workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended && acpWorkspaceRetainedDataAvailable(workspace)
+		if !fresh && !resume {
+			return fmt.Errorf("workspace %s is neither fresh nor a settled suspension", workspace.Name)
+		}
+		if operatoraccess.Tainted(workspace.Annotations) {
+			return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+		}
+		return refuseOperatorTaintedACPWorkspaceHandoff(ctx, reader, workspace, task)
+	}
+}
+
+// stageACPWorkspaceAttachmentIntent stages this Task's next attachment and
+// returns its encoded intent, or "" when staging is refused (for example a
+// rival holds the Lease); the ordinary attach path then applies.
+func (r *TaskReconciler) stageACPWorkspaceAttachmentIntent(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	binding *ACPRuntimeWorkspaceBinding,
+	poolName string,
+) string {
+	if binding == nil || workspace.UID == "" {
+		return ""
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
+	attachment, err := manager.prepareAttachmentIntent(ctx, workspace, task, validateACPWorkspaceAttachmentIntentTarget(ctx, reader, binding, poolName))
+	if err != nil {
+		logf.FromContext(ctx).V(1).Info("speculative attachment not staged", "workspace", workspace.Name, "error", err.Error())
+		return ""
+	}
+	encoded, err := encodeACPWorkspaceAttachmentIntent(attachment)
+	if err != nil {
+		return ""
+	}
+	return encoded
+}
+
+// installableACPWorkspaceAttachmentIntent returns the staged attachment the
+// RuntimePool controller may install in its publication write, or nil. Every
+// guard of an ordinary attach is rechecked against the exact object version
+// the write is fenced on, plus the staged Lease and Secret themselves.
+func installableACPWorkspaceAttachmentIntent(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	resume bool,
+	now time.Time,
+) (*workspacev1alpha1.ExecutionWorkspaceAttachment, error) {
+	intent, ok := parseACPWorkspaceAttachmentIntent(workspace)
+	if !ok || workspace.Spec.Attachment != nil || !intent.ExpiresAt.After(now) {
+		return nil, nil
+	}
+	_, owner, marked := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+	if !marked || owner != string(intent.TaskUID) ||
+		!acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], owner) {
+		return nil, nil
+	}
+	if next, err := nextWorkspaceAttachmentEpoch(workspace); err != nil || next != intent.Epoch {
+		return nil, nil
+	}
+	if !resume && (workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || !acpWorkspaceSpeculativeStartAllowed(workspace)) {
+		return nil, nil
+	}
+	if !acpWorkspaceSuspendCapable(workspace) || operatoraccess.Tainted(workspace.Annotations) || acpWorkspaceQuarantined(workspace) {
+		return nil, nil
+	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	if err != nil || tainted {
+		return nil, err
+	}
+	if staged, err := acpWorkspaceStagedAttachmentObjectsHeld(ctx, reader, workspace, intent, now); err != nil || !staged {
+		return nil, err
+	}
+	return intent.attachment(), nil
+}
+
+// acpWorkspaceStagedAttachmentObjectsHeld verifies the staged bearer Secret
+// (owner, epoch, and digest) and the Lease still fenced to the intent's Task
+// and epoch.
+func acpWorkspaceStagedAttachmentObjectsHeld(
+	ctx context.Context,
+	reader client.Reader,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	intent *acpWorkspaceAttachmentIntent,
+	now time.Time,
+) (bool, error) {
+	epoch := strconv.FormatInt(intent.Epoch, 10)
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: intent.SecretName}, secret); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	secretOwner := metav1.GetControllerOf(secret)
+	digest := sha256.Sum256(secret.Data[workspaceAttachmentTokenKey])
+	if secretOwner == nil || secretOwner.UID != workspace.UID || secret.Labels[workspaceAttachmentLabel] != string(workspace.UID) ||
+		string(secret.Data["workspaceUID"]) != string(workspace.UID) || string(secret.Data[epochField]) != epoch ||
+		"sha256:"+hex.EncodeToString(digest[:]) != intent.TokenSHA256 {
+		return false, nil
+	}
+	lease := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}, lease); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	leaseOwner := metav1.GetControllerOf(lease)
+	return leaseOwner != nil && leaseOwner.UID == workspace.UID && lease.Spec.HolderIdentity != nil &&
+		*lease.Spec.HolderIdentity == string(intent.TaskUID) && !leaseExpired(lease, now) &&
+		lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] == epoch, nil
+}
+
+// releaseACPWorkspaceSpeculativeClaims undoes what a settling Task staged but
+// never installed: its attachment intent and, on a still-suspended
+// workspace, its pending resume request. Removing those annotations first
+// fences the RuntimePool's install and flip, which are optimistic writes on
+// the same object. The staged Secret and Lease are then released from the
+// Lease's own evidence, so a failed delete or a restart after the
+// annotation write is retried on the next settlement pass rather than
+// forgotten. changed=true asks the caller to settle again on a fresh read.
+func (r *TaskReconciler) releaseACPWorkspaceSpeculativeClaims(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) (bool, error) {
+	if workspace.Spec.Attachment != nil && workspace.Spec.Attachment.TaskRef.UID == task.UID {
+		return false, nil
+	}
+	intent, staged := parseACPWorkspaceAttachmentIntent(workspace)
+	ownIntent := staged && intent.TaskUID == task.UID
+	_, owner, marked := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+	pendingResume := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended && marked && owner == string(task.UID)
+	_, malformedIntent := workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation]
+	ownMalformed := malformedIntent && !staged && pendingResume
+	if ownIntent || pendingResume || ownMalformed {
+		base := workspace.DeepCopy()
+		if ownIntent || ownMalformed {
+			delete(workspace.Annotations, acpWorkspaceAttachmentIntentAnnotation)
+		}
+		if pendingResume {
+			delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+			if acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
+				delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+			}
+		}
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return true, nil
+			}
+			return true, err
+		}
+		return true, r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
+	}
+	return false, r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
+}
+
+// releaseACPWorkspaceStagedAttachmentObjects deletes the bearer Secret and
+// Lease of an attachment this Task staged and no workspace spec names: the
+// Lease is held by the Task and fenced to the workspace's next epoch, so no
+// installed attachment can depend on it. It is idempotent.
+func (r *TaskReconciler) releaseACPWorkspaceStagedAttachmentObjects(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) error {
+	if intent, staged := parseACPWorkspaceAttachmentIntent(workspace); staged && intent.TaskUID == task.UID {
+		// The intent is still installable; its removal must land first.
+		return nil
+	}
+	next, err := nextWorkspaceAttachmentEpoch(workspace)
+	if err != nil {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	lease := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}, lease); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	epoch := strconv.FormatInt(next, 10)
+	leaseOwner := metav1.GetControllerOf(lease)
+	if leaseOwner == nil || leaseOwner.UID != workspace.UID || lease.Spec.HolderIdentity == nil ||
+		*lease.Spec.HolderIdentity != string(task.UID) || lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] != epoch {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, next)}, secret); err == nil {
+		secretOwner := metav1.GetControllerOf(secret)
+		if secretOwner != nil && secretOwner.UID == workspace.UID && string(secret.Data[taskUIDField]) == string(task.UID) {
+			if err := r.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
