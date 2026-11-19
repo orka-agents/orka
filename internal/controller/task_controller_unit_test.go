@@ -112,6 +112,8 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		MessageStore:        ss,
 		PlanStore:           ss,
 		ExecutionEventStore: ss,
+		// Admission ledgers live in the controller namespace.
+		ControllerNamespace: "orka-system",
 	}
 }
 
