@@ -126,7 +126,8 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for the authoritative controller epoch")
 		}
 	}
-	if !workspaceCurrentlyAdmittedByCore(w) {
+	attachmentOnlyLag := externalAttachmentOnlyLag(pool, w)
+	if !workspaceCurrentlyAdmittedByCore(w) && !attachmentOnlyLag {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current workspace admission")
 	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
@@ -228,7 +229,14 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) && !externalNativeRuntimeHasOpaqueIdentity(request) {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
 	}
-	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil || w.Status.ObservedGeneration != w.Generation {
+	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil ||
+		w.Status.ObservedGeneration != w.Generation || !workspaceCurrentlyAdmittedByCore(w) {
+		if err == nil && attachmentOnlyLag {
+			// ADR 0057: only an attachment or its re-admission moved the
+			// generation; the admitted instance keeps serving, untouched,
+			// until the provider and core catch up.
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
 	pod, err := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup)
@@ -256,6 +264,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
 	}
+	if err := r.recordExternalRuntimeServed(ctx, pool, w, pod); err != nil {
+		return ctrl.Result{}, err
+	}
 	nonce := string(auth.Data[runtimePoolBootstrapNonceKey])
 	if w.Status.Allocation.Startup.Process != nil {
 		if _, err := r.seedExternalNativeCredentials(ctx, w, auth, providerSecret); err != nil {
@@ -269,7 +280,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
 		func(ctx context.Context, _ *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 			current, err := r.externalPoolWorkspace(ctx, pool)
-			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current) {
+			// An attachment that lands during verification of an instance the
+			// pool already serves does not invalidate it (ADR 0057).
+			lagging := err == nil && (current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current)) &&
+				!externalAttachmentOnlyLag(pool, current)
+			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || lagging {
 				result, err := r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "provider evidence changed during authenticated runtime verification")
 				return result, true, err
 			}
