@@ -8,13 +8,18 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -185,5 +190,76 @@ func TestTaskAdmissionHonorsAConcurrentlyRecordedGrant(t *testing.T) {
 	}
 	if granted, err := r.acquireTaskAdmissionSlot(ctx, checking, scope); err != nil || granted {
 		t.Fatalf("checking granted=%t err=%v, want the newcomer's grant to hold the only slot", granted, err)
+	}
+}
+
+// Namespace ledgers kept in the controller namespace are reaped when their
+// namespace is gone, or when no grant is live and none was made for the stale
+// interval, never while a grant is live, and never once a grant changed them.
+func TestReapNamespaceAdmissionLedgers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ledger := func(namespace string, renewed time.Time, entries ...types.UID) *coordinationv1.Lease {
+		encoded, err := json.Marshal(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		renewTime := metav1.NewMicroTime(renewed)
+		return &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "orka-system", Name: taskAdmissionNamespaceLedger + taskAdmissionLedgerDigest(namespace),
+				Labels: map[string]string{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindNamespace},
+				Annotations: map[string]string{
+					taskAdmissionLedgerNamespaceAnnotation: namespace, taskAdmissionLedgerAnnotation: string(encoded),
+				},
+			},
+			Spec: coordinationv1.LeaseSpec{RenewTime: &renewTime},
+		}
+	}
+	live := limitTestTask("live")
+	live.Namespace = "busy"
+	finished := limitTestTask("finished")
+	finished.Namespace = "idle"
+	finished.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	objects := []client.Object{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "busy"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "idle"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "fresh"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "raced"}},
+		live, finished,
+		ledger("gone", now, "gone-uid"),
+		ledger("busy", now.Add(-2*time.Hour), live.UID),
+		ledger("idle", now.Add(-2*time.Hour), finished.UID),
+		ledger("fresh", now.Add(-time.Minute)),
+		ledger("raced", now.Add(-2*time.Hour)),
+	}
+	r := newUnitReconciler(newTestScheme(), objects...)
+	base := r.Client.(client.WithWatch)
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+			if object.GetName() == taskAdmissionNamespaceLedger+taskAdmissionLedgerDigest("raced") {
+				// A grant lands between the reaper's read and its delete.
+				current := &coordinationv1.Lease{}
+				if err := delegate.Get(ctx, client.ObjectKeyFromObject(object), current); err != nil {
+					return err
+				}
+				current.Annotations[taskAdmissionLedgerAnnotation] = `["new-grant"]`
+				if err := delegate.Update(ctx, current); err != nil {
+					return err
+				}
+			}
+			return delegate.Delete(ctx, object, options...)
+		},
+	})
+	r.APIReader = base
+	r.ControllerNamespace = "orka-system"
+	if err := r.reapNamespaceAdmissionLedgers(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	for namespace, wantKept := range map[string]bool{"gone": false, "busy": true, "idle": false, "fresh": true, "raced": true} {
+		err := base.Get(ctx, types.NamespacedName{Namespace: "orka-system", Name: taskAdmissionNamespaceLedger + taskAdmissionLedgerDigest(namespace)}, &coordinationv1.Lease{})
+		if kept := err == nil; kept != wantKept {
+			t.Errorf("%s ledger kept=%t (err %v), want %t", namespace, kept, err, wantKept)
+		}
 	}
 }

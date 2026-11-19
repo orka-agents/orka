@@ -96,10 +96,15 @@ type acpPreDispatchTimings struct {
 	now     func() time.Time
 	mu      sync.Mutex
 	records map[types.UID]*acpPreDispatchRecord
+	// added holds informer Add times that arrived before the Task's first
+	// reconcile created its record; the record takes it when created.
+	added map[types.UID]time.Time
 }
 
 func newACPPreDispatchTimings(now func() time.Time) *acpPreDispatchTimings {
-	return &acpPreDispatchTimings{now: now, records: make(map[types.UID]*acpPreDispatchRecord)}
+	return &acpPreDispatchTimings{
+		now: now, records: make(map[types.UID]*acpPreDispatchRecord), added: make(map[types.UID]time.Time),
+	}
 }
 
 // acpPreDispatch is shared by the Task controller and the ACP dispatcher,
@@ -137,8 +142,7 @@ func (t *acpPreDispatchTimings) markQueueWriteIssued(task *corev1alpha1.Task) {
 // later stage, which can run after the Task's start already reported and
 // removed its record, never recreates one that nothing would report.
 func acpPreDispatchCreatesRecord(milestone acpPreDispatchMilestone) bool {
-	return milestone == acpPreDispatchInformerAdded || milestone == acpPreDispatchObserved ||
-		milestone == acpPreDispatchStatusInitialized
+	return milestone == acpPreDispatchObserved || milestone == acpPreDispatchStatusInitialized
 }
 
 // acpPreDispatchTaskAdded records the informer Add of a new agent Task with
@@ -149,7 +153,39 @@ func acpPreDispatchTaskAdded(object any, isInInitialList bool) {
 		!task.DeletionTimestamp.IsZero() || task.Status.Phase.IsTerminal() {
 		return
 	}
-	acpPreDispatch.mark(task, acpPreDispatchInformerAdded)
+	acpPreDispatch.informerAdded(task)
+}
+
+// informerAdded stamps the Add at the time it is delivered. The controller's
+// own handler enqueues the Task independently, so the first reconcile can run
+// before or after this callback. An Add that arrives first is held until the
+// first reconcile creates the record; one that arrives after the reconcile
+// was observed, or after the record finished, is later than what it would
+// measure and is dropped. It never creates a record itself.
+func (t *acpPreDispatchTimings) informerAdded(task *corev1alpha1.Task) {
+	if t == nil || task == nil || task.UID == "" || task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if record := t.records[task.UID]; record != nil {
+		if record.marks[acpPreDispatchObserved].IsZero() && record.marks[acpPreDispatchInformerAdded].IsZero() {
+			record.marks[acpPreDispatchInformerAdded] = now
+		}
+		return
+	}
+	if len(t.added) >= acpPreDispatchMaxRecords {
+		for uid, at := range t.added {
+			if now.Sub(at) >= acpPreDispatchRetention {
+				delete(t.added, uid)
+			}
+		}
+		if len(t.added) >= acpPreDispatchMaxRecords {
+			return
+		}
+	}
+	t.added[task.UID] = now
 }
 
 func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPreDispatchMilestone, replace bool) {
@@ -172,6 +208,12 @@ func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPre
 			}
 		}
 		record = &acpPreDispatchRecord{created: task.CreationTimestamp.Time}
+		if added, ok := t.added[task.UID]; ok {
+			delete(t.added, task.UID)
+			if !added.After(now) {
+				record.marks[acpPreDispatchInformerAdded] = added
+			}
+		}
 		t.records[task.UID] = record
 	}
 	if replace || record.marks[milestone].IsZero() {
@@ -198,6 +240,7 @@ func (t *acpPreDispatchTimings) finish(task *corev1alpha1.Task) *acpPreDispatchR
 	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	delete(t.added, task.UID)
 	record := t.records[task.UID]
 	if record == nil {
 		return nil

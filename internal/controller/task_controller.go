@@ -4633,6 +4633,11 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	if strings.TrimSpace(r.ControllerNamespace) != "" {
+		if err := mgr.Add(&taskAdmissionLedgerReaper{reconciler: r, interval: taskAdmissionLedgerReapInterval}); err != nil {
+			return fmt.Errorf("register task admission ledger reaper: %w", err)
+		}
+	}
 	if !r.EnforceNamespaceIsolation {
 		var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
 		if err := mgr.Add(cleanup); err != nil {

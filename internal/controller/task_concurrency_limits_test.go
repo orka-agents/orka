@@ -137,3 +137,41 @@ func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
 		}
 	}
 }
+
+// A recurring Task's scheduling parent stays Scheduled and runs nothing
+// itself, so it never holds a slot: under a limit of one, both its own child
+// run and an unrelated Task proceed.
+func TestHandlePendingRecurringParentHoldsNoSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		labeled bool
+	}{{name: "child run", labeled: true}, {name: "unrelated Task"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := limitTestTask("recurring-parent")
+			parent.Spec.Schedule = "*/5 * * * *"
+			parent.Status.Phase = corev1alpha1.TaskPhaseScheduled
+			waiting := limitTestTask("run")
+			if tc.labeled {
+				waiting.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+			}
+			r := newUnitReconciler(newTestScheme(), parent, waiting)
+			r.APIReader = r.Client
+			r.MaxTasksPerNamespace = 1
+
+			result, err := r.handlePending(context.Background(), waiting.DeepCopy())
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter == 10*time.Second {
+				t.Fatal("the recurring parent held the only namespace slot")
+			}
+			stored := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(waiting), stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status.JobName == "" {
+				t.Fatal("the waiting Task did not run")
+			}
+		})
+	}
+}

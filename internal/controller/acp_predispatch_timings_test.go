@@ -508,3 +508,49 @@ func TestExecuteReservedTaskEarlyExitKeepsPreDispatchMilestones(t *testing.T) {
 		t.Fatalf("record after the early exit: queued %s, started %s; want both kept", queued, started)
 	}
 }
+
+// The controller's handler and the timing handler both see a Task's Add, in
+// either order. An Add delivered before the first reconcile is kept for the
+// record; one delivered after the reconcile was observed, or after the record
+// finished, is dropped and never creates a record.
+func TestACPPreDispatchInformerAddedOrdering(t *testing.T) {
+	created := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	t.Run("add before the first reconcile", func(t *testing.T) {
+		clock := &steppingClock{now: created.Add(100 * time.Millisecond)}
+		timings := newACPPreDispatchTimings(clock.Now)
+		task := preDispatchTestTask("add-first", created)
+		timings.informerAdded(task)
+		if len(timings.records) != 0 {
+			t.Fatal("the Add created a record")
+		}
+		clock.Advance(400 * time.Millisecond)
+		timings.mark(task, acpPreDispatchObserved)
+		got := preDispatchValues(timings.finish(task).keysAndValues())
+		if got["informerAddedMs"] != int64(100) || got["observedMs"] != int64(400) {
+			t.Fatalf("timings = %v, want the Add then the queue wait", got)
+		}
+	})
+	t.Run("add after the first reconcile", func(t *testing.T) {
+		clock := &steppingClock{now: created.Add(100 * time.Millisecond)}
+		timings := newACPPreDispatchTimings(clock.Now)
+		task := preDispatchTestTask("reconcile-first", created)
+		timings.mark(task, acpPreDispatchObserved)
+		clock.Advance(50 * time.Millisecond)
+		timings.informerAdded(task)
+		got := preDispatchValues(timings.finish(task).keysAndValues())
+		if _, ok := got["informerAddedMs"]; ok || got["observedMs"] != int64(100) {
+			t.Fatalf("timings = %v, want the late Add dropped and observed kept", got)
+		}
+	})
+	t.Run("add after the record finished", func(t *testing.T) {
+		timings := newACPPreDispatchTimings(time.Now)
+		task := preDispatchTestTask("finished", created)
+		timings.mark(task, acpPreDispatchObserved)
+		timings.finish(task)
+		timings.informerAdded(task)
+		timings.mark(task, acpPreDispatchReserved)
+		if len(timings.records) != 0 {
+			t.Fatal("a late Add recreated a finished record")
+		}
+	})
+}
