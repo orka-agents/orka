@@ -139,6 +139,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			// exclusively held by this Task; no RuntimePool demand exists yet.
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+		if workspaceName != "" {
+			acpPreDispatch.mark(task, acpPreDispatchWorkspaceReady)
+		}
 		runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
 			promptAttemptHasRuntimeOrSessionBinding(attempt)
 		allowCreate := delivery.allowPoolCreation && !runtimeBound
@@ -178,6 +181,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			}
 			return ctrl.Result{}, err
 		}
+		acpPreDispatch.mark(task, acpPreDispatchRuntimePoolReady)
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
 		if !externalDispatch && (task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
@@ -228,6 +232,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("persist ACP prompt attempt: %w", err)
 	}
+	acpPreDispatch.mark(task, acpPreDispatchAttemptPersisted)
 
 	metadataBase := task.DeepCopy()
 	if task.Labels == nil {
@@ -287,6 +292,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			ObservedAt:    &now,
 		}.Status()
 	}
+	acpPreDispatch.markQueueWriteIssued(task)
 	if err := r.Status().Patch(ctx, task, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, err
 	}

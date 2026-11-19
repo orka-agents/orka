@@ -353,6 +353,8 @@ func main() {
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
 	var taskWebhookDeliveryWorkers int
+	var taskMaxConcurrentReconciles int
+	var runtimePoolMaxConcurrentReconciles int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -626,6 +628,15 @@ func main() {
 	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
 		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
 			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
+	flag.IntVar(&runtimePoolMaxConcurrentReconciles, "runtime-pool-max-concurrent-reconciles",
+		controller.DefaultRuntimePoolMaxConcurrentReconciles,
+		fmt.Sprintf("Different RuntimePools the RuntimePool controller reconciles at once (1-%d); a pool is never "+
+			"reconciled concurrently with itself, so concurrent cold starts publish their workloads without "+
+			"queueing behind each other.", controller.MaxRuntimePoolMaxConcurrentReconciles))
+	flag.IntVar(&taskMaxConcurrentReconciles, "task-max-concurrent-reconciles", controller.DefaultTaskMaxConcurrentReconciles,
+		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
+			"concurrently with itself, and --max-tasks-per-namespace and coordination maxConcurrentChildren "+
+			"grant slots through a resourceVersion-checked ledger, so they stay exact.", controller.MaxTaskMaxConcurrentReconciles))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -641,7 +652,7 @@ func main() {
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
-		"Maximum active tasks per namespace (0 = unlimited).")
+		fmt.Sprintf("Maximum admitted tasks per namespace (0 = unlimited, at most %d).", controller.MaxTaskAdmissionSlots))
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
@@ -983,6 +994,16 @@ func main() {
 	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
 		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
 			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
+		os.Exit(1)
+	}
+	if runtimePoolMaxConcurrentReconciles < 1 || runtimePoolMaxConcurrentReconciles > controller.MaxRuntimePoolMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --runtime-pool-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			runtimePoolMaxConcurrentReconciles, controller.MaxRuntimePoolMaxConcurrentReconciles)
+		os.Exit(1)
+	}
+	if taskMaxConcurrentReconciles < 1 || taskMaxConcurrentReconciles > controller.MaxTaskMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --task-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			taskMaxConcurrentReconciles, controller.MaxTaskMaxConcurrentReconciles)
 		os.Exit(1)
 	}
 
@@ -1805,7 +1826,12 @@ func main() {
 	acpOpencodeRuntimeImage = images.Opencode
 
 	sessionManager.SetGatewayEventStore(appStorage)
-	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
+	if maxTasksPerNamespace < 0 || maxTasksPerNamespace > controller.MaxTaskAdmissionSlots {
+		setupLog.Error(nil, fmt.Sprintf("invalid --max-tasks-per-namespace: must be between 0 (unlimited) and %d", controller.MaxTaskAdmissionSlots),
+			"maxTasksPerNamespace", maxTasksPerNamespace)
+		os.Exit(1)
+	}
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // validated to 0..MaxTaskAdmissionSlots
 	gatewayConfig := gatewayruntime.Config{
 		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
@@ -1905,12 +1931,13 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
-		SubstrateRouter:      runtimePoolSubstrateRouter,
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Scheme:               mgr.GetScheme(),
-		RuntimeNamespace:     acpRuntimeNamespace,
-		WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
+		MaxConcurrentReconciles: runtimePoolMaxConcurrentReconciles,
+		SubstrateRouter:         runtimePoolSubstrateRouter,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Scheme:                  mgr.GetScheme(),
+		RuntimeNamespace:        acpRuntimeNamespace,
+		WorkspaceCleanupOnly:    !workspaceProviderAPIEnabled,
 	}
 	providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 	if err != nil {
@@ -1979,6 +2006,7 @@ func main() {
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
+		MaxConcurrentReconciles:      taskMaxConcurrentReconciles,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,

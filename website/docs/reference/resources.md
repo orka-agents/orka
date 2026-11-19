@@ -279,7 +279,7 @@ spec:
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
 | `approvalRequiredTools` | list | `[]` | Custom Tool CRD names that require human approval before execution in enabled autonomous coordination mode. Built-in tools, including `request_approval`, are rejected |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
-| `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
+| `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks (values above 4096 admit 4096) |
 | `maxDepth` | int32 | `3` | Maximum delegation depth |
 
 Enabling coordination adds Orka's coordination, memory, GitHub pull request, agent

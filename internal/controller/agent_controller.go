@@ -588,7 +588,11 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		}
 		agent.Status.ActiveTasks = activeCount
 		agent.Status.Ready = validationErr == nil
-		agent.Status.LastUsed = lastUsed
+		// LastUsed only moves forward: a Task completion may have recorded
+		// a newer use since this pass read the Agent.
+		if lastUsed != nil && (agent.Status.LastUsed == nil || agent.Status.LastUsed.Before(lastUsed)) {
+			agent.Status.LastUsed = lastUsed
+		}
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
 		setAgentIdentityCondition(agent, now, identity)
 		// The claim was decided from observedClaim; never write it over a
