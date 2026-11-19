@@ -201,9 +201,10 @@ func (r *TaskReconciler) startACPWorkspaceSpeculativeRuntime(
 	logger := logf.FromContext(ctx).V(1)
 	key := types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := r.Get(ctx, key, workspace); err != nil || workspace.Spec.Attachment != nil {
+	if err := r.Get(ctx, key, workspace); (err != nil && !apierrors.IsNotFound(err)) || (err == nil && workspace.Spec.Attachment != nil) {
 		// Another Task holds the attachment: nothing to start, and no API
-		// read for a Task queued behind a long turn.
+		// read for a Task queued behind a long turn. A workspace this pass
+		// just created is not cached yet; the uncached read below finds it.
 		return
 	}
 	// Re-read through the uncached reader: this pass may have just recorded a
@@ -228,7 +229,9 @@ func (r *TaskReconciler) startACPWorkspaceSpeculativeRuntime(
 			if flipErr := r.flipACPWorkspaceForColdResume(ctx, workspace, task, binding.Class.EffectiveOnDetach); flipErr != nil {
 				logger.Info("cold-resume flip deferred", "workspace", workspace.Name, "error", flipErr.Error())
 			}
+			return
 		}
+		acpPreDispatch.mark(task, acpPreDispatchSpeculativePoolActivated)
 		return
 	}
 	if !acpWorkspaceSpeculativeStartEligible(workspace, task) {
@@ -250,7 +253,9 @@ func (r *TaskReconciler) startACPWorkspaceSpeculativeRuntime(
 		ctx, task.Namespace, plan, workspace.Name, string(workspace.UID), string(task.UID), allowCreate, requiredUID, false,
 	); err != nil {
 		logger.Info("speculative workspace runtime demand deferred", "workspace", workspace.Name, "error", err.Error())
+		return
 	}
+	acpPreDispatch.mark(task, acpPreDispatchSpeculativePoolActivated)
 }
 
 // recordACPWorkspaceSpeculativeStart records this Task's speculative start
@@ -314,6 +319,35 @@ func (r *TaskReconciler) recordACPWorkspaceSpeculativeStart(
 		logger.Info("speculative workspace start not recorded", "workspace", workspace.Name, "error", err.Error())
 	}
 	return recorded
+}
+
+// acpWorkspaceAwaitsStagedInstall reports that this Task's first-turn
+// attachment is staged and an activated RuntimePool will install it in its
+// publication write, so the Task should not attach separately. The wait ends
+// when the publication lands (with or without the install), the speculative
+// start expires, or the pool is missing, deleting, or degraded.
+func (r *TaskReconciler) acpWorkspaceAwaitsStagedInstall(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	poolName string,
+	now time.Time,
+) bool {
+	if workspace.Spec.Attachment != nil || workspace.Spec.Workload != nil || poolName == "" {
+		return false
+	}
+	intent, staged := parseACPWorkspaceAttachmentIntent(workspace)
+	deadline, owner, marked := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+	if !staged || intent.TaskUID != task.UID || !marked || owner != string(task.UID) || !now.Before(deadline) {
+		return false
+	}
+	pool := &corev1alpha1.RuntimePool{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool); err != nil {
+		return false
+	}
+	return pool.DeletionTimestamp.IsZero() && pool.Spec.DesiredReplicas > 0 &&
+		pool.Annotations[acpExecutionWorkspaceUIDAnnotation] == string(workspace.UID) &&
+		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded
 }
 
 // acpWorkspaceRetainedDataAvailable reports that the workspace's current
