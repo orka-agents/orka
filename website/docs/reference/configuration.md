@@ -438,6 +438,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
+| `--acp-workspace-default-suspend-after-detach` | `5m` | Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets none; `0` disables it (ADR 0057) |
 | `--acp-workspace-allow-provider-token-in-sandbox` | `ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX` env or `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway; when false they fail admission |
 | `--operator-workspace-access-enabled` | `false` | Serve `orka task exec` / `orka task cp`. Each call also needs the class `acp.workspace.orka.ai/operator-access` opt-in and the `tasks/exec` or `tasks/files` permission; write-capable access taints the session. Requires Task provenance admission. See [Operator workspace access](../guides/operator-workspace-access.md) |
 | `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
@@ -690,7 +691,7 @@ readiness and Task binding fail closed.
 | `idleTimeout` | class lifecycle | Idle suspended workspaces expire; idle `Ready` workspaces take the class default action. |
 | `maxLifetime` | class lifecycle | Hard cleanup bound, always. |
 | `spec.retention.maxSuspendedWorkspaces` | provider-owned workspace profile | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
-| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. No default. |
+| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. When unset, new workspaces use the controller default below. |
 
 A queued continuation may take a still-`Ready` workspace directly. Deletion policies that
 retain data past workspace deletion are rejected.
@@ -707,7 +708,24 @@ count against `maxSuspendedWorkspaces`. If that cap is full when the window ends
 runtime stops and the workspace stays `Ready`; retention applies the pending Suspend once
 the cap has room. Each warm workspace holds one private worker Pod for up to the window.
 
-ADRs 0026–0030 and 0055 carry the full contract.
+When a profile sets no `suspendAfterDetach`, Core freezes a default window into each new
+session-reused Substrate workspace whose class allows Suspend with a `DataOnly` profile. The
+`--acp-workspace-default-suspend-after-detach` flag sets it (default `5m`; `0` disables it). The
+`acp.workspace.orka.ai/default-suspend-after-detach` annotation on an `ExecutionWorkspaceClass`
+overrides it for new workspaces of that class with another duration, or opts the class out with
+`disabled`. A default that is not shorter than `idleTimeout` and `maxLifetime` is not applied.
+Existing workspaces keep the window they froze, and the default never changes profile, class,
+or binding hashes. Each default window costs one idle Actor slot per Session for its duration:
+one Actor's reservation on a shared worker, or one worker Pod on a private one.
+
+Core also starts a workspace runtime speculatively. A Session follow-up that cold-resumes a
+suspended workspace, or the first turn of a new workspace, lets the provider start booting
+before the Task's attachment handshake completes. The runtime passes every startup attestation
+and credential bootstrap, and receives no prompt until the Task holds the attachment. A start
+nobody claims within two minutes, or whose Task is cancelled, is retired through the ordinary
+data-preserving path.
+
+ADRs 0026–0030, 0055, and 0057 carry the full contract.
 
 ### External API OIDC authentication
 

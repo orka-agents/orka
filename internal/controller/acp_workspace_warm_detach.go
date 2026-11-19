@@ -168,6 +168,7 @@ func (r *TaskReconciler) settleACPWorkspaceWarm(
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return false, true, nil
@@ -327,9 +328,21 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 
 // validateACPWorkspaceSuspendAfterDetach verifies a materialized window when
 // present. An absent window stays admissible so a workspace created before
-// the annotation existed can be backfilled.
+// the annotation existed can be backfilled. A window frozen from the
+// controller default (ADR 0057) is admissible only for a binding whose
+// profile sets none, whatever default the current controller uses.
 func validateACPWorkspaceSuspendAfterDetach(workspace *workspacev1alpha1.ExecutionWorkspace, expected string) error {
 	raw, present := workspace.Annotations[acpWorkspaceSuspendAfterDetachAnnotation]
+	source, sourced := workspace.Annotations[acpWorkspaceSuspendAfterDetachSourceAnnotation]
+	if sourced {
+		if source != acpWorkspaceSuspendAfterDetachSourceDefault || !present || expected != "" {
+			return fmt.Errorf("%w: workspace %s default warm-detach window does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
+		}
+		if _, err := parseACPWorkspaceSuspendAfterDetach(raw); err != nil {
+			return fmt.Errorf("%w: workspace %s default warm-detach window is invalid", errACPWorkspaceBindingConflict, workspace.Name)
+		}
+		return nil
+	}
 	if !present {
 		return nil
 	}
