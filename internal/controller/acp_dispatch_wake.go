@@ -31,6 +31,7 @@ const acpDispatchWakeMinInterval = 200 * time.Millisecond
 // scan earlier: reservation still re-reads the Task, the epoch fence, and the
 // RuntimePool admission state.
 func (d *ACPDispatcher) Wake() {
+	d.wokenAt.CompareAndSwap(0, time.Now().UnixNano())
 	select {
 	case d.wakeChannel() <- struct{}{}:
 	default:

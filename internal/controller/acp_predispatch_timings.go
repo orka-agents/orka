@@ -264,7 +264,7 @@ func (t *acpPreDispatchTimings) report(ctx context.Context, task *corev1alpha1.T
 	if record.marks[acpPreDispatchQueued].IsZero() {
 		logger = logger.V(1)
 	}
-	values := append([]any{"namespace", task.Namespace, acpCancelLogKeyTask, task.Name}, record.keysAndValues()...)
+	values := append([]any{acpCancelLogKeyNamespace, task.Namespace, acpCancelLogKeyTask, task.Name}, record.keysAndValues()...)
 	logger.Info(acpPreDispatchTimingsLogMessage, values...)
 }
 
@@ -312,6 +312,7 @@ type acpDispatchScanTimer struct {
 }
 
 const (
+	acpSessionPlanTimingsLogMessage  = "ACP session plan timings"
 	acpReservationTimingsLogMessage  = "ACP reservation timings"
 	acpDispatchScanTimingsLogMessage = "ACP dispatch scan timings"
 	acpDispatchScanSlowThreshold     = 500 * time.Millisecond
@@ -343,4 +344,19 @@ func (s *acpDispatchScanTimer) log(ctx context.Context) {
 		"totalMs", acpPreDispatchMillis(total), "queued", s.queued, "reserved", s.reserved, "poolRetirement", s.retired,
 	}, s.values...)
 	logf.FromContext(ctx).V(1).Info(acpDispatchScanTimingsLogMessage, values...)
+}
+
+type acpStepsKey struct{}
+
+// withACPSteps carries a step timer through calls that time their own steps,
+// such as Session planning, without widening their signatures.
+func withACPSteps(ctx context.Context, steps *acpDispatchScanTimer) context.Context {
+	return context.WithValue(ctx, acpStepsKey{}, steps)
+}
+
+// markACPStep marks a step on the context's timer, if it carries one.
+func markACPStep(ctx context.Context, step string) {
+	if steps, ok := ctx.Value(acpStepsKey{}).(*acpDispatchScanTimer); ok {
+		steps.mark(step)
+	}
 }
