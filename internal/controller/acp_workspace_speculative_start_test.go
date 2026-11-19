@@ -11,6 +11,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -455,13 +457,18 @@ func (f *speculativeTaskFixture) start(t *testing.T, task *corev1alpha1.Task, al
 func TestSpeculativeStartRecordsOnceAndActivatesThePool(t *testing.T) {
 	t.Parallel()
 	f := newSpeculativeTaskFixture(t)
-	before := time.Now()
+	// The creating write already recorded the start.
+	created := f.workspace(t).Annotations[acpWorkspaceSpeculativeStartAnnotation]
 	f.start(t, f.task, true, "")
 	workspace := f.workspace(t)
 	deadline, owner, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
-	if !ok || owner != string(f.task.UID) || deadline.Before(before.Add(acpWorkspaceSpeculativeStartTTL)) ||
-		deadline.After(time.Now().Add(acpWorkspaceSpeculativeStartTTL)) {
-		t.Fatalf("speculative start = %q, want this Task for %s", workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation], acpWorkspaceSpeculativeStartTTL)
+	if !ok || owner != string(f.task.UID) || !deadline.After(time.Now()) ||
+		deadline.After(time.Now().Add(acpWorkspaceSpeculativeStartTTL)) || workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] != created {
+		t.Fatalf("speculative start = %q, want the creating write's start for this Task", workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+	}
+	intent, staged := parseACPWorkspaceAttachmentIntent(workspace)
+	if !staged || intent.TaskUID != f.task.UID || intent.Epoch != 1 {
+		t.Fatalf("staged attachment = %q, want this Task at epoch 1", workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation])
 	}
 	pool, exists := f.pool(t)
 	if !exists || pool.Spec.DesiredReplicas != 1 || pool.Labels[acpExecutionWorkspaceLinkLabel] != workspace.Name ||
@@ -546,10 +553,17 @@ func TestSpeculativeStartRefusesIneligibleRequests(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			f := newSpeculativeTaskFixture(t)
+			// Start from a workspace whose creating write recorded no start.
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+			})
 			task := test.mutate(t, f)
 			f.start(t, task, true, "")
 			if _, present := f.workspace(t).Annotations[acpWorkspaceSpeculativeStartAnnotation]; present {
 				t.Fatal("ineligible request recorded a speculative start")
+			}
+			if _, present := f.workspace(t).Annotations[acpWorkspaceAttachmentIntentAnnotation]; present {
+				t.Fatal("ineligible request staged an attachment")
 			}
 			if _, exists := f.pool(t); exists {
 				t.Fatal("ineligible request created RuntimePool demand")
@@ -575,6 +589,42 @@ func (f *speculativeTaskFixture) bootSpeculativeWorkload(t *testing.T) {
 	})
 }
 
+// installStagedAttachment stands in for the RuntimePool's publication write:
+// it installs the requester's staged attachment exactly as the pool does.
+func (f *speculativeTaskFixture) installStagedAttachment(t *testing.T, resume bool) *workspacev1alpha1.ExecutionWorkspaceAttachment {
+	t.Helper()
+	workspace := f.workspace(t)
+	attachment, err := installableACPWorkspaceAttachmentIntent(context.Background(), f.r.APIReader, workspace, resume, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment == nil {
+		return nil
+	}
+	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+		if resume {
+			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+		}
+		w.Spec.Attachment, w.Spec.AttachmentEpoch = attachment, attachment.Epoch
+		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
+	})
+	return attachment
+}
+
+func (f *speculativeTaskFixture) settleUntilDone(t *testing.T, task *corev1alpha1.Task) {
+	t.Helper()
+	for range 4 {
+		done, err := f.r.settleACPClassWorkspace(context.Background(), f.reloadTask(t, task))
+		if err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		if done {
+			return
+		}
+	}
+	t.Fatal("settlement did not complete")
+}
+
 func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -583,38 +633,121 @@ func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 	f.bootSpeculativeWorkload(t)
 
 	// A concurrent continuation of the same Session reaches the booting
-	// workspace first. It may claim it: the runtime is Session-scoped, cold
-	// booted, and unreachable until the post-attach handshake.
+	// workspace first. The requester's staged attachment holds the one-writer
+	// Lease, so the rival waits.
 	rival := f.task.DeepCopy()
 	rival.ObjectMeta = metav1.ObjectMeta{Namespace: f.task.Namespace, Name: "rival-continuation", UID: "rival-continuation-uid"}
 	rival.Status = corev1alpha1.TaskStatus{}
 	if err := f.r.Create(ctx, rival); err != nil {
 		t.Fatal(err)
 	}
-	if _, ready := attachTestACPWorkspace(t, f.r, rival, f.plan, f.key.Name); !ready {
-		t.Fatal("rival continuation did not attach the booting speculative workspace")
+	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, rival, f.plan); err != nil || ready {
+		t.Fatalf("rival ensure = (%v, %v), want queued behind the staged attachment", ready, err)
 	}
-	claimed := f.workspace(t)
-	if claimed.Spec.Attachment == nil || claimed.Spec.Attachment.TaskRef.UID != rival.UID {
-		t.Fatalf("attachment = %#v, want the rival", claimed.Spec.Attachment)
-	}
-	if _, present := claimed.Annotations[acpWorkspaceSpeculativeStartAnnotation]; present {
-		t.Fatal("the attachment did not claim the speculative start")
-	}
-	if claimed.Spec.Workload == nil || claimed.Spec.Workload.Sequence != 1 {
-		t.Fatal("claiming the speculative start replaced its request")
+	if got := f.workspace(t); got.Spec.Attachment != nil {
+		t.Fatalf("rival took the attachment staged for the requester: %#v", got.Spec.Attachment)
 	}
 
-	// The requester can neither attach nor re-record a start now.
-	if err := validateACPClassWorkspaceAttachmentAttempt(claimed, f.task, f.plan.Workspace, f.plan.PoolName, time.Now()); !errors.Is(err, ErrWorkspaceAttachmentLocked) {
-		t.Fatalf("requester attach error = %v, want the one-writer lock", err)
+	// The publication installs the requester's staged attachment.
+	installed := f.installStagedAttachment(t, false)
+	if installed == nil || installed.TaskRef.UID != f.task.UID || installed.Epoch != 1 {
+		t.Fatalf("installed attachment = %#v, want the requester at epoch 1", installed)
 	}
-	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, f.task, f.plan); err != nil || ready {
-		t.Fatalf("requester ensure = (%v, %v), want queued behind the rival", ready, err)
+	claimed := f.workspace(t)
+	if _, present := claimed.Annotations[acpWorkspaceAttachmentIntentAnnotation]; present {
+		t.Fatal("the install kept the staged attachment")
 	}
-	f.start(t, f.task, true, "")
-	if _, present := f.workspace(t).Annotations[acpWorkspaceSpeculativeStartAnnotation]; present {
-		t.Fatal("requester re-recorded a start on an attached workspace")
+	if claimed.Spec.Workload == nil || claimed.Spec.Workload.Sequence != 1 {
+		t.Fatal("installing the attachment replaced its request")
+	}
+	// Nothing installs it twice, and the rival stays locked out.
+	if again, err := installableACPWorkspaceAttachmentIntent(ctx, f.r.APIReader, claimed, false, time.Now()); err != nil || again != nil {
+		t.Fatalf("second install = (%#v, %v)", again, err)
+	}
+	if err := validateACPClassWorkspaceAttachmentAttempt(claimed, rival, f.plan.Workspace, f.plan.PoolName, time.Now()); !errors.Is(err, ErrWorkspaceAttachmentLocked) {
+		t.Fatalf("rival attach error = %v, want the one-writer lock", err)
+	}
+	// The requester completes its handshake on the installed attachment.
+	acknowledgeTestACPWorkspaceAttachment(t, f.r, claimed)
+	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, f.task, f.plan); err != nil || !ready {
+		t.Fatalf("requester ensure = (%v, %v), want ready on the installed attachment", ready, err)
+	}
+	if final := f.workspace(t); final.Spec.Attachment == nil || final.Spec.Attachment.TaskRef.UID != f.task.UID ||
+		final.Annotations[acpWorkspaceSpeculativeStartAnnotation] != "" {
+		t.Fatal("the requester's attachment did not claim the speculative start")
+	}
+}
+
+// installableACPWorkspaceAttachmentIntent rechecks every fence of the staged
+// attachment against the exact object version the publication writes.
+func TestStagedAttachmentInstallRechecksEveryFence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *speculativeTaskFixture)
+	}{
+		{name: "epoch advanced", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) { w.Spec.AttachmentEpoch = 1 })
+		}},
+		{name: "workspace tainted", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) { w.Annotations[operatoraccess.TaintAnnotation] = "x" })
+		}},
+		{name: "linked Task tainted", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			task := f.reloadTask(t, f.task)
+			task.Annotations[operatoraccess.TaintAnnotation] = "x"
+			if err := f.r.Update(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "demand moved to another Task", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano) + " other other-uid"
+			})
+		}},
+		{name: "settlement pending", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Annotations[acpWorkspaceRevocationStartedAnnotation] = "1 " + time.Now().UTC().Format(time.RFC3339Nano)
+			})
+		}},
+		{name: "Lease taken over", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			lease := &coordinationv1.Lease{}
+			if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentLeaseName(f.key.Name)}, lease); err != nil {
+				t.Fatal(err)
+			}
+			holder := "other-uid"
+			lease.Spec.HolderIdentity = &holder
+			if err := f.r.Update(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "Secret replaced", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			secret := &corev1.Secret{}
+			if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentSecretName(f.key.Name, 1)}, secret); err != nil {
+				t.Fatal(err)
+			}
+			secret.Data[workspaceAttachmentTokenKey] = []byte("forged")
+			if err := f.r.Update(ctx, secret); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "already attached", mutate: func(t *testing.T, f *speculativeTaskFixture) {
+			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+				w.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: 1, TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: "other", UID: "other-uid"}}
+				w.Spec.AttachmentEpoch = 1
+			})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSpeculativeTaskFixture(t)
+			f.start(t, f.task, true, "")
+			f.bootSpeculativeWorkload(t)
+			test.mutate(t, f)
+			if attachment, err := installableACPWorkspaceAttachmentIntent(ctx, f.r.APIReader, f.workspace(t), false, time.Now()); err != nil || attachment != nil {
+				t.Fatalf("install = (%#v, %v), want refused", attachment, err)
+			}
+		})
 	}
 }
 
@@ -658,13 +791,20 @@ func TestCancelledFirstTurnAfterSpeculativeStartDeletesTheWorkspace(t *testing.T
 	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Finalizers = append(w.Finalizers, executionWorkspaceFinalizer)
 	})
-	task := f.reloadTask(t, f.task)
-	if done, err := f.r.settleACPClassWorkspace(ctx, task); err != nil || !done {
-		t.Fatalf("settle = (%v, %v), want completion", done, err)
-	}
+	f.settleUntilDone(t, f.task)
 	deleted := f.workspace(t)
 	if deleted.DeletionTimestamp.IsZero() {
 		t.Fatal("settlement kept the empty speculative workspace")
+	}
+	// The staged attachment it never installed is released with it.
+	if _, present := deleted.Annotations[acpWorkspaceAttachmentIntentAnnotation]; present {
+		t.Fatal("settlement kept the staged attachment")
+	}
+	if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentSecretName(f.key.Name, 1)}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("staged attachment Secret = %v, want deleted", err)
+	}
+	if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentLeaseName(f.key.Name)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("staged attachment Lease = %v, want released", err)
 	}
 	demand := &WorkspaceRuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.APIReader}
 	if _, err := demand.Reconcile(ctx, ctrl.Request{NamespacedName: f.key}); err != nil {
@@ -679,6 +819,13 @@ func TestCancelledFirstTurnAfterSpeculativeStartDeletesTheWorkspace(t *testing.T
 // turn and its data-only suspension, leaving the stopped pool in place.
 func (f *speculativeTaskFixture) suspendAfterFirstTurn(t *testing.T) *corev1alpha1.RuntimePool {
 	t.Helper()
+	return f.suspendAfterFirstTurnWith(t, "first-rev")
+}
+
+// suspendAfterFirstTurnWith suspends the first turn under revision; only a
+// digest revision proves retained data a speculative resume may publish from.
+func (f *speculativeTaskFixture) suspendAfterFirstTurnWith(t *testing.T, revision string) *corev1alpha1.RuntimePool {
+	t.Helper()
 	ctx := context.Background()
 	f.start(t, f.task, true, "")
 	pool, exists := f.pool(t)
@@ -691,17 +838,20 @@ func (f *speculativeTaskFixture) suspendAfterFirstTurn(t *testing.T) *corev1alph
 	}
 	workspace := f.workspace(t)
 	key := workspacev1alpha1.AllocationKey{Namespace: workspace.Namespace, Name: workspace.Name, WorkspaceUID: workspace.UID, ProviderUID: workspace.Spec.ProviderBinding.UID}
-	identity := workspacev1alpha1.InstanceIdentity{AllocationID: "allocation", InstanceID: "first-instance", RequestRevision: "first-rev"}
+	identity := workspacev1alpha1.InstanceIdentity{AllocationID: "allocation", InstanceID: "first-instance", RequestRevision: revision}
 	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 		w.Spec.AttachmentEpoch = 1
-		w.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 1, Key: key, Revision: "first-rev"}
+		w.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 1, Key: key, Revision: revision}
 		w.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: 1, Identity: identity, Action: workspacev1alpha1.WorkloadRetirementSuspend}
 		w.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
 		w.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt(string(f.task.UID), 1)
 		delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
 		delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 	})
+	// The first turn's staged attachment was installed and later revoked.
+	f.releaseFirstTurnAttachment(t)
 	workspace = f.workspace(t)
 	admitTestACPWorkspace(t, f.r, workspace)
 	f.patchStatus(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
@@ -727,6 +877,21 @@ func (f *speculativeTaskFixture) continuation(t *testing.T, name string) *corev1
 	return bindSuspendableSessionTaskForSettlement(t, f.r, continuation)
 }
 
+func (f *speculativeTaskFixture) releaseFirstTurnAttachment(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	for _, object := range []client.Object{
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.key.Namespace, Name: attachmentSecretName(f.key.Name, 1)}},
+		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: f.key.Namespace, Name: attachmentLeaseName(f.key.Name)}},
+	} {
+		if err := f.r.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Without verified retained data the continuation flips the workspace itself,
+// as before ADR 0057's RuntimePool-driven resume.
 func TestSpeculativeResumeStartsAtTheFlipAndRetiresWhenTheContinuationIsCancelled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

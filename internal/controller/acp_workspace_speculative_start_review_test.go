@@ -144,9 +144,7 @@ func TestExpiredSpeculativeStartNeverStallsItsTask(t *testing.T) {
 		}
 		// The failed first turn's settlement deletes the empty incarnation,
 		// so the retry gets a fresh workspace.
-		if done, err := f.r.settleACPClassWorkspace(ctx, f.reloadTask(t, f.task)); err != nil || !done {
-			t.Fatalf("settle = (%v, %v)", done, err)
-		}
+		f.settleUntilDone(t, f.task)
 		remaining := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := f.r.Get(ctx, f.key, remaining); err == nil {
 			if remaining.DeletionTimestamp.IsZero() {
