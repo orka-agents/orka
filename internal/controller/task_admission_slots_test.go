@@ -12,12 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -482,5 +484,77 @@ func TestChildAdmissionCountsOnlyThisParentIncarnation(t *testing.T) {
 	r := newUnitReconciler(newTestScheme())
 	if r.childrenAdmissionScope(oldParent, 1).ledger == r.childrenAdmissionScope(parent, 1).ledger {
 		t.Fatal("the old and new parent share a child ledger")
+	}
+}
+
+// Children pinned to a replaced parent are never granted a slot under the
+// Task that now holds its name: its scope does not list them, so a grant
+// written for one would be dropped by the next request and let several run
+// past the limit. The new parent's children are still admitted up to it, and
+// a Task the namespace scope no longer lists is not admitted either.
+func TestAdmissionNeverGrantsATaskItsScopeDoesNotList(t *testing.T) {
+	ctx := context.Background()
+	parent := limitTestTask("coordinator")
+	parent.UID = "coordinator-new"
+	child := func(name string, ownerUID types.UID) *corev1alpha1.Task {
+		task := limitTestTask(name)
+		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+		isController := true
+		task.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: ownerUID, Controller: &isController,
+		}}
+		return task
+	}
+	annotated := limitTestTask("old-annotated")
+	annotated.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+	annotated.Annotations = map[string]string{labels.AnnotationParentTaskUID: "coordinator-old"}
+	stale := []*corev1alpha1.Task{child("old-a", "coordinator-old"), child("old-b", "coordinator-old"), child("old-c", "coordinator-old"), annotated}
+	first, second := child("new-a", parent.UID), child("new-b", parent.UID)
+	objects := make([]client.Object, 0, 3+len(stale))
+	objects = append(objects, parent, first, second)
+	for _, task := range stale {
+		objects = append(objects, task)
+	}
+	r := newUnitReconciler(newTestScheme(), objects...)
+	r.APIReader = r.Client
+	scope := r.childrenAdmissionScope(parent, 1)
+
+	for range 2 {
+		for _, task := range stale {
+			if granted, err := r.acquireTaskAdmissionSlot(ctx, task, scope); err != nil || granted {
+				t.Fatalf("%s pinned to the replaced parent: granted=%t err=%v, want no grant", task.Name, granted, err)
+			}
+		}
+	}
+	lease := &coordinationv1.Lease{}
+	if err := r.Get(ctx, scope.ledger, lease); !apierrors.IsNotFound(err) {
+		t.Fatalf("the new parent's ledger was written for children it does not list: %v %v", err, lease.Annotations)
+	}
+
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, first, scope); err != nil || !granted {
+		t.Fatalf("the new parent's first child: granted=%t err=%v, want it admitted", granted, err)
+	}
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, second, scope); err != nil || granted {
+		t.Fatalf("the new parent's second child: granted=%t err=%v, want the limit of one to hold it", granted, err)
+	}
+	for _, task := range stale {
+		if granted, err := r.acquireTaskAdmissionSlot(ctx, task, scope); err != nil || granted {
+			t.Fatalf("%s pinned to the replaced parent: granted=%t err=%v once a slot is held", task.Name, granted, err)
+		}
+	}
+	if err := r.Get(ctx, scope.ledger, lease); err != nil {
+		t.Fatal(err)
+	}
+	grants, err := decodeTaskAdmissionLedger(lease.Annotations[taskAdmissionLedgerAnnotation])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(grants, []types.UID{first.UID}) {
+		t.Fatalf("ledger grants = %v, want only %s", grants, first.UID)
+	}
+
+	gone := limitTestTask("deleted")
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, gone, r.namespaceAdmissionScope("default", 10)); err != nil || granted {
+		t.Fatalf("a Task the namespace does not list: granted=%t err=%v, want no grant", granted, err)
 	}
 }

@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,5 +224,72 @@ func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
 	}
 	if stored.UID != replacement.UID || got.UID != replacement.UID {
 		t.Fatalf("stored UID %s, returned UID %s; want the concurrent replacement %s kept", stored.UID, got.UID, replacement.UID)
+	}
+}
+
+// A child pinned to a replaced parent fails terminally rather than being
+// admitted under the Task that now holds the parent's name, whose children
+// limit does not count it. Several such children cannot each run under a
+// limit of one, and the new parent's own child is still admitted. A cache
+// that still holds the earlier parent does not fail the new parent's child.
+func TestCoordinationChildOfAReplacedParentIsNeverAdmitted(t *testing.T) {
+	ctx := context.Background()
+	parentAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{
+			Enabled: true, MaxConcurrentChildren: 1,
+		}},
+	}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-new"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: parentAgent.Name}},
+	}
+	child := func(name string, parentUID types.UID) *corev1alpha1.Task {
+		task := limitTestTask(name)
+		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+		task.Annotations = map[string]string{labels.AnnotationCoordinationDepth: "1"}
+		isController := true
+		task.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: parentUID, Controller: &isController,
+		}}
+		return task
+	}
+	stale := []*corev1alpha1.Task{child("old-a", "parent-old"), child("old-b", "parent-old"), child("old-c", "parent-old")}
+	current := child("new-a", parent.UID)
+	objects := make([]client.Object, 0, 3+len(stale))
+	objects = append(objects, parentAgent, parent, current)
+	for _, task := range stale {
+		objects = append(objects, task)
+	}
+	r := newUnitReconciler(newTestScheme(), objects...)
+	r.APIReader = r.Client
+
+	for _, task := range stale {
+		if _, err, handled := r.validateCoordinationConstraints(ctx, task.DeepCopy()); err != nil || !handled {
+			t.Fatalf("%s: handled=%t err=%v, want a terminal failure", task.Name, handled, err)
+		}
+		stored := &corev1alpha1.Task{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(stored.Status.Message, "was replaced") {
+			t.Fatalf("%s: phase=%s message=%q, want it failed as a child of a replaced parent", task.Name, stored.Status.Phase, stored.Status.Message)
+		}
+	}
+	if _, err, handled := r.validateCoordinationConstraints(ctx, current.DeepCopy()); err != nil || handled {
+		t.Fatalf("the new parent's child: handled=%t err=%v, want it admitted", handled, err)
+	}
+
+	// The cache still holds the earlier parent; the API server has the new
+	// one. The new parent's child is confirmed against the API server and
+	// admitted, not failed as a child of a replaced parent.
+	cachedParent := parent.DeepCopy()
+	cachedParent.UID = "parent-old"
+	fresh := child("new-b", parent.UID)
+	scheme := newTestScheme()
+	r = newUnitReconciler(scheme, parentAgent.DeepCopy(), cachedParent, fresh.DeepCopy())
+	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(parentAgent.DeepCopy(), parent.DeepCopy(), fresh.DeepCopy()).Build()
+	if _, err, handled := r.validateCoordinationConstraints(ctx, fresh.DeepCopy()); err != nil || handled {
+		t.Fatalf("the new parent's child seen with a stale cached parent: handled=%t err=%v, want it admitted", handled, err)
 	}
 }

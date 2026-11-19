@@ -1379,6 +1379,24 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
 		return result, err, true
 	}
+	// A child pinned to an earlier Task of the same name is never admitted
+	// under its replacement: that parent's children scope does not count it.
+	// The cache may still hold the earlier parent, so a mismatch is confirmed
+	// against the API server before the child fails.
+	if pinned, ok := taskParentUIDPin(task, parentName); ok && pinned != parentTask.UID {
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
+			if apierrors.IsNotFound(err) {
+				result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
+				return result, err, true
+			}
+			return ctrl.Result{}, err, true
+		}
+		if pinned != parentTask.UID {
+			result, err := r.failTask(ctx, task, fmt.Sprintf(
+				"parent Task %q was replaced: this child belongs to parent Task UID %s, not to the current Task of that name", parentName, pinned))
+			return result, err, true
+		}
+	}
 
 	parentAgent := &corev1alpha1.Agent{}
 	if parentTask.Spec.AgentRef != nil {
