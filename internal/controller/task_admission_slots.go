@@ -320,6 +320,16 @@ func taskAdmissionOrderedBefore(a, b *corev1alpha1.Task) bool {
 // grant nobody made can never admit a Task past the limit, and a Task the
 // scope does not list as grant-eligible is never admitted.
 func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
+	return r.taskAdmissionSlot(ctx, task, scope, true)
+}
+
+// taskAdmissionSlotFree reports whether acquireTaskAdmissionSlot would admit
+// task now, without writing a grant.
+func (r *TaskReconciler) taskAdmissionSlotFree(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
+	return r.taskAdmissionSlot(ctx, task, scope, false)
+}
+
+func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope, write bool) (bool, error) {
 	if task == nil || task.UID == "" {
 		return false, fmt.Errorf("task identity is required for admission")
 	}
@@ -362,7 +372,7 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		if !view.admits(scope.limit) {
 			return nil
 		}
-		if view.granted {
+		if view.granted || !write {
 			granted = true
 			return nil
 		}
@@ -401,6 +411,40 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		return nil
 	})
 	return granted, err
+}
+
+// releaseTaskAdmissionSlot removes task's grant from the scope's ledger, if
+// it has one. A Task held in one scope releases its grant in the others, so
+// no waiting Task holds a slot another Task waits for: a Task never holds a
+// grant in one ledger while waiting in another, and no two Tasks can each
+// wait for the other. A Task running work keeps its grants; removing a grant
+// only frees capacity the waiting Task is not using.
+func (r *TaskReconciler) releaseTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) error {
+	if task == nil || task.UID == "" || scope.limit <= 0 || scope.ledger.Namespace == "" || taskAdmittedByWork(task) {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		lease := &coordinationv1.Lease{}
+		if err := reader.Get(ctx, scope.ledger, lease); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		entries, err := decodeTaskAdmissionLedger(lease.Annotations[taskAdmissionLedgerAnnotation])
+		if err != nil {
+			return fmt.Errorf("admission ledger %s: %w", scope.ledger, err)
+		}
+		if !slices.Contains(entries, task.UID) {
+			return nil
+		}
+		next := slices.DeleteFunc(slices.Clone(entries), func(uid types.UID) bool { return uid == task.UID })
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		lease.Annotations[taskAdmissionLedgerAnnotation] = string(encoded)
+		// The read's resourceVersion makes this a compare-and-swap.
+		return r.Update(ctx, lease)
+	})
 }
 
 func decodeTaskAdmissionLedger(raw string) ([]types.UID, error) {
