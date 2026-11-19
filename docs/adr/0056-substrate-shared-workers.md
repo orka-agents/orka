@@ -143,13 +143,19 @@ hold:
    - strong retirement starts the Pod's full 3600 s grace plus 5 minutes before it;
    - admission closes an hour earlier;
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
-     grace, never zero, so its absence stays kubelet-confirmed;
+     grace, never zero, so its absence stays kubelet-confirmed. Each such delete is
+     tied to the retired pool's UID and preconditioned on the Pod's UID, so a pool
+     replaced under the same name never loses its Pods;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
      never behind the native sweep (which has a one-minute deadline);
    - unreadable or inconsistent lifetime evidence retires the pool at once;
    - the bound never exceeds the pool's server-set creation time plus the shortest
      lifetime frozen in the journals that recorded it, nor that creation time plus
      24h, so rewriting the pool's own annotations cannot extend it;
+   - when the journals cannot be listed, that ceiling drops to creation plus 3h and
+     admission (claims and Resumes) closes at once. Every shared pool is strongly
+     retired only if the listing still fails 60 s later, so one transient API error
+     never evicts every shared Actor;
    - discovery does not depend on the removable shared label;
    - no failed ledger write can block the deletion.
 
@@ -192,7 +198,9 @@ Core makes these unusable, asynchronously:
     itself fails. Admission refuses such a pool, and every bounds pass retries the Delete.
 
   Strong triggers are persisted under a fresh bounded context detached from the
-  request's deadline. A rejected or timed-out evidence-only Stop suspend is doubt too.
+  request's deadline. A rejected or timed-out evidence-only Stop suspend is doubt too,
+  and so is a Stop that finds its Actor still `SUSPENDING` after that suspend: a Stop
+  needs no data, so it never waits for or continues the suspension.
 - **No replay.** An unresolved suspend is never replayed against a `RUNNING` Actor. Once
   the worker Pod is proven absent, the instance is reported lost and retires through
   Stop with its last checkpoint.
@@ -202,7 +210,8 @@ Core makes these unusable, asynchronously:
     Agent Substrate's workflow is re-entrant and lease-serialized: it reuses the
     persisted snapshot, and atelet answers a checkpoint it already committed. So no new
     checkpoint is taken and no Tag is invented. If the continuation loses that race, the
-    instance is lost as above.
+    instance is lost as above. If every continuation ends without a result, the
+    suspension is doubt and takes the strong path.
 - **What it does.** The provider closes the pool and deletes it. Core observes the
   terminating worker and drains each co-hosted Actor for data-only suspension inside
   its eviction window (ADR 0046). Every hosted instance then proves termination by exact
