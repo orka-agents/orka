@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 	"golang.org/x/sync/semaphore"
@@ -89,6 +91,13 @@ type Store struct {
 	sessionRuntimeCleanup store.SessionRuntimeCleanupFunc
 	sessionCleanupLocks   sessionCleanupLockSet
 	epochMutations        *semaphore.Weighted
+	// interlockLinger and interlockMaxHold configure the interlock hold
+	// (ADR 0058); heldInterlock is the token parked between writes.
+	interlockLinger     time.Duration
+	interlockMaxHold    time.Duration
+	interlockMu         sync.Mutex
+	heldInterlock       *heldEpochInterlock
+	interlockGeneration uint64
 }
 
 // NewComposite constructs the hard-cutover DurableControlStore: Kubernetes is
@@ -121,7 +130,8 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 	}
 	result := &Store{
 		client: kubeClient, controlNamespace: controlNamespace,
-		epochMutations: semaphore.NewWeighted(1),
+		epochMutations:  semaphore.NewWeighted(1),
+		interlockLinger: DefaultControllerEpochInterlockLinger, interlockMaxHold: DefaultControllerEpochInterlockMaxHold,
 	}
 	for _, option := range options {
 		if option == nil {

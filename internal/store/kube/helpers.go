@@ -58,6 +58,9 @@ type epochSnapshot struct {
 	MutationToken        string
 	MutationLease        *coordinationv1.Lease
 	LocalMutationSlot    bool
+	// TokenWrittenAt is when this store sent the token write, read before
+	// the request so it never trails the expiry the token carries.
+	TokenWrittenAt time.Time
 }
 
 func validateKubernetesNamespace(namespace string) error {

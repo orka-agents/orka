@@ -45,7 +45,11 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 				return delegate.Update(ctx, object, options...)
 			},
 		})
-		crashedStore, err := kubestore.New(crashedClient, controllerEpochManagerTestNamespace, kubestore.WithAPIReader(kubeClient))
+		// The process dies while removing its token after a write, so the
+		// store removes the token at once instead of holding it for a next
+		// write (ADR 0058; a crash while holding is covered in store/kube).
+		crashedStore, err := kubestore.New(crashedClient, controllerEpochManagerTestNamespace,
+			kubestore.WithAPIReader(kubeClient), kubestore.WithControllerEpochInterlockHold(0, 0))
 		if err != nil {
 			t.Fatal(err)
 		}

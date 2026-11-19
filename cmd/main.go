@@ -2595,7 +2595,15 @@ func main() {
 		setupLog.Error(err, "workspace upgrade preflight rejected startup")
 		os.Exit(1)
 	}
-	if err := mgr.Start(processCtx); err != nil {
+	err = mgr.Start(processCtx)
+	// A controller-epoch interlock token held between writes (ADR 0058) is
+	// removed on the way out, so a successor need not wait for it to expire.
+	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+	if releaseErr := kubeControlStore.ReleaseHeldControllerEpochInterlock(releaseCtx); releaseErr != nil {
+		setupLog.Error(releaseErr, "unable to release the held controller epoch interlock")
+	}
+	cancelRelease()
+	if err != nil {
 		stopProcess()
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
