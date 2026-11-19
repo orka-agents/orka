@@ -143,7 +143,8 @@ hold:
    - strong retirement starts the Pod's full 3600 s grace plus 5 minutes before it;
    - admission closes an hour earlier;
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
-     grace, never zero, so its absence stays kubelet-confirmed. Each such delete is
+     grace, never zero, so the provider's own delete stays on the kubelet path (other
+     deletion paths are an accepted restriction, below). Each such delete is
      tied to the retired pool's UID and preconditioned on the Pod's UID, so a pool
      replaced under the same name never loses its Pods;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
@@ -153,7 +154,10 @@ hold:
      lifetime frozen in the journals that recorded it, nor that creation time plus
      24h, so rewriting the pool's own annotations cannot extend it. A pool no journal
      recorded, such as an unused warm pool, is bounded by the lifetime of the immutable,
-     hashed profile its scope names, or by 3h if that profile does not match;
+     hashed profile its scope names, or by 3h if that profile does not match. That
+     scope counts only if the pool's immutable name commits to it (a hash of the scope
+     in the name); a name committing to another scope is doubt, and a pool named before
+     the scheme gets 3h;
    - when the journals cannot be listed, that ceiling drops to creation plus 3h and
      admission (claims and Resumes) closes at once. Every shared pool is strongly
      retired only if the listing still fails 60 s later, so one transient API error
@@ -257,6 +261,19 @@ Core makes these unusable, asynchronously:
 - **Residual risk: foreign tenants.** Isolation from other tenants rests on the
   operator's dedicated-install assertion. Verification detects a violation after it
   happens and then strongly retires the pool.
+- **Accepted restriction: Pod absence is kubelet-confirmed only for the provider's own
+  deletes.** The provider deletes worker Pods only with a non-zero grace. PodGC (for a
+  Pod bound to a deleted Node object, such as a partitioned node's) and any force
+  delete remove the Pod object without kubelet confirmation. Exact Pod UID absence then
+  does not prove the hosted sandboxes stopped. Orka's private-path proof (ADRs 0031 and
+  0049), which also rests on exact worker Pod UID absence, has the same limit. Operators
+  must not force-delete Substrate worker Pods, and must not delete a partitioned node's
+  Node object without first fencing that node.
+- **Threat model: writers in the provider's namespaces are operator-equivalent.** A
+  principal with WorkerPool or ConfigMap write access there can already disrupt or
+  delete workers. Making the lifetime bound tamper-resistant against such a writer is
+  defence in depth: it relies only on immutable, server-set data (the pool's name, UID
+  and creationTimestamp) and the provider's own journals.
 - **Residual risk: worker compromise.** A compromised worker exposes every co-hosted
   Actor of the same namespace and profile.
 - **Strong retirements disturb neighbours.** A strong retirement suspends a pool's
