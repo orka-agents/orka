@@ -94,6 +94,7 @@ publication fails afterwards.
 | [0009](0009-defer-runtime-session-ui-until-public-api.md) | Defer runtime-session UI until a public API exists | Accepted |
 | [0014](0014-task-outcome-and-workspace-finalization.md) | Separate immutable Task outcome from workspace finalization | Accepted |
 | [0015](0015-provider-versioning-draining-pools-and-services.md) | Pin provider/class revisions; model draining generically | Accepted |
+| [0058](0058-hold-controller-epoch-interlock-across-writes.md) | Hold the controller-epoch interlock token across consecutive writes | Accepted |
 
 ### Gateways
 
