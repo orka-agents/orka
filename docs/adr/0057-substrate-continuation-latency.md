@@ -240,6 +240,14 @@ things. Each is covered as follows.
    Keeping an admitted runtime open therefore lets no prompt reach it before the provider has
    accepted the new attachment. It only removes the re-admission that followed.
 
+   The dispatcher reserves only Tasks that passed that handshake, and does not re-check the
+   workspace. One holder can therefore keep dispatching across an attachment-only change: a Task
+   whose attachment is rotated at expiry (ADR 0023) holds the next epoch without ever detaching.
+   Today's pass would have paused it until the provider acknowledged. Letting it continue is
+   equivalent, because the runtime never receives the attachment bearer (ADR 0026) and the
+   rotation opens no ownership gap. A different Task attaches only after the holder's settlement
+   revoked it, and a settled Task is never dispatched.
+
 A revocation is the same attachment-only change. The runtime keeps serving no one until a new
 attachment completes the handshake, which is ADR 0055's warm state.
 
