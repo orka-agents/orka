@@ -173,19 +173,23 @@ type TaskReconciler struct {
 	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
-	ACPWorkspaceDispatchEnabled       bool
-	AIWorkerServiceAccountName        string
-	VendorWorkerServiceAccountName    string
-	ContainerWorkerServiceAccountName string
-	AIWorkerClusterRoleName           string
-	VendorWorkerClusterRoleName       string
-	ContainerWorkerClusterRoleName    string
-	WorkerRoleBindingNamePrefix       string
-	EnforceTransactionCredentialAuth  bool
-	TransactionCredentialReadScopes   []string
-	OutboundAccessTrust               outboundaccess.TrustConfig
-	trustedServiceCleanupMu           sync.RWMutex
-	trustedServiceCleanupDone         bool
+	ACPWorkspaceDispatchEnabled bool
+	// ACPWorkspaceDefaultSuspendAfterDetach is the warm-detach window frozen
+	// into each new session-reused Substrate workspace whose profile sets
+	// none (ADR 0057). Zero disables the default.
+	ACPWorkspaceDefaultSuspendAfterDetach time.Duration
+	AIWorkerServiceAccountName            string
+	VendorWorkerServiceAccountName        string
+	ContainerWorkerServiceAccountName     string
+	AIWorkerClusterRoleName               string
+	VendorWorkerClusterRoleName           string
+	ContainerWorkerClusterRoleName        string
+	WorkerRoleBindingNamePrefix           string
+	EnforceTransactionCredentialAuth      bool
+	TransactionCredentialReadScopes       []string
+	OutboundAccessTrust                   outboundaccess.TrustConfig
+	trustedServiceCleanupMu               sync.RWMutex
+	trustedServiceCleanupDone             bool
 	// WebhookDeliveryWorkers bounds the concurrent webhook attempts of the
 	// delivery runnable that SetupWithManager registers (ADR 0042). Zero
 	// selects DefaultTaskWebhookDeliveryWorkers.

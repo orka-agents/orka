@@ -1424,6 +1424,8 @@ func suspendACPWorkspaceWithinQuota(
 	// Suspension ends any warm-detach window in the same write.
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	// It also retires an unclaimed speculative start (ADR 0057).
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

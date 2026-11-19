@@ -10,6 +10,9 @@ Accepted. Implements the ACP-scoped subset of issue #424 on the class binding
 Amended by [ADR 0055](0055-substrate-warm-detach-window.md): retention also ends a
 warm-detach window, before and independently of `idleTimeout`.
 
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): new session-reused Substrate
+workspaces freeze a controller default warm window, which retention ends the same way.
+
 ## Context
 
 Suspended workspaces retain provider compute objects, durable volumes, and
