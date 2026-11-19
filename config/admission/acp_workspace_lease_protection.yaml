@@ -2,6 +2,10 @@
 # acp-retention-fence-*) serialize suspension quota and idle-expiry admission.
 # The orka-agent-use-enforcement Lease marks an unbroken period of Agent use
 # enforcement (ADR 0039) and is reserved the same way.
+# Task admission slot ledgers (orka-task-admission-* and
+# orka-child-admission-*) hold the grants that keep --max-tasks-per-namespace
+# and maxConcurrentChildren exact; a forged or removed grant could admit Tasks
+# past a limit, so they are reserved the same way.
 # Only the controller may write them; Kubernetes cleanup controllers may delete
 # them through owner references or namespace deletion. This is CEL rather than
 # a webhook so the guard never depends on a webhook endpoint, and so managed
@@ -29,9 +33,13 @@ spec:
       request.?name.orValue('') == 'orka-agent-use-enforcement' ||
       request.?name.orValue('').startsWith('acp-suspend-quota-') ||
       request.?name.orValue('').startsWith('acp-retention-fence-') ||
+      request.?name.orValue('').startsWith('orka-task-admission-') ||
+      request.?name.orValue('').startsWith('orka-child-admission-') ||
       (request.operation == 'CREATE' &&
       (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
-      object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+      object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-') ||
+      object.metadata.?generateName.orValue('').startsWith('orka-task-admission-') ||
+      object.metadata.?generateName.orValue('').startsWith('orka-child-admission-')))
   variables:
   - name: controllerNamespace
     expression: "'ORKA_NAMESPACE'"
@@ -48,7 +56,7 @@ spec:
         'system:kube-controller-manager']
   validations:
   - expression: "request.userInfo.username == variables.controllerUser || (request.operation == 'DELETE' && variables.cleanupController)"
-    message: only the Orka controller may create, update, or delete ACP workspace coordination Leases
+    message: only the Orka controller may create, update, or delete ACP workspace coordination and Task admission Leases
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

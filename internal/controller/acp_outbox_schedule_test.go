@@ -209,3 +209,72 @@ func TestSessionTurnFinalizationWakesProjectors(t *testing.T) {
 	}
 	expectWake("resumed turn finalization")
 }
+
+// partialBatchOutboxStore claims two projections that cannot be delivered.
+// Completing the first commits its retry; completing the second fails.
+type partialBatchOutboxStore struct {
+	store.OutboxProjectionStore
+	claimed bool
+}
+
+func (s *partialBatchOutboxStore) ClaimOutboxProjections(context.Context, store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
+	if s.claimed {
+		return nil, nil
+	}
+	s.claimed = true
+	return []store.OutboxProjection{
+		{ID: "first", ProjectionKind: "unsupported", Attempts: 1, Version: 1},
+		{ID: "second", ProjectionKind: "unsupported", Attempts: 1, Version: 1},
+	}, nil
+}
+
+func (s *partialBatchOutboxStore) CompleteOutboxProjection(_ context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
+	if request.ID == "second" {
+		return nil, errors.New("store unavailable")
+	}
+	return &store.OutboxProjection{ID: request.ID, State: request.NewState, AvailableAt: request.AvailableAt}, nil
+}
+
+// A batch that fails after committing a retry still reports that retry, and
+// the empty claim that follows keeps its deadline rather than falling back
+// to the idle interval.
+func TestACPOutboxKeepsRetriesCommittedBeforeABatchFails(t *testing.T) {
+	epochs, _ := settledDeliveryTestEpochs(t)
+	projector := &ACPOutboxProjector{
+		Client: newUnitReconciler(newTestScheme()).Client, Store: &partialBatchOutboxStore{}, Epochs: epochs,
+		WorkerID: "partial-batch", MaxAttempts: 10,
+	}
+	ctx := context.Background()
+	var schedule acpOutboxSchedule
+	idle := time.Hour
+
+	failed, err := projector.projectPass(ctx)
+	if err == nil {
+		t.Fatal("the batch's second completion did not fail")
+	}
+	due, ok := failed.retries["first"]
+	if !ok || len(failed.retries) != 1 {
+		t.Fatalf("retries = %v, want only the committed retry of the first projection", failed.retries)
+	}
+	schedule.observe(failed, err)
+
+	empty, err := projector.projectPass(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedule.observe(empty, nil)
+	if got := schedule.next(empty.claimedAt, empty, nil, idle); !got.Equal(due) {
+		t.Fatalf("after the empty claim: next = %s, want the committed retry %s", got, due)
+	}
+}
+
+func TestACPOutboxScheduleKeepsDeadlinesAcrossAFailedPass(t *testing.T) {
+	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	var schedule acpOutboxSchedule
+	schedule.observe(acpOutboxPass{claimedAt: start, claimed: []string{"a"}, retries: map[string]time.Time{"a": start.Add(4 * time.Second)}}, nil)
+	// A failed pass after a's deadline settles and prunes nothing.
+	schedule.observe(acpOutboxPass{claimedAt: start.Add(5 * time.Second), retries: map[string]time.Time{"b": start.Add(6 * time.Second)}}, errors.New("unavailable"))
+	if len(schedule.retries) != 2 {
+		t.Fatalf("retries = %v, want both deadlines kept across the failed pass", schedule.retries)
+	}
+}

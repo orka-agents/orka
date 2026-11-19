@@ -171,6 +171,16 @@ const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
 // fences for controller-only writes enforced by admission.
 const ACPWorkspaceRetentionFenceLeaseNamePrefix = "acp-retention-fence-"
 
+// TaskAdmissionNamespaceLedgerNamePrefix and
+// TaskAdmissionChildrenLedgerNamePrefix reserve the Task admission slot
+// ledgers (a namespace's --max-tasks-per-namespace grants and a
+// coordinator's maxConcurrentChildren grants) for controller-only writes
+// enforced by admission.
+const (
+	TaskAdmissionNamespaceLedgerNamePrefix = "orka-task-admission-"
+	TaskAdmissionChildrenLedgerNamePrefix  = "orka-child-admission-"
+)
+
 // SelectorValue returns a Kubernetes label-safe value derived from the input.
 // Short, already-valid values are preserved as-is; longer values keep a readable
 // prefix and add a stable hash suffix so selectors remain deterministic.
