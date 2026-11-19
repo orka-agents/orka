@@ -24,9 +24,14 @@ import (
 type acpPreDispatchMilestone int
 
 const (
+	// acpPreDispatchInformerAdded is the Task's Add event reaching this
+	// controller's informer, before it waits in the reconcile queue. Its step
+	// from creation includes up to one second of rounding: creation times
+	// have whole-second precision.
+	acpPreDispatchInformerAdded acpPreDispatchMilestone = iota
 	// acpPreDispatchObserved is the first reconcile of an agent Task that has
 	// no execution yet.
-	acpPreDispatchObserved acpPreDispatchMilestone = iota
+	acpPreDispatchObserved
 	// acpPreDispatchStatusInitialized is the Pending status write.
 	acpPreDispatchStatusInitialized
 	// acpPreDispatchExecutionBound is the write-once execution binding.
@@ -57,6 +62,7 @@ const (
 )
 
 var acpPreDispatchMilestoneNames = [acpPreDispatchMilestoneCount]string{
+	"informerAdded",
 	"observed",
 	"statusInitialized",
 	"executionBound",
@@ -131,7 +137,19 @@ func (t *acpPreDispatchTimings) markQueueWriteIssued(task *corev1alpha1.Task) {
 // later stage, which can run after the Task's start already reported and
 // removed its record, never recreates one that nothing would report.
 func acpPreDispatchCreatesRecord(milestone acpPreDispatchMilestone) bool {
-	return milestone == acpPreDispatchObserved || milestone == acpPreDispatchStatusInitialized
+	return milestone == acpPreDispatchInformerAdded || milestone == acpPreDispatchObserved ||
+		milestone == acpPreDispatchStatusInitialized
+}
+
+// acpPreDispatchTaskAdded records the informer Add of a new agent Task with
+// no execution. Tasks the informer lists at startup are not new.
+func acpPreDispatchTaskAdded(object any, isInInitialList bool) {
+	task, ok := object.(*corev1alpha1.Task)
+	if !ok || isInInitialList || task.Status.Execution != nil || task.Spec.Schedule != "" ||
+		!task.DeletionTimestamp.IsZero() || task.Status.Phase.IsTerminal() {
+		return
+	}
+	acpPreDispatch.mark(task, acpPreDispatchInformerAdded)
 }
 
 func (t *acpPreDispatchTimings) record(task *corev1alpha1.Task, milestone acpPreDispatchMilestone, replace bool) {
@@ -203,7 +221,7 @@ func (t *acpPreDispatchTimings) report(ctx context.Context, task *corev1alpha1.T
 	if record.marks[acpPreDispatchQueued].IsZero() {
 		logger = logger.V(1)
 	}
-	values := append([]any{"namespace", task.Namespace, "task", task.Name}, record.keysAndValues()...)
+	values := append([]any{"namespace", task.Namespace, acpCancelLogKeyTask, task.Name}, record.keysAndValues()...)
 	logger.Info(acpPreDispatchTimingsLogMessage, values...)
 }
 
@@ -251,6 +269,7 @@ type acpDispatchScanTimer struct {
 }
 
 const (
+	acpReservationTimingsLogMessage  = "ACP reservation timings"
 	acpDispatchScanTimingsLogMessage = "ACP dispatch scan timings"
 	acpDispatchScanSlowThreshold     = 500 * time.Millisecond
 )

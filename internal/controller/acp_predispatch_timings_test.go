@@ -270,8 +270,8 @@ func TestEffectiveTaskMaxConcurrentReconciles(t *testing.T) {
 			t.Errorf("effectiveTaskMaxConcurrentReconciles(%d) = %d, %v; want %d, error %t", tc.configured, got, err, tc.want, tc.wantErr)
 		}
 	}
-	if DefaultTaskMaxConcurrentReconciles != 1 {
-		t.Fatalf("default Task concurrency = %d, want serial reconciliation", DefaultTaskMaxConcurrentReconciles)
+	if DefaultTaskMaxConcurrentReconciles < 2 {
+		t.Fatalf("default Task concurrency = %d; independent Tasks would reconcile one at a time", DefaultTaskMaxConcurrentReconciles)
 	}
 }
 

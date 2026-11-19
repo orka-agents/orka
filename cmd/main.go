@@ -635,8 +635,8 @@ func main() {
 			"queueing behind each other.", controller.MaxRuntimePoolMaxConcurrentReconciles))
 	flag.IntVar(&taskMaxConcurrentReconciles, "task-max-concurrent-reconciles", controller.DefaultTaskMaxConcurrentReconciles,
 		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
-			"concurrently with itself. Above 1, --max-tasks-per-namespace and coordination maxConcurrentChildren "+
-			"become best-effort under bursts of new Tasks.", controller.MaxTaskMaxConcurrentReconciles))
+			"concurrently with itself, and --max-tasks-per-namespace and coordination maxConcurrentChildren "+
+			"count Tasks from the API server, so they stay exact.", controller.MaxTaskMaxConcurrentReconciles))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
