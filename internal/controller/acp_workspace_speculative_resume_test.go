@@ -161,3 +161,37 @@ func TestExpiredSpeculativeResumeFallsBackToTheTasksOwnFlipAndAttach(t *testing.
 		t.Fatal("the attachment kept the staged intent")
 	}
 }
+
+// A settlement interrupted after it removed the intent, but before it
+// released the staged Secret and Lease, still releases them on a later pass:
+// the Lease itself is the durable record.
+func TestInterruptedSpeculativeReleaseIsRetriedFromTheLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f, continuation, _ := requestSpeculativeResume(t)
+	intent, staged := parseACPWorkspaceAttachmentIntent(f.workspace(t))
+	if !staged {
+		t.Fatal("no staged attachment")
+	}
+	// The crash: the annotations are gone, the Secret and Lease remain.
+	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
+		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
+		delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+		delete(w.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	})
+	f.settleUntilDone(t, continuation)
+	if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: intent.SecretName}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("staged Secret = %v, want deleted", err)
+	}
+	if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentLeaseName(f.key.Name)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("staged Lease = %v, want released so successors are not blocked", err)
+	}
+	// A successor can resume at once.
+	rival := f.continuation(t, "successor-after-crash")
+	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, rival, f.plan); err != nil || ready {
+		t.Fatalf("successor ensure = (%v, %v)", ready, err)
+	}
+	if _, staged := parseACPWorkspaceAttachmentIntent(f.workspace(t)); !staged {
+		t.Fatal("the successor could not stage its attachment")
+	}
+}

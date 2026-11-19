@@ -625,17 +625,19 @@ func acpWorkspaceStagedAttachmentObjectsHeld(
 }
 
 // releaseACPWorkspaceSpeculativeClaims undoes what a settling Task staged but
-// never installed: its attachment intent (then its Secret and Lease) and, on
-// a still-suspended workspace, its pending resume request. Removing the
-// annotations first fences the RuntimePool's install and flip, which are
-// optimistic writes on the same object. changed=true asks the caller to
-// settle again on a fresh read.
+// never installed: its attachment intent and, on a still-suspended
+// workspace, its pending resume request. Removing those annotations first
+// fences the RuntimePool's install and flip, which are optimistic writes on
+// the same object. The staged Secret and Lease are then released from the
+// Lease's own evidence, so a failed delete or a restart after the
+// annotation write is retried on the next settlement pass rather than
+// forgotten. changed=true asks the caller to settle again on a fresh read.
 func (r *TaskReconciler) releaseACPWorkspaceSpeculativeClaims(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
 ) (bool, error) {
-	if workspace.Spec.Attachment != nil {
+	if workspace.Spec.Attachment != nil && workspace.Spec.Attachment.TaskRef.UID == task.UID {
 		return false, nil
 	}
 	intent, staged := parseACPWorkspaceAttachmentIntent(workspace)
@@ -644,44 +646,69 @@ func (r *TaskReconciler) releaseACPWorkspaceSpeculativeClaims(
 	pendingResume := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended && marked && owner == string(task.UID)
 	_, malformedIntent := workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation]
 	ownMalformed := malformedIntent && !staged && pendingResume
-	if !ownIntent && !pendingResume && !ownMalformed {
-		return false, nil
-	}
-	base := workspace.DeepCopy()
-	if ownIntent || ownMalformed {
-		delete(workspace.Annotations, acpWorkspaceAttachmentIntentAnnotation)
-	}
-	if pendingResume {
-		delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
-		if acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
-			delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	if ownIntent || pendingResume || ownMalformed {
+		base := workspace.DeepCopy()
+		if ownIntent || ownMalformed {
+			delete(workspace.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 		}
-	}
-	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return true, err
-	}
-	if ownIntent {
-		reader := uncachedReader(r.APIReader, r.Client)
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: workspace.Namespace, Name: intent.SecretName}}
-		if err := deleteWorkspaceOwnedAttachmentObject(ctx, reader, r.Client, workspace, secret, "Secret"); err != nil {
-			return true, err
-		}
-		lease := &coordinationv1.Lease{}
-		if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}, lease); err == nil {
-			leaseOwner := metav1.GetControllerOf(lease)
-			if leaseOwner != nil && leaseOwner.UID == workspace.UID && lease.Spec.HolderIdentity != nil &&
-				*lease.Spec.HolderIdentity == string(task.UID) &&
-				lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] == strconv.FormatInt(intent.Epoch, 10) {
-				if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
-					return true, err
-				}
+		if pendingResume {
+			delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+			if acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
+				delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
 			}
-		} else if !apierrors.IsNotFound(err) {
+		}
+		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return true, nil
+			}
 			return true, err
 		}
+		return true, r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
 	}
-	return true, nil
+	return false, r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
+}
+
+// releaseACPWorkspaceStagedAttachmentObjects deletes the bearer Secret and
+// Lease of an attachment this Task staged and no workspace spec names: the
+// Lease is held by the Task and fenced to the workspace's next epoch, so no
+// installed attachment can depend on it. It is idempotent.
+func (r *TaskReconciler) releaseACPWorkspaceStagedAttachmentObjects(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+) error {
+	if intent, staged := parseACPWorkspaceAttachmentIntent(workspace); staged && intent.TaskUID == task.UID {
+		// The intent is still installable; its removal must land first.
+		return nil
+	}
+	next, err := nextWorkspaceAttachmentEpoch(workspace)
+	if err != nil {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	lease := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}, lease); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	epoch := strconv.FormatInt(next, 10)
+	leaseOwner := metav1.GetControllerOf(lease)
+	if leaseOwner == nil || leaseOwner.UID != workspace.UID || lease.Spec.HolderIdentity == nil ||
+		*lease.Spec.HolderIdentity != string(task.UID) || lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] != epoch {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, next)}, secret); err == nil {
+		secretOwner := metav1.GetControllerOf(secret)
+		if secretOwner != nil && secretOwner.UID == workspace.UID && string(secret.Data[taskUIDField]) == string(task.UID) {
+			if err := r.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
