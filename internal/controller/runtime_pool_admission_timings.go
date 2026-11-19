@@ -21,7 +21,10 @@ import (
 // Workspace RuntimePool admission timing: from the first reconcile that sees
 // the provider's startup evidence for the current workspace generation,
 // through the sealed credential bootstrap, to the pool serving and accepting
-// on its authenticated probe. Times are taken in this process; the provider's
+// on its authenticated probe. A runtime admitted once can be admitted again
+// in the same workload sequence when the pool closes and reopens, such as
+// after a Task's attachment changes the workspace generation; such lines are
+// marked readmission, with the lifecycle the pool reopened from. Times are taken in this process; the provider's
 // DataPlaneReady condition time has whole-second precision and is not used.
 
 const (
@@ -41,6 +44,12 @@ type acpRuntimeAdmissionKey struct {
 type acpRuntimeAdmissionRecord struct {
 	observed time.Time
 	seeded   time.Time
+	// readmission is set when the pool already had an active instance, so
+	// this admission reopens a runtime that served before, as after a
+	// Task's attachment changed the workspace generation; reopenedFrom is
+	// the lifecycle the pool reopened from.
+	readmission  bool
+	reopenedFrom corev1alpha1.RuntimePoolLifecycle
 }
 
 type acpRuntimeAdmissionTimings struct {
@@ -79,7 +88,9 @@ func (t *acpRuntimeAdmissionTimings) startupObserved(pool *corev1alpha1.RuntimeP
 			return
 		}
 	}
-	t.records[key] = &acpRuntimeAdmissionRecord{observed: now}
+	t.records[key] = &acpRuntimeAdmissionRecord{
+		observed: now, readmission: pool.Status.ActiveInstance != nil, reopenedFrom: pool.Status.Lifecycle,
+	}
 }
 
 // credentialsSeeded records the first successful credential bootstrap.
@@ -129,6 +140,7 @@ func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, reader client.R
 		return
 	}
 	values := []any{acpCancelLogKeyNamespace, pool.Namespace, acpLogKeyRuntimePool, pool.Name, acpLogKeySequence, sequence,
+		"readmission", record.readmission, "reopenedFrom", string(record.reopenedFrom),
 		"totalMs", acpPreDispatchMillis(now.Sub(record.observed))}
 	if !record.seeded.IsZero() {
 		values = append(values,
