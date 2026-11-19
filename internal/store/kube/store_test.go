@@ -1584,6 +1584,9 @@ func TestControllerEpochAuthorityRejectsCorruptRestore(t *testing.T) {
 func TestControllerEpochMutationReleaseUsesAcquiredLeaseVersion(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	// This covers removing the token itself, so the store does not hold it
+	// for a next write (ADR 0058).
+	kubeStore.interlockLinger = 0
 	withWatch, ok := rawClient.(client.WithWatch)
 	if !ok {
 		t.Fatal("fake client does not implement client.WithWatch")
@@ -1812,6 +1815,7 @@ func TestControllerEpochMutationQueueRespectsCallerDeadline(t *testing.T) {
 func TestControllerEpochMutationReleasePreservesConcurrentLeaseUpdate(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	kubeStore.interlockLinger = 0 // covers removing the token itself (ADR 0058)
 	_, snapshot, err := kubeStore.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		t.Fatalf("acquire mutation: %v", err)
