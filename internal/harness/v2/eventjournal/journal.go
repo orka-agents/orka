@@ -20,6 +20,10 @@ import (
 const (
 	maxOpenToolAccumulators     = 128
 	maxBufferedToolContentBytes = 1 << 20
+
+	// mappedAppendReconcileTimeout is the shortest budget a failed append's
+	// reconcile reads under. See reconcileFailedAppend.
+	mappedAppendReconcileTimeout = 5 * time.Second
 )
 
 // Journal owns duplicate-safe persistence of mapped harness v2 updates.
@@ -1305,13 +1309,18 @@ func (s *State) appendMappedEventWithPlan(
 		return appended, true, nil
 	}
 	firstErr := fmt.Errorf("%s: %w", operation, err)
-	persisted, reconcileErr := s.journal.hasPersistedIdentity(ctx, key)
+	persisted, reconcileErr := s.journal.reconcileFailedAppend(ctx, key)
 	if reconcileErr != nil {
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
 		s.markPersisted(identity, kind, false)
 		return nil, false, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller's context has ended, so a retry under it cannot reach
+		// the store, and its reconcile would only repeat the scan above.
+		return nil, false, errors.Join(firstErr, fmt.Errorf("%s retry skipped: %w", operation, ctxErr))
 	}
 
 	appended, isNew, err = appendIfAbsent()
@@ -1323,7 +1332,7 @@ func (s *State) appendMappedEventWithPlan(
 		return appended, true, nil
 	}
 	retryErr := fmt.Errorf("%s retry: %w", operation, err)
-	persisted, reconcileErr = s.journal.hasPersistedIdentity(ctx, key)
+	persisted, reconcileErr = s.journal.reconcileFailedAppend(ctx, key)
 	if reconcileErr != nil {
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
@@ -1354,6 +1363,31 @@ func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalR
 	case mappedJournalRecordPromptTerminal:
 		s.promptTerminalSequence = identity.Sequence
 	}
+}
+
+// reconcileFailedAppend reports whether a failed append's key is durable.
+// An append that waited out its caller's deadline, for example behind a
+// stalled store, leaves no time to read under that deadline, and a read
+// under it would fail without reaching the store. So the reconcile reads
+// under at least mappedAppendReconcileTimeout, detached from the caller's
+// deadline. A caller that cancelled its context gets no further reads, and
+// one that cancels it before the deadline passes stops the reconcile. The
+// retry append that may follow still runs under the caller's context.
+func (j Journal) reconcileFailedAppend(ctx context.Context, key string) (bool, error) {
+	if deadline, ok := ctx.Deadline(); ok && !errors.Is(ctx.Err(), context.Canceled) &&
+		time.Until(deadline) < mappedAppendReconcileTimeout {
+		caller := ctx
+		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(caller), mappedAppendReconcileTimeout)
+		defer cancel()
+		stop := context.AfterFunc(caller, func() {
+			if errors.Is(caller.Err(), context.Canceled) {
+				cancel()
+			}
+		})
+		defer stop()
+		return j.hasPersistedIdentity(reconcileCtx, key)
+	}
+	return j.hasPersistedIdentity(ctx, key)
 }
 
 func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, error) {
