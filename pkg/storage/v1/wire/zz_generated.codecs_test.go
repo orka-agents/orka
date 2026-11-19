@@ -64,6 +64,15 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "DatasetSource",
+		goType:  reflect.TypeFor[storagev1.DatasetSource](),
+		newWire: func() proto.Message { return &storagepb.DatasetSource{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireDatasetSource(value.(storagev1.DatasetSource)) },
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireDatasetSource(message.(*storagepb.DatasetSource), exact)
+		},
+	},
+	{
 		name:    "DatasetUsage",
 		goType:  reflect.TypeFor[storagev1.DatasetUsage](),
 		newWire: func() proto.Message { return &storagepb.DatasetUsage{} },
@@ -79,6 +88,17 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireMessage(value.(storagev1.Message)) },
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireMessage(message.(*storagepb.Message), exact)
+		},
+	},
+	{
+		name:    "MigrationMarker",
+		goType:  reflect.TypeFor[storagev1.MigrationMarker](),
+		newWire: func() proto.Message { return &storagepb.MigrationMarker{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireMigrationMarker(value.(storagev1.MigrationMarker))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireMigrationMarker(message.(*storagepb.MigrationMarker), exact)
 		},
 	},
 	{

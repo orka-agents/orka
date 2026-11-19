@@ -31,6 +31,7 @@ const (
 	ReasonSessionConfigurationMismatch = "SESSION_CONFIGURATION_MISMATCH"
 	ReasonNotReady                     = "NOT_READY"
 	ReasonDatasetDetached              = "DATASET_DETACHED"
+	ReasonDatasetMigrated              = "DATASET_MIGRATED"
 	ReasonDatasetMismatch              = "DATASET_MISMATCH"
 	ReasonClockSkew                    = "CLOCK_SKEW"
 	ReasonOperationExpired             = "OPERATION_EXPIRED"
@@ -94,12 +95,14 @@ var outcomeReasons = []sentinelReason{
 
 // sentinelReasons are the other sentinels that carry no detail. The order
 // matters only for an error that matches several: a sentinel comes before
-// one it wraps, such as ErrDatasetDetached before ErrNotReady, and family
+// one it wraps, such as ErrDatasetDetached or ErrDatasetMigrated before
+// ErrNotReady, and family
 // errors before the generic errors they resemble.
 var sentinelReasons = []sentinelReason{
 	{ReasonOperationExpired, codes.FailedPrecondition, storagev1.ErrOperationExpired},
 	{ReasonOperationAborted, codes.Aborted, storagev1.ErrOperationAborted},
 	{ReasonDatasetDetached, codes.FailedPrecondition, storagev1.ErrDatasetDetached},
+	{ReasonDatasetMigrated, codes.FailedPrecondition, storagev1.ErrDatasetMigrated},
 	{ReasonDatasetMismatch, codes.FailedPrecondition, storagev1.ErrDatasetMismatch},
 	{ReasonClockSkew, codes.Unavailable, storagev1.ErrClockSkew},
 	{ReasonSessionConfigurationMismatch, codes.FailedPrecondition, storagev1.ErrSessionConfigurationMismatch},
