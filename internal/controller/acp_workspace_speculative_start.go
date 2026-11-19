@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,17 +101,51 @@ func acpWorkspaceSpeculativeStartAttachable(workspace *workspacev1alpha1.Executi
 	if _, _, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); !ok {
 		return false
 	}
-	request, observation := workspace.Spec.Workload, workspace.Status.Allocation
-	if request == nil || workspace.Spec.Retirement != nil {
+	request, observation, retirement := workspace.Spec.Workload, workspace.Status.Allocation, workspace.Spec.Retirement
+	if request == nil {
 		return false
 	}
 	if observation == nil {
-		return request.Sequence == 1 && request.PreviousInstance == nil &&
+		return retirement == nil && request.Sequence == 1 && request.PreviousInstance == nil &&
 			workspace.Spec.AttachmentEpoch == 0 && workspace.Status.AttachedEpoch == 0
 	}
-	return observation.State == workspacev1alpha1.AllocationPending &&
-		observation.Key == request.Key && observation.Sequence == request.Sequence &&
-		(observation.Identity.RequestRevision == "" || observation.Identity.RequestRevision == request.Revision)
+	if observation.Key != request.Key || observation.Sequence != request.Sequence ||
+		(observation.Identity.RequestRevision != "" && observation.Identity.RequestRevision != request.Revision) {
+		return false
+	}
+	if observation.State == workspacev1alpha1.AllocationPending {
+		// A request whose retirement is authorized waits for it to finish.
+		return retirement == nil
+	}
+	// A class without Suspend restarts a stopped request without retained
+	// data. Speculative starts no longer run for such classes, but one left
+	// by an earlier build and retired by Stop must not strand its requester.
+	return observation.State == workspacev1alpha1.AllocationStopped && observation.Startup == nil &&
+		observation.Identity.Valid() && !acpWorkspaceSuspendCapable(workspace) &&
+		(retirement == nil || retirement.Sequence == request.Sequence)
+}
+
+// acpWorkspaceSuspendCapable reports a workspace whose frozen lifecycle allows
+// Suspend with a DataOnly profile. Only such a workspace retires an unclaimed
+// runtime with a data-preserving Suspend, so only it may start speculatively:
+// a Stop retirement of a never-attached first turn would leave a request the
+// attachment rule cannot accept.
+func acpWorkspaceSuspendCapable(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	return slices.Contains(workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] == acpWorkspaceSuspendDataOnly
+}
+
+// acpWorkspaceRetainedDataLost reports an unattached Suspend-capable workspace
+// whose current request stopped without retained data, as a Stop retirement
+// leaves it. Every later request of such a workspace must carry the exact
+// stopped instance's retained data, so no continuation can attach or restart
+// it; the waiting Task fails instead of stalling.
+func acpWorkspaceRetainedDataLost(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	request, observation := workspace.Spec.Workload, workspace.Status.Allocation
+	return workspace.Spec.Attachment == nil && request != nil && observation != nil && acpWorkspaceSuspendCapable(workspace) &&
+		workspace.Status.ObservedGeneration == workspace.Generation &&
+		observation.State == workspacev1alpha1.AllocationStopped && observation.Startup == nil && observation.RetainedData == nil &&
+		observation.Key == request.Key && observation.Sequence == request.Sequence
 }
 
 // acpWorkspaceSpeculativeStartEligible reports whether this Task may record a
@@ -121,6 +156,10 @@ func acpWorkspaceSpeculativeStartEligible(workspace *workspacev1alpha1.Execution
 	if task == nil || task.UID == "" || !acpWorkspaceSpeculativeStartAllowed(workspace) ||
 		!acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) ||
 		strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation]) != string(workspace.UID) {
+		return false
+	}
+	if !acpWorkspaceSuspendCapable(workspace) {
+		// Other classes keep the attach-first path.
 		return false
 	}
 	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {

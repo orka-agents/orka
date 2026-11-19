@@ -338,8 +338,13 @@ func newSpeculativeTaskFixture(t *testing.T) *speculativeTaskFixture {
 // frozen binding before the workspace is materialized.
 func newSpeculativeTaskFixtureWith(t *testing.T, configure func(*TaskReconciler, *ACPRuntimeWorkspaceBinding)) *speculativeTaskFixture {
 	t.Helper()
+	return newSpeculativeTaskFixtureFor(t, suspendableSubstrateFixture(t), configure)
+}
+
+// newSpeculativeTaskFixtureFor materializes the first turn of fixture's class.
+func newSpeculativeTaskFixtureFor(t *testing.T, fixture *acpClassFixture, configure func(*TaskReconciler, *ACPRuntimeWorkspaceBinding)) *speculativeTaskFixture {
+	t.Helper()
 	ctx := context.Background()
-	fixture := suspendableSubstrateFixture(t)
 	// A usable provider reports its adapter, heartbeat, and compatibility.
 	fixture.provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "v1"}
 	fixture.provider.Status.Conditions = append(fixture.provider.Status.Conditions,
@@ -560,7 +565,7 @@ func (f *speculativeTaskFixture) bootSpeculativeWorkload(t *testing.T) {
 	workspace := f.workspace(t)
 	key := workspacev1alpha1.AllocationKey{Namespace: workspace.Namespace, Name: workspace.Name, WorkspaceUID: workspace.UID, ProviderUID: workspace.Spec.ProviderBinding.UID}
 	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
-		w.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 1, Key: key, Revision: "speculative-rev"}
+		w.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 1, Key: key, Revision: speculativeTestRevision}
 	})
 	workspace = f.workspace(t)
 	admitTestACPWorkspace(t, f.r, workspace)

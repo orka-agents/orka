@@ -230,6 +230,18 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, fmt.Errorf("%w: workspace %s: %w; delete the workspace or start a new Session",
 			errACPWorkspaceTerminalFailure, workspace.Name, operatoraccess.ErrTainted)
 	}
+	if acpWorkspaceRetainedDataLost(workspace) && !acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace) {
+		// A stopped request without retained data can never be attached or
+		// restarted (ADR 0057). Fail visibly rather than wait forever. A
+		// never-committed first turn is deleted by its own settlement, so a
+		// retry gets a fresh workspace.
+		next := "start a new Session"
+		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
+			next = "retry the Task"
+		}
+		return "", false, fmt.Errorf("%w: workspace %s: its runtime stopped without retained data and cannot be resumed; %s",
+			errACPWorkspaceTerminalFailure, workspace.Name, next)
+	}
 	if err := r.backfillACPWorkspaceSuspendedCap(ctx, workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
 		return "", false, err
 	}
