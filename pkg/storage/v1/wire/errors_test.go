@@ -8,7 +8,6 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -69,11 +68,11 @@ var alsoMatches = map[string][]string{
 // A contract error the codec does not know would reach the client as a
 // provider error, turning a refused write into an unknown outcome.
 func TestEveryContractSentinelIsCovered(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	contractDir := filepath.Dir(filepath.Dir(file))
-	names, err := filepath.Glob(filepath.Join(contractDir, "*.go"))
+	// go test runs a package's tests in its source directory, even under
+	// -trimpath, so the contract's sources are in the parent directory.
+	names, err := filepath.Glob(filepath.Join("..", "*.go"))
 	require.NoError(t, err)
+	require.NotEmpty(t, names, "the contract's sources")
 	var declared []string
 	for _, name := range names {
 		if strings.HasSuffix(name, "_test.go") {

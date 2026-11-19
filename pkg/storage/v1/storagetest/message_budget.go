@@ -148,6 +148,58 @@ func runMessageBudget(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Equal(t, ids[perBatch:], budgetMessageIDs(unread), "the replay marked nothing more")
 	})
+
+	t.Run("identifiers are capped in bytes when a message is sent", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		atLimit := strings.Repeat("w", storagev1.MaxControlIdentifierBytes)
+		sent := inboxMessage("at the limit")
+		sent.FromTask = atLimit
+		require.NoError(t, provider.SendMessage(ctx, sent))
+
+		over := atLimit + "x"
+		// Two messages with a sender name this large each fit one request, but
+		// a batch of both would not fit one response.
+		huge := strings.Repeat("w", 9<<20)
+		for name, set := range map[string]func(*storagev1.Message){
+			"namespace":         func(m *storagev1.Message) { m.Namespace = over },
+			"fromTask":          func(m *storagev1.Message) { m.FromTask = over },
+			"toTask":            func(m *storagev1.Message) { m.ToTask = over },
+			"parentTask":        func(m *storagev1.Message) { m.ParentTask = over },
+			"fromTask of 9 MiB": func(m *storagev1.Message) { m.FromTask = huge },
+		} {
+			message := inboxMessage("over the limit")
+			set(message)
+			require.ErrorIs(t, provider.SendMessage(ctx, message), storagev1.ErrValidation, name)
+		}
+
+		unread, err := provider.ListUnreadMessages(ctx, "tenant", "reader", "parent", 0)
+		require.NoError(t, err)
+		require.Equal(t, []int64{sent.ID}, budgetMessageIDs(unread), "a refused message stores nothing")
+		require.Equal(t, atLimit, unread[0].FromTask)
+	})
+
+	t.Run("a full batch at every limit fits one response", func(t *testing.T) {
+		provider := newProvider(t)
+		advanceEpoch(t, provider, suiteFence)
+		dataset := datasetID(t, provider)
+		ctx := t.Context()
+		identifier := func(c string) string { return strings.Repeat(c, storagev1.MaxControlIdentifierBytes) }
+		request := storagev1.ConsumeMessagesRequest{Namespace: identifier("n"), TaskName: identifier("r"), ParentTask: identifier("p")}
+		perMessage := storagev1.MaxMessageBatchBytes / storagev1.MaxMessageBatch
+		for i := range storagev1.MaxMessageBatch {
+			require.NoError(t, provider.SendMessage(ctx, &storagev1.Message{
+				Namespace: request.Namespace, FromTask: identifier("w"), ToTask: request.TaskName,
+				ParentTask: request.ParentTask, Content: budgetContent(i, perMessage),
+			}))
+		}
+
+		consumeCtx := storagev1.WithWriteEnvelope(ctx, NewWriteEnvelope(t, dataset, suiteFence, "ConsumeMessages", request))
+		consumed, err := provider.ConsumeMessages(consumeCtx, request)
+		require.NoError(t, err, "a consumed batch at every limit can be sent")
+		require.Len(t, consumed, storagev1.MaxMessageBatch)
+		requireBatchWithinBudget(t, consumed)
+	})
 }
 
 // budgetContent returns size bytes of content that differ from message to

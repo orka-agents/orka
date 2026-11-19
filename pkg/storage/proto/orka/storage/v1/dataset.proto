@@ -8,7 +8,7 @@ import "orka/storage/v1/options.proto";
 option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
 
 // Dataset describes the provider and the dataset it serves. Describe and
-// HealthCheck are the only calls that may omit the orka-storage-dataset
+// HealthCheck are the only calls that may omit the orka-storage-dataset-bin
 // request header.
 service Dataset {
   option (go_interface) = "HealthChecker";

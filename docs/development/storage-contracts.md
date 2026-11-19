@@ -342,7 +342,8 @@ the observable parts.
   `GetWriteWatermark`, on both provider contracts (see "Durability, switch
   detection and recovery holds").
   Revision 13 bounds inter-agent messages by bytes: `SendMessage` refuses
-  content over `MaxMessageContentBytes`, a message batch stops before its
+  content over `MaxMessageContentBytes` and a namespace or task name over
+  `MaxControlIdentifierBytes`, a message batch stops before its
   content passes `MaxMessageBatchBytes`, and the limit is reported in
   `ProviderLimits.MaxMessageContentBytes` (see "Messages, counters and chat
   turns").
@@ -591,7 +592,10 @@ write without one.
   backlog is read over several calls. Messages are also bounded by bytes.
   `SendMessage` refuses content over `MaxMessageContentBytes` (1 MiB) with a
   `TooLargeError` and stores nothing, and a state.v1 provider reports exactly
-  that limit in `ProviderLimits.MaxMessageContentBytes`. A batch stops before
+  that limit in `ProviderLimits.MaxMessageContentBytes`. It also refuses a
+  `Namespace`, `FromTask`, `ToTask` or `ParentTask` over
+  `MaxControlIdentifierBytes` (1 KiB) with `ErrValidation`, so a full batch
+  carries at most 2 MiB of identifiers. A batch stops before
   the message that would take its total content past `MaxMessageBatchBytes`
   (4 MiB), and a non-empty inbox always yields at least one message. The
   batch is sized before `ConsumeMessages` marks anything, so a message left
@@ -1519,7 +1523,9 @@ an envelope as in production, and again over the wire loopback (see "Wire
 protocol"), and the storage client runs it over SQLite with
 `ProviderAttachesEnvelopes`, so the client attaches the envelopes. The
 `Parallel` option runs every family, the harness families included, in
-parallel for a factory that returns isolated datasets concurrently.
+parallel for a factory that returns isolated datasets concurrently. A harness
+that restarts or fails over a database the other families share would
+disconnect them, so a suite with one omits `Parallel`.
 
 `internal/storageclient/storagefault` injects storage faults for Orka's own
 tests. It wraps a state provider, an artifact provider or the embedded store
@@ -1588,16 +1594,19 @@ artifact-fence cases run only in process.
 - **Call metadata.** Every request names `orka-storage-contract`
   (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
   call without them (`CONTRACT_MISMATCH`). Every call except `Describe` and
-  `HealthCheck` names the dataset it expects in `orka-storage-dataset`. Before
+  `HealthCheck` names the dataset it expects in the binary header
+  `orka-storage-dataset-bin`, as a dataset ID may hold any UTF-8 text. Before
   the provider runs, the server refuses a call that leaves it out or names it
   twice (`VALIDATION`) or names another dataset (`DATASET_MISMATCH`), and,
-  when its provider's `Describe` fails, a call that names one (the provider's
-  error, or `UNAVAILABLE`). The server describes the provider again before
-  every read or administrative call that names a dataset, so a provider whose
-  dataset changed while it serves never answers such a call for the dataset
-  it served before. A write is compared against the dataset the provider last
-  described, on the first call that names a dataset or on any later
-  `Describe` or read, and is still checked by its envelope's dataset. A
+  when its provider's `Describe` fails, a call that names one (the
+  `UNAVAILABLE`, `UNAUTHENTICATED` or `INCOMPATIBLE` that `Describe` may
+  return, or `UNAVAILABLE` for any other error). The server describes the
+  provider again before every read or administrative call that names a
+  dataset, so a provider whose dataset changed while it serves never answers
+  such a call for the dataset it served before. A write is compared against
+  the dataset the provider last described, on the first call that names a
+  dataset or on any later `Describe` or read, and is still checked by its
+  envelope's dataset. A
   client without a dataset can call only `Describe` and `HealthCheck`, and a bound client
   leaves the dataset off those two, so its `Describe` reports whichever
   dataset the server serves, as in process. Responses name the contract, the
@@ -1646,7 +1655,9 @@ artifact-fence cases run only in process.
   pointer to it, so `errors.As` finds the text it finds in process,
   and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
   its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
-  a second status detail. A failed authentication is `ErrUnauthenticated`, and a
+  a second status detail. A failed authentication is `ErrUnauthenticated`, as
+  is any call to a server with an `Authenticator` that reached it through a
+  transport that runs no gRPC tap, such as `grpc.Server.ServeHTTP`, and a
   call the server refuses for its contract headers or an unknown field, or an
   RPC it does not serve, is `ErrIncompatible`. Any other provider error, and a
   provider panic, is reported without its text as `PROVIDER_ERROR` with a
@@ -1667,8 +1678,8 @@ artifact-fence cases run only in process.
   16 MiB message limit before sending anything. The server reports a
   response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
   fail it with a status that reads as a transport failure; the message byte
-  budgets keep a contract-conforming provider's message batches well under
-  it.
+  budgets and identifier bounds keep a contract-conforming provider's message
+  batches well under it.
 
 ### Orka policy above the client
 

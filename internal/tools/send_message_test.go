@@ -333,7 +333,8 @@ func TestSendMessageToolReportsTheMessageLimitFromTheController(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = NewSendMessageTool().Execute(context.Background(), args)
-	if err == nil || !strings.Contains(err.Error(), "send a shorter message") {
-		t.Fatalf("Execute() error = %v, want the message limit", err)
+	if err == nil || !strings.Contains(err.Error(), "controller rejected the message as too large") ||
+		!strings.Contains(err.Error(), "send a shorter message") || strings.Contains(err.Error(), "exceeds the") {
+		t.Fatalf("Execute() error = %v, want the controller's rejection without a local size claim", err)
 	}
 }

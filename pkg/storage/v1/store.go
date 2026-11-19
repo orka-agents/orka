@@ -488,9 +488,11 @@ const MaxMessageContentBytes = 1 << 20
 // ConsumeMessages call returns: a batch stops before the message that would
 // take its total Content bytes past it, and always holds at least one message
 // when the inbox has one. It is at least MaxMessageContentBytes, so any stored
-// message fits a batch of its own, and with MaxMessageBatch messages of
-// metadata it stays well under the wire's message limit, so a consumed batch
-// can always be sent.
+// message fits a batch of its own. SendMessage also bounds each of a
+// message's four identifiers by MaxControlIdentifierBytes, so a full batch of
+// MaxMessageBatch messages carries at most 2 MiB of identifiers beside its
+// content and stays well under the wire's message limit: a consumed batch can
+// always be sent.
 const MaxMessageBatchBytes = 4 << 20
 
 // Message represents an inter-agent message.
@@ -532,7 +534,8 @@ type MessageStore interface {
 	// provider writes the assigned ID and creation time back into msg; a
 	// replay writes back the same ones and stores nothing. Content over
 	// MaxMessageContentBytes returns a TooLargeError (What "message content")
-	// and stores nothing.
+	// and stores nothing. A Namespace, FromTask, ToTask or ParentTask over
+	// MaxControlIdentifierBytes returns ErrValidation and stores nothing.
 	SendMessage(ctx context.Context, msg *Message) error
 
 	// ListUnreadMessages returns up to limit of the oldest unread messages in

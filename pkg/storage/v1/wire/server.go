@@ -36,7 +36,9 @@ type ServerConfig struct {
 	// Authenticator, when set, authenticates every storage call before its
 	// request is decoded. It does not cover other services registered on
 	// the same grpc.Server, and without one the server library
-	// authenticates nothing.
+	// authenticates nothing. It runs in the gRPC transport's tap, so a call
+	// served through a transport that runs no tap, such as
+	// grpc.Server.ServeHTTP, is refused as unauthenticated.
 	Authenticator Authenticator
 	// Logger receives one entry per call and the text of the provider
 	// errors the server does not forward, which can quote stored values. It
@@ -97,15 +99,31 @@ func (s *Server) Register(registrar grpc.ServiceRegistrar) {
 	s.registerServices(registrar)
 }
 
-// tap authenticates a call before its request is read.
+// tap authenticates a call before its request is read, and marks the call's
+// context so the interceptor knows it did.
 func (s *Server) tap(ctx context.Context, info *tap.Info) (context.Context, error) {
 	if s.authenticator == nil || methodByFullName(info.FullMethodName) == nil {
 		return ctx, nil
 	}
 	if err := s.authenticator.Authenticate(ctx, info.FullMethodName, info.Header); err != nil {
-		return ctx, errorStatus(codes.Unauthenticated, ReasonUnauthenticated, "storage authentication failed", nil)
+		return ctx, unauthenticatedStatus()
 	}
-	return ctx, nil
+	return context.WithValue(ctx, tapAuthenticated{}, s), nil
+}
+
+// tapAuthenticated keys the Server whose tap authenticated a call.
+type tapAuthenticated struct{}
+
+// authenticatedByTap reports whether this server's tap authenticated the
+// call. A transport that never runs the tap, as grpc.Server.ServeHTTP does
+// not, leaves no mark.
+func (s *Server) authenticatedByTap(ctx context.Context) bool {
+	marked, _ := ctx.Value(tapAuthenticated{}).(*Server)
+	return marked == s
+}
+
+func unauthenticatedStatus() error {
+	return errorStatus(codes.Unauthenticated, ReasonUnauthenticated, "storage authentication failed", nil)
 }
 
 // intercept applies the protocol checks to every storage call before the
@@ -114,6 +132,11 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 	m := methodByFullName(info.FullMethod)
 	if m == nil {
 		return handler(ctx, req)
+	}
+	if s.authenticator != nil && !s.authenticatedByTap(ctx) {
+		// The call reached the server without passing its authenticator,
+		// so it is refused before anything else runs.
+		return nil, unauthenticatedStatus()
 	}
 	started := time.Now()
 	defer func() {
@@ -304,8 +327,15 @@ func (s *Server) checkDataset(ctx context.Context, m *method, header metadata.MD
 	case len(named) == 0:
 		return validationStatus("a " + m.name + " call must name the dataset it expects")
 	case describeErr != nil:
-		if encoded, ok := contractStatus(describeErr); ok {
-			return encoded
+		// Describe may fail only as unavailable, unauthenticated or
+		// incompatible, each of which the client takes from a server that
+		// has not checked its dataset. Any other error, such as a cold
+		// replica's ErrNotReady, would read as an answer for another
+		// dataset, so it is reported as the server being unavailable.
+		if describeRefusal(describeErr) {
+			if encoded, ok := contractStatus(describeErr); ok {
+				return encoded
+			}
 		}
 		s.logger.ErrorContext(ctx, "storage provider cannot describe its dataset", "method", m.name, "error", describeErr)
 		return errorStatus(codes.Unavailable, ReasonUnavailable, "the storage server cannot name its dataset", nil)
@@ -314,6 +344,13 @@ func (s *Server) checkDataset(ctx context.Context, m *method, header metadata.MD
 			"the call names a dataset this storage server does not serve", nil)
 	}
 	return nil
+}
+
+// describeRefusal reports whether err is one of the errors Describe may
+// return.
+func describeRefusal(err error) bool {
+	return errors.Is(err, storagev1.ErrUnavailable) || errors.Is(err, storagev1.ErrUnauthenticated) ||
+		errors.Is(err, storagev1.ErrIncompatible)
 }
 
 // responseHeader names the contract, this library's revision and, once the
