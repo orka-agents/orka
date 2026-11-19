@@ -36,7 +36,9 @@ type suiteOptions struct {
 // order. The factory must then be safe for concurrent use, and each dataset
 // it returns must stay isolated from the others, as a schema per case on a
 // shared database is; a harness then acts on its dataset while the other
-// families use theirs.
+// families use theirs. A harness's effects must stay just as isolated: one
+// that restarts or fails over a database the other families share would
+// disconnect them, so a suite with such a harness omits Parallel.
 func Parallel() Option {
 	return func(o *suiteOptions) { o.parallel = true }
 }

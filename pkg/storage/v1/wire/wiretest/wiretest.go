@@ -48,7 +48,8 @@ func Methods() []string {
 }
 
 // Serve serves provider over the loopback and returns a client bound to the
-// provider's dataset. The server and connection stop when the test ends.
+// provider's dataset. The server and connection stop when the test ends, as
+// Dial's do.
 func Serve(t testing.TB, provider storagev1.StateProvider) *wire.Client {
 	t.Helper()
 	conn := Dial(t, provider)
@@ -60,7 +61,10 @@ func Serve(t testing.TB, provider storagev1.StateProvider) *wire.Client {
 }
 
 // Dial serves provider over the loopback and returns an authenticated client
-// connection to it.
+// connection to it. The server and connection stop when the test ends, and
+// stopping waits for every provider call still running. A test whose provider
+// blocks a call must therefore release it before then: in the test itself,
+// or in a cleanup registered after Dial or Serve, which runs before theirs.
 func Dial(t testing.TB, provider storagev1.StateProvider) *grpc.ClientConn {
 	t.Helper()
 	material, err := loadMaterial()

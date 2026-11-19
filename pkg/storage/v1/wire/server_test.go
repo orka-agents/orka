@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -291,8 +292,11 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, provider.callsTo("GetPlan")[0].hasEnvelope, "a read carries no envelope")
 
+	// The server library forwards a write that carries no envelope; refusing
+	// it is the provider's job, which the conformance suite's
+	// missing-envelopes family checks over the wire.
 	require.NoError(t, client.DeletePlan(t.Context(), "n", "t"))
-	require.False(t, provider.callsTo("DeletePlan")[0].hasEnvelope, "a write without an envelope is accepted")
+	require.False(t, provider.callsTo("DeletePlan")[0].hasEnvelope, "the provider sees no envelope")
 }
 
 func TestProviderFailuresCrossTheWire(t *testing.T) {
@@ -325,8 +329,10 @@ func TestProviderFailuresCrossTheWire(t *testing.T) {
 	provider.mu.Unlock()
 	err = client.DeletePlan(t.Context(), "n", "t")
 	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown, "a panic in a write is an unknown outcome")
-	_, err = client.GetPlan(t.Context(), "n", "t")
-	require.Error(t, err, "the server keeps serving after a provider panic")
+	provider.set("GetPlan", []any{&storagev1.PlanState{Summary: "after the panic"}}, nil)
+	plan, err := client.GetPlan(t.Context(), "n", "t")
+	require.NoError(t, err, "the server keeps serving after a provider panic")
+	require.Equal(t, "after the panic", plan.Summary)
 }
 
 func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
@@ -512,6 +518,15 @@ func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 	err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 	require.ErrorIs(t, err, storagev1.ErrIncompatible, "a contract error from Describe keeps its reason")
 	require.Empty(t, provider.callsTo("SavePlan"))
+
+	// An error Describe may not return, such as a cold replica's
+	// ErrNotReady, is the server being unavailable, not an answer for
+	// another dataset.
+	provider.set("Describe", nil, storagev1.NotReadyErrorf("the replica is still priming"))
+	_, err = client.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	require.False(t, errors.Is(err, storagev1.ErrDatasetMismatch), "%v", err)
+	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
 // foreignResults answers plan calls for whatever datasets it is given, as a
@@ -642,6 +657,58 @@ func TestFailedAuthenticationIsUnauthenticated(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "an unauthenticated write committed nothing")
 	require.Empty(t, provider.callsTo("SavePlan"))
+}
+
+// acceptAll passes every authentication.
+type acceptAll struct{}
+
+func (acceptAll) Authenticate(context.Context, string, metadata.MD) error {
+	return nil
+}
+
+// A call that reaches the server through a transport that runs no tap, as
+// grpc.Server.ServeHTTP does not, never passed the authenticator, so the
+// server refuses it before the provider runs.
+func TestServerRefusesCallsThatSkippedItsAuthenticator(t *testing.T) {
+	provider := newRecordingProvider()
+	server, err := wire.NewServer(wire.ServerConfig{State: provider, Authenticator: acceptAll{}})
+	require.NoError(t, err)
+	grpcServer := grpc.NewServer(server.ServerOptions()...)
+	server.Register(grpcServer)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	httpServer := &http.Server{Handler: grpcServer, Protocols: new(http.Protocols), ReadHeaderTimeout: 10 * time.Second}
+	httpServer.Protocols.SetUnencryptedHTTP2(true)
+	go func() { _ = httpServer.Serve(listener) }()
+	t.Cleanup(func() { _ = httpServer.Close() })
+	client := wire.NewClient(dialInsecure(t, listener.Addr().String()), wire.ClientConfig{Dataset: testDataset})
+
+	err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
+	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "the refused write committed nothing")
+	_, err = client.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
+	_, err = client.Describe(t.Context())
+	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
+	require.Empty(t, provider.calls, "the provider never ran")
+}
+
+// A dataset ID may hold any UTF-8 text, which the binary dataset header
+// carries in both directions.
+func TestDatasetIDsNeedNotBeASCII(t *testing.T) {
+	provider := newRecordingProvider()
+	provider.set("Describe", []any{storagev1.ProviderInfo{DatasetID: "données"}}, nil)
+	provider.set("GetPlan", []any{&storagev1.PlanState{Summary: "s"}}, nil)
+	client := wiretest.Serve(t, provider)
+
+	plan, err := client.GetPlan(t.Context(), "n", "t")
+	require.NoError(t, err, "the response names the client's dataset")
+	require.Equal(t, "s", plan.Summary)
+	require.NoError(t, client.DeletePlan(t.Context(), "n", "t"))
+
+	other := wire.NewClient(wiretest.Dial(t, provider), wire.ClientConfig{Dataset: "donnée"})
+	_, err = other.GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
 }
 
 func TestNewServerRequiresAStateProvider(t *testing.T) {
