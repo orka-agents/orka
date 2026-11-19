@@ -102,8 +102,11 @@ workers, but gives no per-Actor proof of sandbox exit:
   bounds loop apply this rule and retire existing shared pools at 60 s. A rejection of the provider's own credentials is not "down" and gets no
   deferral, because other clients may still place Actors; the pools are retired at
   60 s even though suspending
-  their neighbours, which needs those credentials, may then fail. The same applies when
-  the pool's assignment checks are rejected for those credentials past 60 s. Isolation wins, and
+  their neighbours, which needs those credentials, may then fail. Each per-pool isolation
+  check (hosted workspaces, workers and assignments) runs on a budget of its own; a pool
+  whose checks do not complete, including on a timeout or a credential rejection, is
+  unverified: admission refuses it at once and it is retired at 60 s (5 minutes only
+  while native looks down from the provider). Isolation wins, and
   the provider reports the rejection as a Warning Event on its ExecutionWorkspaceProvider.
 - **Residual risk.** A foreign template or Actor created between two checks can reach a
   shared worker until the next check, the ledger's assignment check, or observation
