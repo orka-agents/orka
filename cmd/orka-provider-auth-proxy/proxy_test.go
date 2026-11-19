@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,6 +29,79 @@ func newProviderAuthProxy(cfg proxyConfig, bearerToken []byte) (*providerAuthPro
 }
 
 const testSharedProviderToken = "0123456789abcdef0123456789abcdef"
+
+func TestProviderAuthProxyForwards429WithoutRetry(t *testing.T) {
+	const rejection = `{"error":{"code":"rate_limit_exceeded","message":"fixture quota window"}}`
+	var sends atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if sends.Add(1) != 1 {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Retry-After-Ms", "1250")
+		w.Header().Set("X-Ms-Retry-After-Ms", "1500")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, rejection)
+	}))
+	defer upstream.Close()
+	proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test"}`))
+	request.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, request)
+	if sends.Load() != 1 || response.Code != http.StatusTooManyRequests || response.Body.String() != rejection {
+		t.Fatalf("shared gateway must forward the original rejection: upstream sends=%d HTTP=%d", sends.Load(), response.Code)
+	}
+	for name, want := range map[string]string{"Retry-After": "1", "Retry-After-Ms": "1250", "X-Ms-Retry-After-Ms": "1500"} {
+		if got := response.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestProviderAuthProxyDoesNotReplayAmbiguousPOST(t *testing.T) {
+	for _, key := range []string{"Idempotency-Key", "X-Idempotency-Key"} {
+		t.Run(key, func(t *testing.T) {
+			var warmAddr atomic.Value
+			var reused atomic.Bool
+			var posts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					warmAddr.Store(r.RemoteAddr)
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				if posts.Add(1) == 1 {
+					reused.Store(warmAddr.Load() == r.RemoteAddr)
+					_, _ = io.Copy(io.Discard, r.Body)
+					panic(http.ErrAbortHandler) // consumed the POST; no response headers
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
+			send := func(method, path, body string) int {
+				r := httptest.NewRequest(method, path, strings.NewReader(body))
+				r.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
+				if method == http.MethodPost {
+					r.Header.Set(key, "fixture-request")
+				}
+				w := httptest.NewRecorder()
+				proxy.ServeHTTP(w, r)
+				return w.Code
+			}
+			if status := send(http.MethodGet, "/v1/models", ""); status != http.StatusNoContent {
+				t.Fatalf("warm-up HTTP=%d", status)
+			}
+			status := send(http.MethodPost, "/v1/responses", `{"model":"test"}`)
+			if !reused.Load() || posts.Load() != 1 || status != http.StatusBadGateway {
+				t.Fatalf("ambiguous POST: reused connection=%t, upstream sends=%d, HTTP=%d", reused.Load(), posts.Load(), status)
+			}
+		})
+	}
+}
 
 func TestProviderAuthProxyDefaultResponseHeaderTimeout(t *testing.T) {
 	cfg, _, err := normalizeProxyConfig(proxyConfig{UpstreamBaseURL: "http://vekil.example"})

@@ -613,6 +613,10 @@ func codexProviderDefinition(baseURL string) map[string]any {
 		"base_url":           baseURL,
 		"wire_api":           "responses",
 		"env_key":            "CODEX_API_KEY",
+		// The session proxy owns rejected-request retries. Neither a transport
+		// failure nor a broken response stream authorizes a second POST.
+		"request_max_retries": 0,
+		"stream_max_retries":  0,
 	}
 }
 
@@ -1468,7 +1472,8 @@ func prepareCodexHome(paths acp.SessionPaths) error {
 
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session
 // provider definition travels in CODEX_CONFIG (see codexBaseConfig).
-const codexHomeConfigTOML = "check_for_update_on_startup = false\n"
+// Codex 0.160.0's connection retry loop is independent of stream_max_retries.
+const codexHomeConfigTOML = "check_for_update_on_startup = false\nfeatures.unbounded_connection_retries = false\n"
 
 func openAIProxyURL(base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")

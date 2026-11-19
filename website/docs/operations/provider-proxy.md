@@ -49,6 +49,46 @@ Orka's own tests use, and the example below installs it.
 Whatever you choose, configure its providers and models, and verify a model
 request succeeds through it before connecting Orka.
 
+### When Codex is rate limited
+
+For a built-in Codex `POST /responses` (or `/v1/responses`), the session proxy
+can resend the same validated request if its upstream returns **HTTP 429**
+before anything is relayed to Codex. The original send counts toward a maximum
+of three. Once a 429 is observed, backoff, retry response headers, and reading
+the final HTTP error body share a 30-second budget from the first send. If a
+retry returns 503 and its body stalls, for example, the proxy keeps the 503
+and the bounded detail received so far; it does not send again. It allows up
+to one additional second to write the known error to Codex, even if the
+initial 429 headers arrived after the window. This does not extend upstream
+reads. Neither an initial 503 nor a successful stream gets this retry timeout.
+
+The proxy uses the longest valid `Retry-After` (seconds or HTTP date),
+`retry-after-ms` or `x-ms-retry-after-ms` hint. Fractional milliseconds
+round up to the next whole millisecond. Without a valid hint
+it waits 250 ms, then 500 ms. A wait that cannot fit the budget, request
+deadline or active prompt lease returns the last 429 without retrying early.
+On exhaustion, the final status and sanitized provider detail still reach
+prompt failure accounting.
+
+Retries share the original inference turn. Cancelling during backoff stops
+the next send; it does not erase the 429 already received. If that rejection
+settles the prompt before Codex acknowledges cancellation, the result is
+`Failed`, not `Cancelled`. A lost connection, a 503, or an error inside a
+200 stream is **not** a rejection that permits replay. Other routes (including
+compaction, query-bearing requests and tools) and other runtimes do not use
+this policy. No Task, ACP prompt or tool is retried.
+
+The session proxy is the only retry owner in this Orka path. The Codex
+profile disables native HTTP retries, stream reconnects and unbounded
+connection retries; the ACP adapter submits the turn to Codex, and the Orka
+auth proxy forwards the nonempty inference POST without a rewindable body.
+Neither Orka hop lets an `Idempotency-Key` or `X-Idempotency-Key` trigger a
+Go transport retry of this POST on a reused connection. The limit counts sends
+**to the configured gateway**, not calls inside it. Orka cannot verify whether an
+external gateway or provider retries, fails over, or reports a 429 after doing
+work. For an end-to-end single retry owner, use a single-send gateway route
+that returns 429 only for rejected requests and verify at its upstream.
+
 ## Example: Vekil on the same cluster
 
 [Vekil](https://github.com/sozercan/vekil) is a small reverse proxy that fronts

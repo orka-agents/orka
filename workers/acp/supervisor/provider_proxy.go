@@ -157,16 +157,16 @@ type providerProxySession struct {
 	firstInferenceResponseStartedAt time.Time
 	lastSuccessSeq                  uint64
 	lastFailureSeq                  uint64
+	lastCodexRejectionSeq           uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
-	// admissionClosed rejects new requests for the active prompt once the
-	// ACP child has settled its turn, while in-flight relays keep their
-	// gate context and drain normally.
-	admissionClosed bool
-	inflight        int
-	drained         chan struct{}
-	closed          bool
-	requestSlots    chan struct{}
+	// Closing admission wakes pending retries without cancelling an already
+	// dispatched request or a response still draining to the child.
+	admissionDone chan struct{} // nil once closed
+	inflight      int
+	drained       chan struct{}
+	closed        bool
+	requestSlots  chan struct{}
 	// telemetry is the GenAI recorder of telemetryPromptID; chats holds its
 	// in-flight model calls by issuance sequence so accounted outcomes reach
 	// their chat spans. Both are nil when GenAI telemetry is disabled.
@@ -387,13 +387,14 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.maxTurns = maxTurns
 	s.inferenceRequests = 0
 	s.turnLimitExceeded = false
-	s.admissionClosed = false
+	s.admissionDone = make(chan struct{})
 	s.inferenceSuccesses = 0
 	s.inferenceFailures = 0
 	s.issuedInference = 0
 	s.firstInferenceResponseStartedAt = time.Time{}
 	s.lastSuccessSeq = 0
 	s.lastFailureSeq = 0
+	s.lastCodexRejectionSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
 	// Issuance sequences restart per prompt; a previous prompt's late chat
@@ -438,10 +439,11 @@ func (s *providerProxySession) renew(promptID string, expiresAt, now time.Time) 
 func (s *providerProxySession) closeAdmission(promptID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activePromptID != strings.TrimSpace(promptID) {
+	if s.activePromptID != strings.TrimSpace(promptID) || s.admissionDone == nil {
 		return
 	}
-	s.admissionClosed = true
+	close(s.admissionDone)
+	s.admissionDone = nil
 }
 
 func (s *providerProxySession) deactivate(promptID string) {
@@ -567,7 +569,7 @@ func (s *providerProxySession) authorize(r *http.Request, class providerRequestC
 		}
 		return providerProxyAuthorization{gateContext: s.revokedGate}, false
 	}
-	if s.admissionClosed {
+	if s.admissionDone == nil {
 		return providerProxyAuthorization{}, false
 	}
 	if s.inflight == 0 {
@@ -653,11 +655,18 @@ func (s *providerProxySession) releaseInferenceRequest(class providerRequestClas
 // classification, so they must not convert a completed prompt into a
 // provider failure.
 func (s *providerProxySession) waitInference(ctx context.Context) error {
+	return s.waitPromptInference(ctx, "")
+}
+
+func (s *providerProxySession) waitPromptInference(ctx context.Context, promptID string) error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	drained := s.drainedInference
+	if promptID != "" && s.turnPromptID != promptID {
+		drained = nil
+	}
 	s.mu.Unlock()
 	if drained == nil {
 		return nil
@@ -1092,22 +1101,64 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamRequest.Header.Set(foundryContextHeader, trustedContext)
 	}
 
-	response, err := p.client.Do(upstreamRequest)
+	session.forwardProviderRequest(w, upstreamRequest, suffix, body, requestClass, authorization, waitForCancellation)
+}
+
+func (s *providerProxySession) forwardProviderRequest(
+	w http.ResponseWriter, req *http.Request, suffix string, body []byte,
+	class providerRequestClass, auth providerProxyAuthorization, waitForCancellation func(error),
+) {
+	ctx := req.Context()
+	codexResponsesPost := s.proxy.providerKind == providerKindCodex && class == providerRequestInference &&
+		req.Method == http.MethodPost && req.URL.RawQuery == "" && (suffix == providerResponsesPath || suffix == providerOpenAIResponsesV1Path)
+	var retryDeadline time.Time
+	var cancel context.CancelFunc
+	if codexResponsesPost {
+		// A rewindable POST with a caller's (X-)Idempotency-Key can be
+		// retried by net/http on a reused connection without a response.
+		var requestCtx context.Context
+		requestCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		req = req.WithContext(requestCtx)
+		req.GetBody = nil
+		retryDeadline = time.Now().Add(codexInferenceRetryWindow)
+	}
+	response, err := s.proxy.client.Do(req)
+	if codexResponsesPost && err == nil && response.StatusCode == http.StatusTooManyRequests {
+		defer s.retainUnrecoveredCodexRejection(auth)
+		// Arm the budget only after a rejection, but on the context that
+		// owns the original body too: that 429 may itself stall mid-body.
+		timer := time.AfterFunc(time.Until(retryDeadline), cancel)
+		defer timer.Stop()
+		response, err = s.retryRejectedCodexInference(req, body, response, auth.gateContext, retryDeadline)
+		if err == nil && response.StatusCode >= http.StatusBadRequest {
+			// A deadline can shorten the error body, never its HTTP status.
+			// Don't promise the child bytes the upstream may never provide.
+			response.Header.Del("Content-Length")
+			response.Body = codexRetryErrorBody{response.Body, req.Context()}
+			// Initial headers can arrive after the retry window. Give the
+			// child a bounded write to receive the known status even then;
+			// this never extends upstream reads or authorizes another send.
+			writer := http.NewResponseController(w)
+			writeBudget := max(0, time.Until(retryDeadline)) + codexErrorWriteGrace
+			_ = writer.SetWriteDeadline(time.Now().Add(writeBudget))
+			defer func() { _ = writer.SetWriteDeadline(time.Time{}) }()
+		} else {
+			timer.Stop() // don't cut off a newly established successful stream
+		}
+	}
 	if err != nil {
-		// A transport failure is upstream evidence only while the child's
-		// request is still wanted. When the child (or the prompt gate)
-		// cancelled before headers arrived, nothing about the upstream was
-		// learned, so the sequence is left unaccounted rather than turning a
-		// speculative request the child abandoned into a prompt failure.
-		if requestContext.Err() == nil {
-			session.recordInferenceOutcome(authorization.promptID, requestClass, inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
+		// Cancelling a transport before headers supplies no new upstream
+		// evidence. Only a live request accounts a transport failure.
+		if ctx.Err() == nil {
+			s.recordInferenceOutcome(auth.promptID, class, auth.inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
 		}
 		waitForCancellation(err)
 		providerproxy.WriteError(w, http.StatusBadGateway, providerUpstreamTransportFailure)
 		return
 	}
 	defer response.Body.Close() //nolint:errcheck
-	p.relayUpstreamResponseWithCancellation(requestContext, w, session, authorization.promptID, requestClass, inferenceSeq, response, waitForCancellation)
+	s.proxy.relayUpstreamResponseWithCancellation(ctx, w, s, auth.promptID, class, auth.inferenceSeq, response, waitForCancellation)
 }
 
 // newProviderProxyRequestContext revokes the upstream transport immediately.
