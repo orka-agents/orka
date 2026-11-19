@@ -151,7 +151,9 @@ hold:
    - unreadable or inconsistent lifetime evidence retires the pool at once;
    - the bound never exceeds the pool's server-set creation time plus the shortest
      lifetime frozen in the journals that recorded it, nor that creation time plus
-     24h, so rewriting the pool's own annotations cannot extend it;
+     24h, so rewriting the pool's own annotations cannot extend it. A pool no journal
+     recorded, such as an unused warm pool, is bounded by the lifetime of the immutable,
+     hashed profile its scope names, or by 3h if that profile does not match;
    - when the journals cannot be listed, that ceiling drops to creation plus 3h and
      admission (claims and Resumes) closes at once. Every shared pool is strongly
      retired only if the listing still fails 60 s later, so one transient API error
@@ -192,7 +194,8 @@ Core makes these unusable, asynchronously:
   a crash right after the intent was saved or while the native API is down:
   - a persisted strong marker;
   - a hosted journal's recorded failure;
-  - a hosted workspace that is tainted, quarantined or `Failed`;
+  - a hosted workspace that is tainted, quarantined or `Failed`, including the workspace
+    of any unreleased journal that recorded the pool, whatever its ledger entries say;
   - a pool ledger saved as `Retiring` or `Quarantined`;
   - a retirement-intent annotation, which the provider writes when the pool's Delete
     itself fails. Admission refuses such a pool, and every bounds pass retries the Delete.
