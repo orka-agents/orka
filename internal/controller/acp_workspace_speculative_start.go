@@ -172,6 +172,10 @@ func acpWorkspaceSpeculativeStartEligible(workspace *workspacev1alpha1.Execution
 		// Other classes keep the attach-first path.
 		return false
 	}
+	if _, warm := acpWorkspaceWarmWindowOpen(workspace); warm {
+		// The warm window already keeps the runtime running.
+		return false
+	}
 	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue {
 		return workspace.Spec.Workload != nil
 	}

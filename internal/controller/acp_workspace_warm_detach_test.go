@@ -828,7 +828,8 @@ func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			name := "acp-ws-warm-veto-" + test.name
-			deadline := now.Add(-time.Minute)
+			// Expire past the grace that live continuation demand earns (ADR 0057).
+			deadline := now.Add(-acpWorkspaceWarmExpiryGrace - time.Minute)
 			workspace := warmRetentionWorkspace(t, name, deadline, test.mutate)
 			sessionUID := string(workspace.Spec.SessionRef.UID)
 			control := &corev1alpha1.RuntimeSessionControl{

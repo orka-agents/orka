@@ -400,6 +400,12 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
 	}
+	if err := r.stampACPWorkspaceWarmDemand(ctx, workspace, task, time.Now()); err != nil {
+		if apierrors.IsConflict(err) {
+			return "", false, nil
+		}
+		return "", false, client.IgnoreNotFound(err)
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
