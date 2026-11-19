@@ -101,11 +101,16 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	// ADR 0057: a continuation's speculative resume leaves the settled
+	// workspace Suspended until the publication below flips it back to Ready
+	// in the same write.
+	pendingResume := acpWorkspaceSpeculativeResumePending(w, r.now())
 	// A provider-reported Failed instance is terminal: retire it, never replace
 	// it. So is one the provider stopped because its Suspend authorization
 	// expired first: like an instance the worker killed, it kept no data, and
 	// a data-only class admits a successor only with verified retained data.
-	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+	stopping := deleting || pool.Spec.DesiredReplicas == 0 ||
+		(w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady && !pendingResume) ||
 		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
 		externalProviderSuspendDeadlineExceeded(w)
 	// Timing only: remember when this process first saw the sequence retire.
@@ -212,7 +217,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStarting, "rotating private credentials before cold boot")
 			}
 		}
-		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret)
+		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret, pendingResume)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
@@ -337,7 +342,8 @@ func (r *RuntimePoolReconciler) externalPoolProgressStatus(pool *corev1alpha1.Ru
 	return status
 }
 
-func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (ctrl.Result, error) {
+//nolint:gocyclo // Rendering, network admission, and the one-write publication stay auditable together.
+func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret, resume bool) (ctrl.Result, error) {
 	registration := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, registration); err != nil {
 		return ctrl.Result{}, err
@@ -458,8 +464,16 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := workspaceprovider.ValidateWorkloadTransition(w.Spec.Workload, request, w.Status.Allocation, slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)); err != nil {
 		return ctrl.Result{}, err
 	}
+	// ADR 0057: a Task's staged attachment, rechecked against this exact
+	// object version, lands in the same write, so the provider acknowledges
+	// the epoch and starts the runtime on one observation and the runtime is
+	// admitted once.
+	attachment, err := installableACPWorkspaceAttachmentIntent(ctx, uncachedReader(r.APIReader, r.Client), w, resume, r.now())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	before := w.DeepCopy()
-	w.Spec.Workload, w.Spec.Retirement = &request, nil
+	applyExternalWorkspacePublication(w, &request, resume, attachment)
 	setExternalRuntimeMilestone(w, externalWorkloadPublishedAnnotation, request.Sequence, r.now())
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
@@ -474,6 +488,20 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	// the published request re-derives the same condition from the request.
 	r.setExternalRuntimeTelemetryReady(pool, &status, telemetryFits, telemetryMessage)
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
+// applyExternalWorkspacePublication writes the next request and, for a
+// speculative resume or start (ADR 0057), the Ready flip and the requester's
+// staged attachment into the same workspace write.
+func applyExternalWorkspacePublication(w *workspacev1alpha1.ExecutionWorkspace, request *workspacev1alpha1.WorkloadRequest, resume bool, attachment *workspacev1alpha1.ExecutionWorkspaceAttachment) {
+	w.Spec.Workload, w.Spec.Retirement = request, nil
+	if resume {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	}
+	if attachment != nil {
+		w.Spec.Attachment, w.Spec.AttachmentEpoch = attachment, attachment.Epoch
+		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
+	}
 }
 
 // setExternalRuntimeTelemetryReady records whether a request's supervisor
