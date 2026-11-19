@@ -8,6 +8,10 @@ Accepted. Amends the detach step of ADR 0027, the idle Ready rule of ADR 0029, a
 Detach and finalization section of ADR 0026 for Substrate classes that opt in. ADR
 0031's data-only cold path and ADR 0030's full-memory gate are unchanged.
 
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): new eligible Substrate workspaces
+freeze a controller default window when their profile sets none, replacing the **No default** rule
+for those workspaces only.
+
 ## Context
 
 A session-reused Substrate workspace whose frozen detach action is `Suspend` is torn
