@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -685,5 +686,125 @@ func TestLoweredLimitRetryingHolderWaitsForRunningHolders(t *testing.T) {
 	finish(second)
 	if granted, err := r.acquireTaskAdmissionSlot(ctx, retrying, scope); err != nil || !granted {
 		t.Fatalf("no running holder: granted=%t err=%v, want the retrying Task admitted", granted, err)
+	}
+}
+
+// Tasks running work without a grant still hold their slot under a limit of
+// one, so a waiting Task is held until they finish:
+//   - after a restart or takeover, a Task Running on a Job recorded in its
+//     status, admitted before ledgers existed or with no grant left;
+//   - a Task whose Job a controller created but stopped before recording,
+//     found from the Job it owns (finished or deleting Jobs do not count);
+//   - a Task whose Job was deleted externally and that is backing off
+//     before the retry path recreates it.
+func TestAdmissionCountsTasksRunningWithoutAGrant(t *testing.T) {
+	ctx := context.Background()
+	ownedJob := func(owner *corev1alpha1.Task, mutate func(*batchv1.Job)) *batchv1.Job {
+		isController := true
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Namespace: owner.Namespace, Name: buildTaskJobName(owner),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: owner.Name, UID: owner.UID, Controller: &isController,
+			}},
+		}}
+		if mutate != nil {
+			mutate(job)
+		}
+		return job
+	}
+	for _, tc := range []struct {
+		name     string
+		holder   func() (*corev1alpha1.Task, []client.Object)
+		wantHeld bool
+	}{
+		{name: "running on a recorded Job", wantHeld: true, holder: func() (*corev1alpha1.Task, []client.Object) {
+			task := limitTestTask("recorded")
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = buildTaskJobName(task)
+			return task, []client.Object{ownedJob(task, nil)}
+		}},
+		{name: "Job created but not recorded", wantHeld: true, holder: func() (*corev1alpha1.Task, []client.Object) {
+			task := limitTestTask("unrecorded")
+			return task, []client.Object{ownedJob(task, nil)}
+		}},
+		{name: "unrecorded Job already finished", holder: func() (*corev1alpha1.Task, []client.Object) {
+			task := limitTestTask("finished-job")
+			return task, []client.Object{ownedJob(task, func(job *batchv1.Job) {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			})}
+		}},
+		{name: "Job deleted externally, retry pending", wantHeld: true, holder: func() (*corev1alpha1.Task, []client.Object) {
+			return limitTestRetryingTask("job-deleted"), nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			holder, extra := tc.holder()
+			waiting := limitTestTask("waiting")
+			objects := append([]client.Object{holder, waiting}, extra...)
+			r := newUnitReconciler(newTestScheme(), objects...)
+			r.APIReader = r.Client
+			scope := r.namespaceAdmissionScope("default", 1)
+			granted, err := r.acquireTaskAdmissionSlot(ctx, waiting, scope)
+			if err != nil || granted == tc.wantHeld {
+				t.Fatalf("waiting Task granted=%t err=%v, want held=%t", granted, err, tc.wantHeld)
+			}
+			if !tc.wantHeld {
+				return
+			}
+			current := &corev1alpha1.Task{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(holder), current); err != nil {
+				t.Fatal(err)
+			}
+			current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			if err := r.Status().Update(ctx, current); err != nil {
+				t.Fatal(err)
+			}
+			if granted, err := r.acquireTaskAdmissionSlot(ctx, waiting, scope); err != nil || !granted {
+				t.Fatalf("after the holder finished: granted=%t err=%v, want admitted", granted, err)
+			}
+		})
+	}
+}
+
+// A Task that takes the last slot and starts running between another
+// Task's ledger read and its List is still counted: its grant changed the
+// ledger, so the other Task's write conflicts and it counts again.
+func TestAdmissionCountsATaskThatStartsBetweenTheReadAndTheWrite(t *testing.T) {
+	ctx := context.Background()
+	racer, waiting := limitTestTask("racer"), limitTestTask("waiting")
+	r := newUnitReconciler(newTestScheme(), racer, waiting)
+	scope := r.namespaceAdmissionScope("default", 1)
+	writeAdmissionLedger(t, r.Client, scope.ledger)
+	base := r.Client.(client.WithWatch)
+	raced := false
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, delegate client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
+			if _, tasks := list.(*corev1alpha1.TaskList); tasks && !raced {
+				raced = true
+				lease := &coordinationv1.Lease{}
+				if err := delegate.Get(ctx, scope.ledger, lease); err != nil {
+					return err
+				}
+				lease.Annotations[taskAdmissionLedgerAnnotation] = `["` + string(racer.UID) + `"]`
+				if err := delegate.Update(ctx, lease); err != nil {
+					return err
+				}
+				current := &corev1alpha1.Task{}
+				if err := delegate.Get(ctx, client.ObjectKeyFromObject(racer), current); err != nil {
+					return err
+				}
+				current.Status.Phase = corev1alpha1.TaskPhaseRunning
+				current.Status.JobName = buildTaskJobName(current)
+				if err := delegate.Status().Update(ctx, current); err != nil {
+					return err
+				}
+			}
+			return delegate.List(ctx, list, options...)
+		},
+	})
+	r.APIReader = r.Client
+	granted, err := r.acquireTaskAdmissionSlot(ctx, waiting, scope)
+	if !raced || err != nil || granted {
+		t.Fatalf("raced=%t granted=%t err=%v, want the waiting Task held by the Task that started", raced, granted, err)
 	}
 }

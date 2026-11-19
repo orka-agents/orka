@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -99,6 +100,8 @@ func effectiveTaskAdmissionLimit(limit int32) int32 {
 type taskAdmissionScope struct {
 	ledger types.NamespacedName
 	limit  int32
+	// namespace holds every Task the scope lists, and their Jobs.
+	namespace string
 	// list returns the scope's Tasks. It is called after each ledger read,
 	// so every grant the read returns belongs to a Task the list can see
 	// unless that Task is gone.
@@ -114,7 +117,8 @@ func (r *TaskReconciler) namespaceAdmissionScope(namespace string, limit int32) 
 		ledger: types.NamespacedName{
 			Namespace: strings.TrimSpace(r.ControllerNamespace), Name: taskAdmissionNamespaceLedger + taskAdmissionLedgerDigest(namespace),
 		},
-		limit: limit,
+		limit:     limit,
+		namespace: namespace,
 		list: func(ctx context.Context) ([]corev1alpha1.Task, error) {
 			tasks := &corev1alpha1.TaskList{}
 			err := uncachedReader(r.APIReader, r.Client).List(ctx, tasks, client.InNamespace(namespace))
@@ -131,7 +135,8 @@ func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit
 		ledger: types.NamespacedName{
 			Namespace: strings.TrimSpace(r.ControllerNamespace), Name: taskAdmissionChildrenLedgerName(parent.Namespace, parent.UID),
 		},
-		limit: limit,
+		limit:     limit,
+		namespace: parent.Namespace,
 		list: func(ctx context.Context) ([]corev1alpha1.Task, error) {
 			siblings := &corev1alpha1.TaskList{}
 			if err := uncachedReader(r.APIReader, r.Client).List(ctx, siblings, client.InNamespace(parent.Namespace),
@@ -266,7 +271,7 @@ func (v taskAdmissionView) admits(limit int32) bool {
 // one ledger is ahead in all of them and two Tasks never each hold a slot
 // the other waits for. No grant is dropped: a claimant not yet elected keeps
 // its place and proceeds once those ahead of it finish.
-func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) taskAdmissionView {
+func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task, jobOwners map[types.UID]struct{}) taskAdmissionView {
 	eligible := make(map[types.UID]*corev1alpha1.Task, len(tasks))
 	for i := range tasks {
 		if taskAdmissionGrantEligible(&tasks[i]) {
@@ -293,8 +298,9 @@ func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []
 			continue
 		}
 		_, hasGrant := grants[uid]
+		_, ownsJob := jobOwners[uid]
 		switch {
-		case taskAdmittedByWork(candidate):
+		case taskAdmittedByWork(candidate) || ownsJob:
 			view.running++
 		case hasGrant || taskAdmissionRetryPending(candidate):
 			view.claimants++
@@ -368,7 +374,11 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 		}) {
 			return nil
 		}
-		view := newTaskAdmissionView(task, entries, tasks)
+		jobOwners, err := r.taskAdmissionJobOwners(ctx, scope.namespace)
+		if err != nil {
+			return err
+		}
+		view := newTaskAdmissionView(task, entries, tasks, jobOwners)
 		if !view.admits(scope.limit) {
 			return nil
 		}
@@ -411,6 +421,40 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 		return nil
 	})
 	return granted, err
+}
+
+// taskAdmissionJobOwners returns the UIDs of the Tasks in namespace that own
+// a live Job. A Task counts as running while its Job does, even when its
+// status does not name the Job: a controller that stopped between creating
+// the Job and recording it, such as one from before admission ledgers, left
+// no other trace. Jobs are read from the controller's cache, which is
+// synced before any Task is reconciled, so it holds every Job an earlier
+// leader created.
+func (r *TaskReconciler) taskAdmissionJobOwners(ctx context.Context, namespace string) (map[types.UID]struct{}, error) {
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	owners := map[types.UID]struct{}{}
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		owner := metav1.GetControllerOf(job)
+		if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+			job.DeletionTimestamp != nil || taskAdmissionJobFinished(job) {
+			continue
+		}
+		owners[owner.UID] = struct{}{}
+	}
+	return owners, nil
+}
+
+func taskAdmissionJobFinished(job *batchv1.Job) bool {
+	for _, condition := range job.Status.Conditions {
+		if (condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed) && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseTaskAdmissionSlot removes task's grant from the scope's ledger, if

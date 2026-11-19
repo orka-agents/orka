@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -122,7 +123,7 @@ func TestDeliveryRecoveryReadsASettledTaskOnlyWhenItChanges(t *testing.T) {
 	}
 
 	dispatcher.mu.Lock()
-	dispatcher.settledDeliveryRecoveries[tasks[0].UID] = acpSettledDeliveryRecovery{resourceVersion: "11", epoch: epoch - 1}
+	dispatcher.settledDeliveryRecoveries.put(tasks[0].UID, acpSettledDeliveryRecovery{resourceVersion: "11", epoch: epoch - 1})
 	dispatcher.mu.Unlock()
 	if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks); err != nil {
 		t.Fatal(err)
@@ -135,7 +136,7 @@ func TestDeliveryRecoveryReadsASettledTaskOnlyWhenItChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher.mu.Lock()
-	remaining := len(dispatcher.settledDeliveryRecoveries)
+	remaining := dispatcher.settledDeliveryRecoveries.len()
 	dispatcher.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("%d verdicts remain for Tasks no longer listed", remaining)
@@ -145,6 +146,112 @@ func TestDeliveryRecoveryReadsASettledTaskOnlyWhenItChanges(t *testing.T) {
 // A succeeded attempt whose delivery is still NotRequested can move on to
 // Validating without the Task changing, so it is read on every scan and is
 // recovered as soon as its durable delivery needs it.
+// The verdict cache is bounded: past its limit it evicts the least recently
+// used verdict instead of growing, and an evicted Task is only read from the
+// store again, with the same result.
+func TestDeliveryRecoveryVerdictCacheIsBounded(t *testing.T) {
+	epochs, epoch := settledDeliveryTestEpochs(t)
+	attempts := &countingAttemptStore{attempt: store.PromptAttempt{
+		ExecutionState: store.PromptExecutionSucceeded, DeliveryState: store.PromptDeliveryReadValidated,
+	}}
+	const limit = 4
+	dispatcher := &ACPDispatcher{Store: attempts, Epochs: epochs, sem: make(chan struct{}, 1)}
+	dispatcher.settledDeliveryRecoveries.limit = limit
+	ctx := context.Background()
+	tasks := make([]corev1alpha1.Task, 3*limit)
+	for i := range tasks {
+		tasks[i] = settledDeliveryTestTask(epoch)
+		tasks[i].Name = fmt.Sprintf("settled-%d", i)
+		tasks[i].UID = types.UID(fmt.Sprintf("settled-uid-%d", i))
+	}
+	cached := func() int {
+		dispatcher.mu.Lock()
+		defer dispatcher.mu.Unlock()
+		return dispatcher.settledDeliveryRecoveries.len()
+	}
+
+	if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks); err != nil {
+		t.Fatal(err)
+	}
+	if got := cached(); got != limit {
+		t.Fatalf("cached verdicts after one scan of %d settled Tasks = %d, want the limit %d", len(tasks), got, limit)
+	}
+	if got := attempts.readCount(); got != len(tasks) {
+		t.Fatalf("store reads on the first scan = %d, want %d", got, len(tasks))
+	}
+	// Every Task is still recognised as settled: the ones kept are skipped,
+	// the evicted ones are read again and found settled again, and the cache
+	// never grows past its limit.
+	for scan := range 3 {
+		before := attempts.readCount()
+		if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks); err != nil {
+			t.Fatal(err)
+		}
+		if got := cached(); got != limit {
+			t.Fatalf("scan %d: cached verdicts = %d, want %d", scan, got, limit)
+		}
+		if reads := attempts.readCount() - before; reads < len(tasks)-limit || reads > len(tasks) {
+			t.Fatalf("scan %d: store reads = %d, want between %d and %d", scan, reads, len(tasks)-limit, len(tasks))
+		}
+	}
+	// A kept verdict is still honoured exactly: with only the cached Tasks
+	// listed, none is read.
+	dispatcher.mu.Lock()
+	kept := make([]corev1alpha1.Task, 0, limit)
+	for i := range tasks {
+		if _, ok := dispatcher.settledDeliveryRecoveries.entries[tasks[i].UID]; ok {
+			kept = append(kept, tasks[i])
+		}
+	}
+	dispatcher.mu.Unlock()
+	before := attempts.readCount()
+	if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, kept); err != nil {
+		t.Fatal(err)
+	}
+	if reads := attempts.readCount() - before; len(kept) != limit || reads != 0 {
+		t.Fatalf("kept=%d store reads=%d, want %d kept Tasks skipped without reads", len(kept), reads, limit)
+	}
+	// A recovery that becomes necessary is still found for an evicted Task
+	// (with no free slot, it is offered and deferred rather than started).
+	dispatcher.sem = make(chan struct{})
+	attempts.setDelivery(store.PromptDeliveryValidating)
+	evicted := tasks[0]
+	evicted.ResourceVersion = "12"
+	before = attempts.readCount()
+	if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, []corev1alpha1.Task{evicted}); err != nil {
+		t.Fatal(err)
+	}
+	if reads := attempts.readCount() - before; reads != 1 {
+		t.Fatalf("store reads for a changed evicted Task = %d, want 1", reads)
+	}
+}
+
+func TestACPSettledDeliveryRecoveryCacheEvictsLeastRecentlyUsed(t *testing.T) {
+	cache := acpSettledDeliveryRecoveryCache{limit: 2}
+	cache.put("a", acpSettledDeliveryRecovery{resourceVersion: "1"})
+	cache.put("b", acpSettledDeliveryRecovery{resourceVersion: "1"})
+	if _, ok := cache.get("a"); !ok {
+		t.Fatal("a was not kept")
+	}
+	cache.put("c", acpSettledDeliveryRecovery{resourceVersion: "1"})
+	if _, ok := cache.get("b"); ok {
+		t.Fatal("b, the least recently used, was kept past the limit")
+	}
+	for _, uid := range []types.UID{"a", "c"} {
+		if _, ok := cache.get(uid); !ok {
+			t.Fatalf("%s was evicted", uid)
+		}
+	}
+	cache.put("a", acpSettledDeliveryRecovery{resourceVersion: "2"})
+	if verdict, _ := cache.get("a"); verdict.resourceVersion != "2" || cache.len() != 2 {
+		t.Fatalf("updated a = %+v, len %d", verdict, cache.len())
+	}
+	cache.remove("a")
+	if _, ok := cache.get("a"); ok || cache.len() != 1 {
+		t.Fatalf("removed a still cached, len %d", cache.len())
+	}
+}
+
 func TestDeliveryRecoveryKeepsReadingAttemptsThatCanStillChange(t *testing.T) {
 	epochs, epoch := settledDeliveryTestEpochs(t)
 	attempts := &countingAttemptStore{attempt: store.PromptAttempt{

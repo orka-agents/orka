@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"container/list"
+
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -48,6 +50,68 @@ func acpDeliveryRecoveryVerdictSettled(task *corev1alpha1.Task, attempt *store.P
 	}
 }
 
+// acpSettledDeliveryRecoveryCacheSize bounds the settled verdicts kept. A
+// Task whose verdict is not kept, or was evicted, is read from the store
+// again, as it was before the cache existed, so the bound costs only reads.
+const acpSettledDeliveryRecoveryCacheSize = 16384
+
+// acpSettledDeliveryRecoveryCache keeps settled verdicts for the most
+// recently checked Tasks, evicting the least recently used past its limit.
+// It is guarded by the dispatcher's mu.
+type acpSettledDeliveryRecoveryCache struct {
+	// limit overrides acpSettledDeliveryRecoveryCacheSize when positive.
+	limit   int
+	entries map[types.UID]*list.Element
+	order   list.List
+}
+
+type acpSettledDeliveryRecoveryEntry struct {
+	uid     types.UID
+	verdict acpSettledDeliveryRecovery
+}
+
+func (c *acpSettledDeliveryRecoveryCache) size() int {
+	if c.limit > 0 {
+		return c.limit
+	}
+	return acpSettledDeliveryRecoveryCacheSize
+}
+
+func (c *acpSettledDeliveryRecoveryCache) len() int {
+	return len(c.entries)
+}
+
+func (c *acpSettledDeliveryRecoveryCache) get(uid types.UID) (acpSettledDeliveryRecovery, bool) {
+	element, ok := c.entries[uid]
+	if !ok {
+		return acpSettledDeliveryRecovery{}, false
+	}
+	c.order.MoveToFront(element)
+	return element.Value.(*acpSettledDeliveryRecoveryEntry).verdict, true
+}
+
+func (c *acpSettledDeliveryRecoveryCache) put(uid types.UID, verdict acpSettledDeliveryRecovery) {
+	if c.entries == nil {
+		c.entries = make(map[types.UID]*list.Element)
+	}
+	if element, ok := c.entries[uid]; ok {
+		element.Value.(*acpSettledDeliveryRecoveryEntry).verdict = verdict
+		c.order.MoveToFront(element)
+		return
+	}
+	for len(c.entries) >= c.size() {
+		c.remove(c.order.Back().Value.(*acpSettledDeliveryRecoveryEntry).uid)
+	}
+	c.entries[uid] = c.order.PushFront(&acpSettledDeliveryRecoveryEntry{uid: uid, verdict: verdict})
+}
+
+func (c *acpSettledDeliveryRecoveryCache) remove(uid types.UID) {
+	if element, ok := c.entries[uid]; ok {
+		c.order.Remove(element)
+		delete(c.entries, uid)
+	}
+}
+
 // deliveryRecoverySettled reports whether delivery recovery already found
 // nothing to recover for this exact Task version under this controller epoch.
 // Any Task write, including a projection or cleanup receipt, changes its
@@ -58,7 +122,7 @@ func (d *ACPDispatcher) deliveryRecoverySettled(task *corev1alpha1.Task, epoch i
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	settled, ok := d.settledDeliveryRecoveries[task.UID]
+	settled, ok := d.settledDeliveryRecoveries.get(task.UID)
 	return ok && settled.resourceVersion == task.ResourceVersion && settled.epoch == epoch
 }
 
@@ -68,10 +132,7 @@ func (d *ACPDispatcher) rememberDeliveryRecoverySettled(task *corev1alpha1.Task,
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.settledDeliveryRecoveries == nil {
-		d.settledDeliveryRecoveries = make(map[types.UID]acpSettledDeliveryRecovery)
-	}
-	d.settledDeliveryRecoveries[task.UID] = acpSettledDeliveryRecovery{resourceVersion: task.ResourceVersion, epoch: epoch}
+	d.settledDeliveryRecoveries.put(task.UID, acpSettledDeliveryRecovery{resourceVersion: task.ResourceVersion, epoch: epoch})
 }
 
 // pruneSettledDeliveryRecoveries forgets Tasks no longer listed.
@@ -82,9 +143,9 @@ func (d *ACPDispatcher) pruneSettledDeliveryRecoveries(tasks []corev1alpha1.Task
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for uid := range d.settledDeliveryRecoveries {
+	for uid := range d.settledDeliveryRecoveries.entries {
 		if _, ok := live[uid]; !ok {
-			delete(d.settledDeliveryRecoveries, uid)
+			d.settledDeliveryRecoveries.remove(uid)
 		}
 	}
 }
