@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Testing | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/testing"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Testing | Orka"><meta data-rh="true" name="description" content="The test suites Orka runs, what each one covers, and how to run them."><meta data-rh="true" property="og:description" content="The test suites Orka runs, what each one covers, and how to run them."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/testing"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/testing" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/testing" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Testing","item":"https://orka-agents.github.io/orka/docs/testing"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.84a3497b.css">
-<script src="/orka/assets/js/runtime~main.90591035.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.db144d8b.js" defer="defer"></script>
 <script src="/orka/assets/js/main.e159c864.js" defer="defer"></script>
 </head>
 <body>
@@ -37,6 +37,10 @@ and verifies read and write intents, a publishable workspace delta, native captu
 return history, unchanged source bytes, and runtime cleanup. It explicitly enables
 <code>ORKA_NATIVE_CODEX_TEST=1</code> and requires the named test to pass, so a skipped test
 cannot satisfy the job. This verifies the native integration, not live-model recall.</p>
+<p>On one continuation the gate requests <code>max</code> for <code>gpt-6-astra</code> and checks
+<code>model</code> and <code>reasoning.effort</code> in the actual <code>POST /v1/responses</code> body. This
+verifies what the pinned client sends, not which live models or Azure
+deployments accept it.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="local-environment-notes">Local environment notes<a href="#local-environment-notes" class="hash-link" aria-label="Direct link to Local environment notes" title="Direct link to Local environment notes" translate="no">​</a></h3>
 <ul>
 <li class=""><strong>Script test suites need bash &gt;= 4.</strong> The suites under <code>scripts/tests/</code>
