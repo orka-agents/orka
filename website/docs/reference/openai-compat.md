@@ -306,7 +306,7 @@ curl https://orka.example.com/openai/v1/models \
 | System messages | Yes, but Orka's own prompt is prepended in coordinator mode |
 | Multi-part content | Yes (text parts extracted) |
 | `max_tokens` / `max_completion_tokens` | Yes |
-| `temperature` | Yes |
+| `temperature` | Yes, except that an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it |
 | `stop` sequences | Yes |
 | `stream_options.include_usage` | Yes |
 | Image inputs | Not yet (text extracted from multi-part) |

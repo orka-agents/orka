@@ -82,7 +82,6 @@ User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
     "provider": "anthropic",
     "model": "claude-opus-5",
     "namespace": "default",
-    "temperature": 0.7,
     "maxTokens": 4096,
     "systemPrompt": "Focus on security topics",
     "agentRef": "my-agent"

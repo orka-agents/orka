@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -60,13 +61,12 @@ func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
 				case captured <- request:
 				default:
 				}
-				w.Header().Set("Content-Type", "application/json")
 				switch modelCalls.Add(1) {
 				case 1:
 					// Also attempt an unadvertised custom tool to verify rejection.
-					_, _ = fmt.Fprintf(w, `{"id":"msg-tools","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"custom-call","name":"example-lookup","input":{"query":"test"}},{"type":"tool_use","id":"remote-call","name":"remote-lookup","input":{}},{"type":"tool_use","id":"builtin-call","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, file.Name())
+					_ = anthropictest.WriteMessage(w, fmt.Sprintf(`{"id":"msg-tools","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"custom-call","name":"example-lookup","input":{"query":"test"}},{"type":"tool_use","id":"remote-call","name":"remote-lookup","input":{}},{"type":"tool_use","id":"builtin-call","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, file.Name()))
 				case 2:
-					_, _ = fmt.Fprintf(w, `{"id":"msg-result","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":%q}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, goalStateSentinel+"\n"+fileContent)
+					_ = anthropictest.WriteMessage(w, fmt.Sprintf(`{"id":"msg-result","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":%q}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, goalStateSentinel+"\n"+fileContent))
 				default:
 					http.Error(w, "unexpected model call", http.StatusBadRequest)
 				}
@@ -139,8 +139,7 @@ func TestCompatToolsDisabledPreservesClientDefinitions(t *testing.T) {
 					return
 				}
 				captured <- request
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"id":"msg-client","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"client-call","name":"file_read","input":{"filename":"client.txt"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+				_ = anthropictest.WriteMessage(w, `{"id":"msg-client","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"client-call","name":"file_read","input":{"filename":"client.txt"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
 			}))
 			t.Cleanup(model.Close)
 

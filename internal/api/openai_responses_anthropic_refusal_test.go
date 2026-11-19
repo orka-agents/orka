@@ -20,7 +20,9 @@ import (
 func TestResponsesProductionAnthropicTerminalRefusal(t *testing.T) {
 	for _, outcome := range []string{"refusal", "end_turn", "max_tokens"} {
 		for _, disabled := range []bool{false, true} {
-			for _, streamMode := range []string{"both", "required", "unsupported"} {
+			// The anthropic provider streams every request, so every mode
+			// below must reach the upstream as a streaming request.
+			for _, streamMode := range []string{"both", "required"} {
 				t.Run(fmt.Sprintf("%s/disabled=%t/stream=%s", outcome, disabled, streamMode), func(t *testing.T) {
 					text := "Done. <!-- GOAL_STATE:SATISFIED -->"
 					if outcome == "refusal" {

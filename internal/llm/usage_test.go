@@ -16,6 +16,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -420,6 +421,32 @@ func TestUsageStreamFailureAndCancellationPreserveInput(t *testing.T) {
 	}
 }
 
+// Complete streams too, so a stream that fails or ends after message_start
+// must keep the input it was billed for.
+func TestUsageCompleteFailurePreservesInput(t *testing.T) {
+	for _, truncated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("truncated=%t", truncated), func(t *testing.T) {
+			ctx, report := usageFixture(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "event: message_start\ndata: "+`{"type":"message_start","message":{"id":"message","type":"message","role":"assistant","model":"served-model","usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":10}}}`+"\n\n")
+				if !truncated {
+					_, _ = fmt.Fprint(w, "event: error\ndata: "+`{"type":"error","error":{"type":"invalid_request_error","message":"fixture failure"}}`+"\n\n")
+				}
+			}))
+			t.Cleanup(server.Close)
+			provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL})
+			require.NoError(t, err)
+			_, err = provider.Complete(ctx, usageRequest())
+			require.Error(t, err)
+			got := report()
+			require.EqualValues(t, 110, got.Summary.TotalTokens)
+			require.Equal(t, "partial", got.Summary.Completeness)
+			require.Equal(t, store.UsageStatusFailed, got.Works[0].Tasks[0].Measurements[0].Status)
+		})
+	}
+}
+
 func TestUsageStreamFallbackAfterEarlyInput(t *testing.T) {
 	for _, outputBeforeFailure := range []bool{false, true} {
 		t.Run(fmt.Sprint(outputBeforeFailure), func(t *testing.T) {
@@ -546,8 +573,7 @@ func TestUsagePersistenceFailureDoesNotRepeatProviderCall(t *testing.T) {
 							_, _ = fmt.Fprint(w, "event: message_delta\ndata: "+`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}`+"\n\n")
 							return
 						}
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = fmt.Fprint(w, `{"id":"message","type":"message","role":"assistant","model":"served-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}`)
+						_ = anthropictest.WriteMessage(w, `{"id":"message","type":"message","role":"assistant","model":"served-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}`)
 					}))
 					t.Cleanup(server.Close)
 					provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/primary/"})

@@ -148,8 +148,6 @@ metadata:
 spec:
   providerRef:
     name: anthropic
-  model:
-    temperature: 0.7
   systemPrompt:
     inline: "You are a helpful assistant."
   tools:
