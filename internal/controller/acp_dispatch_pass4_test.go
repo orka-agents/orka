@@ -87,24 +87,24 @@ func TestMarkACPStepUsesTheContextTimer(t *testing.T) {
 }
 
 // Admission is timed only for a pool that is not yet admitting, and is
-// reported once, when it serves and accepts.
+// reported once, when its stored status serves and accepts.
 func TestRuntimeAdmissionTimingsRecordOnlyRealAdmissions(t *testing.T) {
 	clock := &steppingClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
 	timings := &acpRuntimeAdmissionTimings{now: clock.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
 	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: "pool-uid"}}
 	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	r := newUnitReconciler(newTestScheme(), pool)
 
 	timings.startupObserved(pool, 2)
 	clock.Advance(300 * time.Millisecond)
 	timings.credentialsSeeded(pool, 2)
 	clock.Advance(200 * time.Millisecond)
-	timings.served(context.Background(), pool, 2) // still starting: nothing reported
+	timings.served(context.Background(), r.Client, pool, 2) // still starting: nothing reported
 	if len(timings.records) != 1 {
 		t.Fatalf("records = %d, want the admission still open while the pool starts", len(timings.records))
 	}
-	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
-	pool.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
-	timings.served(context.Background(), pool, 2)
+	setRuntimePoolAdmitting(t, r.Client, pool)
+	timings.served(context.Background(), r.Client, pool, 2)
 	if len(timings.records) != 0 {
 		t.Fatal("serving did not report and close the admission")
 	}
@@ -112,5 +112,55 @@ func TestRuntimeAdmissionTimingsRecordOnlyRealAdmissions(t *testing.T) {
 	timings.startupObserved(pool, 2)
 	if len(timings.records) != 0 {
 		t.Fatal("a pool already serving and accepting opened an admission record")
+	}
+}
+
+func setRuntimePoolAdmitting(t *testing.T, c client.Client, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	stored := &corev1alpha1.RuntimePool{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pool), stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+	stored.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
+	// This fake registers no RuntimePool status subresource, so Update
+	// stores the status.
+	if err := c.Update(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	pool.Status.Lifecycle = stored.Status.Lifecycle
+	pool.Status.AdmissionState = stored.Status.AdmissionState
+}
+
+// The pass sets its own copy of the pool to Serving before writing the
+// status. When that write fails or conflicts, the stored pool still starts:
+// the admission stays open, and the pass that lands the write reports it
+// once, with the retry's delay included.
+func TestRuntimeAdmissionTimingsWaitForThePersistedStatus(t *testing.T) {
+	clock := &steppingClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
+	timings := &acpRuntimeAdmissionTimings{now: clock.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: "pool-uid"}}
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	r := newUnitReconciler(newTestScheme(), pool)
+	timings.startupObserved(pool, 3)
+
+	// The failed write left only the pass's copy serving.
+	local := pool.DeepCopy()
+	local.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+	local.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
+	timings.served(context.Background(), r.Client, local, 3)
+	if len(timings.records) != 1 {
+		t.Fatal("a status write that never landed closed the admission")
+	}
+
+	clock.Advance(time.Second)
+	setRuntimePoolAdmitting(t, r.Client, pool)
+	timings.served(context.Background(), r.Client, pool, 3)
+	if len(timings.records) != 0 {
+		t.Fatal("the pass that landed the status did not report the admission")
+	}
+	timings.served(context.Background(), r.Client, pool, 3)
+	if len(timings.records) != 0 {
+		t.Fatal("a later pass reopened the admission")
 	}
 }

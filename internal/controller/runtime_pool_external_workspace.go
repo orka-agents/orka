@@ -257,8 +257,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	acpRuntimeAdmission.credentialsSeeded(pool, request.Sequence)
 	status := r.baseRuntimePoolStatus(pool, 1)
 	r.deriveExternalRuntimeTelemetryReady(pool, &status, request)
-	defer func() { acpRuntimeAdmission.served(ctx, pool, request.Sequence) }()
-	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
+	result, err := r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
 		func(ctx context.Context, _ *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 			current, err := r.externalPoolWorkspace(ctx, pool)
 			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current) {
@@ -271,6 +270,10 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			}
 			return ctrl.Result{}, false, nil
 		})
+	if err == nil {
+		acpRuntimeAdmission.served(ctx, uncachedReader(r.APIReader, r.Client), pool, request.Sequence)
+	}
+	return result, err
 }
 
 func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha1.AllocationObservation {

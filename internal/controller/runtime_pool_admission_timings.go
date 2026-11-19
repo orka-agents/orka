@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -24,6 +25,9 @@ import (
 // DataPlaneReady condition time has whole-second precision and is not used.
 
 const (
+	// acpLogKeyRuntimePool is the log key for a RuntimePool name.
+	acpLogKeyRuntimePool                 = "runtimePool"
+	acpLogKeySequence                    = "sequence"
 	acpRuntimeAdmissionTimingsLogMessage = "ACP workspace runtime admission timings"
 	acpRuntimeAdmissionMaxRecords        = 1024
 	acpRuntimeAdmissionRetention         = 30 * time.Minute
@@ -91,14 +95,32 @@ func (t *acpRuntimeAdmissionTimings) credentialsSeeded(pool *corev1alpha1.Runtim
 	}
 }
 
-// served logs the sequence's admission once the pool serves and accepts.
-func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, pool *corev1alpha1.RuntimePool, sequence int64) {
-	if pool == nil || pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
-		pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+func runtimePoolAdmitting(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting
+}
+
+// served logs the sequence's admission once the pool's stored status serves
+// and accepts. The pass's own copy is not enough: it is set before the status
+// write, which can conflict without an error, so the stored pool is read and
+// an admission still pending keeps its record for the pass that lands it.
+func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool, sequence int64) {
+	if !runtimePoolAdmitting(pool) {
+		return
+	}
+	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
+	t.mu.Lock()
+	open := t.records[key] != nil
+	t.mu.Unlock()
+	if !open {
+		return
+	}
+	stored := &corev1alpha1.RuntimePool{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), stored); err != nil ||
+		stored.UID != pool.UID || !runtimePoolAdmitting(stored) {
 		return
 	}
 	now := t.now()
-	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
 	t.mu.Lock()
 	record := t.records[key]
 	delete(t.records, key)
@@ -106,7 +128,7 @@ func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, pool *corev1alp
 	if record == nil {
 		return
 	}
-	values := []any{"namespace", pool.Namespace, "runtimePool", pool.Name, "sequence", sequence,
+	values := []any{acpCancelLogKeyNamespace, pool.Namespace, acpLogKeyRuntimePool, pool.Name, acpLogKeySequence, sequence,
 		"totalMs", acpPreDispatchMillis(now.Sub(record.observed))}
 	if !record.seeded.IsZero() {
 		values = append(values,
