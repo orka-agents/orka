@@ -409,17 +409,18 @@ var _ = Describe("Controller Feature Tests", func() {
 					},
 					"coordination": {
 						"enabled": true,
+						"allowedAgents": [{"name": "%s"}],
 						"maxConcurrentChildren": 1
 					}
 				}
-			}`, agentName, namespace, model)
+			}`, agentName, namespace, model, agentName)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(agentManifest)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("creating a parent task")
+			By("creating a parent task whose agent sets maxConcurrentChildren")
 			parentManifest := fmt.Sprintf(`{
 				"apiVersion": "core.orka.ai/v1alpha1",
 				"kind": "Task",
@@ -431,16 +432,17 @@ var _ = Describe("Controller Feature Tests", func() {
 					"type": "container",
 					"image": "busybox:latest",
 					"command": ["sleep"],
-					"args": ["120"]
+					"args": ["120"],
+					"agentRef": {"name": "%s"}
 				}
-			}`, parentTaskName, namespace)
+			}`, parentTaskName, namespace, agentName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(parentManifest)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("creating child tasks with parent label")
+			By("creating coordinated child tasks with parent label and depth annotation")
 			for _, childName := range []string{child1Name, child2Name, child3Name} {
 				childManifest := fmt.Sprintf(`{
 					"apiVersion": "core.orka.ai/v1alpha1",
@@ -450,6 +452,9 @@ var _ = Describe("Controller Feature Tests", func() {
 						"namespace": "%s",
 						"labels": {
 							"orka.ai/parent-task": "%s"
+						},
+						"annotations": {
+							"orka.ai/coordination-depth": "1"
 						}
 					},
 					"spec": {
@@ -467,21 +472,38 @@ var _ = Describe("Controller Feature Tests", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			By("waiting a moment for scheduling to occur")
-			time.Sleep(15 * time.Second)
+			By("sampling child phases until two children have run in turn")
+			// Sample while the children run, so overlapping admission fails the
+			// spec even if both children finish between reads. Requiring two
+			// Succeeded children also proves waiting children are admitted.
+			deadline := time.Now().Add(3 * time.Minute)
+			maxRunning, admitted := 0, false
+			for {
+				cmd = exec.Command("kubectl", "get", "tasks",
+					"-l", fmt.Sprintf("orka.ai/parent-task=%s", parentTaskName),
+					"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
+					"-n", namespace)
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
 
-			By("verifying at most 1 child is Running at a time")
-			cmd = exec.Command("kubectl", "get", "tasks",
-				"-l", fmt.Sprintf("orka.ai/parent-task=%s", parentTaskName),
-				"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
-				"-n", namespace)
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			runningCount := strings.Count(output, "=Running")
-			_, _ = fmt.Fprintf(GinkgoWriter, "Child task phases: %s (running=%d)\n", output, runningCount)
-			Expect(runningCount).To(BeNumerically("<=", 1),
-				"At most 1 child should be Running with maxConcurrentChildren=1")
+				runningCount := strings.Count(output, "=Running")
+				succeededCount := strings.Count(output, "=Succeeded")
+				maxRunning = max(maxRunning, runningCount)
+				admitted = admitted || runningCount+succeededCount > 0
+				_, _ = fmt.Fprintf(GinkgoWriter, "Child task phases: %s (running=%d)\n", output, runningCount)
+				Expect(runningCount).To(BeNumerically("<=", 1),
+					"At most 1 child should be Running with maxConcurrentChildren=1")
+				Expect(output).NotTo(ContainSubstring("=Failed"),
+					"coordinated children should wait for a slot, not fail admission")
+				if succeededCount >= 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					Fail(fmt.Sprintf("children did not run in turn before the deadline (admitted=%t, max running=%d): %s",
+						admitted, maxRunning, output))
+				}
+				time.Sleep(time.Second)
+			}
 		})
 	})
 
