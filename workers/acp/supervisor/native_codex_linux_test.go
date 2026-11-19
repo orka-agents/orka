@@ -58,12 +58,12 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNativeBundleExcludesCredentials(t, data, revokedSourceCredential)
-	first := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "", harnessv2.WorkspaceIntentRead)
-	second := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE", harnessv2.WorkspaceIntentRead)
+	first := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "", harnessv2.WorkspaceIntentRead, "gpt-5.4", "high")
+	second := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE", harnessv2.WorkspaceIntentRead, "gpt-6-astra", "max")
 	if second.ProviderSessionID != threadID || first.DataDigest == second.DataDigest {
 		t.Fatal("return transfer did not preserve native UUID and append the second turn")
 	}
-	written := runPinnedNativeTurn(t, second.Data, threadID, "write-current-test-credential", "NATIVE_ORka_WRITE", "NATIVE_ORka_REPLY_TWO", harnessv2.WorkspaceIntentWrite)
+	written := runPinnedNativeTurn(t, second.Data, threadID, "write-current-test-credential", "NATIVE_ORka_WRITE", "NATIVE_ORka_REPLY_TWO", harnessv2.WorkspaceIntentWrite, "gpt-5.4", "high")
 	if written.ProviderSessionID != threadID || written.DataDigest == second.DataDigest {
 		t.Fatal("write continuation did not preserve native UUID and append its turn")
 	}
@@ -73,17 +73,16 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 	}
 }
 
-func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent) harnessv2.NativeSessionSnapshot {
+func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent, model, effort string) harnessv2.NativeSessionSnapshot {
 	t.Helper()
 	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent)
 	defer upstream.Close()
-	const model = "gpt-5.4"
 	cfg, _ := newTestConfigWithUpstream(t, "unused", upstream.URL+"/v1", freshCredential)
 	allowed := []string{providerToolRead, providerToolGrep, providerToolGlob}
 	if intent == harnessv2.WorkspaceIntentWrite {
 		allowed = nil
 	}
-	projection := testProviderProjectionRequest(t, "codex", model, "Use the current Orka runtime policy.", "high", allowed, nil, intent == harnessv2.WorkspaceIntentWrite)
+	projection := testProviderProjectionRequest(t, "codex", model, "Use the current Orka runtime policy.", effort, allowed, nil, intent == harnessv2.WorkspaceIntentWrite)
 	projection.Profile.WorkspaceIntent = intent
 	provider, err := providerProfile("codex", model, intent)
 	if err != nil {
@@ -203,6 +202,7 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 		t.Fatal(err)
 	}
 	requests := capturedRequests()
+	assertPinnedNativeReasoningEffort(t, requests, model, effort)
 	if !bytes.Contains(requests[0], []byte("Run the shell command to print the SessionKit nonce")) || previousReply != "" && !bytes.Contains(requests[0], []byte(previousReply)) {
 		t.Fatal("resumed provider did not receive the native source and prior continuation history")
 	}
@@ -216,6 +216,24 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	assertCurrentNativeSettings(t, bundle.Rollout, state.paths.Workspace)
 	assertSavedNativeFilesDeleted(t, server, cfg, create, state)
 	return response.Snapshot
+}
+
+func assertPinnedNativeReasoningEffort(t *testing.T, requests [][]byte, model, effort string) {
+	t.Helper()
+	for _, body := range requests {
+		var request struct {
+			Model     string `json:"model"`
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Model != model || request.Reasoning.Effort != effort {
+			t.Fatalf("POST /v1/responses: model=%q reasoning.effort=%q, want %q and %q", request.Model, request.Reasoning.Effort, model, effort)
+		}
+	}
 }
 
 func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent) (*httptest.Server, func() [][]byte) {

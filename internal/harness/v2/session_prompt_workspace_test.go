@@ -57,10 +57,12 @@ func TestAgentSessionConfigurationValidation(t *testing.T) {
 	if err := base.Validate(); err != nil {
 		t.Fatalf("AgentSessionConfiguration.Validate() error = %v", err)
 	}
-	codexNone := base
-	codexNone.ReasoningEffort = "none"
-	if err := codexNone.Validate(); err != nil {
-		t.Fatalf("Codex none reasoning effort validation error = %v", err)
+	for _, effort := range []string{"none", "max"} {
+		codex := base
+		codex.ReasoningEffort = effort
+		if err := codex.Validate(); err != nil {
+			t.Fatalf("Codex %s reasoning effort validation error = %v", effort, err)
+		}
 	}
 	claudeMax := base
 	claudeMax.ProviderKind = "claude"
@@ -90,7 +92,6 @@ func TestAgentSessionConfigurationValidation(t *testing.T) {
 			configuration.ProviderKind = "claude"
 			configuration.ReasoningEffort = "none"
 		}, wantErr: "claude provider does not support"},
-		{name: "codex max effort", mutate: func(configuration *AgentSessionConfiguration) { configuration.ReasoningEffort = "max" }, wantErr: "codex provider does not support"},
 		{name: "copilot effort", mutate: func(configuration *AgentSessionConfiguration) {
 			configuration.ProviderKind = "copilot"
 			configuration.ReasoningEffort = "high"
