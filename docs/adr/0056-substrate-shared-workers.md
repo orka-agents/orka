@@ -88,6 +88,15 @@ workers, but gives no per-Actor proof of sandbox exit:
   template this provider recorded. Any foreign template fails closed: the pool stops
   admitting and is strongly retired. This runs before each claim, before each Resume,
   and on every sweep.
+- **When templates cannot be listed.** Admission closes at once. Once the native
+  ActorTemplate inventory has stayed unavailable for 60 s, every shared pool is
+  strongly retired, unless the control plane itself is down (a transport or
+  availability failure): then nothing can be placed, and retiring would only strand the
+  Actors' data. A rejection of the provider's own credentials is not "down", because
+  other clients may still place Actors; the pools are retired even though suspending
+  their neighbours, which needs those credentials, may then fail. The same applies when
+  the pool's assignment checks are rejected for those credentials past 60 s. Isolation wins, and
+  the provider reports the rejection as a Warning Event on its ExecutionWorkspaceProvider.
 - **Residual risk.** A foreign template or Actor created between two checks can reach a
   shared worker until the next check, the ledger's assignment check, or observation
   detects it. Detection then strongly retires the pool. The checks bound this race; they
