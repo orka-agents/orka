@@ -195,21 +195,28 @@ func TestDefaultWarmWindowHonorsClassOverrideAndOptOut(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name  string
+		flag  time.Duration
 		value string
 		want  string
 	}{
-		{name: "override", value: "15m", want: (15 * time.Minute).String()},
-		{name: "opt-out", value: "disabled"},
-		{name: "invalid", value: "2h"},
+		{name: "override", flag: 5 * time.Minute, value: "15m", want: (15 * time.Minute).String()},
+		{name: "override with the controller default off", value: "15m", want: (15 * time.Minute).String()},
+		{name: "opt-out", flag: 5 * time.Minute, value: "disabled"},
+		{name: "opt-out with the controller default off", value: "disabled"},
+		{name: "no annotation with the controller default off"},
+		{name: "invalid", flag: 5 * time.Minute, value: "2h"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			f := newSpeculativeTaskFixtureWith(t, func(r *TaskReconciler, binding *ACPRuntimeWorkspaceBinding) {
-				r.ACPWorkspaceDefaultSuspendAfterDetach = 5 * time.Minute
+				r.ACPWorkspaceDefaultSuspendAfterDetach = test.flag
 				binding.Class.ParametersRef = &workspacev1alpha1.TypedObjectReference{Group: substrateWorkspaceProfileGroup, Kind: substrateWorkspaceProfileKind, Name: binding.Class.ParametersRef.Name}
 				class := &workspacev1alpha1.ExecutionWorkspaceClass{}
 				if err := r.Get(context.Background(), types.NamespacedName{Namespace: acpTestNamespace, Name: binding.Class.Name}, class); err != nil {
 					t.Fatal(err)
+				}
+				if test.value == "" {
+					return
 				}
 				base := class.DeepCopy()
 				if class.Annotations == nil {

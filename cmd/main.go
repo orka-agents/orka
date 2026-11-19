@@ -704,9 +704,9 @@ func main() {
 	flag.DurationVar(&acpWorkspaceDefaultSuspendAfterDetach, "acp-workspace-default-suspend-after-detach",
 		controller.DefaultACPWorkspaceSuspendAfterDetach,
 		"Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets no "+
-			"spec.retention.suspendAfterDetach (ADR 0057). Existing workspaces keep what they froze. 0 disables the default; "+
+			"spec.retention.suspendAfterDetach (ADR 0057). Existing workspaces keep what they froze. 0 disables only the controller default; "+
 			"the ExecutionWorkspaceClass annotation "+controller.ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation+
-			" overrides it per class, and \"disabled\" opts a class out.")
+			" still sets a per-class window, and \"disabled\" opts a class out.")
 	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
 		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,

@@ -69,6 +69,10 @@ workspace before it holds the attachment. It may do so only when all of these ho
 - no revocation stamp is present, so no settlement is pending;
 - the outstanding demand stamp (`resume-requested-at`) names this Task's UID;
 - the Task is linked to this exact workspace UID;
+- the workspace's frozen lifecycle allows `Suspend` with a `DataOnly` profile. Only such a
+  workspace retires an unclaimed runtime with a data-preserving `Suspend`. A `Stop` of a
+  never-attached request would leave a stopped request without retained data, which the
+  attachment rule cannot accept, so every other class keeps the attach-first path;
 - the workspace is one of:
   - **a resumed lineage** that this Task just flipped back from a settled `Suspended`;
   - **a fresh workspace** that has never published a workload or held an attachment (a first
@@ -133,7 +137,7 @@ the start along with the demand.
 
 - **Where the default comes from.** The controller flag
   `--acp-workspace-default-suspend-after-detach` sets it, with a default of `5m`.
-  - `0` disables the default.
+  - `0` disables only the controller default; a class annotation still applies.
   - The value must be at most 1 h; otherwise the controller refuses to start.
 - **When it applies.** Only when Core materializes a new class-backed workspace whose binding is:
   - session-reused;
@@ -143,7 +147,8 @@ the start along with the demand.
 - **Overrides.**
   - An explicit profile window always wins.
   - The annotation `acp.workspace.orka.ai/default-suspend-after-detach` on the exact frozen
-    `ExecutionWorkspaceClass` can set another duration for new workspaces of that class.
+    `ExecutionWorkspaceClass` can set another duration for new workspaces of that class, whatever
+    the flag is, including `0`.
   - The value `disabled` opts the class out. An invalid value also disables the default.
 - **ADR 0055's validation.** The window must be at most 1 h and strictly shorter than
   `idleTimeout` and `maxLifetime`. Suspend, `DataOnly`, and Session reuse are required. A
@@ -209,7 +214,19 @@ the start along with the demand.
 6. **Unclaimed but still alive.** If the requester outlives the deadline without attaching, the
    pool scales to zero and the instance retires the same way. The workspace stays `Ready` with
    the stopped allocation and its retained data. That is exactly today's post-flip state. The
-   requester's later attach takes the stopped-predecessor path and cold-boots again.
+   requester's later attach takes the stopped-predecessor path and cold-boots again. This also
+   holds when the expiry races the requester's own attach:
+   - if the attach lands first, the pool controller's uncached re-read sees it and keeps the
+     replicas;
+   - if the scale-down lands first, the attach waits for the exact retirement to finish and then
+     attaches the stopped request.
+
+   A runtime retired by `Stop` (taint, quarantine, or failure) never strands its requester. Taint,
+   quarantine, and `Failed` already fail the waiting Task. Any other unattached Suspend-capable
+   workspace whose current request stopped without retained data also fails its Task with a
+   terminal error. No later request could carry that data. The error says to retry the Task for
+   a never-committed first turn, whose settlement deletes the empty workspace, or to start a new
+   Session.
 7. **Controller restart.** Every decision reads durable state only: the start annotation, the
    demand stamp, desired state, and the attachment. A restarted controller rebuilds the hold. It
    neither extends nor re-records a start. A new controller epoch retires a request published

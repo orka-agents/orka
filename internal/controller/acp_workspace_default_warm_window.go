@@ -49,7 +49,8 @@ const (
 )
 
 // ValidateACPWorkspaceDefaultSuspendAfterDetach checks the controller flag:
-// zero disables the default, otherwise ADR 0055's bound applies.
+// zero disables the controller default (class annotations still apply),
+// otherwise ADR 0055's bound applies.
 func ValidateACPWorkspaceDefaultSuspendAfterDetach(window time.Duration) error {
 	if window < 0 || window > maxACPWorkspaceSuspendAfterDetach {
 		return fmt.Errorf("the default warm-detach window must be 0 (disabled) or positive and at most %s", maxACPWorkspaceSuspendAfterDetach)
@@ -127,7 +128,8 @@ func (r *TaskReconciler) acpWorkspaceDefaultSuspendAfterDetachAnnotations(
 	namespace string,
 	binding *ACPRuntimeWorkspaceBinding,
 ) (map[string]string, error) {
-	if r.ACPWorkspaceDefaultSuspendAfterDetach <= 0 || !acpWorkspaceDefaultSuspendAfterDetachEligible(binding) {
+	// A zero controller default still lets a class annotation set a window.
+	if !acpWorkspaceDefaultSuspendAfterDetachEligible(binding) {
 		return nil, nil
 	}
 	class := &workspacev1alpha1.ExecutionWorkspaceClass{}

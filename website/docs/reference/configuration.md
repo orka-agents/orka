@@ -438,7 +438,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max admitted tasks per namespace (0 = unlimited). A Pending task waiting for a slot does not count. |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
-| `--acp-workspace-default-suspend-after-detach` | `5m` | Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets none; `0` disables it (ADR 0057) |
+| `--acp-workspace-default-suspend-after-detach` | `5m` | Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets none; `0` disables the controller default, while class annotations still apply (ADR 0057) |
 | `--acp-workspace-allow-provider-token-in-sandbox` | `ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX` env or `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway; when false they fail admission |
 | `--operator-workspace-access-enabled` | `false` | Serve `orka task exec` / `orka task cp`. Each call also needs the class `acp.workspace.orka.ai/operator-access` opt-in and the `tasks/exec` or `tasks/files` permission; write-capable access taints the session. Requires Task provenance admission. See [Operator workspace access](../guides/operator-workspace-access.md) |
 | `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
@@ -710,16 +710,17 @@ the cap has room. Each warm workspace holds one private worker Pod for up to the
 
 When a profile sets no `suspendAfterDetach`, Core freezes a default window into each new
 session-reused Substrate workspace whose class allows Suspend with a `DataOnly` profile. The
-`--acp-workspace-default-suspend-after-detach` flag sets it (default `5m`; `0` disables it). The
+`--acp-workspace-default-suspend-after-detach` flag sets it (default `5m`; `0` disables the controller default). The
 `acp.workspace.orka.ai/default-suspend-after-detach` annotation on an `ExecutionWorkspaceClass`
 overrides it for new workspaces of that class with another duration, or opts the class out with
-`disabled`. A default that is not shorter than `idleTimeout` and `maxLifetime` is not applied.
+`disabled`; the annotation applies even when the flag is `0`. A default that is not shorter than `idleTimeout` and `maxLifetime` is not applied.
 Existing workspaces keep the window they froze, and the default never changes profile, class,
 or binding hashes. Each default window costs one idle Actor slot per Session for its duration:
 one Actor's reservation on a shared worker, or one worker Pod on a private one.
 
-Core also starts a workspace runtime speculatively. A Session follow-up that cold-resumes a
-suspended workspace, or the first turn of a new workspace, lets the provider start booting
+Core also starts a workspace runtime speculatively for classes that allow Suspend with a
+`DataOnly` profile. A Session follow-up that cold-resumes a suspended workspace, or the first
+turn of a new workspace, lets the provider start booting
 before the Task's attachment handshake completes. The runtime passes every startup attestation
 and credential bootstrap, and receives no prompt until the Task holds the attachment. A start
 nobody claims within two minutes, or whose Task is cancelled, is retired through the ordinary
