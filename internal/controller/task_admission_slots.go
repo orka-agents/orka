@@ -158,14 +158,22 @@ func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit
 // belongs to an earlier Task of the same name and is not counted. A child
 // with no pin at all is counted: counting it can only delay admission.
 func taskAdmissionChildOf(child, parent *corev1alpha1.Task) bool {
+	pinned, ok := taskParentUIDPin(child, parent.Name)
+	return !ok || pinned == parent.UID
+}
+
+// taskParentUIDPin returns the parent UID a child pins for the parent named
+// parentName: its controller owner reference to that Task or, failing that,
+// the parent UID annotation.
+func taskParentUIDPin(child *corev1alpha1.Task, parentName string) (types.UID, bool) {
 	if owner := metav1.GetControllerOf(child); owner != nil && owner.Kind == taskResourceKind &&
-		owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == parent.Name {
-		return owner.UID == parent.UID
+		owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == parentName {
+		return owner.UID, true
 	}
 	if pinned := types.UID(strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID])); pinned != "" {
-		return pinned == parent.UID
+		return pinned, true
 	}
-	return true
+	return "", false
 }
 
 func taskAdmissionChildrenLedgerName(namespace string, parentUID types.UID) string {
@@ -232,7 +240,8 @@ func taskAdmissionHolders(task *corev1alpha1.Task, granted []types.UID, tasks []
 // acquireTaskAdmissionSlot reports whether task holds one of the scope's
 // slots, granting it one if a slot is free. A Task already in the ledger is
 // admitted only while the other holders number fewer than the limit, so a
-// grant nobody made can never admit a Task past it.
+// grant nobody made can never admit a Task past it, and a Task the scope does
+// not list as grant-eligible is never admitted.
 func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
 	if task == nil || task.UID == "" {
 		return false, fmt.Errorf("task identity is required for admission")
@@ -263,6 +272,14 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		tasks, err := scope.list(ctx)
 		if err != nil {
 			return err
+		}
+		// A grant only counts for a Task the scope lists, so one written for
+		// any other Task would be discarded by the next request and let it
+		// run past the limit.
+		if !slices.ContainsFunc(tasks, func(candidate corev1alpha1.Task) bool {
+			return candidate.UID == task.UID && taskAdmissionGrantEligible(&candidate)
+		}) {
+			return nil
 		}
 		holders, valid := taskAdmissionHolders(task, entries, tasks)
 		if int32(len(holders)) >= scope.limit { //nolint:gosec // bounded by the listed Task count
