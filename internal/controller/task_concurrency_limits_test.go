@@ -8,25 +8,30 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
 // limitTestReconciler returns a reconciler whose informer cache still shows
-// peer before its Pending write, while the API server already has it Pending,
-// as when another Task's reconcile admitted peer concurrently.
+// peer before its admission, while the API server already has it admitted, as
+// when another Task's reconcile admitted peer concurrently.
 func limitTestReconciler(t *testing.T, task, peer *corev1alpha1.Task, objects ...client.Object) *TaskReconciler {
 	t.Helper()
 	scheme := newTestScheme()
 	cachedPeer := peer.DeepCopy()
-	cachedPeer.Status.Phase = ""
+	cachedPeer.Status = corev1alpha1.TaskStatus{}
 	r := newUnitReconciler(scheme, append([]client.Object{task, cachedPeer}, objects...)...)
 	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}).
@@ -42,19 +47,21 @@ func objectCopies(objects []client.Object) []client.Object {
 	return copies
 }
 
-func limitTestTask(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+// limitTestTask is a Pending container Task.
+func limitTestTask(name string) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Finalizers: []string{labels.TaskFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid"), Finalizers: []string{labels.TaskFinalizer}},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: phase},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 }
 
 // Parallel reconciles must not admit past the namespace limit: a Task the
 // cache has not yet seen as Pending is counted from the API server.
 func TestHandlePendingNamespaceLimitCountsConcurrentlyAdmittedTasks(t *testing.T) {
-	task := limitTestTask("checking", corev1alpha1.TaskPhasePending)
-	peer := limitTestTask("admitted-concurrently", corev1alpha1.TaskPhasePending)
+	task := limitTestTask("checking")
+	peer := limitTestTask("admitted-concurrently")
+	peer.Status.JobName = "admitted-concurrently-job"
 	r := limitTestReconciler(t, task, peer)
 	r.MaxTasksPerNamespace = 1
 
@@ -77,16 +84,17 @@ func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) 
 		}},
 	}
 	parent := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: parentAgent.Name}},
 	}
 	child := func(name string) *corev1alpha1.Task {
-		task := limitTestTask(name, corev1alpha1.TaskPhasePending)
+		task := limitTestTask(name)
 		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
 		task.Annotations = map[string]string{labels.AnnotationCoordinationDepth: "1"}
 		return task
 	}
 	task, sibling := child("checking-child"), child("admitted-sibling")
+	sibling.Status.JobName = "admitted-sibling-job"
 	r := limitTestReconciler(t, task, sibling, parentAgent, parent)
 
 	result, err, handled := r.validateCoordinationConstraints(context.Background(), task)
@@ -95,5 +103,125 @@ func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) 
 	}
 	if !handled || result.RequeueAfter != 10*time.Second {
 		t.Fatalf("handled=%t RequeueAfter=%v, want the child limit to hold the second child", handled, result.RequeueAfter)
+	}
+}
+
+// Two Pending Tasks waiting under a limit of one used to count each other
+// and wait forever. Waiting Tasks no longer count: the first to take the slot
+// proceeds and the other waits for it.
+func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
+	first := limitTestTask("first-waiting")
+	second := limitTestTask("second-waiting")
+	r := newUnitReconciler(newTestScheme(), first, second)
+	r.APIReader = r.Client
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), first.DeepCopy())
+	if err != nil {
+		t.Fatalf("first handlePending() error = %v", err)
+	}
+	if result.RequeueAfter == 10*time.Second {
+		t.Fatal("the first waiting Task was held although no Task held the slot")
+	}
+	result, err = r.handlePending(context.Background(), second.DeepCopy())
+	if err != nil {
+		t.Fatalf("second handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("second RequeueAfter = %v, want it to wait for the slot", result.RequeueAfter)
+	}
+	// Only the admitted Task created its Job.
+	stored := &corev1alpha1.Task{}
+	for _, task := range []*corev1alpha1.Task{first, second} {
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), stored); err != nil {
+			t.Fatal(err)
+		}
+		if admitted := stored.Status.JobName != ""; admitted != (task == first) {
+			t.Fatalf("%s JobName = %q, want only the first Task admitted", task.Name, stored.Status.JobName)
+		}
+	}
+}
+
+// A recurring Task's scheduling parent stays Scheduled and runs nothing
+// itself, so it never holds a slot: under a limit of one, both its own child
+// run and an unrelated Task proceed.
+func TestHandlePendingRecurringParentHoldsNoSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		labeled bool
+	}{{name: "child run", labeled: true}, {name: "unrelated Task"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := limitTestTask("recurring-parent")
+			parent.Spec.Schedule = "*/5 * * * *"
+			parent.Status.Phase = corev1alpha1.TaskPhaseScheduled
+			waiting := limitTestTask("run")
+			if tc.labeled {
+				waiting.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+			}
+			r := newUnitReconciler(newTestScheme(), parent, waiting)
+			r.APIReader = r.Client
+			r.MaxTasksPerNamespace = 1
+
+			result, err := r.handlePending(context.Background(), waiting.DeepCopy())
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter == 10*time.Second {
+				t.Fatal("the recurring parent held the only namespace slot")
+			}
+			stored := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(waiting), stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status.JobName == "" {
+				t.Fatal("the waiting Task did not run")
+			}
+		})
+	}
+}
+
+// Two reconciles of Tasks in one namespace can both read a worker
+// RoleBinding with a stale RoleRef. When the other has already replaced it
+// with the desired binding, this one must not delete that replacement out
+// from under running workers.
+func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
+	ctx := context.Background()
+	const namespace = "shared-ns"
+	spec := workerRBACSpec{
+		serviceAccountName: AIWorkerServiceAccount, clusterRoleName: DefaultAIWorkerClusterRoleName,
+		roleBindingName: "orka-ai-worker-" + namespace,
+	}
+	replacement := workerRoleBinding(namespace, spec)
+	replacement.UID = "replacement-uid"
+	r := newUnitReconciler(newTestScheme(), replacement)
+	// The fake client ignores delete preconditions; the API server refuses a
+	// delete whose UID precondition does not match with a Conflict.
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+			deleteOptions := &client.DeleteOptions{}
+			deleteOptions.ApplyOptions(options)
+			if preconditions := deleteOptions.Preconditions; preconditions != nil && preconditions.UID != nil {
+				current := &rbacv1.RoleBinding{}
+				if err := delegate.Get(ctx, client.ObjectKeyFromObject(object), current); err == nil && current.UID != *preconditions.UID {
+					return apierrors.NewConflict(rbacv1.Resource("rolebindings"), object.GetName(), errors.New("UID precondition failed"))
+				}
+			}
+			return delegate.Delete(ctx, object, options...)
+		},
+	})
+	staleRead := replacement.DeepCopy()
+	staleRead.UID = "stale-uid"
+	staleRead.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "stale-worker-role"}
+
+	got, err := r.recreateWorkerRoleBinding(ctx, namespace, spec, staleRead, workerRoleBinding(namespace, spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(replacement), stored); err != nil {
+		t.Fatalf("the concurrent replacement was deleted: %v", err)
+	}
+	if stored.UID != replacement.UID || got.UID != replacement.UID {
+		t.Fatalf("stored UID %s, returned UID %s; want the concurrent replacement %s kept", stored.UID, got.UID, replacement.UID)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -185,23 +186,60 @@ func wakeACPOutboxProjectors() {
 
 // acpOutboxPass is what one projection pass claimed and scheduled.
 type acpOutboxPass struct {
-	claimed int
-	// nextRetry is the earliest time a projection this pass returned to
-	// Pending becomes claimable again; zero when none was.
-	nextRetry time.Time
+	// claimedAt is the time the pass claimed at; claimed holds the claimed
+	// projection IDs.
+	claimedAt time.Time
+	claimed   []string
+	// retries maps each projection the pass returned to Pending to the time
+	// it becomes claimable again.
+	retries map[string]time.Time
 }
 
-// nextACPOutboxClaim returns when the projector should claim next after a
-// pass at now. A failed pass, or one that filled its claim limit, claims again
-// on the next tick; otherwise the projector waits for an enqueue wakeup, the
-// earliest retry it scheduled, or the idle interval, whichever comes first.
-func nextACPOutboxClaim(now time.Time, pass acpOutboxPass, err error, idle time.Duration) time.Time {
-	if err != nil || pass.claimed >= defaultACPOutboxLimit {
+// acpOutboxSchedule remembers, across passes, when each retry the projector
+// scheduled falls due, so a pass that claims nothing, such as one an enqueue
+// woke early, or one where the earliest retry succeeds, never forgets a later
+// deadline.
+type acpOutboxSchedule struct {
+	retries map[string]time.Time
+}
+
+// observe folds a pass into the schedule. A claimed projection's earlier
+// deadline is settled by that claim; a deadline at or before a pass that
+// claimed fewer than its limit, yet did not return it, belongs to a
+// projection no longer pending. A failed pass changes nothing.
+func (s *acpOutboxSchedule) observe(pass acpOutboxPass, err error) {
+	if err != nil {
+		return
+	}
+	if s.retries == nil {
+		s.retries = map[string]time.Time{}
+	}
+	for _, id := range pass.claimed {
+		delete(s.retries, id)
+	}
+	if len(pass.claimed) < defaultACPOutboxLimit {
+		for id, due := range s.retries {
+			if !due.After(pass.claimedAt) {
+				delete(s.retries, id)
+			}
+		}
+	}
+	maps.Copy(s.retries, pass.retries)
+}
+
+// next returns when the projector should claim after a pass at now. A failed
+// pass, or one that filled its claim limit, claims again on the next tick;
+// otherwise the projector waits for an enqueue wakeup, the earliest
+// outstanding retry, or the idle interval, whichever comes first.
+func (s *acpOutboxSchedule) next(now time.Time, pass acpOutboxPass, err error, idle time.Duration) time.Time {
+	if err != nil || len(pass.claimed) >= defaultACPOutboxLimit {
 		return now
 	}
 	next := now.Add(idle)
-	if !pass.nextRetry.IsZero() && pass.nextRetry.Before(next) {
-		next = pass.nextRetry
+	for _, due := range s.retries {
+		if due.Before(next) {
+			next = due
+		}
 	}
 	return next
 }
@@ -242,6 +280,7 @@ func (p *ACPOutboxProjector) Start(ctx context.Context) error {
 	defer unsubscribe()
 	ticker := time.NewTicker(p.Interval)
 	defer ticker.Stop()
+	var schedule acpOutboxSchedule
 	var nextClaim time.Time // claim at once: projections may predate this process
 	for {
 		if now := time.Now(); !now.Before(nextClaim) {
@@ -249,7 +288,8 @@ func (p *ACPOutboxProjector) Start(ctx context.Context) error {
 			if err != nil && !errors.Is(err, context.Canceled) {
 				logf.FromContext(ctx).Error(err, "ACP outbox projection pass failed")
 			}
-			nextClaim = nextACPOutboxClaim(time.Now(), pass, err, idle)
+			schedule.observe(pass, err)
+			nextClaim = schedule.next(time.Now(), pass, err, idle)
 		}
 		select {
 		case <-ctx.Done():
@@ -279,9 +319,10 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 	if err != nil {
 		return pass, err
 	}
-	pass.claimed = len(projections)
+	pass.claimedAt = now
 	for i := range projections {
 		projection := &projections[i]
+		pass.claimed = append(pass.claimed, projection.ID)
 		deliveryDigest, projectErr := p.deliver(ctx, *projection)
 		state := store.OutboxProjectionDelivered
 		lastError := ""
@@ -298,9 +339,10 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
-				if pass.nextRetry.IsZero() || availableAt.Before(pass.nextRetry) {
-					pass.nextRetry = availableAt
+				if pass.retries == nil {
+					pass.retries = map[string]time.Time{}
 				}
+				pass.retries[projection.ID] = availableAt
 			}
 			deliveryDigest = ""
 		}

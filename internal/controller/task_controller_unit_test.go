@@ -1850,7 +1850,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 		t.Run(string(tt.phase), func(t *testing.T) {
 			scheme := newTestScheme()
 			parentTask := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeAI,
 					AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
@@ -1869,6 +1869,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sibling",
 					Namespace: "default",
+					UID:       "sibling-uid",
 					Labels:    map[string]string{labels.LabelParentTask: "parent"},
 				},
 				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
@@ -1877,6 +1878,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child",
 					Namespace: "default",
+					UID:       "child-uid",
 					Annotations: map[string]string{
 						labels.AnnotationCoordinationDepth: "1",
 					},
@@ -5932,19 +5934,22 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	scheme := newTestScheme()
 	// Create active tasks to hit the limit
 	active1 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default", UID: "active1-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
+	// A Pending Task holds a slot once admitted (here, its Job created); a
+	// Pending Task still waiting for a slot would not count.
 	active2 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default", UID: "active2-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: "active2-job"},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-limit",
 			Namespace:  "default",
+			UID:        "pending-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
@@ -5964,7 +5969,7 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 	scheme := newTestScheme()
 	finalizing := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default", UID: "finalizing-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
 	}
@@ -5972,6 +5977,7 @@ func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-finalizing-limit",
 			Namespace:  "default",
+			UID:        "pending-finalizing-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},

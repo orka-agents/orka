@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -16,24 +17,68 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestNextACPOutboxClaim(t *testing.T) {
+func TestACPOutboxScheduleNext(t *testing.T) {
 	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	idle := 10 * time.Second
-	for _, tc := range []struct {
-		name string
-		pass acpOutboxPass
-		err  error
-		want time.Time
-	}{
-		{name: "idle pass waits for the idle interval", want: now.Add(idle)},
-		{name: "a failed pass retries on the next tick", err: errors.New("unavailable"), want: now},
-		{name: "a full claim may have left more due", pass: acpOutboxPass{claimed: defaultACPOutboxLimit}, want: now},
-		{name: "a scheduled retry comes due first", pass: acpOutboxPass{claimed: 1, nextRetry: now.Add(2 * time.Second)}, want: now.Add(2 * time.Second)},
-		{name: "a retry after the idle interval waits for the interval", pass: acpOutboxPass{claimed: 1, nextRetry: now.Add(time.Minute)}, want: now.Add(idle)},
-	} {
-		if got := nextACPOutboxClaim(now, tc.pass, tc.err, idle); !got.Equal(tc.want) {
-			t.Errorf("%s: next claim = %s, want %s", tc.name, got, tc.want)
-		}
+	var schedule acpOutboxSchedule
+	if got := schedule.next(now, acpOutboxPass{claimedAt: now}, nil, idle); !got.Equal(now.Add(idle)) {
+		t.Fatalf("idle pass: next = %s, want the idle interval", got)
+	}
+	if got := schedule.next(now, acpOutboxPass{claimedAt: now}, errors.New("unavailable"), idle); !got.Equal(now) {
+		t.Fatalf("failed pass: next = %s, want the next tick", got)
+	}
+	full := acpOutboxPass{claimedAt: now, claimed: make([]string, defaultACPOutboxLimit)}
+	if got := schedule.next(now, full, nil, idle); !got.Equal(now) {
+		t.Fatalf("full claim: next = %s, want the next tick", got)
+	}
+}
+
+// An enqueue can wake a pass before a scheduled retry is due. That pass
+// claims nothing and must keep the retry's deadline rather than fall back to
+// the idle interval.
+func TestACPOutboxScheduleKeepsARetryAcrossAnEarlyPass(t *testing.T) {
+	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	idle := 10 * time.Second
+	var schedule acpOutboxSchedule
+	first := acpOutboxPass{claimedAt: start, claimed: []string{"a"}, retries: map[string]time.Time{"a": start.Add(2 * time.Second)}}
+	schedule.observe(first, nil)
+	if got := schedule.next(start, first, nil, idle); !got.Equal(start.Add(2 * time.Second)) {
+		t.Fatalf("after scheduling a retry: next = %s, want the retry", got)
+	}
+	early := acpOutboxPass{claimedAt: start.Add(500 * time.Millisecond)}
+	schedule.observe(early, nil)
+	if got := schedule.next(early.claimedAt, early, nil, idle); !got.Equal(start.Add(2 * time.Second)) {
+		t.Fatalf("after an early enqueue pass: next = %s, want the outstanding retry %s", got, start.Add(2*time.Second))
+	}
+}
+
+// A batch can schedule several retries. When the earliest is claimed and
+// delivered, the later deadline is still outstanding.
+func TestACPOutboxScheduleKeepsLaterRetriesOfABatch(t *testing.T) {
+	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	idle := 10 * time.Second
+	var schedule acpOutboxSchedule
+	batch := acpOutboxPass{claimedAt: start, claimed: []string{"a", "b"}, retries: map[string]time.Time{
+		"a": start.Add(time.Second), "b": start.Add(4 * time.Second),
+	}}
+	schedule.observe(batch, nil)
+	retryA := acpOutboxPass{claimedAt: start.Add(time.Second), claimed: []string{"a"}} // delivered
+	schedule.observe(retryA, nil)
+	if got := schedule.next(retryA.claimedAt, retryA, nil, idle); !got.Equal(start.Add(4 * time.Second)) {
+		t.Fatalf("after the earliest retry succeeded: next = %s, want b's retry %s", got, start.Add(4*time.Second))
+	}
+	retryB := acpOutboxPass{claimedAt: start.Add(4 * time.Second), claimed: []string{"b"}} // delivered
+	schedule.observe(retryB, nil)
+	if got := schedule.next(retryB.claimedAt, retryB, nil, idle); !got.Equal(retryB.claimedAt.Add(idle)) {
+		t.Fatalf("after every retry settled: next = %s, want the idle interval", got)
+	}
+	// A due deadline a non-full pass did not return belongs to a projection
+	// that is no longer pending, and is dropped.
+	schedule.observe(acpOutboxPass{claimedAt: start, retries: map[string]time.Time{"gone": start.Add(time.Second)}}, nil)
+	late := acpOutboxPass{claimedAt: start.Add(2 * time.Second)}
+	schedule.observe(late, nil)
+	if got := schedule.next(late.claimedAt, late, nil, idle); !got.Equal(late.claimedAt.Add(idle)) {
+		t.Fatalf("stale deadline kept the projector busy: next = %s", got)
 	}
 }
 
@@ -123,4 +168,44 @@ func TestEnqueuedTerminalProjectionWakesProjectors(t *testing.T) {
 	default:
 		t.Fatal("an enqueued terminal projection did not wake the projector")
 	}
+}
+
+// A Session turn's finalization, and a resumed finalization, activate its
+// terminal projection through the store; both wake the projector.
+func TestSessionTurnFinalizationWakesProjectors(t *testing.T) {
+	ctx := context.Background()
+	s, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "finalize-wake.db"))
+	defer closeStore()
+	continuity := newACPSessionTestContinuity(t, s, ACPBootstrapLimits{})
+	control := ensureACPSessionForTest(t, continuity, fence, "finalize-wake")
+	turn, attempt := openACPSessionTurnForTest(t, continuity, s, fence, control, "task-finalize-wake", "prompt-finalize-wake", "work")
+	completeACPAttemptExecutionForTest(t, s, fence, attempt, true)
+
+	wake, unsubscribe := subscribeACPOutboxWakeups()
+	defer unsubscribe()
+	expectWake := func(step string) {
+		t.Helper()
+		select {
+		case <-wake:
+		default:
+			t.Fatalf("%s did not wake the projector", step)
+		}
+	}
+	finalized, err := continuity.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
+		SessionTurn: *turn, Fence: fence, Reason: "ambiguous prompt acceptance",
+		Projection: acpSessionProjectionForTest("finalize-wake", "OutcomeUnknown"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectWake("turn finalization")
+
+	resumed := *turn
+	resumed.Turn = finalized.Turn
+	if _, err := continuity.ResumeSessionTurnFinalization(ctx, ACPResumeSessionTurnFinalizationRequest{
+		SessionTurn: resumed, Fence: fence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expectWake("resumed turn finalization")
 }

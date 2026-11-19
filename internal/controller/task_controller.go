@@ -202,8 +202,9 @@ type TaskReconciler struct {
 const (
 	// DefaultTaskMaxConcurrentReconciles lets independent Tasks reconcile in
 	// parallel. A Task is never reconciled concurrently with itself, the
-	// namespace Task limit and maxConcurrentChildren count Tasks from the API
-	// server, writes to objects other Tasks share are create-if-absent or
+	// namespace Task limit and maxConcurrentChildren grant slots through a
+	// resourceVersion-checked ledger (task_admission_slots.go), writes to
+	// objects other Tasks share are create-if-absent or
 	// resourceVersion-checked, and the reconciler's own state is
 	// lock-protected.
 	DefaultTaskMaxConcurrentReconciles = 4
@@ -1066,29 +1067,21 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		if !validationTask {
-			// Count from the API server, not the informer cache. A Task is
-			// counted from its Pending write, which commits before its own
-			// check, so every Task that passed this check is visible here
-			// however many Tasks reconcile at once.
-			var namespaceTasks corev1alpha1.TaskList
-			if err := uncachedReader(r.APIReader, r.Client).List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-				log.Error(err, "failed to list namespace tasks for limit check")
+			// Slots are counted from the API server and granted through the
+			// namespace's admission ledger, so parallel reconciles never
+			// admit past the limit and waiting Tasks never block each other.
+			granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace))
+			if err != nil {
+				log.Error(err, "failed to acquire a namespace task slot")
 				return ctrl.Result{}, err
 			}
-			active := int32(0)
-			for _, t := range namespaceTasks.Items {
-				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-					active++
-				}
-			}
-			if active >= r.MaxTasksPerNamespace {
+			if !granted {
 				log.Info("namespace task limit reached, requeueing",
 					"namespace", task.Namespace,
-					"active", active,
 					"limit", r.MaxTasksPerNamespace,
 				)
 				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+					"namespace %q has no free task slot (limit: %d), requeueing", task.Namespace, r.MaxTasksPerNamespace)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 		}
@@ -1438,22 +1431,15 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 	// Enforce maxConcurrentChildren (requeue if at limit)
 	if coord.MaxConcurrentChildren > 0 {
-		// Counted from the API server for the same reason as the namespace
-		// limit: a sibling admitted concurrently is already Pending there.
-		var siblings corev1alpha1.TaskList
-		if err := uncachedReader(r.APIReader, r.Client).List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
-			log.Error(err, "failed to list sibling tasks")
+		// Granted through the parent's admission ledger for the same reason
+		// as the namespace limit.
+		granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren))
+		if err != nil {
+			log.Error(err, "failed to acquire a coordination child slot")
 			return ctrl.Result{}, err, true
 		}
-		active := int32(0)
-		for _, s := range siblings.Items {
-			if s.Name != task.Name && taskPhaseCountsTowardConcurrency(s.Status.Phase) {
-				active++
-			}
-		}
-		if active >= coord.MaxConcurrentChildren {
-			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
+		if !granted {
+			log.Info("coordination concurrency limit reached", "max", coord.MaxConcurrentChildren)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 		}
 	}
@@ -4647,6 +4633,11 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	if strings.TrimSpace(r.ControllerNamespace) != "" {
+		if err := mgr.Add(&taskAdmissionLedgerReaper{reconciler: r, interval: taskAdmissionLedgerReapInterval}); err != nil {
+			return fmt.Errorf("register task admission ledger reaper: %w", err)
+		}
+	}
 	if !r.EnforceNamespaceIsolation {
 		var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
 		if err := mgr.Add(cleanup); err != nil {
@@ -5287,11 +5278,28 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 	return nil
 }
 
+// deleteExactStaleWorkerRoleBinding deletes binding only while it is the
+// exact object read. A binding already deleted or replaced is not an error.
+func (r *TaskReconciler) deleteExactStaleWorkerRoleBinding(ctx context.Context, binding *rbacv1.RoleBinding) error {
+	uid := binding.UID
+	options := []client.DeleteOption{}
+	if uid != "" {
+		options = append(options, client.Preconditions{UID: &uid})
+	}
+	if err := r.Delete(ctx, binding, options...); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
+	}
+	return nil
+}
+
 func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.roleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
 
-	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+	// Delete only the exact stale binding read: a concurrent reconcile of
+	// another Task in this namespace may already have replaced it with the
+	// desired one, which must not be deleted out from under running workers.
+	if err := r.deleteExactStaleWorkerRoleBinding(ctx, current); err != nil {
 		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
@@ -5312,7 +5320,7 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			// The API server may still be serving the stale object while deletion is
 			// propagating, or another actor may have recreated it with the stale
 			// immutable RoleRef. Keep deleting/retrying until the name is available.
-			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+			if err := r.deleteExactStaleWorkerRoleBinding(ctx, latest); err != nil {
 				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.roleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
 			}
 			return false, nil

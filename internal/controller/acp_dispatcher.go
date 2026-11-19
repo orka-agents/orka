@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -132,6 +133,9 @@ type ACPDispatcher struct {
 
 	wake     chan struct{}
 	wakeOnce sync.Once
+	// wokenAt is when the first wakeup since the last scan arrived, in Unix
+	// nanoseconds; zero when none is pending. Timing only.
+	wokenAt atomic.Int64
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -251,6 +255,9 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 // stopped ones; capacity accounting runs on every scan either way.
 func (d *ACPDispatcher) dispatchScan(ctx context.Context, retirePools bool) error {
 	timer := newACPDispatchScanTimer(time.Now, retirePools)
+	if woken := d.wokenAt.Swap(0); woken > 0 {
+		timer.values = append(timer.values, "sinceWakeMs", acpPreDispatchMillis(timer.started.Sub(time.Unix(0, woken))))
+	}
 	defer timer.log(ctx)
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
@@ -4272,7 +4279,24 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return nil, acpDispatchTarget{}, nil
 	}
 	steps.mark("attemptReserved")
-	bound, err = refreshTarget()
+	markReserved := func(status *corev1alpha1.TaskExecutionStatus) {
+		status.State = corev1alpha1.TaskExecutionStateReserved
+		status.ControllerEpoch = fence.Epoch
+		status.Reason = ""
+		status.Message = ""
+		status.LastTransitionTime = nowMeta()
+	}
+	if target.pool != nil {
+		// The Reserved write re-reads the Task uncached and checks the pool
+		// binding on that read before its optimistic patch, so a separate
+		// refresh just before it would read the same state twice.
+		bound, err = d.patchReservedExecutionForPool(ctx, task, target.pool, markReserved)
+	} else {
+		bound, err = refreshTarget()
+		if err == nil && bound {
+			err = d.patchExecution(ctx, task, markReserved)
+		}
+	}
 	if err != nil {
 		releaseClaim()
 		return nil, acpDispatchTarget{}, err
@@ -4280,16 +4304,6 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 	if !bound {
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
-	}
-	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-		status.State = corev1alpha1.TaskExecutionStateReserved
-		status.ControllerEpoch = fence.Epoch
-		status.Reason = ""
-		status.Message = ""
-		status.LastTransitionTime = nowMeta()
-	}); err != nil {
-		releaseClaim()
-		return nil, acpDispatchTarget{}, err
 	}
 	steps.mark("taskReserved")
 	bound, err = refreshTarget()
@@ -4304,7 +4318,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 	steps.mark("finalRefresh")
 	acpPreDispatch.mark(task, acpPreDispatchReserved)
 	logf.FromContext(ctx).V(1).Info(acpReservationTimingsLogMessage,
-		append([]any{"namespace", task.Namespace, acpCancelLogKeyTask, task.Name}, steps.values...)...)
+		append([]any{acpCancelLogKeyNamespace, task.Namespace, acpCancelLogKeyTask, task.Name}, steps.values...)...)
 	return task, target, nil
 }
 
@@ -4440,19 +4454,59 @@ func (d *ACPDispatcher) refreshTaskRuntimePoolBinding(
 		}
 		return false, err
 	}
-	if current.UID != task.UID || current.Status.Execution == nil ||
-		(current.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued &&
-			current.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) ||
-		current.Status.Execution.Attempt != task.Status.Execution.Attempt ||
-		current.Status.Execution.PromptID != task.Status.Execution.PromptID ||
-		current.Status.Execution.RequestDigest != task.Status.Execution.RequestDigest ||
-		!acpRuntimePoolBindingMatches(current.Status.Execution, pool) {
+	if !acpTaskStillTargetsRuntimePool(task, current, pool) {
 		return false, nil
 	}
 	task.Status = current.Status
 	task.Labels = current.Labels
 	task.Annotations = current.Annotations
 	return true, nil
+}
+
+// acpTaskStillTargetsRuntimePool reports whether current is the same queued
+// or reserved attempt as task, still bound to pool.
+func acpTaskStillTargetsRuntimePool(task, current *corev1alpha1.Task, pool *corev1alpha1.RuntimePool) bool {
+	return current.UID == task.UID && current.Status.Execution != nil && task.Status.Execution != nil &&
+		(current.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
+			current.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved) &&
+		current.Status.Execution.Attempt == task.Status.Execution.Attempt &&
+		current.Status.Execution.PromptID == task.Status.Execution.PromptID &&
+		current.Status.Execution.RequestDigest == task.Status.Execution.RequestDigest &&
+		acpRuntimePoolBindingMatches(current.Status.Execution, pool)
+}
+
+// patchReservedExecutionForPool writes the Reserved execution state when the
+// uncached read the optimistic patch is based on still shows this attempt
+// bound to pool. It reports false, writing nothing, when it does not.
+func (d *ACPDispatcher) patchReservedExecutionForPool(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	pool *corev1alpha1.RuntimePool,
+	mutate func(*corev1alpha1.TaskExecutionStatus),
+) (bool, error) {
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	bound := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		bound = false
+		latest := &corev1alpha1.Task{}
+		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, key, latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if !acpTaskStillTargetsRuntimePool(task, latest, pool) {
+			return nil
+		}
+		base := latest.DeepCopy()
+		mutate(latest.Status.Execution)
+		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		task.Status = latest.Status
+		task.Labels = latest.Labels
+		task.Annotations = latest.Annotations
+		bound = true
+		return nil
+	})
+	return bound, err
 }
 
 func (d *ACPDispatcher) refreshTaskExternalRuntimeBinding(
