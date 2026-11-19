@@ -339,7 +339,8 @@ the observable parts.
   `GetWriteWatermark`, on both provider contracts (see "Durability, switch
   detection and recovery holds").
   Revision 13 bounds inter-agent messages by bytes: `SendMessage` refuses
-  content over `MaxMessageContentBytes`, a message batch stops before its
+  content over `MaxMessageContentBytes` and a namespace or task name over
+  `MaxControlIdentifierBytes`, a message batch stops before its
   content passes `MaxMessageBatchBytes`, and the limit is reported in
   `ProviderLimits.MaxMessageContentBytes` (see "Messages, counters and chat
   turns").
@@ -587,7 +588,10 @@ write without one.
   backlog is read over several calls. Messages are also bounded by bytes.
   `SendMessage` refuses content over `MaxMessageContentBytes` (1 MiB) with a
   `TooLargeError` and stores nothing, and a state.v1 provider reports exactly
-  that limit in `ProviderLimits.MaxMessageContentBytes`. A batch stops before
+  that limit in `ProviderLimits.MaxMessageContentBytes`. It also refuses a
+  `Namespace`, `FromTask`, `ToTask` or `ParentTask` over
+  `MaxControlIdentifierBytes` (1 KiB) with `ErrValidation`, so a full batch
+  carries at most 2 MiB of identifiers. A batch stops before
   the message that would take its total content past `MaxMessageBatchBytes`
   (4 MiB), and a non-empty inbox always yields at least one message. The
   batch is sized before `ConsumeMessages` marks anything, so a message left
@@ -1544,10 +1548,9 @@ artifact-fence cases run only in process.
   The client refuses invalid UTF-8, out-of-range times and requests over the
   16 MiB message limit before sending anything. The server reports a
   response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
-  fail it with a status that reads as a transport failure. The message byte
-  budgets bound the content of a message batch; only very large task or
-  namespace identifiers, which the contract does not bound, can still take a
-  batch over the limit.
+  fail it with a status that reads as a transport failure; the message byte
+  budgets and identifier bounds keep a contract-conforming provider's message
+  batches well under it.
 
 ### Orka policy above the client
 

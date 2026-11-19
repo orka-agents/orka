@@ -158,7 +158,8 @@ const (
 	// adds [MemoryConsolidationStore]. Revision 12 requires
 	// [WriteWatermarkStore] on both provider contracts. Revision 13 bounds
 	// inter-agent messages: [MessageStore.SendMessage] refuses content over
-	// [MaxMessageContentBytes], [MessageStore.ListUnreadMessages] and
+	// [MaxMessageContentBytes] and identifiers over
+	// [MaxControlIdentifierBytes], [MessageStore.ListUnreadMessages] and
 	// [MessageStore.ConsumeMessages] stop a batch before its content passes
 	// [MaxMessageBatchBytes], and the limit is reported in
 	// [ProviderLimits.MaxMessageContentBytes].

@@ -292,6 +292,7 @@ const (
 	MaxResultBytes                    = storagev1.MaxResultBytes
 	MaxMessageContentBytes            = storagev1.MaxMessageContentBytes
 	MaxMessageBatchBytes              = storagev1.MaxMessageBatchBytes
+	MaxControlIdentifierBytes         = storagev1.MaxControlIdentifierBytes
 )
 
 var (

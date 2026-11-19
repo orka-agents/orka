@@ -53,6 +53,13 @@ func (s *Store) sendMessageWrite(ctx context.Context, msg store.Message) (sentMe
 			What: "message content", Size: int64(len(msg.Content)), Limit: store.MaxMessageContentBytes,
 		}
 	}
+	for _, field := range []struct{ name, value string }{
+		{"namespace", msg.Namespace}, {"fromTask", msg.FromTask}, {"toTask", msg.ToTask}, {"parentTask", msg.ParentTask},
+	} {
+		if len(field.value) > store.MaxControlIdentifierBytes {
+			return sentMessage{}, store.ValidationErrorf("message %s exceeds %d bytes", field.name, store.MaxControlIdentifierBytes)
+		}
+	}
 	var sent sentMessage
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		var err error
