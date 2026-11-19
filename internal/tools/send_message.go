@@ -175,7 +175,7 @@ func sendMessageViaController(ctx context.Context, targetTask, content string) (
 	}
 
 	if resp.StatusCode == http.StatusRequestEntityTooLarge {
-		return "", errMessageContentTooLarge(len(content))
+		return "", fmt.Errorf("the controller rejected the message as too large (HTTP 413); send a shorter message")
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return "", fmt.Errorf("failed to send message: HTTP %d: %s", resp.StatusCode, string(respBody))

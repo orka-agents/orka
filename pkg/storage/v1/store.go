@@ -488,9 +488,10 @@ const MaxMessageContentBytes = 1 << 20
 // ConsumeMessages call returns: a batch stops before the message that would
 // take its total Content bytes past it, and always holds at least one message
 // when the inbox has one. It is at least MaxMessageContentBytes, so any stored
-// message fits a batch of its own, and with MaxMessageBatch messages of
-// metadata it stays well under the wire's message limit, so a consumed batch
-// can always be sent.
+// message fits a batch of its own. The budget counts Content bytes only: the
+// contract does not bound Namespace, FromTask, ToTask or ParentTask, so a
+// full batch with very large identifiers can still pass the wire's message
+// limit, and the wire server then reports that response as a provider error.
 const MaxMessageBatchBytes = 4 << 20
 
 // Message represents an inter-agent message.

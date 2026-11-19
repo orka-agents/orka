@@ -1544,9 +1544,10 @@ artifact-fence cases run only in process.
   The client refuses invalid UTF-8, out-of-range times and requests over the
   16 MiB message limit before sending anything. The server reports a
   response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
-  fail it with a status that reads as a transport failure; the message byte
-  budgets keep a contract-conforming provider's message batches well under
-  it.
+  fail it with a status that reads as a transport failure. The message byte
+  budgets bound the content of a message batch; only very large task or
+  namespace identifiers, which the contract does not bound, can still take a
+  batch over the limit.
 
 ### Orka policy above the client
 
