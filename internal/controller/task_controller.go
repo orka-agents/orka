@@ -5278,11 +5278,28 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 	return nil
 }
 
+// deleteExactStaleWorkerRoleBinding deletes binding only while it is the
+// exact object read. A binding already deleted or replaced is not an error.
+func (r *TaskReconciler) deleteExactStaleWorkerRoleBinding(ctx context.Context, binding *rbacv1.RoleBinding) error {
+	uid := binding.UID
+	options := []client.DeleteOption{}
+	if uid != "" {
+		options = append(options, client.Preconditions{UID: &uid})
+	}
+	if err := r.Delete(ctx, binding, options...); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
+	}
+	return nil
+}
+
 func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.roleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
 
-	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+	// Delete only the exact stale binding read: a concurrent reconcile of
+	// another Task in this namespace may already have replaced it with the
+	// desired one, which must not be deleted out from under running workers.
+	if err := r.deleteExactStaleWorkerRoleBinding(ctx, current); err != nil {
 		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
@@ -5303,7 +5320,7 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			// The API server may still be serving the stale object while deletion is
 			// propagating, or another actor may have recreated it with the stale
 			// immutable RoleRef. Keep deleting/retrying until the name is available.
-			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+			if err := r.deleteExactStaleWorkerRoleBinding(ctx, latest); err != nil {
 				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.roleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
 			}
 			return false, nil

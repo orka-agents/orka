@@ -8,13 +8,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -173,5 +177,51 @@ func TestHandlePendingRecurringParentHoldsNoSlot(t *testing.T) {
 				t.Fatal("the waiting Task did not run")
 			}
 		})
+	}
+}
+
+// Two reconciles of Tasks in one namespace can both read a worker
+// RoleBinding with a stale RoleRef. When the other has already replaced it
+// with the desired binding, this one must not delete that replacement out
+// from under running workers.
+func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
+	ctx := context.Background()
+	const namespace = "shared-ns"
+	spec := workerRBACSpec{
+		serviceAccountName: AIWorkerServiceAccount, clusterRoleName: DefaultAIWorkerClusterRoleName,
+		roleBindingName: "orka-ai-worker-" + namespace,
+	}
+	replacement := workerRoleBinding(namespace, spec)
+	replacement.UID = "replacement-uid"
+	r := newUnitReconciler(newTestScheme(), replacement)
+	// The fake client ignores delete preconditions; the API server refuses a
+	// delete whose UID precondition does not match with a Conflict.
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+			deleteOptions := &client.DeleteOptions{}
+			deleteOptions.ApplyOptions(options)
+			if preconditions := deleteOptions.Preconditions; preconditions != nil && preconditions.UID != nil {
+				current := &rbacv1.RoleBinding{}
+				if err := delegate.Get(ctx, client.ObjectKeyFromObject(object), current); err == nil && current.UID != *preconditions.UID {
+					return apierrors.NewConflict(rbacv1.Resource("rolebindings"), object.GetName(), errors.New("UID precondition failed"))
+				}
+			}
+			return delegate.Delete(ctx, object, options...)
+		},
+	})
+	staleRead := replacement.DeepCopy()
+	staleRead.UID = "stale-uid"
+	staleRead.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "stale-worker-role"}
+
+	got, err := r.recreateWorkerRoleBinding(ctx, namespace, spec, staleRead, workerRoleBinding(namespace, spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(replacement), stored); err != nil {
+		t.Fatalf("the concurrent replacement was deleted: %v", err)
+	}
+	if stored.UID != replacement.UID || got.UID != replacement.UID {
+		t.Fatalf("stored UID %s, returned UID %s; want the concurrent replacement %s kept", stored.UID, got.UID, replacement.UID)
 	}
 }
