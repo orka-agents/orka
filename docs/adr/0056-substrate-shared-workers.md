@@ -141,14 +141,17 @@ hold:
 4. **The residue is bounded in time.** `maxWorkerLifetime` is a hard bound on the worker
    Pod, not on when its deletion begins:
    - strong retirement starts the Pod's full 3600 s grace plus 5 minutes before it;
-   - admission closes an hour earlier;
+   - admission closes an hour earlier, so a pool admits for `maxWorkerLifetime − 2h05m`
+     after birth (55 minutes at the 3h minimum, 21h55m at 24h);
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
      grace, never zero, so the provider's own delete stays on the kubelet path (other
      deletion paths are an accepted restriction, below). Each such delete is
      tied to the retired pool's UID and preconditioned on the Pod's UID, so a pool
      replaced under the same name never loses its Pods;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
-     never behind the native sweep (which has a one-minute deadline);
+     never behind the native sweep (which has a one-minute deadline), and escalation
+     never waits for provenance discovery: a pool due by its annotations' bound under
+     the 24h ceiling, which provenance can only shorten, is escalated first;
    - unreadable or inconsistent lifetime evidence retires the pool at once;
    - the bound never exceeds the pool's server-set creation time plus the shortest
      lifetime frozen in the journals that recorded it, nor that creation time plus
