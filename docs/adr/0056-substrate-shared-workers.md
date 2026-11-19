@@ -187,13 +187,22 @@ Core makes these unusable, asynchronously:
   - a persisted strong marker;
   - a hosted journal's recorded failure;
   - a hosted workspace that is tainted, quarantined or `Failed`;
-  - a pool ledger saved as `Retiring` or `Quarantined`.
+  - a pool ledger saved as `Retiring` or `Quarantined`;
+  - a retirement-intent annotation, which the provider writes when the pool's Delete
+    itself fails. Admission refuses such a pool, and every bounds pass retries the Delete.
 
   Strong triggers are persisted under a fresh bounded context detached from the
   request's deadline. A rejected or timed-out evidence-only Stop suspend is doubt too.
-- **No replay.** An unresolved suspend is never replayed. Once the worker Pod is proven
-  absent, the instance is reported lost and retires through Stop with its last
-  checkpoint.
+- **No replay.** An unresolved suspend is never replayed against a `RUNNING` Actor. Once
+  the worker Pod is proven absent, the instance is reported lost and retires through
+  Stop with its last checkpoint.
+  - A shared Actor left `SUSPENDING` by a failed SuspendActor (for example a transient
+    `FinalizeSuspended` error) is different. The provider continues that same upstream
+    suspension, a bounded number of times, before the deleted pool's worker Pod is gone.
+    Agent Substrate's workflow is re-entrant and lease-serialized: it reuses the
+    persisted snapshot, and atelet answers a checkpoint it already committed. So no new
+    checkpoint is taken and no Tag is invented. If the continuation loses that race, the
+    instance is lost as above.
 - **What it does.** The provider closes the pool and deletes it. Core observes the
   terminating worker and drains each co-hosted Actor for data-only suspension inside
   its eviction window (ADR 0046). Every hosted instance then proves termination by exact
