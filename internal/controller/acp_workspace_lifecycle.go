@@ -1193,6 +1193,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// newer attachment.
 		return true, nil
 	}
+	// A staged attachment or pending speculative resume this Task never had
+	// installed is released before anything else, including the receipt
+	// shortcut below, so an interrupted release is always retried (ADR 0057).
+	if changed, err := r.releaseACPWorkspaceSpeculativeClaims(ctx, workspace, task); err != nil || changed {
+		return false, err
+	}
 	// A live attachment or UID-bound pending resume demand owned by this Task is
 	// stronger evidence than an old workspace receipt. Process it below so the
 	// current Task's frozen detach action cannot be mistaken for a predecessor's
@@ -1274,11 +1280,6 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// it. The caller requeues, and the next pass finalizes against the
 		// converged object.
 		return false, nil
-	}
-	// A staged attachment or pending speculative resume this Task never had
-	// installed is released before any detach action (ADR 0057).
-	if changed, err := r.releaseACPWorkspaceSpeculativeClaims(ctx, workspace, task); err != nil || changed {
-		return false, err
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
