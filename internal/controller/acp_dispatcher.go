@@ -149,7 +149,7 @@ type ACPDispatcher struct {
 	// settledDeliveryRecoveries caches, per Task, the exact Task version and
 	// controller epoch at which delivery recovery found nothing left to
 	// recover from settled durable state; see deliveryRecoverySettled.
-	settledDeliveryRecoveries map[types.UID]acpSettledDeliveryRecovery
+	settledDeliveryRecoveries acpSettledDeliveryRecoveryCache
 	staleRecoveryMu           sync.Mutex
 
 	approvalRecoveryMu sync.Mutex
