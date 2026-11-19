@@ -24,6 +24,8 @@ import (
 type WorkspaceRuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
+	// Now overrides the clock in tests.
+	Now func() time.Time
 }
 
 func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -58,12 +60,23 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	// A detached workspace inside its warm-detach window (ADR 0055) keeps the
-	// runtime it already has. The deadline is never evaluated here: a drain
-	// cannot be undone, so only retention ends the window.
-	if (w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || w.Spec.Attachment == nil) &&
-		!acpWorkspaceWarmWindowHoldsPool(w) {
-		if pool.Spec.DesiredReplicas != 0 {
+	now := r.now()
+	if !workspaceRuntimePoolDemandHeld(w, now) && pool.Spec.DesiredReplicas != 0 {
+		// The Task controller writes the attachment or a speculative start
+		// (ADR 0057) before it activates the pool, but this reconcile may read
+		// a cached workspace older than the pool event that woke it. A drain
+		// cannot be undone, so confirm against the API server before scaling
+		// down.
+		current := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, req.NamespacedName, current); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		if current.UID != w.UID {
+			return ctrl.Result{}, fmt.Errorf("workspace RuntimePool link identifies another incarnation")
+		}
+		w = current
+		if !workspaceRuntimePoolDemandHeld(w, now) && w.DeletionTimestamp.IsZero() &&
+			w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 			before := pool.DeepCopy()
 			pool.Spec.DesiredReplicas = 0
 			if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -71,7 +84,37 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 			}
 		}
 	}
+	if w.Spec.Attachment == nil {
+		if deadline, held := acpWorkspaceSpeculativeStartHoldsPool(w, now); held {
+			// Only the deadline ends an unclaimed speculative start; this
+			// controller watches no Tasks, so wake at expiry.
+			return ctrl.Result{RequeueAfter: deadline.Sub(now) + time.Second}, nil
+		}
+	}
 	return ctrl.Result{}, nil
+}
+
+func (r *WorkspaceRuntimePoolReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// workspaceRuntimePoolDemandHeld reports whether a workspace keeps its linked
+// RuntimePool's replicas: it is attached and desired Ready, it is inside its
+// warm-detach window (ADR 0055), or a speculative start is open (ADR 0057).
+// The warm-window deadline is never evaluated here, because only retention
+// ends the window.
+func workspaceRuntimePoolDemandHeld(w *workspacev1alpha1.ExecutionWorkspace, now time.Time) bool {
+	if w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady && w.Spec.Attachment != nil {
+		return true
+	}
+	if acpWorkspaceWarmWindowHoldsPool(w) {
+		return true
+	}
+	_, held := acpWorkspaceSpeculativeStartHoldsPool(w, now)
+	return held
 }
 
 func (r *WorkspaceRuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -36,6 +36,9 @@ const (
 	acpPreDispatchStatusInitialized
 	// acpPreDispatchExecutionBound is the write-once execution binding.
 	acpPreDispatchExecutionBound
+	// acpPreDispatchSpeculativeStart is the recorded speculative start of
+	// the Task's execution workspace runtime (ADR 0057).
+	acpPreDispatchSpeculativeStart
 	// acpPreDispatchWorkspaceAttachRequested is the exclusive attachment of
 	// the Task's execution workspace.
 	acpPreDispatchWorkspaceAttachRequested
@@ -66,6 +69,7 @@ var acpPreDispatchMilestoneNames = [acpPreDispatchMilestoneCount]string{
 	"observed",
 	"statusInitialized",
 	"executionBound",
+	"speculativeStart",
 	"workspaceAttachRequested",
 	"workspaceReady",
 	"runtimePoolReady",

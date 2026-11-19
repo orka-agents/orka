@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -275,6 +276,8 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name + " " + string(task.UID)
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
 			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
+			// A speculative start left by an earlier cycle never carries over.
+			delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
@@ -501,6 +504,10 @@ func validateACPClassWorkspaceAttachmentAttempt(
 		observation.Identity.RequestRevision == request.Revision && observation.Startup == nil && observation.RetainedData != nil {
 		return nil
 	}
+	if acpWorkspaceSpeculativeStartAttachable(workspace) {
+		// ADR 0057: the speculative runtime is still booting.
+		return nil
+	}
 	return err
 }
 
@@ -532,7 +539,8 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	_, warmPending := workspace.Annotations[acpWorkspaceSuspendPendingAnnotation]
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
 		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" &&
-		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" && !warmDeadline && !warmPending {
+		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" && !warmDeadline && !warmPending &&
+		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] == "" {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -550,6 +558,8 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
 	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	// The attachment claims any speculative start (ADR 0057).
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -828,6 +838,13 @@ func (r *TaskReconciler) createACPClassWorkspace(
 	if binding.Class.SuspendMode != "" {
 		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = binding.Class.SuspendMode
 	}
+	// ADR 0057: a profile without its own window gets the controller default,
+	// frozen into this new workspace only.
+	defaultWindow, err := r.acpWorkspaceDefaultSuspendAfterDetachAnnotations(ctx, task.Namespace, binding)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(workspace.Annotations, defaultWindow)
 	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
 			return nil, fmt.Errorf("session-reused execution workspace requires spec.sessionRef.name")
