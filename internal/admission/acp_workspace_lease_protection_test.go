@@ -25,6 +25,8 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 	))
 	quotaLease := labels.ACPSuspendQuotaLeaseNamePrefix + "0123456789abcdef01234567"
 	retentionFence := labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + "0123456789abcdef01234567"
+	namespaceLedger := labels.TaskAdmissionNamespaceLedgerNamePrefix + "0123456789abcdef0123"
+	childLedger := labels.TaskAdmissionChildrenLedgerNamePrefix + "0123456789abcdef0123"
 	tests := []struct {
 		name      string
 		operation apiserveradmission.Operation
@@ -57,6 +59,24 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 		{name: "forged enforcement marker delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: "orka-agent-use-enforcement"},
 		{name: "controller enforcement marker create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
 		{name: "controller enforcement marker delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
+		// Task admission ledgers: a forged or removed grant could admit Tasks
+		// past a namespace or child limit.
+		{name: "forged namespace ledger create", operation: apiserveradmission.Create, username: untrustedUsername, leaseName: namespaceLedger},
+		{name: "forged namespace ledger generateName", operation: apiserveradmission.Create, username: untrustedUsername, generate: labels.TaskAdmissionNamespaceLedgerNamePrefix},
+		{name: "forged namespace ledger update", operation: apiserveradmission.Update, username: untrustedUsername, leaseName: namespaceLedger},
+		{name: "forged namespace ledger delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: namespaceLedger},
+		{name: "forged child ledger create", operation: apiserveradmission.Create, username: untrustedUsername, leaseName: childLedger},
+		{name: "forged child ledger generateName", operation: apiserveradmission.Create, username: untrustedUsername, generate: labels.TaskAdmissionChildrenLedgerNamePrefix},
+		{name: "forged child ledger update", operation: apiserveradmission.Update, username: untrustedUsername, leaseName: childLedger},
+		{name: "forged child ledger delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: childLedger},
+		{name: "controller namespace ledger create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: namespaceLedger, allowed: true},
+		{name: "controller namespace ledger update", operation: apiserveradmission.Update, username: trustedControllerUser, leaseName: namespaceLedger, allowed: true},
+		{name: "controller namespace ledger delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: namespaceLedger, allowed: true},
+		{name: "controller child ledger create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: childLedger, allowed: true},
+		{name: "controller child ledger update", operation: apiserveradmission.Update, username: trustedControllerUser, leaseName: childLedger, allowed: true},
+		{name: "controller child ledger delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: childLedger, allowed: true},
+		{name: "garbage collector ledger update", operation: apiserveradmission.Update, username: genericGarbageCollectorUsername, leaseName: childLedger},
+		{name: "namespace controller ledger delete", operation: apiserveradmission.Delete, username: namespaceControllerUsername, leaseName: namespaceLedger, allowed: true},
 	}
 
 	kind := coordinationv1.SchemeGroupVersion.WithKind("Lease")

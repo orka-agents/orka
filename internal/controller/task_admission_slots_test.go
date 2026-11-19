@@ -436,3 +436,51 @@ func TestReapChildAdmissionLedgers(t *testing.T) {
 		}
 	}
 }
+
+// A coordinator recreated under the same name while a child of the old one is
+// still running: the child limit counts only the children pinned to the
+// current parent's UID, so the old child does not take the new parent's slot,
+// a child pinned to the new parent does, and an unpinned child is counted to
+// be safe. Each incarnation has its own ledger.
+func TestChildAdmissionCountsOnlyThisParentIncarnation(t *testing.T) {
+	ctx := context.Background()
+	parent := limitTestTask("coordinator")
+	parent.UID = "coordinator-new"
+	child := func(name string, ownerUID types.UID, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+		task := limitTestTask(name)
+		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+		task.Status.Phase = phase
+		if ownerUID != "" {
+			isController := true
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: ownerUID, Controller: &isController,
+			}}
+		}
+		return task
+	}
+	waiting := child("new-child", parent.UID, corev1alpha1.TaskPhasePending)
+	for _, tc := range []struct {
+		name        string
+		running     *corev1alpha1.Task
+		wantGranted bool
+	}{
+		{name: "old parent's child running", running: child("old-child", "coordinator-old", corev1alpha1.TaskPhaseRunning), wantGranted: true},
+		{name: "new parent's child running", running: child("sibling", parent.UID, corev1alpha1.TaskPhaseRunning)},
+		{name: "unpinned child running", running: child("unpinned", "", corev1alpha1.TaskPhaseRunning)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newUnitReconciler(newTestScheme(), parent, tc.running, waiting)
+			r.APIReader = r.Client
+			granted, err := r.acquireTaskAdmissionSlot(ctx, waiting, r.childrenAdmissionScope(parent, 1))
+			if err != nil || granted != tc.wantGranted {
+				t.Fatalf("granted=%t err=%v, want %t", granted, err, tc.wantGranted)
+			}
+		})
+	}
+	oldParent := parent.DeepCopy()
+	oldParent.UID = "coordinator-old"
+	r := newUnitReconciler(newTestScheme())
+	if r.childrenAdmissionScope(oldParent, 1).ledger == r.childrenAdmissionScope(parent, 1).ledger {
+		t.Fatal("the old and new parent share a child ledger")
+	}
+}

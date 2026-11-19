@@ -206,13 +206,16 @@ type acpOutboxSchedule struct {
 // observe folds a pass into the schedule. A claimed projection's earlier
 // deadline is settled by that claim; a deadline at or before a pass that
 // claimed fewer than its limit, yet did not return it, belongs to a
-// projection no longer pending. A failed pass changes nothing.
+// projection no longer pending. A failed pass may still have committed
+// retries for projections it completed before failing: those are added, and
+// nothing is settled or pruned.
 func (s *acpOutboxSchedule) observe(pass acpOutboxPass, err error) {
-	if err != nil {
-		return
-	}
 	if s.retries == nil {
 		s.retries = map[string]time.Time{}
+	}
+	if err != nil {
+		maps.Copy(s.retries, pass.retries)
+		return
 	}
 	for _, id := range pass.claimed {
 		delete(s.retries, id)
@@ -339,10 +342,6 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
-				if pass.retries == nil {
-					pass.retries = map[string]time.Time{}
-				}
-				pass.retries[projection.ID] = availableAt
 			}
 			deliveryDigest = ""
 		}
@@ -360,6 +359,14 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 		})
 		if err != nil {
 			return pass, err
+		}
+		if state == store.OutboxProjectionPending {
+			// Recorded only once the retry is committed, so a pass that fails
+			// later still reports every retry it made.
+			if pass.retries == nil {
+				pass.retries = map[string]time.Time{}
+			}
+			pass.retries[projection.ID] = availableAt
 		}
 	}
 	return pass, nil

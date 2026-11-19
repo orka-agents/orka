@@ -164,3 +164,27 @@ func TestRuntimeAdmissionTimingsWaitForThePersistedStatus(t *testing.T) {
 		t.Fatal("a later pass reopened the admission")
 	}
 }
+
+// A runtime admitted once is admitted again in the same workload sequence
+// when the pool closes and reopens, such as after an attachment changes the
+// workspace generation. The record marks that admission a readmission and
+// keeps the lifecycle the pool reopened from; a first start is not one.
+func TestRuntimeAdmissionTimingsMarkReadmissions(t *testing.T) {
+	timings := &acpRuntimeAdmissionTimings{now: time.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: "pool-uid"}}
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	timings.startupObserved(pool, 1)
+	first := timings.records[acpRuntimeAdmissionKey{pool: pool.UID, sequence: 1}]
+	if first == nil || first.readmission {
+		t.Fatalf("first start record = %+v, want an admission that is not a readmission", first)
+	}
+
+	reopened := pool.DeepCopy()
+	reopened.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "workspace:actor.boot"}
+	reopened.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	timings.startupObserved(reopened, 2)
+	again := timings.records[acpRuntimeAdmissionKey{pool: pool.UID, sequence: 2}]
+	if again == nil || !again.readmission || again.reopenedFrom != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("reopen record = %+v, want a readmission from Degraded", again)
+	}
+}

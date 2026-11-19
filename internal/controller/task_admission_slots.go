@@ -43,7 +43,10 @@ import (
 // their slot by reaching a terminal phase or being deleted.
 //
 // Ledgers live only in the controller namespace, the trust boundary that also
-// holds the controller-epoch Lease; Task authors cannot write there. A grant
+// holds the controller-epoch Lease, and admission refuses every write to
+// their name prefixes but the controller's
+// (config/admission/acp_workspace_lease_protection.yaml), so a tenant that
+// can write Leases there cannot forge or remove a grant. A grant
 // counts only when it names a live, schedule-free Task of the scope by UID,
 // and every admission, a granted Task's included, requires the other holders
 // to number fewer than the limit. A forged or stale grant can therefore only
@@ -53,8 +56,8 @@ const (
 	// taskAdmissionLedgerAnnotation holds the granted Task UIDs, sorted, as a
 	// JSON array.
 	taskAdmissionLedgerAnnotation = "orka.ai/task-admission-slots"
-	taskAdmissionNamespaceLedger  = "orka-task-admission-"
-	taskAdmissionChildrenLedger   = "orka-child-admission-"
+	taskAdmissionNamespaceLedger  = labels.TaskAdmissionNamespaceLedgerNamePrefix
+	taskAdmissionChildrenLedger   = labels.TaskAdmissionChildrenLedgerNamePrefix
 	// taskAdmissionLedgerKindLabel marks ledgers for the reaper, which reads
 	// the scope a ledger admits from its annotations.
 	taskAdmissionLedgerKindLabel           = "orka.ai/task-admission-ledger"
@@ -127,9 +130,17 @@ func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit
 		limit: limit,
 		list: func(ctx context.Context) ([]corev1alpha1.Task, error) {
 			siblings := &corev1alpha1.TaskList{}
-			err := uncachedReader(r.APIReader, r.Client).List(ctx, siblings, client.InNamespace(parent.Namespace),
-				client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)})
-			return siblings.Items, err
+			if err := uncachedReader(r.APIReader, r.Client).List(ctx, siblings, client.InNamespace(parent.Namespace),
+				client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}); err != nil {
+				return nil, err
+			}
+			children := siblings.Items[:0]
+			for i := range siblings.Items {
+				if taskAdmissionChildOf(&siblings.Items[i], parent) {
+					children = append(children, siblings.Items[i])
+				}
+			}
+			return children, nil
 		},
 		labels: map[string]string{taskAdmissionLedgerKindLabel: taskAdmissionLedgerKindChildren},
 		annotations: map[string]string{
@@ -138,6 +149,23 @@ func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit
 			taskAdmissionLedgerParentUIDAnnotation: string(parent.UID),
 		},
 	}
+}
+
+// taskAdmissionChildOf reports whether a Task labelled as parent's child
+// belongs to this incarnation of parent. A child pins its parent's UID with
+// its controller owner reference or, across namespaces, the parent UID
+// annotation, as delegatedBy reads them; a child pinned to another UID
+// belongs to an earlier Task of the same name and is not counted. A child
+// with no pin at all is counted: counting it can only delay admission.
+func taskAdmissionChildOf(child, parent *corev1alpha1.Task) bool {
+	if owner := metav1.GetControllerOf(child); owner != nil && owner.Kind == taskResourceKind &&
+		owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == parent.Name {
+		return owner.UID == parent.UID
+	}
+	if pinned := types.UID(strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID])); pinned != "" {
+		return pinned == parent.UID
+	}
+	return true
 }
 
 func taskAdmissionChildrenLedgerName(namespace string, parentUID types.UID) string {
