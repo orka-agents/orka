@@ -17,6 +17,9 @@ restore remains prohibited. The earlier contract below is retained as history.
 Amended by [ADR 0055](0055-substrate-warm-detach-window.md): an opted-in class delays the
 detach-time suspension by a bounded warm window.
 
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): a cold resume lifts the pool intent
+when the continuation flips the workspace back to Ready, before its attachment settles.
+
 ## Context
 
 ADR 0025 prohibits suspending a live Substrate actor because the provider's
