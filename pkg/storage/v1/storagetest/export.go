@@ -150,7 +150,15 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		target := newProvider(t)
 		_, err = target.BeginImport(t.Context(), invalid)
 		require.ErrorIs(t, err, storagev1.ErrValidation)
-		invalid = beginImportRequest(t, sourceInfo, manifest[1:])
+		// The request is built directly: for a provider that serves only
+		// artifacts.v1 the shorter manifest is empty, which has no digest.
+		invalid = request
+		invalid.Manifest = manifest[1:]
+		invalid.Source.ManifestDigest = controlDigest("a manifest that misses a family")
+		if len(invalid.Manifest) > 0 {
+			invalid.Source.ManifestDigest, err = storagev1.ManifestDigest(invalid.Manifest)
+			require.NoError(t, err)
+		}
 		_, err = target.BeginImport(t.Context(), invalid)
 		require.ErrorIs(t, err, storagev1.ErrValidation, "a manifest that misses a family")
 
@@ -200,7 +208,27 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		requireRefused(err, storagev1.ErrValidation, "an encoding other than the manifest's")
 		_, err = target.ImportRecords(t.Context(), batch(2, record))
 		requireRefused(err, storagev1.ErrConflict, "a batch that skips a sequence")
+		// A provider may refuse any batch of two records with ErrTooLarge;
+		// either way the batch commits nothing.
+		refusedPair := func(err error, want error, msg string) {
+			t.Helper()
+			if errors.Is(err, storagev1.ErrTooLarge) {
+				want = storagev1.ErrTooLarge
+			}
+			requireRefused(err, want, msg)
+		}
+		_, err = target.ImportRecords(t.Context(), batch(1, record, wrongKey))
+		refusedPair(err, storagev1.ErrValidation, "a valid record followed by an invalid one")
+		_, err = target.ImportRecords(t.Context(), batch(1, record, changedRecord(t, record)))
+		refusedPair(err, storagev1.ErrConflict, "a batch that holds one key with two bodies")
 
+		// Two copies of one record count once. A provider that takes one
+		// record at a time may refuse the pair instead.
+		pair, err := target.ImportRecords(t.Context(), batch(1, record, record))
+		if !errors.Is(err, storagev1.ErrTooLarge) {
+			require.NoError(t, err, "a batch that holds one record twice")
+			require.Equal(t, storagev1.ImportFamilyProgress{Family: family, Sequence: 1, Imported: 1}, pair)
+		}
 		progress, err := target.ImportRecords(t.Context(), batch(1, record))
 		require.NoError(t, err)
 		require.Equal(t, storagev1.ImportFamilyProgress{Family: family, Sequence: 1, Imported: 1}, progress)
@@ -250,6 +278,61 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		progress, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
 		require.Zero(t, importedCount(progress, schema.Name), "a refused batch commits nothing")
+	})
+
+	t.Run("an import keeps message identifiers within the bound SendMessage enforces", func(t *testing.T) {
+		target := newProvider(t)
+		if !slices.Contains(describe(t, target).Contracts, storagev1.StateContract) {
+			t.Skip("the provider serves no state.v1 messages")
+		}
+		source := seededSource(t, newProvider, seed)
+		manifest, _ := exportDataset(t, source)
+		session, err := target.BeginImport(t.Context(), beginImportRequest(t, describe(t, source), manifest))
+		require.NoError(t, err)
+		schema, ok := storagev1.LookupExportSchema("messages")
+		require.True(t, ok)
+		atLimit := strings.Repeat("w", storagev1.MaxControlIdentifierBytes)
+		identifiers := []string{"namespace", "from_task", "to_task", "parent_task"}
+		// message returns a message whose identifiers are at the bound, except
+		// over, which is one byte longer.
+		message := func(id int64, over string) storagev1.RawRecord {
+			values := make([]any, len(schema.Fields))
+			for i, field := range schema.Fields {
+				switch {
+				case field.Name == "id":
+					values[i] = id
+				case field.Name == over:
+					values[i] = atLimit + "x"
+				case slices.Contains(identifiers, field.Name):
+					values[i] = atLimit
+				default:
+					if !field.Nullable {
+						values[i] = exampleExportValue(field.Kind, i)
+					}
+				}
+			}
+			record, err := schema.Encode(values)
+			require.NoError(t, err)
+			decoded, err := schema.Decode(record)
+			require.NoError(t, err)
+			require.Equal(t, values, decoded, "the record encodes its identifiers unchanged")
+			return record
+		}
+		progress, err := target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 1, Records: []storagev1.RawRecord{message(1, "")},
+		})
+		require.NoError(t, err, "identifiers of MaxControlIdentifierBytes are imported")
+		require.Equal(t, int64(1), progress.Imported)
+
+		for _, over := range identifiers {
+			_, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+				SessionID: session.SessionID, Family: schema.Name, Sequence: 2, Records: []storagev1.RawRecord{message(2, over)},
+			})
+			require.ErrorIs(t, err, storagev1.ErrValidation, "a %s over MaxControlIdentifierBytes", over)
+			after, err := target.GetImportProgress(t.Context(), session.SessionID)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+		}
 	})
 
 	t.Run("completion compares the import with the manifest", func(t *testing.T) {

@@ -268,6 +268,7 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 	schema, _ := storagev1.LookupExportSchema(request.Family)
 	held := m.records[request.Family]
 	var added []storagev1.RawRecord
+	inBatch := make(map[string][]byte, len(request.Records))
 	for _, record := range request.Records {
 		if record.Encoding != expected.Encoding {
 			return storagev1.ImportFamilyProgress{}, storagev1.ValidationErrorf("record encoding %q is not the manifest's", record.Encoding)
@@ -279,6 +280,13 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 		if err := checkMemoryImportLimits(schema, values); err != nil {
 			return storagev1.ImportFamilyProgress{}, err
 		}
+		if body, seen := inBatch[record.Key]; seen {
+			if !bytes.Equal(body, record.Body) {
+				return storagev1.ImportFamilyProgress{}, storagev1.ConflictErrorf("the batch holds a key of family %q with two bodies", request.Family)
+			}
+			continue
+		}
+		inBatch[record.Key] = record.Body
 		stored, ok := held[record.Key]
 		switch {
 		case ok && !bytes.Equal(stored.Body, record.Body):
@@ -419,6 +427,17 @@ func (m *memoryExport) ClearMigrationMarker(_ context.Context, request storagev1
 // checkMemoryImportLimits refuses a result over MaxResultBytes, which the
 // reference provider reports as its limit.
 func checkMemoryImportLimits(schema storagev1.ExportFamilySchema, values []any) error {
+	if schema.Name == "messages" {
+		for i, field := range schema.Fields {
+			switch field.Name {
+			case "namespace", "from_task", "to_task", "parent_task":
+				if value, ok := values[i].(string); ok && len(value) > storagev1.MaxControlIdentifierBytes {
+					return storagev1.ValidationErrorf("message %s exceeds %d bytes", field.Name, storagev1.MaxControlIdentifierBytes)
+				}
+			}
+		}
+		return nil
+	}
 	if schema.Name != "results" {
 		return nil
 	}

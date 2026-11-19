@@ -1390,10 +1390,13 @@ capability, so it does not raise `ContractRevision`.
   write, the controller epoch advance and `BindDataset` return `ErrNotReady`.
   `ImportRecords` commits one batch atomically; batches are numbered per
   family, a repeated batch is accepted only when the family already holds its
-  records unchanged, and a record whose key is held with another body returns
-  `ErrConflict`. A record beyond the target's `ProviderLimits`, such as a
-  result over `MaxResultBytes`, returns a `TooLargeError`, so a target with
-  lower limits refuses the import instead of truncating it. References
+  records unchanged, and a record whose key is held with another body, or
+  that appears twice in the batch with two bodies, returns `ErrConflict`. A
+  record beyond the target's `ProviderLimits`, such as a result over
+  `MaxResultBytes`, returns a `TooLargeError`, so a target with lower limits
+  refuses the import instead of truncating it. A message with an identifier
+  over `MaxControlIdentifierBytes` returns `ErrValidation`, as `SendMessage`
+  does, so an imported inbox still fits a consumed batch in one response. References
   between families can be circular, so a provider
   never refuses a record because a record it refers to has not arrived yet; it
   checks references, if it does, when the import completes. `CompleteImport`

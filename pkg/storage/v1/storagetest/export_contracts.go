@@ -126,11 +126,14 @@ func seedStateExport(t *testing.T, provider storagev1.StateProvider) stateExport
 		}
 	}
 	require.NoError(t, provider.UpsertFinding(ctx, workflowFinding("fp-export", "high")))
-	require.NoError(t, provider.DeleteExecutionEvents(ctx, exportSeedTenant, storagev1.ExecutionEventStreamTypeTask, "task-a"))
+	// The session's sequence head is read before the deletion, so an import
+	// that lowered it to the remaining events would reuse a sequence and fail.
 	_, seed.lastSessionSeq, err = provider.ListSessionExecutionEvents(ctx, storagev1.SessionExecutionEventFilter{
 		Namespace: exportSeedTenant, SessionName: eventsSession,
 	})
 	require.NoError(t, err)
+	require.Equal(t, int64(3), seed.lastSessionSeq, "the session issued one sequence per appended event")
+	require.NoError(t, provider.DeleteExecutionEvents(ctx, exportSeedTenant, storagev1.ExecutionEventStreamTypeTask, "task-a"))
 	return seed
 }
 

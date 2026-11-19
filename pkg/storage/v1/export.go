@@ -243,7 +243,10 @@ type ImportRecordsRequest struct {
 	// beyond those limits, such as a result over MaxResultBytes or an
 	// artifact over MaxArtifactBytes, returns a [TooLargeError] and commits
 	// nothing, so a target with lower limits than the source refuses the
-	// import instead of truncating it.
+	// import instead of truncating it. A message whose namespace, from_task,
+	// to_task or parent_task is over [MaxControlIdentifierBytes] returns
+	// ErrValidation and commits nothing, as [MessageStore.SendMessage] refuses
+	// it, so an imported inbox still fits a consumed batch in one response.
 	Records []RawRecord
 }
 
@@ -361,8 +364,10 @@ type DatasetImporter interface {
 	// the family's last committed batch is committed; a batch at or before it
 	// is a repeat, and returns the progress without change if the family
 	// holds every record in it with the same body. A record whose key the
-	// family already holds with a different body, or a batch that skips a
-	// sequence, returns ErrConflict.
+	// family already holds with a different body, two records of the batch
+	// with one key and different bodies, or a batch that skips a sequence,
+	// returns ErrConflict and commits nothing. Records of one batch with one
+	// key and the same body count once.
 	//
 	// Orka imports families in [ExportSchemas] order, but references between
 	// families can be circular and a family can refer to itself, so a
