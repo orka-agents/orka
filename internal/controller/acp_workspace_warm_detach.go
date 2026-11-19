@@ -31,6 +31,50 @@ import (
 // acpWorkspaceSuspendAfterDetachAnnotation; one window instance is the
 // absolute acpWorkspaceSuspendAtAnnotation deadline.
 
+// acpWorkspaceWarmExpiryGrace bounds how long live continuation demand may
+// defer a warm window's expiry past its deadline, and how close to the
+// deadline a continuation records its demand before attaching.
+const acpWorkspaceWarmExpiryGrace = 2 * time.Minute
+
+// stampACPWorkspaceWarmDemand records a continuation's demand on a warm
+// workspace whose deadline is near. Retention's delayed Suspend is an
+// optimistic write on the same object, so once this lands the expiry either
+// sees the demand and defers, or loses the conflict, exactly as it would
+// against the attachment itself.
+func (r *TaskReconciler) stampACPWorkspaceWarmDemand(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	now time.Time,
+) error {
+	deadline, open := acpWorkspaceWarmWindowOpen(workspace)
+	if !open || deadline.Sub(now) >= acpWorkspaceWarmExpiryGrace ||
+		strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "" {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+		now.UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+// warmWindowDemandOutstanding reports demand that must defer a warm window's
+// expiry: a live recorded requester, an open speculative start (ADR 0057),
+// or any live continuation Task of the Session, bound or not yet linked.
+func (r *ACPWorkspaceRetentionReconciler) warmWindowDemandOutstanding(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) (bool, error) {
+	if deadline, _, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); ok && now.Before(deadline) {
+		return true, nil
+	}
+	if live, err := r.recordedWorkspaceDemandLive(ctx, workspace, nil); err != nil || live {
+		return true, err
+	}
+	return r.liveSessionContinuationExists(ctx, workspace, nil)
+}
+
 // parseACPWorkspaceSuspendAfterDetach parses a frozen warm-detach window: a
 // positive Go duration of at most maxACPWorkspaceSuspendAfterDetach.
 func parseACPWorkspaceSuspendAfterDetach(raw string) (time.Duration, error) {
@@ -262,6 +306,20 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	if !tainted && now.Before(deadline) {
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, true, nil
+	}
+	if !tainted && now.Before(deadline.Add(acpWorkspaceWarmExpiryGrace)) &&
+		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// A continuation that is bound but not attached yet must not watch
+		// the runtime it is about to attach get suspended. Its demand
+		// defers expiry for a bounded grace; the attachment then ends the
+		// window, or the grace runs out and the Suspend applies.
+		outstanding, err := r.warmWindowDemandOutstanding(ctx, workspace, now)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if outstanding {
+			return ctrl.Result{RequeueAfter: min(5*time.Second, deadline.Add(acpWorkspaceWarmExpiryGrace).Sub(now)+time.Second)}, true, nil
+		}
 	}
 	// A fenced expiry can return without deleting: a Session continuation
 	// admitted before the retention fence vetoes it, or a concurrent update
