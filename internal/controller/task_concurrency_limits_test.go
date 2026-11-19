@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -445,5 +446,143 @@ func TestRetryBackoffTakesNoChildSlotWhileWaitingForItsNamespaceSlot(t *testing.
 	}
 	if granted, err := r.acquireTaskAdmissionSlot(ctx, second, children); err != nil || granted {
 		t.Fatalf("second child: child slot granted=%t err=%v, want it held", granted, err)
+	}
+}
+
+// After both limits drop to 1, sibling A holds only a namespace grant and
+// sibling B only a child grant: each needs the slot the other holds. A Task
+// held in one scope gives up its grant in the other, so in either age order
+// exactly one sibling is admitted and the other follows once it finishes.
+// A running holder in either scope holds both siblings until it finishes.
+func TestCrossScopePartialHoldersProceedOneAtATime(t *testing.T) {
+	for _, running := range []string{"", taskAdmissionLedgerKindNamespace, taskAdmissionLedgerKindChildren} {
+		for _, aOlder := range []bool{true, false} {
+			name := fmt.Sprintf("running=%q/aOlder=%t", running, aOlder)
+			t.Run(name, func(t *testing.T) {
+				testCrossScopePartialHolders(t, running, aOlder)
+			})
+		}
+	}
+}
+
+func testCrossScopePartialHolders(t *testing.T, running string, aOlder bool) {
+	ctx := context.Background()
+	parentAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{
+			Enabled: true, MaxConcurrentChildren: 1,
+		}},
+	}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: parentAgent.Name}},
+	}
+	base := time.Now().Add(-time.Hour)
+	child := func(name string, age time.Duration) *corev1alpha1.Task {
+		task := limitTestTask(name)
+		task.CreationTimestamp = metav1.NewTime(base.Add(-age))
+		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+		task.Annotations = map[string]string{labels.AnnotationCoordinationDepth: "1"}
+		isController := true
+		task.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: parent.UID, Controller: &isController,
+		}}
+		return task
+	}
+	ageA, ageB := time.Minute, 2*time.Minute
+	if aOlder {
+		ageA, ageB = ageB, ageA
+	}
+	a, b := child("a", ageA), child("b", ageB)
+	objects := []client.Object{parentAgent, parent, a, b}
+	namespaceGrants, childGrants := []types.UID{a.UID}, []types.UID{b.UID}
+	r := newUnitReconciler(newTestScheme())
+	r.MaxTasksPerNamespace = 1
+	var holder *corev1alpha1.Task
+	switch running {
+	case taskAdmissionLedgerKindNamespace:
+		holder = limitTestTask("running-elsewhere")
+		namespaceGrants = append(namespaceGrants, holder.UID)
+	case taskAdmissionLedgerKindChildren:
+		// A running sibling fills the child slot; the namespace has room for
+		// it and one more.
+		holder = child("running-sibling", 3*time.Minute)
+		namespaceGrants = append(namespaceGrants, holder.UID)
+		childGrants = append(childGrants, holder.UID)
+		r.MaxTasksPerNamespace = 2
+	}
+	if holder != nil {
+		holder.Status.Phase = corev1alpha1.TaskPhaseRunning
+		holder.Status.JobName = holder.Name + "-job"
+		objects = append(objects, holder)
+	}
+	limit := r.MaxTasksPerNamespace
+	r = newUnitReconciler(newTestScheme(), objects...)
+	r.APIReader = r.Client
+	r.MaxTasksPerNamespace = limit
+	writeAdmissionLedger(t, r.Client, r.namespaceAdmissionScope("default", 1).ledger, namespaceGrants...)
+	writeAdmissionLedger(t, r.Client, r.childrenAdmissionScope(parent, 1).ledger, childGrants...)
+
+	stored := func(task *corev1alpha1.Task) *corev1alpha1.Task {
+		t.Helper()
+		current := &corev1alpha1.Task{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatal(err)
+		}
+		return current
+	}
+	admitted := func(task *corev1alpha1.Task) bool {
+		current := stored(task)
+		return current.Status.JobName != "" && !current.Status.Phase.IsTerminal()
+	}
+	// reconcile runs every waiting sibling a few times and returns the
+	// admitted ones; never more than one runs at once.
+	reconcile := func(when string) []*corev1alpha1.Task {
+		t.Helper()
+		for range 3 {
+			for _, task := range []*corev1alpha1.Task{a, b} {
+				current := stored(task)
+				if current.Status.JobName != "" || current.Status.Phase.IsTerminal() {
+					continue
+				}
+				if _, err := r.handlePending(ctx, current); err != nil {
+					t.Fatalf("%s: handlePending(%s): %v", when, task.Name, err)
+				}
+				if admitted(a) && admitted(b) {
+					t.Fatalf("%s: both siblings admitted under limits of one", when)
+				}
+			}
+		}
+		var out []*corev1alpha1.Task
+		for _, task := range []*corev1alpha1.Task{a, b} {
+			if admitted(task) {
+				out = append(out, task)
+			}
+		}
+		return out
+	}
+	finish := func(task *corev1alpha1.Task) {
+		t.Helper()
+		current := stored(task)
+		current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+		if err := r.Status().Update(ctx, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if holder != nil {
+		if got := reconcile("while a holder runs"); len(got) != 0 {
+			t.Fatalf("while a holder runs, admitted %s", got[0].Name)
+		}
+		finish(holder)
+	}
+	first := reconcile("after the limits dropped")
+	if len(first) != 1 {
+		t.Fatalf("after the limits dropped, %d siblings admitted, want exactly one", len(first))
+	}
+	finish(first[0])
+	second := reconcile("after the first sibling finished")
+	if len(second) != 1 || second[0] == first[0] {
+		t.Fatalf("after %s finished, admitted %d siblings, want the other one", first[0].Name, len(second))
 	}
 }

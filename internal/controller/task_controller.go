@@ -1346,15 +1346,42 @@ func (r *TaskReconciler) acquireNamespaceAdmission(ctx context.Context, task *co
 	if validationTask {
 		return ctrl.Result{}, false, false, nil
 	}
+	namespace := r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)
+	// A coordination child also needs a child slot, taken after this one. It
+	// takes no namespace slot while its child slot is not free, and gives up
+	// any it holds, so it never holds a namespace slot while waiting for a
+	// sibling (see releaseTaskAdmissionSlot).
+	children, isChild := r.coordinationChildAdmissionScope(ctx, task)
+	if isChild {
+		free, err := r.taskAdmissionSlotFree(ctx, task, children)
+		if err != nil {
+			log.Error(err, "failed to check a coordination child slot")
+			return ctrl.Result{}, true, false, err
+		}
+		if !free {
+			if err := r.releaseTaskAdmissionSlot(ctx, task, namespace); err != nil {
+				log.Error(err, "failed to release a namespace task slot")
+				return ctrl.Result{}, true, false, err
+			}
+			log.Info("coordination concurrency limit reached", "max", children.limit)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, true, true, nil
+		}
+	}
 	// Slots are counted from the API server and granted through the
 	// namespace's admission ledger, so parallel reconciles never admit past
 	// the limit and waiting Tasks never block each other.
-	granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace))
+	granted, err := r.acquireTaskAdmissionSlot(ctx, task, namespace)
 	if err != nil {
 		log.Error(err, "failed to acquire a namespace task slot")
 		return ctrl.Result{}, true, false, err
 	}
 	if !granted {
+		if isChild {
+			if err := r.releaseTaskAdmissionSlot(ctx, task, children); err != nil {
+				log.Error(err, "failed to release a coordination child slot")
+				return ctrl.Result{}, true, false, err
+			}
+		}
 		log.Info("namespace task limit reached, requeueing",
 			"namespace", task.Namespace,
 			"limit", r.MaxTasksPerNamespace,
@@ -1364,6 +1391,39 @@ func (r *TaskReconciler) acquireNamespaceAdmission(ctx context.Context, task *co
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, true, true, nil
 	}
 	return ctrl.Result{}, false, false, nil
+}
+
+// coordinationChildAdmissionScope returns the children scope that will admit
+// task, a coordination child whose parent and coordination settings resolve.
+// It fails nothing: checkCoordinationConstraints reports every problem.
+func (r *TaskReconciler) coordinationChildAdmissionScope(ctx context.Context, task *corev1alpha1.Task) (taskAdmissionScope, bool) {
+	if _, ok := task.Annotations[labels.AnnotationCoordinationDepth]; !ok {
+		return taskAdmissionScope{}, false
+	}
+	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
+	parentTask := &corev1alpha1.Task{}
+	if parentName == "" || r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask) != nil {
+		return taskAdmissionScope{}, false
+	}
+	if pinned, ok := taskParentUIDPin(task, parentName); ok && pinned != parentTask.UID {
+		return taskAdmissionScope{}, false
+	}
+	if parentTask.Spec.AgentRef == nil {
+		return taskAdmissionScope{}, false
+	}
+	agentNS := parentTask.Spec.AgentRef.Namespace
+	if agentNS == "" {
+		agentNS = task.Namespace
+	}
+	parentAgent := &corev1alpha1.Agent{}
+	if r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent) != nil {
+		return taskAdmissionScope{}, false
+	}
+	coord := parentAgent.Spec.Coordination
+	if coord == nil || !coord.Enabled || coord.MaxConcurrentChildren <= 0 {
+		return taskAdmissionScope{}, false
+	}
+	return r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren), true
 }
 
 // holdRetryAdmission keeps a Task's slots through its retry backoff: before
@@ -1499,21 +1559,36 @@ func (r *TaskReconciler) checkCoordinationConstraints(ctx context.Context, task 
 
 	// Enforce maxConcurrentChildren (requeue if at limit)
 	if coord.MaxConcurrentChildren > 0 {
-		// Granted through the parent's admission ledger for the same reason
-		// as the namespace limit.
-		granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren))
-		if err != nil {
-			log.Error(err, "failed to acquire a coordination child slot")
-			return ctrl.Result{}, err, true
-		}
-		if !granted {
-			log.Info("coordination concurrency limit reached", "max", coord.MaxConcurrentChildren)
-			*waiting = true
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
-		}
+		return r.acquireChildAdmission(ctx, task, r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren), waiting)
 	}
 
 	return ctrl.Result{}, nil, false
+}
+
+// acquireChildAdmission holds a coordination child to its parent's
+// maxConcurrentChildren, granted through the parent's admission ledger for
+// the same reason as the namespace limit. Waiting for a sibling, the child
+// gives up its namespace slot (see releaseTaskAdmissionSlot) and takes one
+// again once a child slot is free.
+func (r *TaskReconciler) acquireChildAdmission(ctx context.Context, task *corev1alpha1.Task, children taskAdmissionScope, waiting *bool) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	granted, err := r.acquireTaskAdmissionSlot(ctx, task, children)
+	if err != nil {
+		log.Error(err, "failed to acquire a coordination child slot")
+		return ctrl.Result{}, err, true
+	}
+	if granted {
+		return ctrl.Result{}, nil, false
+	}
+	if r.MaxTasksPerNamespace > 0 {
+		if err := r.releaseTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)); err != nil {
+			log.Error(err, "failed to release a namespace task slot")
+			return ctrl.Result{}, err, true
+		}
+	}
+	log.Info("coordination concurrency limit reached", "max", children.limit)
+	*waiting = true
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 }
 
 // resolveProvider fetches the Provider referenced by the task or agent, if any.
