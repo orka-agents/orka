@@ -161,8 +161,98 @@ So the flip, the publication, and the attachment now land in **one workspace wri
 - **The RuntimePool cannot be activated.** The Task flips at once.
 - **No verified retained data.** The Task flips as before.
 - **The pool publishes before a first turn's intent exists.** The first turn attaches through the
-  ordinary path, before or after the publication. Either order admits the runtime once, unless
-  the runtime finishes booting before the attach lands.
+  ordinary path after the publication, and the rule in the next section keeps the runtime
+  serving.
+
+#### First turns: the publication carries the attachment
+
+Round 6 showed first turns unchanged: bind → provider start of 2.3–4.9 s on private workers, and
+speculative start → publish of 1.6–3.5 s. There were two causes:
+
+- **The pool was activated a pass late.** The creation pass's speculative start read the workspace
+  it had just created from the informer cache, missed it, and gave up. It now falls back to the
+  uncached read.
+- **The Task attached first.** The Task's own attach, allowed as soon as core admitted the fresh
+  workspace and the provider observed it, landed before the publication. It bumped the
+  generation, made the publication wait for a re-admission, and left the staged attachment
+  unused.
+
+  Now, while a first turn's attachment is staged, its speculative start is open, no request is
+  published, and its RuntimePool exists, holds a replica, and is not deleting or degraded, the
+  Task does not attach. The publication installs the attachment instead. The wait ends when the
+  publication lands (with or without the install), the start expires, or the pool stops
+  qualifying; then the Task attaches itself.
+
+A `speculativePoolActivated` pre-dispatch milestone times the pool activation.
+
+#### Serving across an attachment-only generation change
+
+Round 6's main tail was readmission. A Task attaching a pool that already serves (a warm window,
+a spare runtime that booted before its attach, or a shared worker), or a settlement revoking one,
+bumps the workspace generation, and core's re-admission bumps it again. The serving path closed
+admission until the provider observed the new generation, then re-attested, re-bootstrapped, and
+re-probed the same runtime. That cost 7–38 s of probe → serving, and accounted for 73 of the 99
+shared admission lines, with up to 9 in one sequence.
+
+- **What the pool records.** Once the pool serves an attested instance at the current
+  generation, it records on itself (`orka.ai/external-runtime-served`):
+  - the runtime-relevant spec digest, which is the workspace spec without `attachment`,
+    `attachmentEpoch`, and `coreAdmission`;
+  - the provider's allocation sequence, allocation ID, instance ID, and request revision;
+  - the active Pod UID and boot ID.
+- **When the pool keeps serving.** While the generation lags (the provider has not observed it,
+  or core has not re-admitted it), the pool keeps serving only if all of these hold:
+  - the pool is `Serving` and `Accepting` with that recorded active instance;
+  - the digest is unchanged;
+  - the provider's last observation is the recorded `Ready` allocation with startup evidence.
+
+  Then the admission and observation gates, and the post-probe check, keep serving instead of
+  closing. Nothing is re-attested, re-bootstrapped, or re-probed until the provider catches up,
+  after which the ordinary serving pass runs as on any other pass.
+
+**Fence-equivalence.** Closing and re-probing after a generation change guards against four
+things. Each is covered as follows.
+
+1. **The runtime changed because the spec changed:** a new request, a retirement, a desired-state
+   change, a lifecycle change, or deletion. Any of these changes the digest or fails the explicit
+   deletion, desired-state, and retirement checks, so the pool closes as before.
+2. **The provider replaced or lost the instance.** The provider writes status only with the
+   generation it observed. While the generation lags, the observation is the one the pool
+   already attested. When the provider observes the new generation and reports another instance,
+   that is no longer a lag, and the ordinary path re-attests. Even during the lag, a reported
+   allocation that differs from the record closes the pool. A supervisor restart is caught by the
+   next ordinary pass's probe, exactly as between any two serving passes.
+3. **Core admission was withdrawn.** A lag needs the immutable class and provider bindings to
+   still match core's last admission and no `Admitted=False` condition. A withdrawn admission
+   (class or provider deleting, profile drift) closes as before. Taint, quarantine, `Failed`,
+   retirement requests, and evictions close as before. Every fence that does not depend on the new
+   observation still runs before the gate: provider usability, runtime configuration, the frozen
+   controller-epoch and provider-token fence, and pool binding.
+4. **A prompt races the attachment.** The pool's admission is not what authorizes a Task's
+   prompts on a workspace pool. A Task is queued only after the workspace handshake
+   (`verifyACPWorkspaceReadyForPool`) requires all of:
+   - current core admission;
+   - the provider's observation of the current generation;
+   - its acknowledgement of exactly this attachment epoch;
+   - a current `Attached` condition.
+
+   The pool is single-session and the attachment exclusive, so no other Task can be queued on it.
+   Keeping an admitted runtime open therefore lets no prompt reach it before the provider has
+   accepted the new attachment. It only removes the re-admission that followed.
+
+   The dispatcher reserves only Tasks that passed that handshake, and does not re-check the
+   workspace. One holder can therefore keep dispatching across an attachment-only change: a Task
+   whose attachment is rotated at expiry (ADR 0023) holds the next epoch without ever detaching.
+   Today's pass would have paused it until the provider acknowledged. Letting it continue is
+   equivalent, because the runtime never receives the attachment bearer (ADR 0026) and the
+   rotation opens no ownership gap. A different Task attaches only after the holder's settlement
+   revoked it, and a settled Task is never dispatched.
+
+A revocation is the same attachment-only change. The runtime keeps serving no one until a new
+attachment completes the handshake, which is ADR 0055's warm state.
+
+The security review of this rule is requested before it is merged into integration.
+
 
 #### Pool demand
 
@@ -379,6 +469,16 @@ and is not done here.
 - **Wasted boots.** A cancelled or rejected follow-up may boot and retire a runtime it never
   uses. That costs one extra `VOLUMES` Tag and up to two minutes of an idle runtime. Session data
   is never lost: the same retained data is re-captured or kept.
-- **Pre-dispatch timing.** It gains the `speculativeStart` milestone.
+- **Round 6 measured the resume write.** Bind → provider start dropped to 1.1–1.7 s (from
+  3.5–5.3 s), speculative start → publish to 0.18–0.63 s, and a spare's first-admission
+  probe → serving to 0.72 s (from 5–6 s). Marker conflicts and missed starts were zero.
+- **Readmission removed.** An attachment-only generation change no longer closes a serving
+  runtime, which removes round 6's 7–38 s readmission tail on warm, spare, and shared paths.
+- **First turns.** The pool is activated on the creation pass, and the publication carries the
+  attachment. Bind → provider start should drop by the readmission hop the separate attach
+  forced; live timing must confirm this.
+- **Pre-dispatch timing.** It gains the `speculativeStart` and `speculativePoolActivated`
+  milestones, and retention reports each deferred warm-window expiry with a log line and a
+  `WarmWindowExpiryDeferred` Event.
 - **Out of scope.** Change 1 does not apply to the warm window, which already attaches a running
   runtime. Change 2 does not apply to Agent Sandbox or non-Substrate profiles.

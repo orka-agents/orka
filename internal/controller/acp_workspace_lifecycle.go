@@ -406,6 +406,13 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, client.IgnoreNotFound(err)
 	}
+	if r.acpWorkspaceAwaitsStagedInstall(ctx, workspace, task, plan.PoolName, time.Now()) {
+		// ADR 0057: the RuntimePool installs this Task's staged attachment in
+		// its publication write. Attaching separately first would bump the
+		// generation, force a core re-admission before that publication, and
+		// split the provider's observation in two.
+		return "", false, nil
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
