@@ -36,12 +36,14 @@ import (
 // Task admission limits (--max-tasks-per-namespace and a coordinator's
 // maxConcurrentChildren) admit Tasks through a slot ledger. A Task is a slot
 // holder once it has been granted a slot, or once its own state shows it
-// admitted (see taskAdmittedByWork and taskAdmissionRetryPending); a Task still waiting for a slot, or a
-// recurring Task's scheduling parent, is not counted. A waiting Task joins the
-// ledger with a resourceVersion-checked update of one shared Lease, so two
-// contenders can never both take the last slot, and whenever a slot is free
-// some contender takes it: waiting Tasks never block each other. Holders free
-// their slot by reaching a terminal phase or being deleted.
+// admitted (see taskAdmittedByWork and taskAdmissionRetryPending); a Task
+// still waiting for a slot, or a recurring Task's scheduling parent, is not
+// counted. A waiting Task joins the ledger with a resourceVersion-checked
+// update of one shared Lease, so two contenders can never both take the last
+// slot, and whenever a slot is free some contender takes it: waiting Tasks
+// never block each other. Holders that run nothing yet, such as Tasks over a
+// lowered limit, proceed one at a time, oldest first (taskAdmissionView).
+// Holders free their slot by reaching a terminal phase or being deleted.
 //
 // Ledgers live only in the controller namespace, the trust boundary that also
 // holds the controller-epoch Lease, and admission refuses every write to
@@ -49,9 +51,10 @@ import (
 // (config/admission/acp_workspace_lease_protection.yaml), so a tenant that
 // can write Leases there cannot forge or remove a grant. A grant
 // counts only when it names a live, schedule-free Task of the scope by UID,
-// and every admission, a granted Task's included, requires the other holders
-// to number fewer than the limit. A forged or stale grant can therefore only
-// delay admission, never raise capacity above the limit.
+// and every admission, a granted Task's included, requires the running Tasks
+// and the holders ahead of it to number fewer than the limit. A forged or
+// stale grant can therefore only delay admission, never raise capacity above
+// the limit.
 
 const (
 	// taskAdmissionLedgerAnnotation holds the granted Task UIDs, sorted, as a
@@ -224,52 +227,98 @@ func taskAdmissionGrantEligible(task *corev1alpha1.Task) bool {
 	return task.UID != "" && !task.Status.Phase.IsTerminal() && task.Spec.Schedule == ""
 }
 
-// taskAdmissionHolders returns the slot holders other than task, and the
-// grants still valid: a grant counts only when it names, by UID, a listed
-// Task of the scope that is grant-eligible; live Tasks admitted by state
-// count on their own. A Task backing off between retries is itself one of
-// the Tasks admitted before the ledger, so when it asks it does not count
-// others held only by a retry backoff: Tasks over a newly lowered limit then
-// take the slots one at a time instead of each waiting for the other.
-func taskAdmissionHolders(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) (holders map[types.UID]struct{}, valid []types.UID) {
-	eligible := make(map[types.UID]struct{}, len(tasks))
-	holders = map[types.UID]struct{}{}
-	retrying := false
+// taskAdmissionView is what a scope's ledger and Task list say about one
+// Task's admission.
+type taskAdmissionView struct {
+	// running counts the other Tasks of the scope running work
+	// (taskAdmittedByWork).
+	running int
+	// claimants counts the other Tasks entitled to a slot that run nothing
+	// yet: those with a valid grant, and those backing off between retries;
+	// claimantsBefore counts the ones ordered before task.
+	claimants, claimantsBefore int
+	// claimant reports whether task itself is such a Task.
+	claimant bool
+	// valid holds the grants that still count, and granted whether one of
+	// them is task's.
+	valid   []types.UID
+	granted bool
+}
+
+// admits reports whether task may proceed under limit. A claimant waits only
+// for the running Tasks and the claimants ordered before it, so claimants
+// over a lowered limit proceed one at a time in a fixed order instead of
+// each waiting for all the others; any other Task waits for every running
+// Task and claimant. Either way the running Tasks and the claimants allowed
+// to proceed never number more than limit.
+func (v taskAdmissionView) admits(limit int32) bool {
+	ahead := v.running + v.claimants
+	if v.claimant {
+		ahead = v.running + v.claimantsBefore
+	}
+	return int32(ahead) < limit //nolint:gosec // bounded by the listed Task count
+}
+
+// newTaskAdmissionView reads task's admission from the scope's grants and
+// Tasks. A grant counts only when it names, by UID, a listed Task of the
+// scope that is grant-eligible. Claimants are ordered oldest first
+// (taskAdmissionOrderedBefore), the same in every scope, so a Task ahead in
+// one ledger is ahead in all of them and two Tasks never each hold a slot
+// the other waits for. No grant is dropped: a claimant not yet elected keeps
+// its place and proceeds once those ahead of it finish.
+func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task) taskAdmissionView {
+	eligible := make(map[types.UID]*corev1alpha1.Task, len(tasks))
 	for i := range tasks {
-		if tasks[i].UID == task.UID {
-			retrying = taskAdmissionRetryPending(&tasks[i])
+		if taskAdmissionGrantEligible(&tasks[i]) {
+			eligible[tasks[i].UID] = &tasks[i]
 		}
 	}
-	for i := range tasks {
-		candidate := &tasks[i]
-		if !taskAdmissionGrantEligible(candidate) {
-			continue
-		}
-		eligible[candidate.UID] = struct{}{}
-		if candidate.UID == task.UID {
-			continue
-		}
-		if taskAdmittedByWork(candidate) || (!retrying && taskAdmissionRetryPending(candidate)) {
-			holders[candidate.UID] = struct{}{}
-		}
-	}
+	view := taskAdmissionView{}
+	grants := make(map[types.UID]struct{}, len(granted))
 	for _, uid := range granted {
-		if _, ok := eligible[uid]; !ok || slices.Contains(valid, uid) {
+		if _, ok := eligible[uid]; !ok || slices.Contains(view.valid, uid) {
 			continue
 		}
-		valid = append(valid, uid)
-		if uid != task.UID {
-			holders[uid] = struct{}{}
+		view.valid = append(view.valid, uid)
+		grants[uid] = struct{}{}
+	}
+	self := task
+	if listed, ok := eligible[task.UID]; ok {
+		self = listed
+		_, view.granted = grants[task.UID]
+		view.claimant = view.granted || taskAdmissionRetryPending(listed)
+	}
+	for uid, candidate := range eligible {
+		if uid == task.UID {
+			continue
+		}
+		_, hasGrant := grants[uid]
+		switch {
+		case taskAdmittedByWork(candidate):
+			view.running++
+		case hasGrant || taskAdmissionRetryPending(candidate):
+			view.claimants++
+			if taskAdmissionOrderedBefore(candidate, self) {
+				view.claimantsBefore++
+			}
 		}
 	}
-	return holders, valid
+	return view
+}
+
+// taskAdmissionOrderedBefore orders claimants oldest first, by creation time
+// and then UID, a total order every scope and reconcile agrees on.
+func taskAdmissionOrderedBefore(a, b *corev1alpha1.Task) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.UID < b.UID
 }
 
 // acquireTaskAdmissionSlot reports whether task holds one of the scope's
-// slots, granting it one if a slot is free. A Task already in the ledger is
-// admitted only while the other holders number fewer than the limit, so a
-// grant nobody made can never admit a Task past it, and a Task the scope does
-// not list as grant-eligible is never admitted.
+// slots, granting it one if a slot is free (see taskAdmissionView.admits). A
+// grant nobody made can never admit a Task past the limit, and a Task the
+// scope does not list as grant-eligible is never admitted.
 func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
 	if task == nil || task.UID == "" {
 		return false, fmt.Errorf("task identity is required for admission")
@@ -309,15 +358,15 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 		}) {
 			return nil
 		}
-		holders, valid := taskAdmissionHolders(task, entries, tasks)
-		if int32(len(holders)) >= scope.limit { //nolint:gosec // bounded by the listed Task count
+		view := newTaskAdmissionView(task, entries, tasks)
+		if !view.admits(scope.limit) {
 			return nil
 		}
-		if slices.Contains(valid, task.UID) {
+		if view.granted {
 			granted = true
 			return nil
 		}
-		next := append([]types.UID{task.UID}, valid...)
+		next := append([]types.UID{task.UID}, view.valid...)
 		slices.Sort(next)
 		encoded, err := json.Marshal(next)
 		if err != nil {

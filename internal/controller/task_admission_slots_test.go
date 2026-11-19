@@ -558,3 +558,132 @@ func TestAdmissionNeverGrantsATaskItsScopeDoesNotList(t *testing.T) {
 		t.Fatalf("a Task the namespace does not list: granted=%t err=%v, want no grant", granted, err)
 	}
 }
+
+// A limit lowered from 2 to 1 while both granted Job Tasks back off between
+// retries: exactly one, the oldest, proceeds, and the other proceeds once it
+// finishes. Neither grant is dropped. A retrying Task whose grant was pruned
+// still holds its place and proceeds after both, and a new Task waits for
+// all of them.
+func TestLoweredLimitElectsOneRetryingHolderAtATime(t *testing.T) {
+	for _, scopeKind := range []string{taskAdmissionLedgerKindNamespace, taskAdmissionLedgerKindChildren} {
+		t.Run(scopeKind, func(t *testing.T) {
+			ctx := context.Background()
+			parent := limitTestTask("coordinator")
+			created := time.Now().Add(-time.Hour)
+			task := func(name string, age time.Duration, retrying bool) *corev1alpha1.Task {
+				task := limitTestTask(name)
+				if retrying {
+					task = limitTestRetryingTask(name)
+				}
+				task.CreationTimestamp = metav1.NewTime(created.Add(-age))
+				if scopeKind == taskAdmissionLedgerKindChildren {
+					task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
+				}
+				return task
+			}
+			// "younger" sorts first by UID; age alone elects "older".
+			younger, older := task("a-younger", time.Minute, true), task("b-older", 2*time.Minute, true)
+			pruned, fresh := task("c-pruned", 0, true), task("d-fresh", 0, false)
+			r := newUnitReconciler(newTestScheme(), parent, younger, older, pruned, fresh)
+			r.APIReader = r.Client
+			scope := r.namespaceAdmissionScope("default", 1)
+			if scopeKind == taskAdmissionLedgerKindChildren {
+				scope = r.childrenAdmissionScope(parent, 1)
+			}
+			writeAdmissionLedger(t, r.Client, scope.ledger, younger.UID, older.UID)
+			acquire := func(task *corev1alpha1.Task, want bool, when string) {
+				t.Helper()
+				if granted, err := r.acquireTaskAdmissionSlot(ctx, task, scope); err != nil || granted != want {
+					t.Fatalf("%s: %s granted=%t err=%v, want %t", when, task.Name, granted, err, want)
+				}
+			}
+			finish := func(task *corev1alpha1.Task) {
+				t.Helper()
+				current := &corev1alpha1.Task{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+					t.Fatal(err)
+				}
+				current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+				if err := r.Status().Update(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			for range 2 {
+				acquire(younger, false, "limit lowered")
+				acquire(older, true, "limit lowered")
+				acquire(pruned, false, "limit lowered")
+				acquire(fresh, false, "limit lowered")
+			}
+			lease := &coordinationv1.Lease{}
+			if err := r.Get(ctx, scope.ledger, lease); err != nil {
+				t.Fatal(err)
+			}
+			if grants, err := decodeTaskAdmissionLedger(lease.Annotations[taskAdmissionLedgerAnnotation]); err != nil ||
+				!slices.Equal(grants, []types.UID{younger.UID, older.UID}) {
+				t.Fatalf("ledger grants = %v (%v), want both retrying holders kept", grants, err)
+			}
+
+			finish(older)
+			acquire(pruned, false, "after the oldest finished")
+			acquire(fresh, false, "after the oldest finished")
+			acquire(younger, true, "after the oldest finished")
+
+			finish(younger)
+			acquire(fresh, false, "after both granted holders finished")
+			acquire(pruned, true, "after both granted holders finished")
+
+			finish(pruned)
+			acquire(fresh, true, "after every retrying Task finished")
+		})
+	}
+}
+
+// Running holders over a lowered limit keep their grants and run on; a
+// granted Task backing off between retries waits until the running Tasks
+// number fewer than the new limit.
+func TestLoweredLimitRetryingHolderWaitsForRunningHolders(t *testing.T) {
+	ctx := context.Background()
+	running := func(name string) *corev1alpha1.Task {
+		task := limitTestTask(name)
+		task.Status.Phase = corev1alpha1.TaskPhaseRunning
+		task.Status.JobName = name + "-job"
+		return task
+	}
+	first, second, retrying := running("first-running"), running("second-running"), limitTestRetryingTask("retrying")
+	r := newUnitReconciler(newTestScheme(), first, second, retrying)
+	r.APIReader = r.Client
+	scope := r.namespaceAdmissionScope("default", 1)
+	writeAdmissionLedger(t, r.Client, scope.ledger, first.UID, second.UID, retrying.UID)
+	finish := func(task *corev1alpha1.Task) {
+		t.Helper()
+		current := &corev1alpha1.Task{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			t.Fatal(err)
+		}
+		current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+		if err := r.Status().Update(ctx, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, retrying, scope); err != nil || granted {
+		t.Fatalf("two running holders over a limit of one: granted=%t err=%v, want the retrying Task held", granted, err)
+	}
+	lease := &coordinationv1.Lease{}
+	if err := r.Get(ctx, scope.ledger, lease); err != nil {
+		t.Fatal(err)
+	}
+	if grants, err := decodeTaskAdmissionLedger(lease.Annotations[taskAdmissionLedgerAnnotation]); err != nil ||
+		!slices.Contains(grants, first.UID) || !slices.Contains(grants, second.UID) {
+		t.Fatalf("ledger grants = %v (%v), want the running holders' grants kept", grants, err)
+	}
+	finish(first)
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, retrying, scope); err != nil || granted {
+		t.Fatalf("one running holder at a limit of one: granted=%t err=%v, want the retrying Task held", granted, err)
+	}
+	finish(second)
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, retrying, scope); err != nil || !granted {
+		t.Fatalf("no running holder: granted=%t err=%v, want the retrying Task admitted", granted, err)
+	}
+}
