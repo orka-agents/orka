@@ -28,7 +28,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // Dataset describes the provider and the dataset it serves. Describe and
-// HealthCheck are the only calls that may omit the orka-storage-dataset
+// HealthCheck are the only calls that may omit the orka-storage-dataset-bin
 // request header.
 type DatasetClient interface {
 	Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*DescribeResponse, error)
@@ -68,7 +68,7 @@ func (c *datasetClient) HealthCheck(ctx context.Context, in *HealthCheckRequest,
 // for forward compatibility.
 //
 // Dataset describes the provider and the dataset it serves. Describe and
-// HealthCheck are the only calls that may omit the orka-storage-dataset
+// HealthCheck are the only calls that may omit the orka-storage-dataset-bin
 // request header.
 type DatasetServer interface {
 	Describe(context.Context, *DescribeRequest) (*DescribeResponse, error)

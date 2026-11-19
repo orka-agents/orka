@@ -20,8 +20,9 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 //
 // Every request names the contract (orka-storage-contract) and the client's
 // protocol revision (orka-storage-revision). Every request except Describe
-// and HealthCheck names the dataset it expects (orka-storage-dataset), and
-// the server refuses one that names none (VALIDATION) or another dataset
+// and HealthCheck names the dataset it expects in the binary header
+// orka-storage-dataset-bin, as a dataset ID may hold any UTF-8 text, and the
+// server refuses one that names none (VALIDATION) or another dataset
 // (DATASET_MISMATCH) before the provider runs. A write carries its
 // WriteEnvelope as the binary header orka-storage-envelope-bin; a read or an
 // administrative call carries none, and the server refuses one that does. A

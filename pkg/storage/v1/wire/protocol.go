@@ -16,10 +16,12 @@ const ProtocolRevision = 1
 // request and response. The dataset header names the dataset a request
 // expects and the dataset a response came from; every call but those of the
 // Dataset service, which a client makes to learn its dataset, must name one.
+// It is a binary header, as a dataset ID may hold any UTF-8 text and gRPC
+// carries only printable ASCII in a text header.
 const (
 	HeaderContract = "orka-storage-contract"
 	HeaderRevision = "orka-storage-revision"
-	HeaderDataset  = "orka-storage-dataset"
+	HeaderDataset  = "orka-storage-dataset-bin"
 	// HeaderEnvelope carries a write's binary WriteEnvelope message. Only a
 	// write carries one.
 	HeaderEnvelope = "orka-storage-envelope-bin"
