@@ -90,10 +90,16 @@ workers, but gives no per-Actor proof of sandbox exit:
   and on every sweep.
 - **When templates cannot be listed.** Admission closes at once. Once the native
   ActorTemplate inventory has stayed unavailable for 60 s, every shared pool is
-  strongly retired, unless the control plane itself is down (a transport or
-  availability failure): then nothing can be placed, and retiring would only strand the
-  Actors' data. A rejection of the provider's own credentials is not "down", because
-  other clients may still place Actors; the pools are retired even though suspending
+  strongly retired. Retirement is deferred only while the control plane looks down from
+  the provider (a transport or availability failure), because retiring then would
+  strand the Actors' data. That exception covers short outages only: at 5 minutes of
+  total outage, every shared pool is retired regardless. A provider-side transport
+  failure does not prove other clients cannot place, so foreign placement during a
+  provider-only partition is bounded by 5 minutes; after that, isolation wins over
+  data. The outage age is stamped durably on each pool, so a restarting provider never
+  resets it. A rejection of the provider's own credentials is not "down" and gets no
+  deferral, because other clients may still place Actors; the pools are retired at
+  60 s even though suspending
   their neighbours, which needs those credentials, may then fail. The same applies when
   the pool's assignment checks are rejected for those credentials past 60 s. Isolation wins, and
   the provider reports the rejection as a Warning Event on its ExecutionWorkspaceProvider.
