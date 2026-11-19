@@ -202,8 +202,9 @@ type TaskReconciler struct {
 const (
 	// DefaultTaskMaxConcurrentReconciles lets independent Tasks reconcile in
 	// parallel. A Task is never reconciled concurrently with itself, the
-	// namespace Task limit and maxConcurrentChildren count Tasks from the API
-	// server, writes to objects other Tasks share are create-if-absent or
+	// namespace Task limit and maxConcurrentChildren grant slots through a
+	// resourceVersion-checked ledger (task_admission_slots.go), writes to
+	// objects other Tasks share are create-if-absent or
 	// resourceVersion-checked, and the reconciler's own state is
 	// lock-protected.
 	DefaultTaskMaxConcurrentReconciles = 4
@@ -1066,29 +1067,21 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		if !validationTask {
-			// Count from the API server, not the informer cache. A Task is
-			// counted from its Pending write, which commits before its own
-			// check, so every Task that passed this check is visible here
-			// however many Tasks reconcile at once.
-			var namespaceTasks corev1alpha1.TaskList
-			if err := uncachedReader(r.APIReader, r.Client).List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-				log.Error(err, "failed to list namespace tasks for limit check")
+			// Slots are counted from the API server and granted through the
+			// namespace's admission ledger, so parallel reconciles never
+			// admit past the limit and waiting Tasks never block each other.
+			granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace))
+			if err != nil {
+				log.Error(err, "failed to acquire a namespace task slot")
 				return ctrl.Result{}, err
 			}
-			active := int32(0)
-			for _, t := range namespaceTasks.Items {
-				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-					active++
-				}
-			}
-			if active >= r.MaxTasksPerNamespace {
+			if !granted {
 				log.Info("namespace task limit reached, requeueing",
 					"namespace", task.Namespace,
-					"active", active,
 					"limit", r.MaxTasksPerNamespace,
 				)
 				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+					"namespace %q has no free task slot (limit: %d), requeueing", task.Namespace, r.MaxTasksPerNamespace)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 		}
@@ -1438,22 +1431,15 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 	// Enforce maxConcurrentChildren (requeue if at limit)
 	if coord.MaxConcurrentChildren > 0 {
-		// Counted from the API server for the same reason as the namespace
-		// limit: a sibling admitted concurrently is already Pending there.
-		var siblings corev1alpha1.TaskList
-		if err := uncachedReader(r.APIReader, r.Client).List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
-			log.Error(err, "failed to list sibling tasks")
+		// Granted through the parent's admission ledger for the same reason
+		// as the namespace limit.
+		granted, err := r.acquireTaskAdmissionSlot(ctx, task, r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren))
+		if err != nil {
+			log.Error(err, "failed to acquire a coordination child slot")
 			return ctrl.Result{}, err, true
 		}
-		active := int32(0)
-		for _, s := range siblings.Items {
-			if s.Name != task.Name && taskPhaseCountsTowardConcurrency(s.Status.Phase) {
-				active++
-			}
-		}
-		if active >= coord.MaxConcurrentChildren {
-			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
+		if !granted {
+			log.Info("coordination concurrency limit reached", "max", coord.MaxConcurrentChildren)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 		}
 	}

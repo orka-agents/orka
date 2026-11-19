@@ -12,6 +12,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -20,13 +21,13 @@ import (
 )
 
 // limitTestReconciler returns a reconciler whose informer cache still shows
-// peer before its Pending write, while the API server already has it Pending,
-// as when another Task's reconcile admitted peer concurrently.
+// peer before its admission, while the API server already has it admitted, as
+// when another Task's reconcile admitted peer concurrently.
 func limitTestReconciler(t *testing.T, task, peer *corev1alpha1.Task, objects ...client.Object) *TaskReconciler {
 	t.Helper()
 	scheme := newTestScheme()
 	cachedPeer := peer.DeepCopy()
-	cachedPeer.Status.Phase = ""
+	cachedPeer.Status = corev1alpha1.TaskStatus{}
 	r := newUnitReconciler(scheme, append([]client.Object{task, cachedPeer}, objects...)...)
 	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}).
@@ -42,19 +43,21 @@ func objectCopies(objects []client.Object) []client.Object {
 	return copies
 }
 
-func limitTestTask(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+// limitTestTask is a Pending container Task.
+func limitTestTask(name string) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Finalizers: []string{labels.TaskFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid"), Finalizers: []string{labels.TaskFinalizer}},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: phase},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 }
 
 // Parallel reconciles must not admit past the namespace limit: a Task the
 // cache has not yet seen as Pending is counted from the API server.
 func TestHandlePendingNamespaceLimitCountsConcurrentlyAdmittedTasks(t *testing.T) {
-	task := limitTestTask("checking", corev1alpha1.TaskPhasePending)
-	peer := limitTestTask("admitted-concurrently", corev1alpha1.TaskPhasePending)
+	task := limitTestTask("checking")
+	peer := limitTestTask("admitted-concurrently")
+	peer.Status.JobName = "admitted-concurrently-job"
 	r := limitTestReconciler(t, task, peer)
 	r.MaxTasksPerNamespace = 1
 
@@ -77,16 +80,17 @@ func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) 
 		}},
 	}
 	parent := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: parentAgent.Name}},
 	}
 	child := func(name string) *corev1alpha1.Task {
-		task := limitTestTask(name, corev1alpha1.TaskPhasePending)
+		task := limitTestTask(name)
 		task.Labels = map[string]string{labels.LabelParentTask: parent.Name}
 		task.Annotations = map[string]string{labels.AnnotationCoordinationDepth: "1"}
 		return task
 	}
 	task, sibling := child("checking-child"), child("admitted-sibling")
+	sibling.Status.JobName = "admitted-sibling-job"
 	r := limitTestReconciler(t, task, sibling, parentAgent, parent)
 
 	result, err, handled := r.validateCoordinationConstraints(context.Background(), task)
@@ -95,5 +99,41 @@ func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) 
 	}
 	if !handled || result.RequeueAfter != 10*time.Second {
 		t.Fatalf("handled=%t RequeueAfter=%v, want the child limit to hold the second child", handled, result.RequeueAfter)
+	}
+}
+
+// Two Pending Tasks waiting under a limit of one used to count each other
+// and wait forever. Waiting Tasks no longer count: the first to take the slot
+// proceeds and the other waits for it.
+func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
+	first := limitTestTask("first-waiting")
+	second := limitTestTask("second-waiting")
+	r := newUnitReconciler(newTestScheme(), first, second)
+	r.APIReader = r.Client
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), first.DeepCopy())
+	if err != nil {
+		t.Fatalf("first handlePending() error = %v", err)
+	}
+	if result.RequeueAfter == 10*time.Second {
+		t.Fatal("the first waiting Task was held although no Task held the slot")
+	}
+	result, err = r.handlePending(context.Background(), second.DeepCopy())
+	if err != nil {
+		t.Fatalf("second handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("second RequeueAfter = %v, want it to wait for the slot", result.RequeueAfter)
+	}
+	// Only the admitted Task created its Job.
+	stored := &corev1alpha1.Task{}
+	for _, task := range []*corev1alpha1.Task{first, second} {
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), stored); err != nil {
+			t.Fatal(err)
+		}
+		if admitted := stored.Status.JobName != ""; admitted != (task == first) {
+			t.Fatalf("%s JobName = %q, want only the first Task admitted", task.Name, stored.Status.JobName)
+		}
 	}
 }

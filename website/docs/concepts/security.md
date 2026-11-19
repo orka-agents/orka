@@ -401,7 +401,7 @@ When OIDC API authentication is enabled, configure an explicit subject allowlist
 
 ### Per-namespace Task limits
 
-Use `--max-tasks-per-namespace` to cap the number of active (Pending/Running) tasks per namespace. Tasks exceeding the limit are requeued with backoff. Set to `0` (default) for unlimited.
+Use `--max-tasks-per-namespace` to cap the number of admitted tasks per namespace. A task holds a slot from its admission until it finishes; a Pending task still waiting for a slot does not count, so waiting tasks never block each other, and the controller grants slots through one ledger per namespace, so parallel reconciles never admit past the limit. Tasks over the limit are requeued with backoff. Set to `0` (default) for unlimited.
 
 ### Recommended production configuration
 
