@@ -93,6 +93,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
+	// An eviction or upgrade drain of a detached warm runtime ends its
+	// window now (ADR 0055), so retention suspends it inside the drain's
+	// deadline; the runtime keeps serving no one in the meantime.
+	if ended, err := endACPWorkspaceWarmWindowForDrain(ctx, r.Client, pool, w, r.now()); err != nil || ended {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	// A provider-reported Failed instance is terminal: retire it, never replace it.
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||

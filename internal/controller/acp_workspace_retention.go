@@ -1409,6 +1409,7 @@ func suspendACPWorkspaceWithinQuota(
 	// Suspension ends any warm-detach window in the same write.
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

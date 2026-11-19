@@ -96,6 +96,48 @@ func acpWorkspaceQuarantined(workspace *workspacev1alpha1.ExecutionWorkspace) bo
 		workspaceprovider.ConditionIsTrue(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceQuarantined))
 }
 
+// acpWorkspaceWarmWindowDrainedAnnotation records that an eviction or upgrade
+// drain of the warm runtime ended the window early. Its Suspend then applies
+// at once: the drain's own deadline, which can be shorter than any window,
+// leaves no room to wait.
+const acpWorkspaceWarmWindowDrainedAnnotation = "acp.workspace.orka.ai/warm-window-drained-at"
+
+// endACPWorkspaceWarmWindowForDrain ends the warm window of a detached
+// workspace whose runtime the RuntimePool must drain (a worker eviction, or a
+// retirement for an upgrade or a changed runtime fence): it moves the
+// deadline to now, never later, so retention applies the frozen Suspend
+// before the drain's deadline instead of when the window would have ended.
+// ended reports a write; the caller requeues to read it back.
+func endACPWorkspaceWarmWindowForDrain(
+	ctx context.Context,
+	writer client.Client,
+	pool *corev1alpha1.RuntimePool,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) (bool, error) {
+	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != booleanTrueValue &&
+		strings.TrimSpace(pool.Annotations[externalRuntimeEvictionAnnotation]) == "" {
+		return false, nil
+	}
+	if !acpWorkspaceWarmWindowHoldsPool(workspace) {
+		return false, nil
+	}
+	deadline, open := acpWorkspaceWarmWindowOpen(workspace)
+	_, drained := workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]
+	if !open || (drained && !deadline.After(now)) {
+		return false, nil
+	}
+	base := workspace.DeepCopy()
+	if deadline.After(now) {
+		workspace.Annotations[acpWorkspaceSuspendAtAnnotation] = now.UTC().Format(time.RFC3339Nano)
+	}
+	workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation] = now.UTC().Format(time.RFC3339Nano)
+	if err := writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // acpWorkspaceWarmWindowOpen reports an unattached Ready workspace carrying a
 // parseable warm-window deadline for its recorded Suspend action.
 func acpWorkspaceWarmWindowOpen(workspace *workspacev1alpha1.ExecutionWorkspace) (time.Time, bool) {
@@ -193,6 +235,7 @@ func clearACPWorkspaceSuspendAt(ctx context.Context, writer client.Client, works
 	}
 	base := workspace.DeepCopy()
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	if pending {
 		workspace.Annotations[acpWorkspaceSuspendPendingAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	} else {

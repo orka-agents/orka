@@ -508,6 +508,7 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	// it: the warm runtime now serves this attachment.
 	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -1676,6 +1677,7 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	// Each detach gets its own window: a deadline left by an earlier epoch is
 	// replaced, never carried into this one.
 	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	if window := acpWorkspaceWarmDetachWindow(workspace, task); window > 0 {
 		workspace.Annotations[acpWorkspaceSuspendAtAnnotation] = startedAt.Add(window).Format(time.RFC3339Nano)
 	} else {
