@@ -143,9 +143,18 @@ hold:
    - strong retirement starts the Pod's full 3600 s grace plus 5 minutes before it;
    - admission closes an hour earlier, so a pool admits for `maxWorkerLifetime − 2h05m`
      after birth (55 minutes at the 3h minimum, 21h55m at 24h);
+   - every retirement first deletes the worker Pod directly, UID-preconditioned, with
+     a grace that ends 5 minutes before the bound (at most 3600 s), and only then the
+     pool. A kubelet that has started a longer stop does not shorten it for a later
+     delete, as live validation showed, so the first delete must carry the bound; the
+     API server never lengthens an in-progress grace, so the pool's cascade cannot
+     undo it. Neighbours drain and Core evicts them inside that grace; a retirement
+     issued late, after an outage, can leave too little time, and a neighbour that
+     cannot checkpoint in time fails without replay with its last checkpoint;
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
      grace, never zero, so the provider's own delete stays on the kubelet path (other
-     deletion paths are an accepted restriction, below). Each such delete is
+     deletion paths are an accepted restriction, below). That re-delete is best
+     effort for a stop already begun. Each such delete is
      tied to the retired pool's UID and preconditioned on the Pod's UID, so a pool
      replaced under the same name never loses its Pods;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
