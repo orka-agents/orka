@@ -257,7 +257,7 @@ spec:
 | Field | Description |
 | --- | --- |
 | `providerRef` | The [Provider](#provider) for a native Agent. Mutually exclusive with `runtime`. |
-| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2; an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it), `maxTokens` (when unset, an `anthropic` Provider sends 64,000 to Claude 4.5 and later models and 4,096 to others), `contextWindow`, and [`fallbacks`](#model-fallbacks). |
+| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2; an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it), `maxTokens` (when unset, the Provider chooses: `anthropic` sends 64,000 to Claude 4.5 and later models and 4,096 to others, and `openai` and `azure-openai` send no limit, so the model's maximum applies), `contextWindow`, and [`fallbacks`](#model-fallbacks). |
 | `systemPrompt` | `inline` text, or `configMapRef` to read it from a ConfigMap key. |
 | `tools` | Native Agents only. Tools the Agent may call: [built-in tools](built-in-tools.md) and custom [Tool](#tool) resources by name. An entry with `enabled: false` is skipped. Runtime Agents use `runtime.defaultAllowedTools` instead. |
 | `skills` | Native Agents only. [Skills](#skill) whose content is added to the system prompt. |
