@@ -164,7 +164,10 @@ hold:
    - when the journals cannot be listed, that ceiling drops to creation plus 3h and
      admission (claims and Resumes) closes at once. Every shared pool is strongly
      retired only if the listing still fails 60 s later, so one transient API error
-     never evicts every shared Actor;
+     never evicts every shared Actor. That 60 s limit is independent of the discovery
+     budget: the pool List has its own deadline, so a journal read that uses up the
+     budget never keeps the pools unlisted, and a failed pool List is retried within
+     10 s while a failed journal read keeps admission closed;
    - discovery does not depend on the removable shared label;
    - no failed ledger write can block the deletion.
 
