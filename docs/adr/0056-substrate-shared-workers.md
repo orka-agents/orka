@@ -154,7 +154,13 @@ hold:
    - a Pod still present 5 minutes before the bound is re-deleted with a one-second
      grace, never zero, so the provider's own delete stays on the kubelet path (other
      deletion paths are an accepted restriction, below). That re-delete is best
-     effort for a stop already begun. Each such delete is
+     effort for a stop already begun. The bound is enforced only through graceful
+     deletion the kubelet honours, with a capped grace: a kubelet restart during a
+     stop restarts it with the grace the Pod object then carries (the capped value,
+     or one second after escalation, never the original 3600 s), so it can extend
+     termination by up to one capped grace, and a node or kubelet failure is outside
+     the bound. That is the accepted limit of this hard bound; no stronger mechanism
+     exists within the provider's RBAC, which has no node access. Each such delete is
      tied to the retired pool's UID and preconditioned on the Pod's UID, so a pool
      replaced under the same name never loses its Pods;
    - all of this runs in its own provider loop every 10 s, using Kubernetes alone,
