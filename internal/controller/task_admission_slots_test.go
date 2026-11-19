@@ -263,3 +263,46 @@ func TestReapNamespaceAdmissionLedgers(t *testing.T) {
 		}
 	}
 }
+
+// A ledger never holds more grants than its limit, and every limit is capped
+// at MaxTaskAdmissionSlots, so a full ledger of UUID-shaped UIDs stays far
+// below the 256KiB Kubernetes allows for all of an object's annotations.
+func TestTaskAdmissionLedgerSizeIsBoundedByTheSlotCap(t *testing.T) {
+	entries := make([]types.UID, MaxTaskAdmissionSlots)
+	for i := range entries {
+		entries[i] = types.UID(fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i))
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const annotationLimit = 256 * 1024
+	if len(encoded) > annotationLimit*3/4 {
+		t.Fatalf("a full ledger encodes to %d bytes, too close to the %d-byte annotation limit", len(encoded), annotationLimit)
+	}
+	for _, tc := range []struct{ configured, want int32 }{
+		{1, 1}, {MaxTaskAdmissionSlots, MaxTaskAdmissionSlots}, {MaxTaskAdmissionSlots + 1, MaxTaskAdmissionSlots}, {1 << 30, MaxTaskAdmissionSlots},
+	} {
+		if got := effectiveTaskAdmissionLimit(tc.configured); got != tc.want {
+			t.Errorf("effectiveTaskAdmissionLimit(%d) = %d, want %d", tc.configured, got, tc.want)
+		}
+	}
+}
+
+// A limit above the cap admits at most MaxTaskAdmissionSlots holders.
+func TestTaskAdmissionClampsALimitAboveTheCap(t *testing.T) {
+	ctx := context.Background()
+	holders := make([]corev1alpha1.Task, MaxTaskAdmissionSlots)
+	for i := range holders {
+		holders[i] = corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: fmt.Sprintf("holder-%d", i), UID: types.UID(fmt.Sprintf("holder-%d", i))},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}}
+	}
+	contender := limitTestTask("contender")
+	r := newUnitReconciler(newTestScheme(), contender)
+	r.APIReader = r.Client
+	scope := r.namespaceAdmissionScope("default", 1<<30)
+	scope.list = func(context.Context) ([]corev1alpha1.Task, error) { return append(holders, *contender), nil }
+	if granted, err := r.acquireTaskAdmissionSlot(ctx, contender, scope); err != nil || granted {
+		t.Fatalf("granted=%t err=%v with %d holders, want the capped limit to hold", granted, err, MaxTaskAdmissionSlots)
+	}
+}

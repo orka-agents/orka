@@ -653,7 +653,7 @@ func main() {
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
-		"Maximum active tasks per namespace (0 = unlimited).")
+		fmt.Sprintf("Maximum admitted tasks per namespace (0 = unlimited, at most %d).", controller.MaxTaskAdmissionSlots))
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
@@ -1837,7 +1837,12 @@ func main() {
 	acpOpencodeRuntimeImage = images.Opencode
 
 	sessionManager.SetGatewayEventStore(appStorage)
-	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
+	if maxTasksPerNamespace < 0 || maxTasksPerNamespace > controller.MaxTaskAdmissionSlots {
+		setupLog.Error(nil, fmt.Sprintf("invalid --max-tasks-per-namespace: must be between 0 (unlimited) and %d", controller.MaxTaskAdmissionSlots),
+			"maxTasksPerNamespace", maxTasksPerNamespace)
+		os.Exit(1)
+	}
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // validated to 0..MaxTaskAdmissionSlots
 	gatewayConfig := gatewayruntime.Config{
 		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,

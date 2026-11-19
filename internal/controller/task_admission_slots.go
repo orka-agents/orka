@@ -60,6 +60,19 @@ const (
 	taskAdmissionLedgerReapInterval = 10 * time.Minute
 )
 
+// MaxTaskAdmissionSlots bounds every admission limit. A ledger never holds
+// more grants than its limit, each about 40 bytes of JSON, so this keeps a
+// full ledger near 160KiB, well under the 256KiB Kubernetes allows for all of
+// an object's annotations. --max-tasks-per-namespace is validated against it;
+// a larger maxConcurrentChildren admits at most this many children at once.
+const MaxTaskAdmissionSlots = 4096
+
+// effectiveTaskAdmissionLimit clamps a configured limit to
+// MaxTaskAdmissionSlots, the stricter direction.
+func effectiveTaskAdmissionLimit(limit int32) int32 {
+	return min(limit, MaxTaskAdmissionSlots)
+}
+
 // taskAdmissionScope is one limit: its ledger, its size, and how to list
 // every Task it covers from the API server.
 type taskAdmissionScope struct {
@@ -172,6 +185,7 @@ func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *cor
 	if scope.limit <= 0 {
 		return true, nil
 	}
+	scope.limit = effectiveTaskAdmissionLimit(scope.limit)
 	reader := uncachedReader(r.APIReader, r.Client)
 	granted := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

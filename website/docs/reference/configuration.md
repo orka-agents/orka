@@ -436,7 +436,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
 | `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
-| `--max-tasks-per-namespace` | `0` | Max admitted tasks per namespace (0 = unlimited). A Pending task waiting for a slot does not count. |
+| `--max-tasks-per-namespace` | `0` | Max admitted tasks per namespace (0 = unlimited, at most 4096). A Pending task waiting for a slot does not count. |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
 | `--acp-workspace-default-suspend-after-detach` | `5m` | Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets none; `0` disables the controller default, while class annotations still apply (ADR 0057) |
 | `--acp-workspace-allow-provider-token-in-sandbox` | `ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX` env or `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway; when false they fail admission |
