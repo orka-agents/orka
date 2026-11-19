@@ -97,7 +97,9 @@ workers, but gives no per-Actor proof of sandbox exit:
   failure does not prove other clients cannot place, so foreign placement during a
   provider-only partition is bounded by 5 minutes; after that, isolation wins over
   data. The outage age is stamped durably on each pool, so a restarting provider never
-  resets it. A rejection of the provider's own credentials is not "down" and gets no
+  resets it. A provider that starts without working native control (always its own
+  local misconfiguration, because the dial does not connect) has the Kubernetes-only
+  bounds loop apply this rule and retire existing shared pools at 60 s. A rejection of the provider's own credentials is not "down" and gets no
   deferral, because other clients may still place Actors; the pools are retired at
   60 s even though suspending
   their neighbours, which needs those credentials, may then fail. The same applies when
