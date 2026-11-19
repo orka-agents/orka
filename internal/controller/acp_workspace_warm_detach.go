@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
@@ -364,7 +365,14 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 			return ctrl.Result{}, true, err
 		}
 		if outstanding {
-			return ctrl.Result{RequeueAfter: min(5*time.Second, deadline.Add(acpWorkspaceWarmExpiryGrace).Sub(now)+time.Second)}, true, nil
+			graceEnds := deadline.Add(acpWorkspaceWarmExpiryGrace)
+			logf.FromContext(ctx).Info("Warm-detach window expiry deferred for live continuation demand",
+				"workspace", workspace.Name, "deadline", deadline.UTC().Format(time.RFC3339Nano),
+				"graceEnds", graceEnds.UTC().Format(time.RFC3339Nano), "pastDeadlineMs", now.Sub(deadline).Milliseconds())
+			r.recordRetention(workspace, "WarmWindowExpiryDeferred",
+				"the warm-detach window elapsed while a continuation still demands the workspace; its Suspend waits at most until "+
+					graceEnds.UTC().Format(time.RFC3339))
+			return ctrl.Result{RequeueAfter: min(5*time.Second, graceEnds.Sub(now)+time.Second)}, true, nil
 		}
 	}
 	// A fenced expiry can return without deleting: a Session continuation

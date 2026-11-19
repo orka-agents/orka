@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	k8sevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -162,4 +164,26 @@ func TestWarmWindowExpiryDefersForLiveContinuationDemand(t *testing.T) {
 			t.Fatal("the continuation attached without first recording its demand")
 		}
 	})
+}
+
+// The grace wait reports itself so live runs can see it work.
+func TestWarmWindowExpiryDeferralIsReported(t *testing.T) {
+	t.Parallel()
+	f, deadline := warmExpiryFixture(t)
+	f.continuationTask(t, "reported-continuation")
+	recorder := k8sevents.NewFakeRecorder(4)
+	c := f.r.APIReader.(client.Client)
+	retention := &ACPWorkspaceRetentionReconciler{Client: c, APIReader: c, Recorder: recorder,
+		Now: func() time.Time { return deadline.Add(time.Second) }}
+	if _, err := retention.Reconcile(context.Background(), ctrl.Request{NamespacedName: f.key}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "WarmWindowExpiryDeferred") {
+			t.Fatalf("event = %q, want the deferral", event)
+		}
+	default:
+		t.Fatal("the deferred expiry reported nothing")
+	}
 }
