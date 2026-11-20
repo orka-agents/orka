@@ -111,7 +111,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	}
 	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, defaultEpochAcquisitionTimeout)
 	defer cancelAcquisition()
-	m.publishTakeoverIntent(acquisitionCtx)
+	m.publishTakeoverIntent(acquisitionCtx, 0)
 	current, err := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 	if err != nil {
 		return err
@@ -137,7 +137,10 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		if !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("advance controller epoch: %w", err)
 		}
-		m.publishTakeoverIntent(acquisitionCtx)
+		// Only against the epoch the failed attempt replaces: if another
+		// holder has replaced it since, this manager lost, and a request
+		// against the winner would hold off its writes.
+		m.publishTakeoverIntent(acquisitionCtx, pending.change.ExpectedEpoch)
 		observed, readErr := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 		if readErr != nil {
 			return fmt.Errorf("reconcile controller epoch CAS conflict: %w", readErr)
@@ -184,11 +187,11 @@ type takeoverIntentPublisher interface {
 // change the epoch, before a read whose mirror checks a busy holder's token
 // can keep failing: an epoch read that keeps conflicting must not stop the
 // request from being made.
-func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context) {
+// expectedEpoch is the epoch the manager is replacing, or zero before its
+// first read: whatever epoch is current, unless the manager already holds it.
+func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context, expectedEpoch int64) {
 	if publisher, ok := m.Store.(takeoverIntentPublisher); ok {
-		// Zero: whatever epoch is current, unless this manager already holds
-		// it, as after a change that committed with an ambiguous result.
-		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID, 0)
+		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID, expectedEpoch)
 	}
 }
 

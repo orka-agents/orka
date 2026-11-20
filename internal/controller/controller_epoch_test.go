@@ -895,3 +895,66 @@ func TestControllerEpochManagerAcquiresWhileEveryReadPairConflicts(t *testing.T)
 	stopHolder()
 	<-holderDone
 }
+
+// losingPublisherStore lets another holder win the epoch change just before
+// the manager's own attempt, and records the epochs the manager publishes its
+// takeover request against.
+type losingPublisherStore struct {
+	*kubestore.Store
+	winner    *kubestore.Store
+	won       atomic.Bool
+	mu        sync.Mutex
+	published []int64
+	stop      func()
+}
+
+func (s *losingPublisherStore) CompareAndSwapControllerEpoch(ctx context.Context, change store.ControllerEpochCAS) (*store.ControllerEpoch, error) {
+	if s.won.CompareAndSwap(false, true) {
+		winning := change
+		winning.HolderID, winning.RequestDigest = "controller-winner", "sha256:"+strings.Repeat("b", 64)
+		if _, err := s.winner.CompareAndSwapControllerEpoch(ctx, winning); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.CompareAndSwapControllerEpoch(ctx, change)
+}
+
+func (s *losingPublisherStore) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64) {
+	s.mu.Lock()
+	s.published = append(s.published, expectedEpoch)
+	recovery := len(s.published) == 2
+	s.mu.Unlock()
+	s.Store.PublishControllerEpochTakeoverIntent(ctx, name, holder, expectedEpoch)
+	if recovery {
+		s.stop() // the manager gives up after this recovery
+	}
+}
+
+// A manager whose epoch change loses to another holder publishes its
+// conflict-recovery takeover request only against the epoch it tried to
+// replace, which is gone, so it leaves no request that would hold off the
+// winner (ADR 0058).
+func TestControllerEpochManagerThatLostLeavesNoRequestAgainstTheWinner(t *testing.T) {
+	authority, kubeClient := newKubernetesControllerEpochAuthority(t)
+	previous := advanceKubernetesControllerEpoch(t, t.Context(), authority, 1)
+	winner, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	losing := &losingPublisherStore{Store: authority, winner: winner, stop: cancel}
+	manager := NewControllerEpochManager(losing, "controller-loser")
+	if err := manager.Start(ctx); err == nil {
+		t.Fatal("the losing manager acquired the epoch")
+	}
+	losing.mu.Lock()
+	published := slices.Clone(losing.published)
+	losing.mu.Unlock()
+	if !slices.Equal(published, []int64{0, previous.Epoch}) {
+		t.Fatalf("published takeover requests against epochs %v, want [0 %d] (before the first read, then the failed attempt's)", published, previous.Epoch)
+	}
+	if controllerEpochTakeoverRequested(t, t.Context(), kubeClient) {
+		t.Fatal("the losing manager left a takeover request against the winner")
+	}
+}
