@@ -119,22 +119,29 @@ For takeover liveness under continuous writes:
   `FinalizeSessionTurn`, `ResumeSessionTurnFinalization`, the outbox, Session
   control, prompt attempt, publication, branch claim and external effect
   writes. Releasing the interlock cancels the context.
-- **A waiting successor stops new tokens.** When a successor's epoch change is
-  refused because a live token is on the epoch Lease, the successor records a
-  takeover request: the epoch it waits on, its holder ID and the time. The
-  request goes on a Lease of its own (`controller-epoch-takeover-*`), which
-  only successors write, so the request never competes with the holder's
-  writes to the epoch Lease. The successor refreshes the request every 10s
-  while it is refused, and deletes it once its epoch change commits.
+- **A waiting successor stops new tokens.** Before every attempt to advance
+  the epoch, a successor records a takeover request: the epoch it waits to
+  replace, its holder ID and the time. Recording it before the attempt
+  matters. A successor that recorded it only after seeing a live token could
+  keep reading a gap and losing its update to the holder's next token, and
+  never ask. The request goes on a Lease of its own
+  (`controller-epoch-takeover-*`), which only successors write, so it never
+  competes with the holder's writes to the epoch Lease. Each attempt refreshes
+  it after 10s, and it is deleted once the epoch change commits.
 - Before writing a token, a store reads that request. It writes no token while
-  an unexpired request (under 30s old) waits on its current epoch from another
-  holder, and fails the write with `ErrControllerEpochMutationContention`
-  instead. Reusing a held token does not read the request.
+  an unexpired request (under 30s old) waits to replace its current epoch,
+  whoever made the request (a restart can keep its holder ID). It fails the
+  write with `ErrControllerEpochMutationContention` instead. Reusing a held
+  token does not read the request.
 - A write that fails to acquire removes any held token it did not reuse or
   write over.
 - A token whose removal fails is not forgotten. It stays parked, and the idle
   timer retries the removal with backoff (100ms doubling to 5s) until the
-  token would have expired anyway.
+  token would have expired anyway. Such a token is never reused. A failed
+  removal may still commit on the server, and its precondition is the
+  `resourceVersion` it was sent against. Reuse is the only path that leaves
+  the Lease at that version. A confirmed removal or a fresh token write
+  changes it, so the stale removal can no longer commit.
   `ReleaseHeldControllerEpochInterlock` tries five times with backoff. If the
   removal still fails, it returns the error and leaves the token parked for
   the timer.
