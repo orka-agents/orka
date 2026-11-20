@@ -104,4 +104,29 @@ func TestStaticChartContainerTaskSecretUse(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("the kustomize install lets the controller read only the policy by name", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "rbac", "static_controller_cluster_role.yaml"))
+		require.NoError(t, err)
+		var role struct {
+			Rules []struct {
+				APIGroups     []string `json:"apiGroups"`
+				Resources     []string `json:"resources"`
+				ResourceNames []string `json:"resourceNames"`
+				Verbs         []string `json:"verbs"`
+			} `json:"rules"`
+		}
+		require.NoError(t, yaml.Unmarshal([]byte(strings.SplitN(string(raw), "\n---", 2)[0]), &role))
+		found := false
+		for _, rule := range role.Rules {
+			if len(rule.APIGroups) == 1 && rule.APIGroups[0] == "admissionregistration.k8s.io" {
+				require.Equal(t, []string{"container-task-secret-use.orka.ai"}, rule.ResourceNames)
+				require.ElementsMatch(t,
+					[]string{"validatingadmissionpolicies", "validatingadmissionpolicybindings"}, rule.Resources)
+				require.Equal(t, []string{"get"}, rule.Verbs)
+				found = true
+			}
+		}
+		require.True(t, found, "the controller's cluster role must let it confirm the policy is bound")
+	})
 }
