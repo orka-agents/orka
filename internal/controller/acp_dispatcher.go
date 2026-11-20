@@ -1227,10 +1227,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		persistentReuse.attempted = true
 		refused := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionRefusedAnnotation])
 		switch {
+		case persistentScope == acpPersistentReasonClassDisabled:
+			persistentReuse.miss(acpPersistentSessionStagePlan, persistentScope)
+			persistentClaim = &acpPersistentSessionClaimInput{forceFresh: true}
 		case persistentScope != "":
 			persistentReuse.miss(acpPersistentSessionStagePlan, persistentScope)
 		case refused != "":
 			persistentReuse.miss(acpPersistentSessionStageGate, refused)
+			persistentClaim = &acpPersistentSessionClaimInput{forceFresh: true}
 		default:
 			reuseDigest, digestErr := acpPersistentSessionReuseDigest(
 				acpPersistentSessionReuseInputFor(bound, task, mcpBindingDigest, bound.promptAttempt),
@@ -2728,15 +2732,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		// for a resident read-intent session: no task-scoped cleanup receipt is
 		// recorded, so Session deletion and instance retirement still retire it.
 		runtimeSessionCleanupPending = false
-		if workspace.Intent == harnessv2.WorkspaceIntentWrite {
-			// Only the durable record may authorize reusing a write session.
-			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
-		} else {
-			cached := sessionExecution.Binding
-			cached.WorkspaceDigest = sessionExecution.KeepRecord.WorkspaceDigest
-			cached.PromptDelivered = true
-			d.setRuntimeSessionBinding(cached)
-		}
+		// Only the durable record may authorize reusing a kept session: the
+		// ordinary path must never reuse it from the in-memory cache.
+		d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
 	} else if runtimeSessionRetirementRequired {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {
 			return cleanupErr

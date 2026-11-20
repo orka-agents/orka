@@ -544,7 +544,11 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 	var current *ACPRuntimeSessionBinding
 	claimHandoffID := ""
 	var claimRecord *store.SessionResidentRuntime
-	if claim != nil {
+	if claim != nil && claim.forceFresh {
+		// ADR 0059: a class opt-out or a refused reuse always gets a fresh
+		// RuntimeSession; the in-memory binding is never consulted.
+		current = nil
+	} else if claim != nil {
 		// ADR 0059: on this path the in-memory binding is only a cache; the
 		// durable record alone may authorize reuse, and any refusal plans a
 		// fresh RuntimeSession instead of trusting the cache.

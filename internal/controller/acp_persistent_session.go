@@ -353,6 +353,10 @@ func acpRuntimeSessionBindingFromResidentRuntime(record *store.SessionResidentRu
 // acpPersistentSessionClaimInput is what the dispatcher knows about turn N+1
 // before acquiring its lease.
 type acpPersistentSessionClaimInput struct {
+	// forceFresh plans a fresh RuntimeSession without consulting the record
+	// or the in-memory binding: the class opted out, or this Task's reuse was
+	// already refused at the gate.
+	forceFresh    bool
 	handoffID     string
 	fence         store.ControllerEpochFence
 	runtimeFence  harnessv2.Fence
@@ -514,6 +518,15 @@ func (d *ACPDispatcher) prepareACPPersistentSessionKeep(
 	workspaceDigest := input.workspaceDigest
 	verifiedBaseline := session.VerifiedBaseline
 	rebasedTree := ""
+	if claimed := session.ResidentClaimed; !rebaseNeeded && claimed != nil && claimed.RebasedTreeDigest != "" &&
+		claimed.RebasedTreeDigest == input.baseline.TreeDigest && claimed.WorkspaceDigest == workspaceDigest {
+		// A reused rebased session that published nothing keeps its derived
+		// baseline identity, so the next turn can still reuse it.
+		rebasedTree = claimed.RebasedTreeDigest
+		if verifiedBaseline == nil {
+			verifiedBaseline = claimed.VerifiedBaseline
+		}
+	}
 	var rebaseDuration time.Duration
 	if rebaseNeeded {
 		started := time.Now()

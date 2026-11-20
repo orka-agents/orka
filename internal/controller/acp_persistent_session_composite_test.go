@@ -358,3 +358,27 @@ func TestPersistentSessionConcurrentContinuationsClaimExactlyOnce(t *testing.T) 
 		t.Fatalf("%d continuations claimed the runtime, want exactly one (errors %v)", claimed, errs)
 	}
 }
+
+// A class opt-out (or a refused reuse) always plans a fresh RuntimeSession,
+// even when the in-memory cache still names the resident process.
+func TestPersistentSessionForcedFreshNeverReusesTheCachedBinding(t *testing.T) {
+	turnN := persistentCompositeTask("turn-n", "55555555-0000-0000-0000-000000000001")
+	turnN1 := persistentCompositeTask("turn-n1", "55555555-0000-0000-0000-000000000002")
+	h := newPersistentCompositeHarness(t, turnN, turnN1)
+	kept := h.keep(turnN, testControlDigestForDispatcher("reuse"))
+	// Even a cache entry naming the resident process must not be reused.
+	h.dispatcher.setRuntimeSessionBinding(acpRuntimeSessionBindingFromResidentRuntime(kept))
+	fence := h.fence()
+	h.reserve(turnN1, fence)
+	session, err := h.prepare(turnN1, fence, &acpPersistentSessionClaimInput{forceFresh: true}, &acpPersistentSessionReuse{attempted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Reused || session.ResidentClaimed != nil || session.Bootstrap == nil ||
+		session.Binding.Generation <= uint64(kept.RuntimeSessionGeneration) {
+		t.Fatalf("forced fresh turn reused=%v claimed=%v generation=%d", session.Reused, session.ResidentClaimed != nil, session.Binding.Generation)
+	}
+	if record := h.control().ResidentRuntime; record == nil || record.State != store.SessionResidentRuntimeRetiring {
+		t.Fatalf("the unclaimed record must retire: %#v", record)
+	}
+}

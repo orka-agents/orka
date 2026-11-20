@@ -878,6 +878,23 @@ func TestACPPersistentSessionKeepLiveRefusalReasonsAndRecord(t *testing.T) {
 		t.Fatalf("rebased record = %#v", rebasedRecord)
 	}
 
+	// A reused rebased session whose next write turn published nothing keeps
+	// its derived identity for the turn after it.
+	carried, reason := run(t, nil, nil, &fakePersistentSupervisor{}, func(in *acpPersistentSessionKeepInput) {
+		claimed := store.CloneSessionResidentRuntime(rebasedRecord)
+		in.session.ResidentClaimed = claimed
+		in.session.VerifiedBaseline = claimed.VerifiedBaseline
+		in.intent = harnessv2.WorkspaceIntentWrite
+		in.delta = harnessv2.WorkspaceDeltaDescriptor{State: harnessv2.WorkspaceDeltaNoChange}
+		in.attempt.DeliveryState = store.PromptDeliveryNoChange
+		in.baseline = harnessv2.WorkspaceBaseline{RepositoryIdentity: claimed.VerifiedBaseline.RepositoryID, Revision: claimed.VerifiedBaseline.SHA, TreeDigest: claimed.RebasedTreeDigest}
+		in.workspaceDigest = claimed.WorkspaceDigest
+	})
+	if carried == nil || reason != "" || carried.RebasedTreeDigest != rebasedRecord.RebasedTreeDigest ||
+		carried.WorkspaceDigest != rebasedRecord.WorkspaceDigest {
+		t.Fatalf("no-change turn after a rebase dropped the rebased identity: %#v, %q", carried, reason)
+	}
+
 	for name, tc := range map[string]struct {
 		workspace  func(*workspacev1alpha1.ExecutionWorkspace)
 		pool       func(*corev1alpha1.RuntimePool)
