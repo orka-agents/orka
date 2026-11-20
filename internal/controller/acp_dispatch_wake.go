@@ -62,30 +62,37 @@ func (d *ACPDispatcher) takeAdmissionWake() bool {
 // waitForNextDispatchScan blocks until the ticker fires, or a wakeup arrives
 // and at least acpDispatchWakeMinInterval has passed since lastScan. A wakeup
 // for which immediate reports true starts the scan at once, including one that
-// arrives while an earlier wakeup waits out the interval. It reports false
-// when ctx ends.
+// arrives while an earlier wakeup waits out the interval. Whatever starts the
+// scan, a pending admission wakeup is consumed with it, so it never lets a
+// later ordinary wakeup skip the interval. It reports false when ctx ends.
 func waitForNextDispatchScan(ctx context.Context, tick <-chan time.Time, wake <-chan struct{}, lastScan time.Time, immediate func() bool) bool {
+	admission := func() bool { return immediate != nil && immediate() }
 	select {
 	case <-ctx.Done():
 		return false
 	case <-tick:
+		admission()
 		return true
 	case <-wake:
 	}
 	for {
-		remaining := acpDispatchWakeMinInterval - time.Since(lastScan)
-		if remaining <= 0 || (immediate != nil && immediate()) {
+		// Consume the admission flag before the interval test so it cannot
+		// outlive the scan this wakeup starts.
+		admitted := admission()
+		if admitted || acpDispatchWakeMinInterval-time.Since(lastScan) <= 0 {
 			return true
 		}
-		timer := time.NewTimer(remaining)
+		timer := time.NewTimer(acpDispatchWakeMinInterval - time.Since(lastScan))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return false
 		case <-tick:
 			timer.Stop()
+			admission()
 			return true
 		case <-timer.C:
+			admission()
 			return true
 		case <-wake:
 			// Re-evaluate: this wakeup may be an admission opening.

@@ -102,6 +102,28 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 		t.Fatalf("admission wakeup during the interval waited %s, want less than %s", elapsed, acpDispatchWakeMinInterval)
 	}
 
+	// An admission wakeup that arrives after the interval has elapsed is
+	// consumed by the scan it starts; it does not let the next ordinary
+	// wakeup skip the interval.
+	d.wakeForAdmission()
+	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), time.Now().Add(-time.Second), d.takeAdmissionWake) {
+		t.Fatal("admission wakeup did not start a scan")
+	}
+	if d.takeAdmissionWake() {
+		t.Fatal("an admission wakeup outlived the scan it started")
+	}
+	// A tick that starts the scan consumes a pending admission wakeup too.
+	d.wakeForAdmission()
+	<-d.wakeChannel()
+	tick := make(chan time.Time, 1)
+	tick <- time.Now()
+	if !waitForNextDispatchScan(ctx, tick, make(chan struct{}), time.Now(), d.takeAdmissionWake) {
+		t.Fatal("tick did not start a scan")
+	}
+	if d.takeAdmissionWake() {
+		t.Fatal("an admission wakeup outlived the ticked scan")
+	}
+
 	// An ordinary wakeup during the interval still waits it out.
 	d.Wake()
 	start = time.Now()
