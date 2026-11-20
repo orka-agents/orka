@@ -269,7 +269,7 @@ func TestControllerEpochAuthorityRejectsRecreatedLeaseIncarnation(t *testing.T) 
 	if _, err := kubeStore.GetControllerEpochFence(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("recreated Lease fence read error = %v, want UID conflict", err)
 	}
-	if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
+	if _, _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("recreated Lease mutation-fence error = %v, want UID conflict", err)
 	}
 	key := controlstore.PromptAttemptKey{
@@ -384,7 +384,7 @@ func TestControllerEpochAuthorityRejectsMissingLeaseUIDBinding(t *testing.T) {
 	if _, err := kubeStore.GetControllerEpoch(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "has no immutable authoritative Lease UID binding") {
 		t.Fatalf("missing Lease UID binding error = %v, want fail-closed conflict", err)
 	}
-	if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "has no immutable authoritative Lease UID binding") {
+	if _, _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "has no immutable authoritative Lease UID binding") {
 		t.Fatalf("missing Lease UID mutation-fence error = %v, want fail-closed conflict", err)
 	}
 	leaseAfter := &coordinationv1.Lease{}
@@ -461,7 +461,7 @@ func TestControllerEpochAuthorityRejectsWrongLeaseUIDBinding(t *testing.T) {
 	if _, err := kubeStore.GetControllerEpoch(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("wrong Lease UID binding error = %v, want conflict", err)
 	}
-	if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
+	if _, _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("wrong Lease UID mutation-fence error = %v, want conflict", err)
 	}
 	leaseAfter := &coordinationv1.Lease{}
@@ -1565,7 +1565,7 @@ func TestControllerEpochAuthorityRejectsCorruptRestore(t *testing.T) {
 			if _, err := kubeStore.GetControllerEpoch(ctx, name); err == nil {
 				t.Fatal("corrupt restored epoch authority was accepted")
 			}
-			if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); err == nil {
+			if _, _, _, err := kubeStore.requireControllerEpoch(ctx, fence); err == nil {
 				t.Fatal("corrupt restored epoch authority granted a mutation fence")
 			}
 			leaseAfter := &coordinationv1.Lease{}
@@ -1584,6 +1584,9 @@ func TestControllerEpochAuthorityRejectsCorruptRestore(t *testing.T) {
 func TestControllerEpochMutationReleaseUsesAcquiredLeaseVersion(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	// This covers removing the token itself, so the store does not hold it
+	// for a next write (ADR 0058).
+	kubeStore.interlockLinger = 0
 	withWatch, ok := rawClient.(client.WithWatch)
 	if !ok {
 		t.Fatal("fake client does not implement client.WithWatch")
@@ -1649,7 +1652,7 @@ func TestControllerEpochMutationWaitsForShortContention(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
-	_, snapshot, err := kubeStore.requireControllerEpoch(ctx, fence)
+	_, _, snapshot, err := kubeStore.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		t.Fatalf("acquire blocking mutation: %v", err)
 	}
@@ -1796,7 +1799,7 @@ func TestGetExternalEffectByIdentityUsesExactObjectGet(t *testing.T) {
 
 func TestControllerEpochMutationQueueRespectsCallerDeadline(t *testing.T) {
 	kubeStore, _, fence := newTestStoreWithEpoch(t)
-	_, snapshot, err := kubeStore.requireControllerEpoch(context.Background(), fence)
+	_, _, snapshot, err := kubeStore.requireControllerEpoch(context.Background(), fence)
 	if err != nil {
 		t.Fatalf("acquire blocking mutation: %v", err)
 	}
@@ -1804,7 +1807,7 @@ func TestControllerEpochMutationQueueRespectsCallerDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("queued mutation error = %v, want context deadline exceeded", err)
 	}
 }
@@ -1812,7 +1815,8 @@ func TestControllerEpochMutationQueueRespectsCallerDeadline(t *testing.T) {
 func TestControllerEpochMutationReleasePreservesConcurrentLeaseUpdate(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
-	_, snapshot, err := kubeStore.requireControllerEpoch(ctx, fence)
+	kubeStore.interlockLinger = 0 // covers removing the token itself (ADR 0058)
+	_, _, snapshot, err := kubeStore.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		t.Fatalf("acquire mutation: %v", err)
 	}

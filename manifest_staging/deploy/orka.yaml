@@ -3301,11 +3301,12 @@ spec:
   matchConditions:
   - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
       || request.?name.orValue('').startsWith('acp-retention-fence-') || request.?name.orValue('').startsWith('orka-task-admission-')
-      || request.?name.orValue('').startsWith('orka-child-admission-') || (request.operation
-      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('orka-child-admission-') || request.?name.orValue('').startsWith('controller-epoch-takeover-')
+      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')
       || object.metadata.?generateName.orValue('').startsWith('orka-task-admission-')
-      || object.metadata.?generateName.orValue('').startsWith('orka-child-admission-')))
+      || object.metadata.?generateName.orValue('').startsWith('orka-child-admission-')
+      || object.metadata.?generateName.orValue('').startsWith('controller-epoch-takeover-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
     namespaceSelector:

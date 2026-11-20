@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
@@ -35,17 +36,24 @@ const (
 	annotationOperationDigest   = "core.orka.ai/operation-digest"
 	annotationMutationToken     = "core.orka.ai/epoch-mutation-token"
 	annotationMutationExpiresAt = "core.orka.ai/epoch-mutation-expires-at"
-	leaseModeEmpty              = "empty"
-	leaseModeMutation           = "mutation"
-	leaseModeReconciliation     = "reconciliation"
-	controllerEpochNamePrefix   = "controller-epoch-"
-	controllerEpochLeasePrefix  = "controller-epoch-lock-"
-	promptAttemptNamePrefix     = "prompt-attempt-"
-	runtimeSessionNamePrefix    = "runtime-session-"
-	runtimeSessionLeasePrefix   = "runtime-session-lock-"
-	branchClaimNamePrefix       = "branch-claim-"
-	publicationNamePrefix       = "publication-"
-	externalEffectNamePrefix    = "external-effect-"
+	// A successor waiting for a token to leave the epoch Lease asks the
+	// holder, on a Lease of its own, to stop writing new ones (ADR 0058).
+	annotationEpochTakeoverRequestedBy = "core.orka.ai/epoch-takeover-requested-by"
+	annotationEpochTakeoverRequestedAt = "core.orka.ai/epoch-takeover-requested-at"
+	annotationEpochTakeoverFromEpoch   = "core.orka.ai/epoch-takeover-from-epoch"
+	leaseModeEmpty                     = "empty"
+	leaseModeMutation                  = "mutation"
+	leaseModeReconciliation            = "reconciliation"
+	controllerEpochNamePrefix          = "controller-epoch-"
+	controllerEpochLeasePrefix         = "controller-epoch-lock-"
+	// controllerEpochTakeoverLeasePrefix names successors\' takeover requests.
+	controllerEpochTakeoverLeasePrefix = "controller-epoch-takeover-"
+	promptAttemptNamePrefix            = "prompt-attempt-"
+	runtimeSessionNamePrefix           = "runtime-session-"
+	runtimeSessionLeasePrefix          = "runtime-session-lock-"
+	branchClaimNamePrefix              = "branch-claim-"
+	publicationNamePrefix              = "publication-"
+	externalEffectNamePrefix           = "external-effect-"
 )
 
 var dnsDigestEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -58,6 +66,17 @@ type epochSnapshot struct {
 	MutationToken        string
 	MutationLease        *coordinationv1.Lease
 	LocalMutationSlot    bool
+	// TokenWrittenAt is when this store sent the token write, read before
+	// the request so it never trails the expiry the token carries. It keeps
+	// the monotonic clock reading, so ages and deadlines ignore wall-clock
+	// jumps.
+	TokenWrittenAt time.Time
+	// cancelWrite ends the context the write runs under.
+	cancelWrite context.CancelFunc
+	// removalPending marks a token whose removal failed and may still
+	// commit: it is never reused, because only a reuse leaves the Lease at
+	// the resourceVersion that removal was sent against (ADR 0058).
+	removalPending bool
 }
 
 func validateKubernetesNamespace(namespace string) error {

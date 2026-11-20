@@ -6,6 +6,10 @@
 # orka-child-admission-*) hold the grants that keep --max-tasks-per-namespace
 # and maxConcurrentChildren exact; a forged or removed grant could admit Tasks
 # past a limit, so they are reserved the same way.
+# Controller-epoch takeover requests (controller-epoch-takeover-*, ADR 0058)
+# stop the epoch holder writing new mutation tokens; a forged request kept
+# fresh would stall every fenced control-store write, so they are reserved
+# the same way.
 # Only the controller may write them; Kubernetes cleanup controllers may delete
 # them through owner references or namespace deletion. This is CEL rather than
 # a webhook so the guard never depends on a webhook endpoint, and so managed
@@ -35,11 +39,13 @@ spec:
       request.?name.orValue('').startsWith('acp-retention-fence-') ||
       request.?name.orValue('').startsWith('orka-task-admission-') ||
       request.?name.orValue('').startsWith('orka-child-admission-') ||
+      request.?name.orValue('').startsWith('controller-epoch-takeover-') ||
       (request.operation == 'CREATE' &&
       (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
       object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-') ||
       object.metadata.?generateName.orValue('').startsWith('orka-task-admission-') ||
-      object.metadata.?generateName.orValue('').startsWith('orka-child-admission-')))
+      object.metadata.?generateName.orValue('').startsWith('orka-child-admission-') ||
+      object.metadata.?generateName.orValue('').startsWith('controller-epoch-takeover-')))
   variables:
   - name: controllerNamespace
     expression: "'ORKA_NAMESPACE'"

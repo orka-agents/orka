@@ -28,7 +28,7 @@ func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.Br
 	if err != nil {
 		return nil, false, err
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
 	if err != nil {
 		return nil, false, err
 	}
@@ -108,7 +108,7 @@ func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBra
 	if err != nil {
 		return err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
 	if err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (s *Store) CompareAndSwapBranchClaim(ctx context.Context, change store.Bran
 	if err := store.ValidateControlIdentifier("branch claim ID", change.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, change.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, change.Fence)
 	if err != nil {
 		return nil, err
 	}
