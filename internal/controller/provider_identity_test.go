@@ -161,6 +161,12 @@ func TestProviderReconcileKeylessConfigurationErrors(t *testing.T) {
 		"wrong type": {identities: &fakeProviderIdentities{}, mutate: func(p *corev1alpha1.Provider) {
 			p.Spec.Type = corev1alpha1.ProviderTypeOpenAI
 		}, want: "only for azure-openai"},
+		"prefixed baseURL": {identities: &fakeProviderIdentities{}, mutate: func(p *corev1alpha1.Provider) {
+			p.Spec.BaseURL = "https://example.openai.azure.com/azure"
+		}, want: "resource's origin"},
+		"baseURL with a query": {identities: &fakeProviderIdentities{}, mutate: func(p *corev1alpha1.Provider) {
+			p.Spec.BaseURL = "https://example.openai.azure.com/?api-version=1"
+		}, want: "resource's origin"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			now := time.Now()

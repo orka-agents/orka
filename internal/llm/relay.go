@@ -37,9 +37,11 @@ func NewControllerRelayHTTPClient(baseURL string, relay *ControllerRelay) (*http
 	if err != nil {
 		return nil, err
 	}
+	// A keyless Provider's baseURL is its resource's origin: the Azure SDK
+	// would place any path after /openai, outside the Provider's endpoint.
 	base, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		return nil, err
+	if err != nil || strings.Trim(base.EscapedPath(), "/") != "" || base.RawQuery != "" || base.Fragment != "" {
+		return nil, errors.New("a relayed Provider's baseURL must be the resource's origin, without a path or query")
 	}
 	target, err := url.Parse(strings.TrimSpace(relay.URL))
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||
@@ -50,7 +52,6 @@ func NewControllerRelayHTTPClient(baseURL string, relay *ControllerRelay) (*http
 		Transport: &relayTransport{
 			base:       SharedHTTPClient().Transport,
 			origin:     origin,
-			basePath:   strings.TrimSuffix(base.EscapedPath(), "/"),
 			relay:      target,
 			relayToken: relay.Token,
 		},
@@ -61,7 +62,6 @@ func NewControllerRelayHTTPClient(baseURL string, relay *ControllerRelay) (*http
 type relayTransport struct {
 	base       http.RoundTripper
 	origin     string
-	basePath   string
 	relay      *url.URL
 	relayToken BearerTokenSource
 }
@@ -72,8 +72,8 @@ func (t *relayTransport) RoundTrip(request *http.Request) (*http.Response, error
 		closeRequestBody(request)
 		return nil, errors.New("refusing to relay a request outside the Provider's endpoint")
 	}
-	suffix, ok := strings.CutPrefix(request.URL.EscapedPath(), t.basePath)
-	if !ok || (suffix != "" && !strings.HasPrefix(suffix, "/")) {
+	suffix := request.URL.EscapedPath()
+	if suffix != "" && !strings.HasPrefix(suffix, "/") {
 		closeRequestBody(request)
 		return nil, errors.New("refusing to relay a request outside the Provider's endpoint")
 	}
