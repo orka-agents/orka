@@ -203,6 +203,7 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 		if current.HolderID != change.HolderID || current.RequestDigest != change.RequestDigest {
 			return nil, store.ConflictErrorf("controller epoch %q target %d already exists with different holder or digest", change.Name, change.NewEpoch)
 		}
+		s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID)
 		return &current, nil
 	}
 	if current.Version != change.ExpectedVersion || current.Epoch != change.ExpectedEpoch {
@@ -211,6 +212,11 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if change.NewEpoch != change.ExpectedEpoch+1 {
 		return nil, store.ValidationErrorf("controller epoch must advance exactly by one: expected new epoch %d", change.ExpectedEpoch+1)
 	}
+	// Before every attempt to advance, ask the token holder to stop writing
+	// new tokens, so the Lease is free within one of its holds. Recording it
+	// only after a refusal would miss a successor that reads a gap and loses
+	// its update to the holder's next token, every time (ADR 0058).
+	s.requestControllerEpochTakeover(ctx, change.Name, current.Epoch, change.HolderID, time.Now().UTC())
 	if active, expiresAt, lockErr := controllerEpochMutationLock(lease); lockErr != nil {
 		return nil, lockErr
 	} else if active && expiresAt.After(time.Now().UTC()) {
@@ -246,6 +252,7 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if err := s.syncControllerEpochStatus(ctx, result, updated, preCASMirrorDigest); err != nil {
 		return nil, err
 	}
+	s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID)
 	return &result, nil
 }
 
@@ -904,10 +911,16 @@ func (s *Store) syncControllerEpochStatus(
 	})
 }
 
-func (s *Store) requireControllerEpoch(ctx context.Context, fence store.ControllerEpochFence) (store.ControllerEpochFence, epochSnapshot, error) {
+// requireControllerEpoch takes the controller-epoch mutation interlock for a
+// write under fence. It returns the context the write must use: it ends
+// controllerEpochFencedWriteBound after the token covering the write was
+// written, so every fenced write, whatever context its caller passed, ends
+// while its token is live (ADR 0058). releaseControllerEpochMutation cancels
+// it.
+func (s *Store) requireControllerEpoch(ctx context.Context, fence store.ControllerEpochFence) (context.Context, store.ControllerEpochFence, epochSnapshot, error) {
 	normalized, err := store.NormalizeEpochFence(fence)
 	if err != nil {
-		return store.ControllerEpochFence{}, epochSnapshot{}, err
+		return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 	}
 	const localQueueTimeout = 30 * time.Second
 	localSlot := false
@@ -916,7 +929,7 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		err = s.epochMutations.Acquire(queueCtx, 1)
 		cancel()
 		if err != nil {
-			return store.ControllerEpochFence{}, epochSnapshot{}, fmt.Errorf("wait for controller epoch mutation slot: %w", err)
+			return ctx, store.ControllerEpochFence{}, epochSnapshot{}, fmt.Errorf("wait for controller epoch mutation slot: %w", err)
 		}
 		localSlot = true
 	}
@@ -926,15 +939,25 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 			s.epochMutations.Release(1)
 		}
 	}()
-	held := s.heldInterlockFor(normalized)
+	held, err := s.heldInterlockFor(normalized)
+	if err != nil {
+		return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
+	}
 	// A held token neither reused nor written over is removed on every
-	// return, so a failed acquisition never strands it until it expires.
+	// return, so a failed acquisition never strands it until it expires; a
+	// removal that fails leaves it parked for the idle timer to retry.
 	heldSettled := held == nil
 	defer func() {
 		if !heldSettled {
-			s.removeMutationToken(*held)
+			_ = s.removeOrRetainInterlock(*held) // kept parked for retry on failure
 		}
 	}()
+	acquired := func(snapshot epochSnapshot) (context.Context, store.ControllerEpochFence, epochSnapshot, error) {
+		releaseLocalSlot, heldSettled = false, true
+		writeCtx, cancel := context.WithDeadline(ctx, snapshot.TokenWrittenAt.Add(s.fencedWriteBound()))
+		snapshot.cancelWrite = cancel
+		return writeCtx, normalized, snapshot, nil
+	}
 	const (
 		acquireTimeout = 2 * time.Second
 		maxRetryDelay  = 200 * time.Millisecond
@@ -945,31 +968,47 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 	for {
 		lease, current, err := s.readControllerEpochFenceLease(ctx, normalized)
 		if err != nil {
-			return store.ControllerEpochFence{}, epochSnapshot{}, err
+			return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 		}
 		active, expiresAt, err := controllerEpochMutationLock(lease)
 		if err != nil {
-			return store.ControllerEpochFence{}, epochSnapshot{}, err
+			return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 		}
-		switch s.heldInterlockOn(held, lease) {
+		switch s.heldInterlockOn(held, normalized, lease) {
 		case heldInterlockReusable:
-			releaseLocalSlot, heldSettled = false, true
-			return normalized, epochSnapshot{
+			return acquired(epochSnapshot{
 				Name: current.Name, Epoch: current.Epoch, HolderID: current.HolderID,
 				LeaseResourceVersion: lease.ResourceVersion, MutationToken: held.MutationToken, MutationLease: lease.DeepCopy(),
 				LocalMutationSlot: localSlot, TokenWrittenAt: held.TokenWrittenAt,
-			}, nil
+			})
 		case heldInterlockRemove:
 			// Remove it first, then read and acquire as without a hold.
-			s.removeMutationToken(*held)
 			heldSettled = true
+			if err := s.removeOrRetainInterlock(*held); err != nil {
+				return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
+			}
 			held = nil
 			continue
 		}
-		now := time.Now().UTC()
-		if active && expiresAt.After(now) {
+		written := time.Now()
+		now := written.UTC()
+		waiting, by := false, ""
+		if !active || !expiresAt.After(now) {
+			// Read only before writing a token, never on a reused one.
+			if waiting, by, err = s.controllerEpochTakeoverWaiting(ctx, normalized.Name, current.Epoch, now); err != nil {
+				return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
+			}
+		}
+		switch {
+		case active && expiresAt.After(now):
 			lastConflict = store.ConflictErrorf("controller epoch %q is serializing another control-store mutation until %s", normalized.Name, expiresAt.Format(time.RFC3339Nano))
-		} else {
+		case waiting:
+			// A successor is waiting to change the epoch: write no new token
+			// until it has, or its request lapses (ADR 0058). This holds for
+			// a successor with the same holder ID too, as a restart that
+			// keeps its identity is.
+			lastConflict = store.ConflictErrorf("controller epoch %q has a takeover by %q waiting", normalized.Name, by)
+		default:
 			updated := lease.DeepCopy()
 			if updated.Annotations == nil {
 				updated.Annotations = map[string]string{}
@@ -978,22 +1017,20 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 			updated.Annotations[annotationMutationToken] = token
 			updated.Annotations[annotationMutationExpiresAt] = formatTime(now.Add(controllerEpochMutationTokenTTL))
 			if err := s.client.Update(ctx, updated); err == nil {
-				// A fresh token replaced any held one on the Lease.
-				releaseLocalSlot, heldSettled = false, true
-				return normalized, epochSnapshot{
+				return acquired(epochSnapshot{
 					Name: current.Name, Epoch: current.Epoch, HolderID: current.HolderID,
 					LeaseResourceVersion: updated.ResourceVersion, MutationToken: token, MutationLease: updated.DeepCopy(),
-					LocalMutationSlot: localSlot, TokenWrittenAt: now,
-				}, nil
+					LocalMutationSlot: localSlot, TokenWrittenAt: written,
+				})
 			} else if apierrors.IsConflict(err) {
 				lastConflict = mapKubernetesError("acquire controller epoch mutation fence", err)
 			} else {
-				return store.ControllerEpochFence{}, epochSnapshot{}, mapKubernetesError("acquire controller epoch mutation fence", err)
+				return ctx, store.ControllerEpochFence{}, epochSnapshot{}, mapKubernetesError("acquire controller epoch mutation fence", err)
 			}
 		}
 
 		if !time.Now().Before(deadline) {
-			return store.ControllerEpochFence{}, epochSnapshot{}, fmt.Errorf("%w: %w", store.ErrControllerEpochMutationContention, lastConflict)
+			return ctx, store.ControllerEpochFence{}, epochSnapshot{}, fmt.Errorf("%w: %w", store.ErrControllerEpochMutationContention, lastConflict)
 		}
 		wait := retryDelay
 		if remaining := time.Until(deadline); wait > remaining {
@@ -1003,7 +1040,7 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return store.ControllerEpochFence{}, epochSnapshot{}, ctx.Err()
+			return ctx, store.ControllerEpochFence{}, epochSnapshot{}, ctx.Err()
 		case <-timer.C:
 		}
 		retryDelay = min(retryDelay*2, maxRetryDelay)
@@ -1060,6 +1097,9 @@ func controllerEpochMutationLock(lease *coordinationv1.Lease) (bool, time.Time, 
 }
 
 func (s *Store) releaseControllerEpochMutation(snapshot epochSnapshot) {
+	if snapshot.cancelWrite != nil {
+		snapshot.cancelWrite()
+	}
 	if snapshot.LocalMutationSlot && s.epochMutations != nil {
 		defer s.epochMutations.Release(1)
 		// With a hold, a token young enough to be reused stays on the Lease
@@ -1068,20 +1108,23 @@ func (s *Store) releaseControllerEpochMutation(snapshot epochSnapshot) {
 			s.parkInterlock(snapshot)
 			return
 		}
+		_ = s.removeOrRetainInterlock(snapshot)
+		return
 	}
-	s.removeMutationToken(snapshot)
+	_ = s.removeMutationToken(snapshot)
 }
 
 // removeMutationToken removes snapshot's token from the epoch Lease if it is
-// still there under the same holder and epoch.
-func (s *Store) removeMutationToken(snapshot epochSnapshot) {
+// still there under the same holder and epoch. It reports a removal that did
+// not commit; a token already gone, or never this store's, is not an error.
+func (s *Store) removeMutationToken(snapshot epochSnapshot) error {
 	if snapshot.MutationToken == "" || snapshot.MutationLease == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	lease := snapshot.MutationLease.DeepCopy()
-	_ = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if lease.Annotations[annotationMutationToken] != snapshot.MutationToken || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != snapshot.HolderID {
 			return nil
 		}
@@ -1099,6 +1142,9 @@ func (s *Store) removeMutationToken(snapshot epochSnapshot) {
 			refreshed := &coordinationv1.Lease{}
 			key := types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}
 			if getErr := s.readClient().Get(ctx, key, refreshed); getErr != nil {
+				if apierrors.IsNotFound(getErr) {
+					return nil
+				}
 				return getErr
 			}
 			lease = refreshed
@@ -1106,4 +1152,5 @@ func (s *Store) removeMutationToken(snapshot epochSnapshot) {
 		}
 		return nil
 	})
+	return mapKubernetesError("remove controller epoch mutation token", err)
 }

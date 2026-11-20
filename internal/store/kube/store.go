@@ -95,6 +95,7 @@ type Store struct {
 	// (ADR 0058); heldInterlock is the token parked between writes.
 	interlockLinger     time.Duration
 	interlockMaxHold    time.Duration
+	interlockWriteBound time.Duration // tests only; see fencedWriteBound
 	interlockMu         sync.Mutex
 	heldInterlock       *heldEpochInterlock
 	interlockGeneration uint64

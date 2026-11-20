@@ -65,7 +65,7 @@ func TestControllerEpochMutationRejectsMissingClientAndCallback(t *testing.T) {
 
 func TestControllerEpochMutationHeldLockContentionAndRecovery(t *testing.T) {
 	owner, rawClient, fence := newTestStoreWithEpoch(t)
-	_, snapshot, err := owner.requireControllerEpoch(t.Context(), fence)
+	_, _, snapshot, err := owner.requireControllerEpoch(t.Context(), fence)
 	require.NoError(t, err)
 	release := sync.OnceFunc(func() { owner.releaseControllerEpochMutation(snapshot) })
 	t.Cleanup(release)

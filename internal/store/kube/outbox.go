@@ -12,7 +12,7 @@ func (s *Store) EnqueueOutboxProjection(ctx context.Context, projection *store.O
 	if s.outbox == nil {
 		return nil, ErrOutboxStoreNotConfigured
 	}
-	normalized, snapshot, err := s.requireControllerEpoch(ctx, fence)
+	ctx, normalized, snapshot, err := s.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func (s *Store) ClaimOutboxProjections(ctx context.Context, request store.ClaimO
 	if s.outbox == nil {
 		return nil, ErrOutboxStoreNotConfigured
 	}
-	normalized, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, normalized, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (s *Store) CompleteOutboxProjection(ctx context.Context, request store.Comp
 	if s.outbox == nil {
 		return nil, ErrOutboxStoreNotConfigured
 	}
-	normalized, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, normalized, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}

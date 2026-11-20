@@ -32,7 +32,7 @@ func (s *Store) CreatePromptAttempt(ctx context.Context, attempt *store.PromptAt
 	if err != nil {
 		return nil, err
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +227,7 @@ func (s *Store) PreparePromptAttemptReclamation(ctx context.Context, request sto
 	if err != nil {
 		return err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
 	if err != nil {
 		return err
 	}
@@ -252,7 +252,7 @@ func (s *Store) ReclaimPromptAttempts(ctx context.Context, request store.Reclaim
 	if err != nil {
 		return 0, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
 	if err != nil {
 		return 0, err
 	}
@@ -1142,7 +1142,7 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 	if err := store.ValidateControlIdentifier("prompt attempt ID", recovery.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, recovery.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, recovery.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -1213,7 +1213,7 @@ func (s *Store) TransitionPromptAttemptExecution(ctx context.Context, transition
 	if err := store.ValidateControlIdentifier("prompt attempt ID", transition.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -1281,7 +1281,7 @@ func (s *Store) TransitionPromptAttemptDelivery(ctx context.Context, transition 
 	if err := store.ValidateControlIdentifier("prompt attempt ID", transition.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
 	if err != nil {
 		return nil, err
 	}

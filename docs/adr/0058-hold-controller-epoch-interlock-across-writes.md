@@ -71,6 +71,21 @@ holds the epoch and writes under it, and it builds one control store.
   write from noticing out-of-band changes to the Lease or the `ControllerEpoch`
   object, which it notices today. This is left for a separate decision.
 
+For takeover liveness under continuous writes:
+
+- **The holder pauses at least one successor retry interval, plus jitter,
+  after removing a token before writing the next one (rejected).** This makes
+  takeover likely but not certain. A successor's read and compare-and-swap can
+  still straddle the pause, and the pause adds latency to the holder's writes
+  every max hold.
+- **A successor records that it is waiting, and the holder writes no new token
+  while it does (chosen).** The request lives on a Lease only successors
+  write, so recording it cannot be starved by the holder. The bound then
+  follows from the write bound and the max hold (below).
+- **The waiting request as an annotation on the epoch Lease (rejected).** It
+  would compete with the holder's own Lease writes for the same
+  `resourceVersion`, which is the race it is meant to settle.
+
 ## Decision
 
 - A Kubernetes control store holds its interlock token between consecutive
@@ -95,8 +110,41 @@ holds the epoch and writes under it, and it builds one control store.
   token's age counts from a gap, nothing can extend a hold past the max hold,
   and continuous writes always leave a successor a gap between tokens. If
   anything else differs, the write proceeds exactly as without a hold.
+- **Every fenced write is bounded by its token.** The interlock hands each
+  fenced write the context it must use, and that context ends 60s (half the
+  token's two-minute life) after the token covering the write was written,
+  whatever context the caller passed. This holds on every acquisition path:
+  `WithControllerEpochMutation` (which also keeps its own 20s bound) and all
+  26 store methods that take the interlock directly, among them
+  `FinalizeSessionTurn`, `ResumeSessionTurnFinalization`, the outbox, Session
+  control, prompt attempt, publication, branch claim and external effect
+  writes. Releasing the interlock cancels the context.
+- **A waiting successor stops new tokens.** Before every attempt to advance
+  the epoch, a successor records a takeover request: the epoch it waits to
+  replace, its holder ID and the time. Recording it before the attempt
+  matters. A successor that recorded it only after seeing a live token could
+  keep reading a gap and losing its update to the holder's next token, and
+  never ask. The request goes on a Lease of its own
+  (`controller-epoch-takeover-*`), which only successors write, so it never
+  competes with the holder's writes to the epoch Lease. Each attempt refreshes
+  it after 10s, and it is deleted once the epoch change commits.
+- Before writing a token, a store reads that request. It writes no token while
+  an unexpired request (under 30s old) waits to replace its current epoch,
+  whoever made the request (a restart can keep its holder ID). It fails the
+  write with `ErrControllerEpochMutationContention` instead. Reusing a held
+  token does not read the request.
 - A write that fails to acquire removes any held token it did not reuse or
   write over.
+- A token whose removal fails is not forgotten. It stays parked, and the idle
+  timer retries the removal with backoff (100ms doubling to 5s) until the
+  token would have expired anyway. Such a token is never reused. A failed
+  removal may still commit on the server, and its precondition is the
+  `resourceVersion` it was sent against. Reuse is the only path that leaves
+  the Lease at that version. A confirmed removal or a fresh token write
+  changes it, so the stale removal can no longer commit.
+  `ReleaseHeldControllerEpochInterlock` tries five times with backoff. If the
+  removal still fails, it returns the error and leaves the token parked for
+  the timer.
 - The held token is removed by any of these:
   - the idle timer, when the linger ends without a write. The timer only acts
     while it holds the slot, and if the slot is busy it checks again shortly;
@@ -104,8 +152,10 @@ holds the epoch and writes under it, and it builds one control store.
     differs;
   - the store itself, before it changes the epoch
     (`CompareAndSwapControllerEpoch`);
-  - the process, on the way out (`ReleaseHeldControllerEpochInterlock` after
-    the manager stops).
+  - the epoch manager, when it stops on leadership loss or shutdown, and the
+    process again after the manager stops (`ReleaseHeldControllerEpochInterlock`
+    both times). So a clean restart or leadership handoff leaves no token
+    behind.
 - A write records the epoch and the Lease `resourceVersion` it ran under, as
   before. Consecutive writes under one held token record the same
   `resourceVersion`. That version is still a Lease state that carried this
@@ -123,10 +173,10 @@ A reused write reads the Lease. It sees the same UID, the same
 produced. Every Lease write changes its `resourceVersion`. So nothing has
 written the Lease since that token write: no epoch change and no other token.
 The checks a token write runs then pass on the same state. The token was
-written under two minutes ago and less than the max hold ago (at most 30s), so
-it is live and remains live through the 20s mutation bound with at least 70s
-to spare (95s at the default 5s max hold, against 100s for a fresh token
-today). Until it expires, no other writer can remove it, because:
+written less than the max hold ago, so it is live. The write's context ends 60s
+after the token was written, so the token is still live, with 60s to spare,
+when the write can no longer act. Until it expires, no other writer can remove
+it, because:
 
 - an epoch change refuses a live token;
 - a token write refuses a live token that is not its own;
@@ -140,29 +190,52 @@ before its compare-and-swap, so it, too, runs under a state it verified once.
   as a process that dies in the middle of a write today. The successor's epoch
   change retries for three minutes, which covers the two-minute expiry plus
   the max hold. A restarted process holds a new holder ID, so its writes under
-  the old fence fail closed. The hold makes it more likely that a crash lands
-  while a token is on the Lease (during a burst or its 500ms linger), but it
-  does not lengthen the wait. A clean shutdown removes the token.
-- **Leader takeover.** A successor cannot change the epoch while a held token
-  is live. It waits for the linger, or under continuous writes for the max
-  hold, at which point the writer removes its token before writing a fresh
-  one. That gives the successor the same window between tokens that
-  back-to-back writes give it today. The successor can wait at most the max
-  hold, which is far within its three-minute retry. Once it has changed the
-  epoch, the old process's next write reads a changed Lease. It does not reuse
-  its token, fails the fence check, and fails closed.
+  the old fence fail closed. A restart that keeps the same identity
+  (`ORKA_CONTROLLER_HOLDER_ID`) is a new store with no held token. It cannot
+  adopt its predecessor's token, so its writes under the old fence fail after
+  the bounded acquisition wait. Its own epoch change waits for that token like
+  any successor. The hold makes it more likely that a crash lands while a
+  token is on the Lease (during a burst or its 500ms linger), but it does not
+  lengthen the wait. A clean shutdown or a lost leadership removes the token.
+- **Leader takeover.** A successor cannot change the epoch while a token is
+  live. Gaps between tokens alone do not bound its wait: under continuous
+  writes, the holder can write a new token right after removing the old one,
+  and a successor's retries can keep missing the gaps. Without the takeover
+  request, the test with slow successor reads starves for its full 10s. The
+  request gives a bound:
+  - Let R be when the request commits. After R, the holder writes no token,
+    except one whose request read came before R.
+  - Any token written at w ≤ R is reused only until w + max hold. Every write
+    under it ends by w + 60s, its context bound. The token is removed at the
+    holder's next acquisition or by its idle timer, both of which wait for the
+    write in progress. So a live holder that can reach the API server clears
+    the epoch Lease by R + 60s + linger. With the default 5s max hold and
+    short writes, that is about R + 5.5s.
+  - A holder that crashed leaves its token to expire, by w + 2 minutes.
+  - The successor's next retry, at most 1s later, then commits the epoch
+    change.
+
+  Its three-minute acquisition window covers both cases. Once the epoch has
+  changed, the old process's next write reads a changed Lease. It does not
+  reuse its token, fails the fence check, and fails closed. A request from a
+  successor that stopped trying lapses after 30s. Until then, the old holder's
+  writes fail with contention, which is what an old holder should get.
 - **Epoch change mid-batch.** While the batch's token is live, an epoch change
   cannot commit. It can commit only after the token is gone (removed or
-  expired). An expired token can stand only if the writer stalled for more
-  than 70s. In that case the change rewrites the Lease, so the next write of
+  expired). No write can still be acting at expiry, because of its 60s
+  bound, so an expired token can stand only if the process stalled for longer
+  than the token's life while it held the token. In that case the change rewrites the Lease, so the next write of
   the batch sees a different `resourceVersion` and epoch and fails closed. It
   never reuses the token, and it leaves no token on the new epoch.
-- **Stalled API server.** A write's reads and its token write block exactly as
-  before, and the age bound is measured from before the token write was sent.
-  A token whose write had an ambiguous outcome is not held: the error returns
-  before anything is parked. As today, it expires on its own. A write that
-  outlives its bound can still commit late on the server, which is the
-  existing limit of the interlock stated on `WithControllerEpochMutation`.
+- **Stalled API server.** Every fenced write's context ends 60s after its
+  token was written, so a stalled write is abandoned while its token is live.
+  The age bound and the write bound are measured on the monotonic clock from
+  before the token write was sent. A token whose write had an ambiguous
+  outcome is not held: the error returns before anything is parked. As today,
+  it expires on its own. A removal that fails is retried until it succeeds or
+  the token expires. A request already on the wire can still commit late on
+  the server, which is the existing limit of the interlock stated on
+  `WithControllerEpochMutation`.
 - **Concurrent writers.** In one process, the slot still runs one fenced write
   at a time, and the slot owner is the only one that can take or park the
   token. Across processes, a held token is a live token, so other stores wait
@@ -170,8 +243,10 @@ before its compare-and-swap, so it, too, runs under a state it verified once.
   do while a write runs today. Only the leader writes under its epoch, so in
   practice nobody else contends.
 - **Clock skew.** Other processes judge a token's expiry by their own clocks,
-  as today. The margin for skew shrinks from about 100s to 95s at the default
-  max hold, and to 70s at the 30s cap.
+  as today. Every fenced write now has a uniform 60s margin for skew. Before
+  this change, writes through `WithControllerEpochMutation` had about 100s,
+  and direct callers had no bound at all. Takeover requests are judged by the
+  holder's clock against a 30s life that the successor refreshes every 10s.
 
 ## Measurement
 
@@ -180,21 +255,34 @@ against a fake API server that delays each GET 30ms and each UPDATE 110ms:
 
 | | write path per write | 3 writes | round trips per write |
 | --- | --- | --- | --- |
-| Before (no hold) | 291, 292, 297ms | 879ms | 4.0 (2 GET + 2 UPDATE) |
-| After (hold) | 179, 63, 64ms | 306ms | 2.3 (2 GET each, 1 UPDATE for the burst) |
+| Before (base branch) | 297, 298, 292ms | 887ms | 4.0 (2 GET + 2 UPDATE) |
+| After (hold) | 208, 63, 65ms | 336ms | 2.7 (2 GET each, plus a takeover-request GET and an UPDATE for the burst's token) |
 
-The token removal happens after the burst, off the write path.
+The token removal happens after the burst, off the write path. With the hold
+turned off, a write now costs five round trips (322ms), because it also reads
+the takeover request.
+
+`TestInterlockHoldWaitingSuccessorIsNotStarvedByContinuousWrites` runs a
+holder writing continuously against a successor whose reads are slowed. The
+successor changes the epoch 291ms after it starts waiting. Without the
+takeover request, it is still waiting when the test gives up at 10s.
 
 ## Consequences
 
-- A burst of N fenced writes costs one token write plus two GETs per write,
-  instead of four round trips per write. On the measurement cluster the
-  Session plan's three interlocks drop from about 0.9s to about 0.3s. Every
-  other fenced write in the turn saves about 230ms.
-- An epoch change by a successor may wait up to the linger after the last
-  write, or up to the max hold under continuous writes. A crash is now more
-  likely to leave a token that the successor must wait out (at most two
-  minutes, as before).
+- A burst of N fenced writes costs two GETs per write, plus one takeover-request
+  GET and one token write for the burst, instead of four round trips per
+  write. On the measurement cluster the Session plan's three interlocks drop
+  from about 0.9s to about 0.34s. Every other fenced write in the turn saves
+  about 230ms.
+- A fenced write that runs longer than 60s after its token was written now
+  fails with a context deadline, instead of running past the point where its
+  token's protection ends.
+- An epoch change by a successor waits at most about 61.5s after its takeover
+  request when the holder is live, and about 5.5s for short writes at the
+  default max hold. It waits two minutes after a crash, as before. A crash is
+  now more likely to leave a token that the successor must wait out.
+- A successor's takeover request stops the old holder's new tokens for up to
+  30s after the successor stops refreshing it.
 - Records written back to back under one held token share the Lease
   `resourceVersion` in their fence evidence. Nothing compares that field
   across records, and it remains a version under which the record's epoch held

@@ -17,6 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -747,8 +748,79 @@ func kubernetesControllerEpochObjects(
 	if err := kubeClient.List(ctx, &leases, client.InNamespace(controllerEpochManagerTestNamespace)); err != nil {
 		t.Fatalf("list controller epoch Leases: %v", err)
 	}
-	if len(leases.Items) != 1 {
-		t.Fatalf("controller epoch Lease count = %d, want 1", len(leases.Items))
+	// A successor's takeover request lives on a Lease of its own (ADR 0058).
+	takeover := kubestore.ControllerEpochTakeoverLeaseName(store.DefaultControllerEpochName)
+	authority := slices.DeleteFunc(leases.Items, func(lease coordinationv1.Lease) bool { return lease.Name == takeover })
+	if len(authority) != 1 {
+		t.Fatalf("controller epoch Lease count = %d, want 1", len(authority))
 	}
-	return objects.Items[0].DeepCopy(), leases.Items[0].DeepCopy()
+	return objects.Items[0].DeepCopy(), authority[0].DeepCopy()
+}
+
+// controllerEpochTakeoverRequested reports whether a successor's takeover
+// request Lease exists.
+func controllerEpochTakeoverRequested(t *testing.T, ctx context.Context, kubeClient client.Client) bool {
+	t.Helper()
+	err := kubeClient.Get(ctx, client.ObjectKey{
+		Namespace: controllerEpochManagerTestNamespace, Name: kubestore.ControllerEpochTakeoverLeaseName(store.DefaultControllerEpochName),
+	}, &coordinationv1.Lease{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
+// Stopping the epoch manager, on leadership loss or shutdown, removes a token
+// its store holds between writes, so a successor takes over at once instead
+// of waiting out the token (ADR 0058).
+func TestControllerEpochManagerStopReleasesTheHeldInterlock(t *testing.T) {
+	_, kubeClient := newKubernetesControllerEpochAuthority(t)
+	const mutationTokenAnnotation = "core.orka.ai/epoch-mutation-token"
+	holding, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace,
+		kubestore.WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewControllerEpochManager(holding, "controller-a")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.Start(ctx) }()
+	fence, err := manager.CurrentFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holding.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, lease := kubernetesControllerEpochObjects(t, t.Context(), kubeClient); lease.Annotations[mutationTokenAnnotation] == "" {
+		t.Fatal("the store did not hold its token after the write")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, lease := kubernetesControllerEpochObjects(t, t.Context(), kubeClient); lease.Annotations[mutationTokenAnnotation] != "" {
+		t.Fatal("stopping the epoch manager left its held token on the Lease")
+	}
+
+	successorStore, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := NewControllerEpochManager(successorStore, "controller-b")
+	successorCtx, stopSuccessor := context.WithCancel(t.Context())
+	defer stopSuccessor()
+	successorDone := make(chan error, 1)
+	go func() { successorDone <- successor.Start(successorCtx) }()
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer readyCancel()
+	acquired, err := successor.CurrentFence(readyCtx)
+	if err != nil || acquired.Epoch != fence.Epoch+1 {
+		t.Fatalf("successor fence = %+v, %v; want epoch %d without waiting for the token to expire", acquired, err, fence.Epoch+1)
+	}
+	stopSuccessor()
+	if err := <-successorDone; err != nil {
+		t.Fatal(err)
+	}
 }

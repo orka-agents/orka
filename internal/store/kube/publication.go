@@ -23,7 +23,7 @@ func (s *Store) CreatePublication(ctx context.Context, publication *store.Public
 	if err != nil {
 		return nil, err
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func (s *Store) SetPublicationPRIntent(ctx context.Context, request store.SetPub
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func (s *Store) SetPublicationPRReceipt(ctx context.Context, request store.SetPu
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +204,7 @@ func (s *Store) TransitionPublication(ctx context.Context, transition store.Publ
 	if err := store.ValidateControlIdentifier("publication ID", transition.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
 	if err != nil {
 		return nil, err
 	}
