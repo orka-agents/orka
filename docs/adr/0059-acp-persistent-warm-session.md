@@ -6,7 +6,8 @@ Date: 2026-11-20
 
 Accepted. The maintainer resolved the open questions on 2026-11-20; their answers are recorded
 in "Maintainer decisions" below. The feature ships behind `--acp-workspace-persistent-session`,
-default off. It amends:
+default off. Amended on 2026-11-20 after the first live kind run; see "Live run corrections"
+below. It amends:
 
 - ADR 0024 and ADR 0055: a write-intent Session on a warm class-backed workspace no longer
   retires its RuntimeSession after every turn. ADR 0055's "a new RuntimeSession is still
@@ -156,7 +157,8 @@ Persistence is attempted only when all of these hold:
   `ReadValidated` (read intent), `NoChange` (write intent), or `VerifiedExact` with a rebase
   receipt (write intent, section 4). It did not park, appended its result to the transcript, and
   has no native capture. Its workspace has a frozen warm window, and its pool is `Serving` and
-  `Accepting` on the same instance with a served record. The supervisor reports the session
+  admits its own resident session (section 6, "Admission") on the same instance with a served
+  record. The supervisor reports the session
   `idle` and quiescent.
 - **No cleanup receipt.** Once the record commits, turn N skips `cleanupRuntimeSession` and
   records no task-scoped cleanup receipt. The kept process stays owned by the Session's newest
@@ -202,8 +204,9 @@ ordinary path.
    A rival Task of the same Session does not hold the attachment, so it stays on the ordinary path
    and queues behind the holder, as today.
 3. **Reserve.** `reserveTask` reserves as today; a reused session then sets `residentSlots = 0`.
-   Unlike today's reuse, the gate (step 6) also requires `AdmissionState == Accepting`. A pool that
-   stops admitting is retiring its instance, and the turn falls back (`pool-not-accepting`).
+   Unlike today's reuse, the gate (step 6) also requires the pool to admit its own resident
+   session (section 6, "Admission"). A pool that stops admitting for any other reason is retiring
+   or degrading its instance, and the turn falls back (`pool-not-accepting`).
 4. **Claim, in the lease write.** `bindAndOpenTaskSessionTurn` calls `AcquireSessionMutationLease`
    with `ClaimResidentRuntime{handoffID}`. The same CAS that acquires the lease moves the record
    from `Resident` to `Claimed{N+1}`. It succeeds only if all of these hold:
@@ -222,11 +225,15 @@ ordinary path.
    - `bindACPRuntimeSessionWorkspace` reports no workspace change.
 
    Anything else plans `Recreate` above *g* with its reason, using the canonical bootstrap that
-   was resolved before the lease. The existing planned-session reconciliation then finds the
-   resident *g* on the same instance and deletes it (fenced `DeleteRuntimeSession`, reason
-   `replace_stale_runtime_session`) before a pre-submission requeue creates the fresh session. A
-   missing or replaced instance is cleanup proof (ADR 0024). On the reuse path the in-memory
-   binding is never consulted: a refusal always plans a fresh session.
+   was resolved before the lease. On the reuse path the in-memory binding is never consulted: a
+   refusal always plans a fresh session, and its plan reason is `persistent-session-miss`, never
+   `controller-restarted`. Before the fresh turn asks for the pool's resident slot, it deletes
+   the Session's older resident session on the reserved instance (fenced `DeleteRuntimeSession`,
+   reason `replace_stale_runtime_session`), because on the dedicated single-session pool that
+   session fills the only slot. The turn holds the Session lease, so no other turn can use it. A
+   pool status that has not yet observed the deletion refuses the slot, and the turn requeues
+   pre-submission with a logged reason until the pool controller's next probe reopens admission.
+   A missing or replaced instance is cleanup proof (ADR 0024).
 6. **Gate before first contact.** The new turn step `residentSessionGate` runs before any runtime
    mutation:
    - **The ADR 0057 handshake.** `verifyACPWorkspaceReadyForPool` must hold. It requires current
@@ -234,8 +241,8 @@ ordinary path.
      epoch e+1, and a current `Attached` condition. The gate waits for it within the pre-submission
      budget. Normally the acknowledgement has already arrived, because steps 2–5 take longer than
      the re-admission hops.
-   - **Pool and runtime.** The pool is `Serving` and `Accepting`, with the record's active
-     instance. The `external-runtime-served` digest is unchanged. No
+   - **Pool and runtime.** The pool is `Serving` and admits its own resident session (section 6,
+     "Admission"), with the record's active instance. The `external-runtime-served` digest is unchanged. No
      `external-runtime-retirement-requested` or `external-runtime-eviction` is set.
    - **Workspace.** `attached-from-warm` names this Task and epoch. Its `last-settled-task-uid`
      equals the record's source Task. Its observed `suspend-at` is later than `keptAt`. No
@@ -433,7 +440,7 @@ turn writes no record and turn N+1 then sees `no-record`:
 | Snapshot | `snapshot-mismatch` (sub-reason: profile, image, agent-configuration, mcp, workspace-binding, class, repository, credential-ref, connections, agent) |
 | Session | `history-boundary`, `transcript-changed`, `session-unavailable` (`ReconciliationBlocked`), `session-deleting` |
 | Previous turn | `previous-turn-not-succeeded` (no record is written), `previous-turn-parked`, `previous-turn-cancelled`, `previous-turn-timed-out`, `rebase-failed` |
-| Pool | `pool-replaced` (UID or generation), `pool-not-accepting` (Draining, Degraded, Ambiguous, Stopped) |
+| Pool | `pool-replaced` (UID or generation), `pool-not-accepting` (Draining, Degraded, Ambiguous, Stopped, or admission closed for any reason other than its own capacity) |
 | Runtime | `runtime-replaced` (instance or boot), `provider-epoch-changed` (served-record digest: allocation sequence or ID, instance, request revision) |
 | Workspace | `workspace-not-warm` (desired not `Ready`, suspended, suspend pending, retired, drained, evicted, ADR 0056 strong retirement, tainted, quarantined, `Failed`), `workspace-incarnation-changed` |
 | Gate | `handshake-timeout`, `runtime-session-missing`, `runtime-session-not-quiescent` |
@@ -452,15 +459,37 @@ turn writes no record and turn N+1 then sees `no-record`:
 - **Session deletion.** `sessionCleanupFencedForUID` already blocks new turns.
   `CleanupSessionRuntime` also deletes the record's exact session, and the record goes with the
   `RuntimeSessionControl`. Sessions have no archived state today. Any future archive transition
-  must move the record to `Retiring` in the same write.
+  must move the record to `Retiring` in the same write. Deletion always finishes once no turn is
+  running. A mutation lease is settled first when its holder is the exact Task, attempt and
+  prompt it names, already terminal, not executing, with its PromptAttempt `Cancelled`, `Failed`
+  or `OutcomeUnknown`: the same recovery finalization a terminal Task's turn gets finalizes its
+  SessionTurn (which also clears a `Claimed` or `Resident` record), or the lease is released if no
+  SessionTurn was persisted. A running turn still makes deletion a conflict.
 - **Capacity.** Workspace pools are pinned to `MaxResidentSessions: 1, MaxRunningPrompts: 1`, and
   the pool belongs to one Session. The resident slot is the Session's own, so nothing else
   competes for it. The running-prompt slot is released at the end of every turn, as today. A
-  fresh create on fallback first deletes the resident session, so the pool never needs two
-  resident slots.
-- **Admission.** Only `Serving` and `Accepting` admits new RuntimeSessions, unchanged. Persisted
-  reuse additionally requires `Accepting`, so a draining or scaling-to-zero pool never takes a
-  reused prompt.
+  fresh create on fallback first deletes the resident session, before it asks for the slot, so
+  the pool never needs two resident slots.
+- **Admission.** Only `Serving` and `Accepting` admits new RuntimeSessions, unchanged. Keeping and
+  reusing a resident session requires the pool to admit that session: `Serving` and either
+  `Accepting`, or `Closed` with `AdmissionReady=False` for reason `AtCapacity` only, on a
+  class-backed workspace pool whose status and condition observe its current generation, with
+  one resident slot and at most one resident session. Everything else refuses
+  (`pool-not-accepting`): Draining, Degraded, Starting, Stopping, Stopped, a closure for any other
+  reason, a status not yet observed for the current generation, or more than one resident
+  session. A draining or scaling-to-zero pool therefore never takes a reused prompt.
+
+  **Why the capacity closure is safe.** With one resident slot, the Session's own session closes
+  admission from its creation on: the pool controller reports `Serving`, `Closed`, `AtCapacity`
+  while turn N runs, at N's settlement, and at N+1's gate. That closure stops new RuntimeSessions,
+  and reuse creates none. The pool controller reaches `AtCapacity` only after the same probe found
+  the supervisor ready, not draining, not terminating and not booting, so it carries no drain,
+  replacement, degradation or ambiguity signal; each of those sets another lifecycle or reason.
+  The session stays bound to the exact instance, boot, epoch and served record, the retirement
+  and eviction annotations still refuse, and the gate still requires the supervisor's
+  authenticated status of that exact session to be idle and quiescent. The single resident
+  session the capacity counts is the one the record names, because the pool belongs to this
+  Session.
 - **Drain and finalization ordering.** Drain stops admission, waits for the running prompt, and
   deletes idle resident sessions before `Quiescent` is persisted. A rebase in flight counts as a
   running operation. Finalization never waits on a record.
@@ -480,9 +509,12 @@ versions and observed instance. There is no warm window, no workspace evidence a
 
 - **`ACP persistent session retained`.** Logged at N's settlement with `namespace`, `task`,
   `result=kept|retired`, `reason`, `runtimeSessionGeneration`, `rebaseMs`.
-- **`ACP persistent session reuse`.** Logged once per N+1 attempt with `namespace`, `task`,
-  `result=hit|miss`, `reason`, `stage=queue|claim|plan|gate`, `handoffAgeMs`, `gateWaitMs`,
-  `runtimeSessionGeneration`.
+- **`ACP persistent session reuse`.** Logged once per decision of an N+1 attempt with
+  `namespace`, `task`, `result=hit|miss`, `reason`, `stage=queue|claim|plan|gate`, `handoffAgeMs`,
+  `gateWaitMs`, `runtimeSessionGeneration`. A pre-submission requeue of the same attempt that
+  reaches the same decision logs and counts nothing.
+- **`ACP task requeued before prompt submission`.** Every pre-submission requeue logs its
+  `reason` and a bounded, redacted `diagnostic`, so a turn that keeps retrying is never silent.
 - **Pre-dispatch timings** (`ACP pre-dispatch timings`) gain `workspaceAttachHeld`, marked in
   place of `workspaceReady` and `runtimePoolReady` on the held path. The pre-dispatch record is
   reported when the reserved execution starts, before the gate runs, so the time the gate waited
@@ -490,7 +522,8 @@ versions and observed instance. There is no warm window, no workspace evidence a
 - **Turn timings** (`ACP turn timings`) gain `residentSessionGate` and `runtimeSessionRebase`. On
   a hit, `sessionCreate` is absent.
 - **Metric.** `orka_acp_persistent_session_total{decision="kept|retired|hit|miss",reason}` with
-  the bounded reason enum. No names or UIDs go into labels.
+  the bounded reason enum, incremented with the log, once per decision. No names or UIDs go into
+  labels.
 
 ### 9. Rollout
 
@@ -636,6 +669,30 @@ The maintainer answered the open questions of the proposal on 2026-11-20:
    this change shares ADR 0057's pending security review.
 7. **Re-admission hops.** Removing the two RuntimePool re-admission hops (an ADR 0023 change) is
    being designed separately as ADR 0060. It is future work and is not part of this decision.
+
+### Live run corrections
+
+The first live kind run (Substrate on gVisor, a Claude fixture Agent, flag on) found four defects,
+corrected above:
+
+1. **No first turn was kept.** The retention check required `Accepting`, but a single-session
+   workspace pool closes admission at capacity as soon as the Session's own session is resident,
+   so every keep was refused with `pool-not-accepting`. Keeping and reusing now accept that one
+   closure (section 6, "Admission").
+2. **The fallback never sent its prompt.** A read-intent turn whose keep is refused leaves its
+   session resident, as today. The next turn's miss planned a fresh session and asked for the
+   resident slot before the planned-session reconciliation could delete the old session. It was
+   refused at capacity and requeued silently until its deadline. The fresh path now deletes the
+   older session first (section 3, step 5), and every pre-submission requeue logs its reason.
+3. **The decision was counted per requeue,** not per decision (section 8).
+4. **The Session could not be deleted.** The requeue had cleared the PromptAttempt's binding
+   while the attempt kept its lease and open SessionTurn for its retry. The deadline settlement
+   saw an unbound attempt and left both, so deletion conflicted forever. Terminal settlement now
+   finds that turn through the attempt's own exact lease and finalizes it with a terminal marker,
+   and deletion settles such a lease (section 6, "Session deletion"). The stores accept an
+   unbound `Cancelled` or `Failed` attempt for that finalization because a pre-submission
+   recovery is the only write that clears the binding, and only for a prompt proven never
+   accepted.
 
 ### Fallback rule
 
