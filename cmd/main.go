@@ -300,6 +300,8 @@ func main() {
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
 	var providerUseAuthorizationEnabled bool
+	var containerTaskSecretUseEnabled bool
+	var containerTaskSecretUsePolicyName string
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
@@ -543,6 +545,12 @@ func main() {
 	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
 		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&containerTaskSecretUseEnabled, "container-task-secret-use-authorization-enabled",
+		envBool("ORKA_CONTAINER_TASK_SECRET_USE_AUTHORIZATION_ENABLED"),
+		"Deliver the Secrets a container Task names only when the identity that wrote it holds the `use` verb on each Secret. Requires the container-task-secret-use ValidatingAdmissionPolicy; cannot be combined with ORKA_AGENT_DIRECT_SECRET_MOUNTS.")
+	flag.StringVar(&containerTaskSecretUsePolicyName, "container-task-secret-use-policy-name",
+		envutil.String("ORKA_CONTAINER_TASK_SECRET_USE_POLICY_NAME", controller.DefaultContainerTaskSecretUsePolicyName),
+		"Name of the container Task Secret use ValidatingAdmissionPolicy and its binding, which the controller confirms before it delivers a Secret.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -1945,6 +1953,18 @@ func main() {
 	jobBuilder.InitImage = sessionLoaderImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
+	if containerTaskSecretUseEnabled {
+		if jobBuilder.DirectSecretMountsEnabled() {
+			setupLog.Error(errors.New("--container-task-secret-use-authorization-enabled cannot be combined with ORKA_AGENT_DIRECT_SECRET_MOUNTS"),
+				"invalid container Task Secret configuration")
+			os.Exit(1)
+		}
+		jobBuilder.ContainerTaskSecretUse = controller.ContainerTaskSecretUsePolicy{
+			Enabled:    true,
+			PolicyName: containerTaskSecretUsePolicyName,
+			Reader:     mgr.GetAPIReader(),
+		}
+	}
 	if contextTokenTTSConfig.Enabled() {
 		jobBuilder.ContextTokenTTSEndpoint = contextTokenTTSConfig.Endpoint
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
