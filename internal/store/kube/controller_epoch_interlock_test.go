@@ -902,3 +902,28 @@ func TestTakeoverWithTheSameHolderIDIsRequestedEvenWhenEveryReadPairConflicts(t 
 	require.Equal(t, fence.Epoch+1, advanced.Epoch)
 	require.Positive(t, rolls.Load())
 }
+
+// A committed epoch change, or a replay of it, clears only its own request
+// against the epoch it replaced. A newer request against the epoch it
+// created, made by a restart that shares the holder ID, is left in place.
+func TestCommittedEpochChangeKeepsANewerSameHolderRequest(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	writer := holdingStore(t, raw, time.Hour, 5*time.Second)
+	change := store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch, NewEpoch: fence.Epoch + 1,
+		HolderID: "shared-holder", RequestDigest: testDigest("shared"), UpdatedAt: testNow}
+	_, err := writer.CompareAndSwapControllerEpoch(ctx, change)
+	require.NoError(t, err)
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the committed change left its own request")
+
+	restart := holdingStore(t, raw, time.Hour, 5*time.Second)
+	restart.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "shared-holder", fence.Epoch+1)
+	require.NoError(t, raw.Get(ctx, requestKey, &coordinationv1.Lease{}), "the restart did not publish its request")
+	// The earlier change is replayed and takes its idempotent path.
+	_, err = writer.CompareAndSwapControllerEpoch(ctx, change)
+	require.NoError(t, err)
+	request := &coordinationv1.Lease{}
+	require.NoError(t, raw.Get(ctx, requestKey, request), "the replay deleted the restart's newer request")
+	require.Equal(t, strconv.FormatInt(fence.Epoch+1, 10), request.Annotations[annotationEpochTakeoverFromEpoch])
+}

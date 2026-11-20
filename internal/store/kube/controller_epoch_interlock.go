@@ -439,13 +439,16 @@ func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, 
 	s.requestControllerEpochTakeover(ctx, normalized, epoch, holder)
 }
 
-// clearControllerEpochTakeover deletes holder's takeover request once its
-// epoch change committed. A request left behind names an older epoch and is
+// clearControllerEpochTakeover deletes holder's request to replace
+// replacedEpoch once that change committed. A newer request, against the
+// epoch that change created, is left alone even when it shares the holder
+// ID, as a restart's does. A request left behind names an older epoch and is
 // ignored.
-func (s *Store) clearControllerEpochTakeover(ctx context.Context, name, holder string) {
+func (s *Store) clearControllerEpochTakeover(ctx context.Context, name, holder string, replacedEpoch int64) {
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochTakeoverLeaseName(name)}
 	request := &coordinationv1.Lease{}
-	if err := s.readClient().Get(ctx, key, request); err != nil || request.Annotations[annotationEpochTakeoverRequestedBy] != holder {
+	if err := s.readClient().Get(ctx, key, request); err != nil || request.Annotations[annotationEpochTakeoverRequestedBy] != holder ||
+		request.Annotations[annotationEpochTakeoverFromEpoch] != strconv.FormatInt(replacedEpoch, 10) {
 		return
 	}
 	_ = s.client.Delete(ctx, request, client.Preconditions{UID: &request.UID, ResourceVersion: &request.ResourceVersion})
