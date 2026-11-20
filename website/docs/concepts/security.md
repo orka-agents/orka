@@ -96,10 +96,15 @@ These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
 `orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
 auditing Kubernetes access.
 
-Container Tasks are untrusted compute. A Task's `spec.secretRef` is mounted only when an
-operator sets `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; without it the mount is omitted and the
-Task still runs. A `spec.env` entry that reads a Secret or ConfigMap through `valueFrom` is
-refused outright: without the opt-in the Task fails before its Pod is created. Task `env`
+Container Tasks are untrusted compute. By default a Task's `spec.secretRef` is omitted and
+the Task still runs, and a `spec.env` entry that reads a Secret or ConfigMap through
+`valueFrom` makes the Task fail before its Pod is created. With the Secret use policy
+(`--container-task-secret-use-authorization-enabled`), a container Task receives a Secret it
+names only if the identity that wrote it holds the `use` verb on that Secret. Orka grants that
+verb to none of its own identities, so Tasks created by agents, tools, chat, or the API never
+qualify, and the controller delivers nothing until it has confirmed the admission policy is
+bound. The legacy `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true` switch instead delivers to every
+container Task and cannot be combined with the policy. Task `env`
 never reaches the workspace preparation init container, which holds the clone credential;
 only `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` pass through to it. See
 [Container tasks](../guides/container-tasks.md#other-fields).

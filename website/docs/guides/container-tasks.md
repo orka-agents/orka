@@ -135,7 +135,7 @@ entrypoint that you want, use that instead.
 | `mkdir /root/.cache: read-only file system` | Go build cache outside `/tmp` | `export GOCACHE=/tmp/gocache` |
 | Second command in a chain fails, first succeeded | Inline env prefix, not `export` | Use `export ... && ...` |
 | `EACCES` / `EROFS` from npm or pip | Cache outside `/tmp` | Set `npm_config_cache` or `PIP_CACHE_DIR` |
-| `spec.env[N] (NAME) uses valueFrom.secretKeyRef, which container Tasks receive only when the operator enables direct Secret mounts` | An `env` entry reads a Secret or ConfigMap | Drop the entry, or ask an operator to enable `ORKA_AGENT_DIRECT_SECRET_MOUNTS` |
+| `spec.env[N] (NAME) uses valueFrom.secretKeyRef, which container Tasks receive only when the operator enables direct Secret mounts` | An `env` entry reads a Secret or ConfigMap | Drop the entry, or ask an operator to grant your identity `use` on the Secret under [the Secret use policy](#secrets) |
 
 ## Other fields
 
@@ -145,29 +145,56 @@ Container Tasks use the same Task fields as everything else:
 - `spec.retryPolicy` — retries with backoff
 - `spec.resources` — CPU and memory requests and limits
 - `spec.secretRef` — a Secret. For a container Task it is **not delivered by default**;
-  see the caution below
+  see [Secrets](#secrets)
 - `spec.execution` — a `RuntimeClass` such as `gvisor` for stronger isolation
 - `spec.schedule` — a cron expression, for recurring work
 
 See [Configuration](../reference/configuration.md) for the full list.
 
-:::caution[A container Task does not receive `spec.secretRef` by default]
-Container Tasks are treated as untrusted compute, so the controller skips the direct Secret
-mount for them. Your Secret is delivered only if an operator has turned on the legacy
-`ORKA_AGENT_DIRECT_SECRET_MOUNTS` opt-in — and even then it arrives as **files under
-`/secrets/task`** (one file per Secret key), never as environment variables. Read the key
-you need from `/secrets/task/<key>`. [Security](../concepts/security.md) explains the
-boundary.
+## Secrets
 
-Environment-variable injection applies to an Agent's `secretRef`, not a Task's.
-
-`spec.env` follows the same policy. Without the opt-in, a container Task whose `env`
-entry uses `valueFrom.secretKeyRef`, `valueFrom.configMapKeyRef`, or `valueFrom.fileKeyRef`
-ends `Failed` before its Pod is created, and the message names the entry and the opt-in.
+Container Tasks are treated as untrusted compute, so by default they receive no Secrets:
+the controller skips `spec.secretRef`, and an `env` entry that uses
+`valueFrom.secretKeyRef`, `valueFrom.configMapKeyRef`, or `valueFrom.fileKeyRef` makes the
+Task end `Failed` before its Pod is created, with a message that names the entry.
 `valueFrom.fieldRef` and `valueFrom.resourceFieldRef` read the Pod's own metadata and are
 always allowed. With a workspace, `env` reaches your command but not the init container that
 clones the repository with the read credential; only the `HTTP_PROXY`, `HTTPS_PROXY`, and
 `NO_PROXY` variables pass through to it.
+
+An operator can let specific container Tasks receive specific Secrets with the Secret use
+policy (`--container-task-secret-use-authorization-enabled`, Helm
+`controller.containerTaskSecretUse.enabled`). A container Task that names a Secret, through
+`spec.secretRef` or an `env` entry's `secretKeyRef`, is then admitted only if the identity that
+writes it holds the `use` verb on that Secret:
+
+```yaml
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["use"]
+  resourceNames: ["repository-bot-key"]
+```
+
+Grant it to the identity that applies your job manifests, for example a GitOps controller
+or an operator's `kubectl` user. Orka grants `use` on Secrets to none of its own identities,
+so Tasks created by agents, tools, chat, or the Orka API never receive Secrets this way, and
+the controller also refuses a Task that carries their provenance. The runs of a scheduled
+Task receive the Secrets the scheduled Task names. The Secret must be in the Task's
+namespace, and `configMapKeyRef` and `fileKeyRef` stay refused. Changing the spec of such a Task,
+for example its image or command, needs `use` again. A Task created before the policy was in
+force was never checked and fails instead; recreate it.
+
+`spec.secretRef` arrives as **files under `/secrets/task`**, one file per key; read the key you
+need from `/secrets/task/<key>`. An `env` entry's `secretKeyRef` becomes that environment
+variable. Neither value appears in the Task's status or events. See
+`config/container-task-secret-use-policy/README.md` for the details.
+
+:::caution[`ORKA_AGENT_DIRECT_SECRET_MOUNTS` opens the boundary for every container Task]
+The legacy `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true` opt-in delivers `spec.secretRef` and `env`
+Secret references to every container Task in the namespace, including ones agents create, and
+lets them name any Secret there. Prefer the Secret use policy; the two cannot be combined.
+Environment-variable injection of a whole Secret applies to an Agent's `secretRef`, not a
+Task's, and the Secret use policy never delivers an Agent's Secret.
 :::
 
 ## When an agent creates these

@@ -2139,7 +2139,7 @@ func TestAddSecretVolumes_ProviderOpenAI(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, nil, provider)
+	jb.addSecretVolumes(context.Background(), job, task, nil, provider, false)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == testOpenAIAPIKey && env.ValueFrom != nil &&
@@ -2167,7 +2167,7 @@ func TestAddSecretVolumes_ProviderAnthropic(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, nil, provider)
+	jb.addSecretVolumes(context.Background(), job, task, nil, provider, false)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == "ANTHROPIC_API_KEY" && env.ValueFrom != nil &&
@@ -2190,7 +2190,7 @@ func TestAddSecretVolumes_TaskSecret(t *testing.T) {
 		},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, nil, nil)
+	jb.addSecretVolumes(context.Background(), job, task, nil, nil, false)
 	found := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == testTaskConfigVolume && v.Secret != nil && v.Secret.SecretName == "task-secret" {
@@ -2216,7 +2216,7 @@ func TestAddSecretVolumes_AgentSecret(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, agent, nil)
+	jb.addSecretVolumes(context.Background(), job, task, agent, nil, false)
 	foundVol := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == "agent-secrets" && v.Secret != nil && v.Secret.SecretName == testAgentSecretName {
@@ -2250,7 +2250,7 @@ func TestAddSecretVolumes_AIAgentEnvFromReservesTelemetryEnv(t *testing.T) {
 		},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, agent, nil)
+	jb.addSecretVolumes(context.Background(), job, task, agent, nil, false)
 
 	for _, name := range []string{
 		workerenv.EnableTelemetry,
@@ -2301,7 +2301,7 @@ func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, agent, nil)
+	jb.addSecretVolumes(context.Background(), job, task, agent, nil, false)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == "ORKA_AI_FALLBACK_0_API_KEY" && env.ValueFrom != nil {
@@ -2384,7 +2384,7 @@ func TestAddSecretVolumes_ProviderAzureOpenAI(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	job, _ := jb.Build(context.Background(), task, nil, nil)
-	jb.addSecretVolumes(context.Background(), job, task, nil, provider)
+	jb.addSecretVolumes(context.Background(), job, task, nil, provider, false)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == testOpenAIAPIKey {
