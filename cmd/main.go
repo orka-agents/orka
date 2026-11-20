@@ -354,6 +354,7 @@ func main() {
 	var taskWebhookSigningSecret string
 	var taskWebhookDeliveryWorkers int
 	var taskMaxConcurrentReconciles int
+	var controllerEpochInterlockHold bool
 	var runtimePoolMaxConcurrentReconciles int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
@@ -638,6 +639,12 @@ func main() {
 		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
 			"concurrently with itself, and --max-tasks-per-namespace and coordination maxConcurrentChildren "+
 			"grant slots through a resourceVersion-checked ledger, so they stay exact.", controller.MaxTaskMaxConcurrentReconciles))
+	flag.BoolVar(&controllerEpochInterlockHold, "controller-epoch-interlock-hold",
+		strings.EqualFold(os.Getenv("ORKA_CONTROLLER_EPOCH_INTERLOCK_HOLD"), "true"),
+		"Keep the controller-epoch interlock token between consecutive fenced writes (ADR 0058). Off by default: "+
+			"a controller from before ADR 0058 sends no takeover requests, so a holder with the hold on can starve "+
+			"it during a rollback. Turn it on once no replica can roll back past ADR 0058. Takeover requests are "+
+			"sent and honoured either way.")
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -1751,11 +1758,11 @@ func main() {
 		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore, SubstrateRouter: runtimePoolSubstrateRouter,
 	}
-	controlStoreOptions := []storekube.Option{
+	controlStoreOptions := append([]storekube.Option{
 		storekube.WithAPIReader(mgr.GetAPIReader()),
 		storekube.WithWatchNamespace(watchNamespace),
 		storekube.WithSessionRuntimeCleanup(sessionCleanupDispatcher.CleanupSessionRuntime),
-	}
+	}, controllerEpochInterlockOptions(controllerEpochInterlockHold)...)
 
 	kubeControlStore, err := storekube.NewComposite(
 		mgr.GetClient(), controlNamespace, appStorage, controlStoreOptions...,
@@ -3234,4 +3241,15 @@ func envStringDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// controllerEpochInterlockOptions configures the control store's
+// controller-epoch interlock hold (ADR 0058). Without the hold every fenced
+// write releases its token at once, as before ADR 0058; takeover requests
+// are published and honoured either way.
+func controllerEpochInterlockOptions(hold bool) []storekube.Option {
+	if hold {
+		return nil
+	}
+	return []storekube.Option{storekube.WithControllerEpochInterlockHold(0, 0)}
 }
