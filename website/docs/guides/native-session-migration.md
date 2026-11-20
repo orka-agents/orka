@@ -315,10 +315,10 @@ CLI, or OpenCode install removes the files it created, and a Claude Code or
 Copilot CLI install that finds exactly what it would write treats the session as
 installed. Once an export saves its receipt in the journal, a retry with the same journal
 reports the session as installed without reinstalling; keep the installed files
-then. An OpenCode export killed before it saves its receipt can leave
-`opencode.db`, `.opencode.db.restore`, or `tool-output` in the destination's
-`opencode` directory, and a retry refuses them. Remove those entries and retry
-with the same journal; it installs the same saved bundle. Changing the agent,
+then. A retry of an OpenCode export killed earlier finishes the same install: it
+recognizes a database that install recorded as published, and otherwise reuses
+the spilled output it already wrote and replaces its own staging. It refuses a
+destination holding a different database or a spill with different content. Changing the agent,
 target, bundle, or cwd with that journal is rejected. The explicitly selected API endpoint must stay
 unchanged across retries. Automatic Kubernetes Service discovery and streaming
 are not available for native migration; use `--server` or a saved trusted API

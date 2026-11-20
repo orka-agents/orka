@@ -390,13 +390,25 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 		}
 		return errors.New("OpenCode state directory already holds a database")
 	}
+	// Installs into this destination run one at a time, so what an install
+	// killed before publishing left behind belongs to no running install. A
+	// retry reuses spills that hold exactly the bundled output and replaces
+	// its own staging; a spill holding anything else is refused, and nothing
+	// else is removed.
 	if len(bundle.toolOutput) > 0 {
-		if err = os.Mkdir(toolOutputDir, 0o700); err != nil {
+		if err = os.Mkdir(toolOutputDir, 0o700); err == nil {
+			created = append(created, toolOutputDir)
+		} else if !errors.Is(err, os.ErrExist) {
 			return err
 		}
-		created = append(created, toolOutputDir)
+		if err = requireRealPath(toolOutputDir, true); err != nil {
+			return err
+		}
 		for name, content := range bundle.toolOutput {
 			path := filepath.Join(toolOutputDir, name)
+			if holdsFile(path, content) {
+				continue
+			}
 			if err = writeNewFile(path, content); err != nil {
 				return err
 			}
@@ -404,6 +416,12 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 		}
 	}
 	staged := filepath.Join(root, ".opencode.db.restore")
+	if err = requireRealPathIfPresent(staged, false); err != nil {
+		return err
+	}
+	if err = os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err = writeNewFile(staged, bundle.database); err != nil {
 		return err
 	}

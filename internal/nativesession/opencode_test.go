@@ -786,3 +786,42 @@ func TestReadBundleRefusesTraversingEntryNames(t *testing.T) {
 		}
 	}
 }
+
+// A retry after an install killed before it published the database reuses
+// the spills it wrote and replaces its staging, but refuses a spill that
+// holds something else.
+func TestOpenCodeInstallRecoversAnInstallKilledBeforePublishing(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leave := func(t *testing.T, spill []byte) Dirs {
+		destination := freshOpenCodeDirs(t)
+		toolOutput := filepath.Join(destination.State, "opencode", "tool-output")
+		if err := os.MkdirAll(toolOutput, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeForTest(t, filepath.Join(toolOutput, openCodeFixtureSpill), string(spill))
+		writeForTest(t, filepath.Join(destination.State, "opencode", ".opencode.db.restore"), "partial")
+		return destination
+	}
+	destination := leave(t, source.spill)
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatalf("a retry must recover a killed install's leftovers: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(destination.State, "opencode", ".opencode.db.restore")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging left behind: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(destination.State, "opencode", "opencode.db")); err != nil {
+		t.Fatalf("database not published: %v", err)
+	}
+	other := leave(t, []byte("another session's output"))
+	if err := format.Install(t.Context(), data, other, realDir(t), openCodeFixtureLimit); err == nil {
+		t.Fatal("a retry must not replace a spill holding other output")
+	}
+	if !holdsFile(filepath.Join(other.State, "opencode", "tool-output", openCodeFixtureSpill), []byte("another session's output")) {
+		t.Fatal("a refused install changed existing output")
+	}
+}
