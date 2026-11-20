@@ -313,10 +313,12 @@ bundle and operation ID. A Codex export also reuses the
 same frozen SessionKit install plan and receipt. A failed Claude Code, Copilot
 CLI, or OpenCode install removes the files it created, and a Claude Code or
 Copilot CLI install that finds exactly what it would write treats the session as
-installed. Once an export installs its session, a retry with the same journal
-reports it again without reinstalling. If an OpenCode export is interrupted
-after it installs but before it reports success, remove the destination's
-`opencode` directory before you retry. Changing the agent,
+installed. Once an export saves its receipt in the journal, a retry with the same journal
+reports the session as installed without reinstalling; keep the installed files
+then. An OpenCode export killed before it saves its receipt can leave
+`opencode.db`, `.opencode.db.restore`, or `tool-output` in the destination's
+`opencode` directory, and a retry refuses them. Remove those entries and retry
+with the same journal; it installs the same saved bundle. Changing the agent,
 target, bundle, or cwd with that journal is rejected. The explicitly selected API endpoint must stay
 unchanged across retries. Automatic Kubernetes Service discovery and streaming
 are not available for native migration; use `--server` or a saved trusted API

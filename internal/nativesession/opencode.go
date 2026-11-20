@@ -266,7 +266,7 @@ func (openCodeFormat) Inspect(ctx context.Context, data []byte, maxBytes int) (S
 	if err := writeNewFile(database, bundle.database); err != nil {
 		return Summary{}, err
 	}
-	if err := verifyOpenCodeDatabase(ctx, database, bundle.manifest); err != nil {
+	if err := verifyOpenCodeDatabase(ctx, database, bundle); err != nil {
 		return Summary{}, err
 	}
 	return Summary{ProviderSessionID: bundle.manifest.SessionID, ProviderVersion: bundle.manifest.Version, DataDigest: dataDigest(data)}, nil
@@ -277,7 +277,16 @@ func (openCodeFormat) Inspect(ctx context.Context, data []byte, maxBytes int) (S
 // OpenCode resumes in the session's recorded directory rather than the cwd it
 // is given. Every file is created new and a failed install removes those it
 // created, so journalDir is unused.
-func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) (err error) {
+func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
+	unlock, err := lockInstallDestination(ctx, dirs.State)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return installOpenCode(ctx, data, dirs, maxBytes)
+}
+
+func installOpenCode(ctx context.Context, data []byte, dirs Dirs, maxBytes int) (err error) {
 	limit, err := normalizeLimit(maxBytes)
 	if err != nil {
 		return err
@@ -333,7 +342,7 @@ func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ str
 		return err
 	}
 	created = append(created, staged)
-	if err = verifyOpenCodeDatabase(ctx, staged, bundle.manifest); err != nil {
+	if err = verifyOpenCodeDatabase(ctx, staged, bundle); err != nil {
 		return err
 	}
 	// Relocation may grow the conversation only into the budget the carried
@@ -359,6 +368,47 @@ func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ str
 		return err
 	}
 	created = nil
+	return nil
+}
+
+// relocateOpenCodeRows rewrites every message and part with replacer, adding
+// at most budget bytes in total.
+func relocateOpenCodeRows(ctx context.Context, tx *sql.Tx, replacer *strings.Replacer, budget int64) error {
+	growth := int64(0)
+	for _, table := range []string{openCodeMessageTable, openCodePartTable} {
+		var ids []string
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM `+table)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			var data string
+			if err := tx.QueryRowContext(ctx, `SELECT data FROM `+table+` WHERE id = ?`, id).Scan(&data); err != nil {
+				return err
+			}
+			relocated := replacer.Replace(data)
+			if relocated == data {
+				continue
+			}
+			if growth += max(0, int64(len(relocated)-len(data))); growth > budget {
+				return errors.New("relocating the OpenCode session would exceed its expanded budget")
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET data = ? WHERE id = ?`, relocated, id); err != nil {
+				return fmt.Errorf("relocate OpenCode session: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -495,7 +545,8 @@ func deleteOtherOpenCodeState(ctx context.Context, db *sql.DB, schema openCodeSc
 // discloses nothing more.
 func openCodeToolOutputReferences(ctx context.Context, db *sql.DB, dir string) ([]string, error) {
 	prefix := dir + string(filepath.Separator)
-	rows, err := db.QueryContext(ctx, `SELECT data FROM part WHERE instr(data, ?) > 0`, prefix)
+	// Only the decoded path is compared: JSON may escape characters of dir.
+	rows, err := db.QueryContext(ctx, `SELECT data FROM part WHERE instr(data, '"outputPath"') > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -538,8 +589,11 @@ func openCodeToolOutputReferences(ctx context.Context, db *sql.DB, dir string) (
 }
 
 // verifyOpenCodeDatabase checks that path is an intact OpenCode database
-// holding exactly the manifest's conversation and nothing else.
-func verifyOpenCodeDatabase(ctx context.Context, path string, manifest openCodeManifest) error {
+// holding exactly the bundle manifest's conversation and nothing else, and
+// that the session's own tool calls spilled every bundled output. A spill
+// the session references may be missing, since OpenCode deletes old ones.
+func verifyOpenCodeDatabase(ctx context.Context, path string, bundle openCodeBundle) error {
+	manifest := bundle.manifest
 	db, err := openSQLite(path, "mode=ro&immutable=1")
 	if err != nil {
 		return err
@@ -582,6 +636,15 @@ func verifyOpenCodeDatabase(ctx context.Context, path string, manifest openCodeM
 	foreign, err := sqliteExists(ctx, db, `SELECT EXISTS(SELECT 1 FROM project WHERE id != ?)`, session.projectID)
 	if err != nil || foreign {
 		return errors.New("OpenCode database carries another project")
+	}
+	referenced, err := openCodeToolOutputReferences(ctx, db, manifest.ToolOutputDir)
+	if err != nil {
+		return err
+	}
+	for name := range bundle.toolOutput {
+		if !slices.Contains(referenced, name) {
+			return errors.New("OpenCode bundle carries a spilled output the session does not reference")
+		}
 	}
 	return nil
 }
@@ -675,6 +738,15 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 			return openCodeSession{}, errors.New("OpenCode database holds messages of another session")
 		}
 	}
+	// Installation joins the session to its project, so a dangling
+	// reference, which quick_check does not report, is not carried.
+	project, err := sqliteExists(ctx, db, `SELECT EXISTS(SELECT 1 FROM project WHERE id = ?)`, session.projectID)
+	if err != nil {
+		return openCodeSession{}, err
+	}
+	if !project {
+		return openCodeSession{}, fmt.Errorf("%w: OpenCode session names a project the database does not hold", ErrUnsupported)
+	}
 	return session, nil
 }
 
@@ -735,34 +807,30 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 		{`UPDATE project SET worktree = ? WHERE id = ?`, []any{newWorktree, projectID}},
 		{`UPDATE session SET directory = ?, path = ? WHERE id = ?`, []any{workspace, sessionPath, manifest.SessionID}},
 	}
-	// Absolute paths move first, so the worktree-relative form OpenCode uses
-	// in tool titles only matches where no absolute path remains.
-	growth := int64(0)
-	for _, move := range [][2]string{{directory, workspace}, {manifest.ToolOutputDir, toolOutputDir}, {previousPath, sessionPath.String}} {
-		if move[0] == "" || move[0] == move[1] {
-			continue
-		}
-		for _, table := range []string{openCodeMessageTable, openCodePartTable} {
-			if len(move[1]) > len(move[0]) {
-				var occurrences int64
-				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(sum((length(CAST(data AS BLOB)) - length(CAST(replace(data, ?, '') AS BLOB))) / ?), 0)
- FROM `+table+` WHERE instr(data, ?) > 0`, move[0], len(move[0]), move[0]).Scan(&occurrences); err != nil {
-					return err
-				}
-				growth += occurrences * int64(len(move[1])-len(move[0]))
-			}
-			statements = append(statements, struct {
-				query string
-				args  []any
-			}{`UPDATE ` + table + ` SET data = replace(data, ?, ?) WHERE instr(data, ?) > 0`, []any{move[0], move[1], move[0]}})
-		}
-	}
-	if growth > int64(budget) {
-		return errors.New("relocating the OpenCode session would exceed its expanded budget")
-	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
 			return fmt.Errorf("relocate OpenCode session: %w", err)
+		}
+	}
+	// Each path moves in one pass over its JSON-encoded form, so a moved path
+	// is never matched again and a path holding a quote stays valid JSON.
+	// Absolute paths come first, the longer one first, so where two match the
+	// more specific one wins; the worktree-relative form OpenCode uses in tool
+	// titles matches only where no absolute path does.
+	moves := [][2]string{{directory, workspace}, {manifest.ToolOutputDir, toolOutputDir}, {previousPath, sessionPath.String}}
+	if len(manifest.ToolOutputDir) > len(directory) {
+		moves[0], moves[1] = moves[1], moves[0]
+	}
+	var replacements []string
+	for _, move := range moves {
+		if move[0] == "" || move[0] == move[1] {
+			continue
+		}
+		replacements = append(replacements, string(jsonStringContent(move[0])), string(jsonStringContent(move[1])))
+	}
+	if len(replacements) > 0 {
+		if err := relocateOpenCodeRows(ctx, tx, strings.NewReplacer(replacements...), int64(budget)); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
@@ -783,10 +851,12 @@ func sqliteExists(ctx context.Context, db *sql.DB, query string, args ...any) (b
 }
 
 // openSQLite opens path without trusting functions its schema names.
+var sqliteURIPath = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
+
 func openSQLite(path, query string) (*sql.DB, error) {
-	if strings.ContainsAny(path, "?#%") {
-		return nil, errors.New("SQLite path contains URI metacharacters")
-	}
+	// SQLite reads a file: URI, so the characters that end or escape its
+	// path are percent-encoded; it decodes them back to the file's name.
+	path = sqliteURIPath.Replace(path)
 	parameters := "_pragma=trusted_schema(0)&_pragma=busy_timeout(250)"
 	if query != "" {
 		parameters = query + "&" + parameters

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -177,6 +178,59 @@ func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
 	}
 	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err == nil {
 		t.Fatal("install must not overwrite an existing OpenCode database")
+	}
+}
+
+// Relocation rewrites each path once, in its JSON form: a new workspace that
+// contains the old worktree-relative path is not moved again, and one that
+// holds a quote leaves every record valid JSON.
+func TestOpenCodeInstallRelocatesEachPathOnceAsJSON(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousRelative := strings.TrimPrefix(source.dirs.Workspace, "/")
+	for name, leaf := range map[string]string{
+		"nested":      previousRelative,
+		"quoted":      `feature"one`,
+		"backslashed": `feature\one`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			destination := freshOpenCodeDirs(t)
+			destination.Workspace = filepath.Join(destination.Workspace, leaf)
+			if err := os.MkdirAll(destination.Workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.State, "opencode", "opencode.db")+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = restored.Close() }()
+			var tool string
+			if err := restored.QueryRow(`SELECT data FROM part WHERE id = 'prt_tool'`).Scan(&tool); err != nil {
+				t.Fatal(err)
+			}
+			var part struct {
+				State struct {
+					Input struct {
+						FilePath string `json:"filePath"`
+					} `json:"input"`
+					Title string `json:"title"`
+				} `json:"state"`
+			}
+			if err := json.Unmarshal([]byte(tool), &part); err != nil {
+				t.Fatalf("relocated part is not JSON: %v: %s", err, tool)
+			}
+			if part.State.Input.FilePath != destination.Workspace+"/LICENSE" ||
+				part.State.Title != strings.TrimPrefix(destination.Workspace, "/")+"/LICENSE" {
+				t.Fatalf("part not moved exactly once: filePath=%q title=%q", part.State.Input.FilePath, part.State.Title)
+			}
+		})
 	}
 }
 
@@ -361,6 +415,9 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"session from an unknown release": {reason: "recorded the session", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET version = 'local'`)
 		}},
+		"session without its project": {reason: "names a project the database does not hold", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `DELETE FROM project`)
+		}},
 		"trigger": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
 		}},
@@ -522,6 +579,12 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 		"session from a later release": rebuild(func(e map[string][]byte) {
 			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `UPDATE session SET version = '1.20.0'`)
 		}),
+		"session without its project": rebuild(func(e map[string][]byte) {
+			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `DELETE FROM project`)
+		}),
+		"spilled output the session does not reference": rebuild(func(e map[string][]byte) {
+			e["tool-output/tool_unreferenced"] = []byte("planted")
+		}),
 	} {
 		if _, err := format.Inspect(t.Context(), tampered, openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s: must be rejected as invalid: %v", name, err)
@@ -529,6 +592,22 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 	}
 	if _, err := format.Inspect(t.Context(), data, len(data)-1); err == nil {
 		t.Fatal("an oversized bundle must be rejected")
+	}
+}
+
+// A spill is selected by its decoded outputPath, which JSON may escape.
+func TestOpenCodeToolOutputReferencesMatchDecodedPaths(t *testing.T) {
+	fixture := newOpenCodeFixture(t)
+	dir := filepath.Join(fixture.dirs.State, "opencode", "tool-output")
+	escaped := strings.ReplaceAll(filepath.Join(dir, "tool_escaped"), "/", `\/`)
+	fixture.exec(t, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_escaped', 'msg_assistant', ?, 3, 3, ?)`,
+		openCodeFixtureSession, `{"type":"tool","state":{"metadata":{"outputPath":"`+escaped+`"}}}`)
+	names, err := openCodeToolOutputReferences(t.Context(), fixture.db, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(names, []string{openCodeFixtureSpill, "tool_escaped"}) {
+		t.Fatalf("references = %v", names)
 	}
 }
 
@@ -609,4 +688,37 @@ func tarGzipForTest(t *testing.T, entries map[string][]byte) []byte {
 		t.Fatal(err)
 	}
 	return out.Bytes()
+}
+
+// A state directory may hold characters a SQLite URI reserves.
+func TestOpenSQLiteOpensPathsWithURIMetacharacters(t *testing.T) {
+	for _, name := range []string{"data#backup", "what?", "100%", "a%23b"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(realDir(t), name)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "opencode.db")
+			db, err := openSQLite(path, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(t.Context(), `CREATE TABLE marker (value text); INSERT INTO marker VALUES ('here')`); err != nil {
+				t.Fatal(err)
+			}
+			_ = db.Close()
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("database not created at its path: %v", err)
+			}
+			readOnly, err := openSQLite(path, "mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = readOnly.Close() }()
+			var value string
+			if err := readOnly.QueryRowContext(t.Context(), `SELECT value FROM marker`).Scan(&value); err != nil || value != "here" {
+				t.Fatalf("read back %q: %v", value, err)
+			}
+		})
+	}
 }

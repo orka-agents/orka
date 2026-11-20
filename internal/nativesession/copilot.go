@@ -146,7 +146,9 @@ func installCopilot(data []byte, dirs Dirs, maxBytes int) (err error) {
 	destination := filepath.Join(sessionDir, copilotEventsEntry)
 	staged := filepath.Join(sessionDir, ".events.jsonl.restore")
 	synced := []string{sessionDir, filepath.Dir(sessionDir), dirs.State, filepath.Dir(dirs.State)}
-	if err = os.Mkdir(sessionDir, 0o700); err != nil {
+	if err = os.Mkdir(sessionDir, 0o700); err == nil {
+		created = append(created, sessionDir)
+	} else {
 		if !errors.Is(err, os.ErrExist) {
 			return err
 		}
@@ -171,7 +173,6 @@ func installCopilot(data []byte, dirs Dirs, maxBytes int) (err error) {
 			return errors.New("the Copilot CLI state directory already holds the session")
 		}
 	}
-	created = append(created, sessionDir)
 	if err = writeNewFile(staged, events); err != nil {
 		return err
 	}

@@ -271,6 +271,12 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"differently cased release": {reason: "Claude Code 2.1.999 wrote", mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1.999","Version":"`+claudeCodeVersion+`"}`+"\n")
 		}},
+		"empty release": {reason: `records release ""`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":""}`+"\n")
+		}},
+		"null release": {reason: `records release ""`, mutate: func(t *testing.T, f claudeFixture) {
+			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":null}`+"\n")
+		}},
 		"unparseable release": {reason: `records release "2.1"`, mutate: func(t *testing.T, f claudeFixture) {
 			appendForTest(t, f.transcript, `{"type":"user","sessionId":"`+claudeFixtureSession+`","version":"2.1"}`+"\n")
 		}},
@@ -324,8 +330,6 @@ func TestClaudeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 
 func TestClaudeCaptureRejectsSymlinks(t *testing.T) {
 	format, _ := For("claude")
-	outside := filepath.Join(realDir(t), "secret")
-	writeForTest(t, outside, "not a transcript\n")
 	for name, plant := range map[string]func(claudeFixture) string{
 		"transcript":  func(f claudeFixture) string { return f.transcript },
 		"tool result": func(f claudeFixture) string { return filepath.Join(f.toolResultsDir, "toolu_01.txt") },
@@ -333,6 +337,14 @@ func TestClaudeCaptureRejectsSymlinks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture := newClaudeFixture(t)
 			target := plant(fixture)
+			// The link points at a copy of what it replaces, so only the
+			// symlink check can refuse it.
+			content, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(realDir(t), "secret")
+			writeForTest(t, outside, string(content))
 			_ = os.Remove(target)
 			if err := os.Symlink(outside, target); err != nil {
 				t.Fatal(err)

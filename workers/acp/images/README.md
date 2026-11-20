@@ -203,9 +203,12 @@ the supervisor discards them. The restore fails unless at least one replayed
 update names the loaded session, every one names it, and the replay stays
 within its byte budget.
 
-Every built-in runtime saves a native checkpoint after each turn and starts the
-next turn in a fresh RuntimeSession when the controller keeps native Sessions,
-so the idle-adapter restart below applies only when it does not.
+Every built-in runtime saves a native checkpoint after each successful turn and
+starts the next turn in a fresh RuntimeSession when the controller keeps native
+Sessions, so the idle-adapter restart below applies only when it does not. A
+failed or cancelled turn saves nothing: the Session carries its previous
+checkpoint forward, so the next turn resumes without the unfinished turn's
+partial history.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter

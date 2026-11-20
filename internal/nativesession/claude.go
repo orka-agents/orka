@@ -422,7 +422,9 @@ func inspectClaudeTranscript(transcript []byte, providerSessionID string) (strin
 		default:
 			return "", errors.New("the Claude Code transcript holds an entry of another session or of none")
 		}
-		if entry.Version != "" {
+		// An entry may omit the release, but one it names must be valid: an
+		// empty or null release would otherwise hide the entry's writer.
+		if _, named := fields["version"]; named || entry.Version != "" {
 			if _, ok := parseRelease(entry.Version); !ok {
 				return "", fmt.Errorf("the Claude Code transcript records release %q", entry.Version)
 			}
