@@ -133,9 +133,10 @@ Persistence is attempted only when all of these hold:
     `RuntimeSessionWorkspaceDigest`, and the lineage configuration digest
     (`acpSessionLineageConfigurationDigest`);
   - `reuseDigest` (section 5);
-  - `transcriptHead`: a digest of the terminal message turn N appended. Message IDs are minted
-    inside the finalization write, so turn N cannot name its own message ID before the write;
-    N+1 instead requires the transcript's last message to match this digest;
+  - `transcriptHead`: a digest of the stable ID of the message before turn N's appends (read
+    just before the finalization write) and the exact messages N appends. Message IDs are minted
+    inside that write, so N cannot name its own; anchoring on the preceding message's unique ID
+    means a later exchange that repeats N's reply never matches;
   - `verifiedBaseline` (write intent);
   - `keptAt` and `expiresAt`. `expiresAt` is `keptAt` plus the workspace's frozen
     `acp.workspace.orka.ai/suspend-after-detach`, and is never extended;
@@ -402,8 +403,8 @@ bootstrapped the whole history through turn N:
 - `throughMessageID` is empty or equals the transcript's last message ID;
 - `maxMessages` is unset or at least the current message count;
 - `promptIncluded` is false (a prompt-included continuation appended its prompt out of band);
-- the transcript's last message still matches `transcriptHead`, the digest of the assistant
-  result turn N appended, so nothing was appended or edited after it.
+- the transcript still ends with exactly the message that preceded turn N followed by N's
+  appended messages (`transcriptHead`), so nothing was appended, inserted or edited since.
 
 Turn N keeps its runtime only if its process holds the whole transcript: it was itself reused
 from a claimed record, or it was created this turn from a bootstrap that omitted nothing (no
